@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{Classifier, DiffChunk, DiffRequest, diff_command};
+use crate::git::diff::{Classifier, DiffChunk, DiffRequest, diff_command, sanitize};
 use crate::git::runner::ChildHandle;
 use crate::intent::AppIntent;
 
@@ -168,11 +168,14 @@ pub fn pump(
                 lines: std::mem::take(&mut batch),
                 done: false,
             }));
-            let Ok(next) = demand.recv() else {
-                child.kill();
-                return;
-            };
-            want = demand.try_iter().fold(want.max(next), usize::max);
+            // Wait for a demand past what we hold; a smaller one asks for nothing new.
+            while count >= want {
+                let Ok(next) = demand.recv() else {
+                    child.kill();
+                    return;
+                };
+                want = demand.try_iter().fold(want.max(next), usize::max);
+            }
         }
         buf.clear();
         match reader.read_until(b'\n', &mut buf) {
@@ -194,9 +197,7 @@ pub fn pump(
     }
     match child.finish() {
         Ok(output) if !output.success && !output.stderr.is_empty() => {
-            emit(Err(String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string()))
+            emit(Err(terminal_safe(&output.stderr)))
         }
         // `--no-index` exits 1 when the files differ, so a quiet failure is fine.
         Ok(_) => emit(Ok(DiffChunk {
@@ -205,6 +206,17 @@ pub fn pump(
         })),
         Err(e) => emit(Err(format!("git diff: {e}"))),
     }
+}
+
+/// git's message, line by line through the same sanitiser as diff lines,
+/// since it can quote repo-controlled paths.
+fn terminal_safe(stderr: &[u8]) -> String {
+    stderr
+        .trim_ascii()
+        .split(|&b| b == b'\n')
+        .map(|line| sanitize(line.strip_suffix(b"\r").unwrap_or(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A poisoned lock only means another thread panicked mid-cancel; the state is still usable.
@@ -335,6 +347,30 @@ mod tests {
         let p = pump_over(child, 250);
         let result = p.chunks.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(result, Err("fatal: bad revision".to_string()));
+    }
+
+    #[test]
+    fn stderr_is_made_terminal_safe_but_keeps_its_lines() {
+        let child = FakeChild::lines(0).exits(fail("fatal: \x1b[2Jbad\tpath\r\nhint: retry\n"));
+        let p = pump_over(child, 250);
+        let result = p.chunks.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            result,
+            Err("fatal: \u{FFFD}[2Jbad    path\nhint: retry".to_string())
+        );
+    }
+
+    #[test]
+    fn a_demand_that_does_not_grow_emits_nothing() {
+        let p = pump_over(FakeChild::lines(1_000), 10);
+        next_chunk(&p);
+        p.demand.send(10).unwrap();
+        p.demand.send(5).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert!(p.chunks.try_recv().is_err(), "no empty chunk");
+
+        p.demand.send(15).unwrap();
+        assert_eq!(next_chunk(&p).lines.len(), 5);
     }
 
     #[test]

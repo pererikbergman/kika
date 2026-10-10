@@ -230,3 +230,34 @@ impl ChildHandle for FakeHandle {
         })
     }
 }
+
+/// A fresh directory under the temp dir, created exclusively so a
+/// pre-existing path (or symlink) is never reused, and removed on drop even
+/// when the test fails.
+pub struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    pub fn new(label: &str) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "kika-{label}-{}-{nanos}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir(&path).expect("a new, unique temp dir");
+        Self(path)
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

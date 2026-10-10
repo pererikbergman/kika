@@ -201,11 +201,11 @@ mod tests {
 
     #[test]
     fn kill_unblocks_a_reader_of_a_large_diff() {
-        let dir = std::env::temp_dir().join(format!("kika-kill-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = crate::git::fake::TempDir::new("kill");
+        let dir = tmp.path();
         let big: String = (0..500_000).map(|i| format!("line {i}\n")).collect();
         std::fs::write(dir.join("big.txt"), big).unwrap();
-        let runner = CliRunner::new(&dir);
+        let runner = CliRunner::new(dir);
         let cmd = GitCommand::new("diff")
             .arg("--no-index")
             .arg("--")
@@ -225,6 +225,5 @@ mod tests {
         reader.read_to_end(&mut rest).unwrap();
         assert!(rest.len() < 1_000_000, "read {} bytes", rest.len());
         assert!(!child.handle.finish().unwrap().success);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

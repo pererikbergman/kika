@@ -62,7 +62,11 @@ pub fn diff_command(request: &DiffRequest) -> GitCommand {
                 .arg(&request.path)
         }
     }
-    cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C")
+    // File names come from the repo, so a hostile `:(top)x` or `x*` must not
+    // be read as pathspec magic or a glob. A no-op under `--no-index`.
+    cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .env("GIT_LITERAL_PATHSPECS", "1")
 }
 
 /// What a diff line is, which decides its colour.
@@ -131,7 +135,7 @@ impl Classifier {
 
 /// Decode lossily and make the text safe to draw: tabs become spaces and any
 /// other control character becomes `U+FFFD`, so file bytes never drive the terminal.
-fn sanitize(raw: &[u8]) -> String {
+pub fn sanitize(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     for c in String::from_utf8_lossy(raw).chars() {
         match c {
@@ -284,10 +288,83 @@ mod tests {
                 env(&cmd),
                 [
                     ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-                    ("LC_ALL".into(), "C".into())
+                    ("LC_ALL".into(), "C".into()),
+                    ("GIT_LITERAL_PATHSPECS".into(), "1".into())
                 ],
                 "{side:?}"
             );
+        }
+    }
+
+    #[test]
+    fn pathspec_magic_and_globs_in_names_pass_through_untouched() {
+        for name in [":(top)other", "x*", "[ab]?"] {
+            for side in [DiffSide::Worktree, DiffSide::Index] {
+                let req = DiffRequest {
+                    path: name.into(),
+                    orig_path: None,
+                    side,
+                };
+                let cmd = diff_command(&req);
+                assert_eq!(argv(&cmd).last().map(String::as_str), Some(name));
+                assert!(
+                    env(&cmd).contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
+                    "{name} {side:?}"
+                );
+            }
+        }
+    }
+
+    /// Run git in `dir` for test setup, failing loudly.
+    fn git(dir: &std::path::Path, args: &[&str]) -> Vec<u8> {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    }
+
+    #[test]
+    fn hostile_file_names_diff_only_themselves_in_real_git() {
+        let tmp = crate::git::fake::TempDir::new("pathspec");
+        let dir = tmp.path();
+        let names = ["other", ":(top)other", "x1", "x*"];
+        git(dir, &["init", "-q"]);
+        for name in names {
+            std::fs::write(dir.join(name), "old\n").unwrap();
+        }
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        for name in names {
+            std::fs::write(dir.join(name), format!("new {name}\n")).unwrap();
+        }
+        let runner = crate::git::CliRunner::new(dir);
+
+        for (name, other) in [(":(top)other", "a/other\n"), ("x*", "a/x1\n")] {
+            let request = DiffRequest {
+                path: name.into(),
+                orig_path: None,
+                side: DiffSide::Worktree,
+            };
+            let out = crate::git::GitRunner::run(&runner, &diff_command(&request)).unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(text.contains(&format!("+new {name}")), "{name}: {text}");
+            assert!(!text.contains(other), "{name} leaked {other}: {text}");
+            assert_eq!(text.matches("diff --git").count(), 1, "{name}: {text}");
         }
     }
 
