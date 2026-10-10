@@ -11,6 +11,8 @@ use crate::git::ops::GitOp;
 pub enum Scope {
     /// The `git status` file list.
     Files,
+    /// The status panel: branch, upstream and operations in progress.
+    Branch,
     /// The selected file's diff.
     Diff,
 }
@@ -36,14 +38,13 @@ const DEPENDS: &[(Scope, Scope)] = &[(Scope::Files, Scope::Diff)];
 /// The table. No `_` arm, so a new [`GitOp`] does not compile without a row.
 pub fn plan(op: &GitOp) -> RefreshPlan {
     let (scopes, selection) = match op {
-        GitOp::Stage(_)
-        | GitOp::Unstage(_)
-        | GitOp::StageAll
-        | GitOp::UnstageAll
-        | GitOp::Commit { .. } => ([Scope::Files], Selection::KeepPath),
+        GitOp::Stage(_) | GitOp::Unstage(_) | GitOp::StageAll | GitOp::UnstageAll => {
+            (&[Scope::Files][..], Selection::KeepPath)
+        }
+        GitOp::Commit { .. } => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
     };
     RefreshPlan {
-        scopes: expand(scopes.into()),
+        scopes: expand(scopes.iter().copied().collect()),
         selection,
     }
 }
@@ -72,16 +73,12 @@ mod tests {
     }
 
     #[test]
-    fn every_op_reloads_files_and_diff_and_keeps_the_path() {
+    fn stage_ops_reload_files_and_diff_and_keep_the_path() {
         let ops = [
             GitOp::Stage(vec!["a".into()]),
             GitOp::Unstage(vec!["a".into()]),
             GitOp::StageAll,
             GitOp::UnstageAll,
-            GitOp::Commit {
-                message: "subj\n".into(),
-                stage_all: true,
-            },
         ];
         for op in ops {
             assert_eq!(
@@ -93,6 +90,26 @@ mod tests {
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_commit_also_reloads_the_branch() {
+        let op = GitOp::Commit {
+            message: "subj\n".into(),
+            stage_all: true,
+        };
+        assert_eq!(
+            plan(&op),
+            RefreshPlan {
+                scopes: set(&[Scope::Files, Scope::Branch, Scope::Diff]),
+                selection: Selection::KeepPath,
+            }
+        );
+    }
+
+    #[test]
+    fn the_branch_pulls_in_nothing_else() {
+        assert_eq!(expand(set(&[Scope::Branch])), set(&[Scope::Branch]));
     }
 
     #[test]

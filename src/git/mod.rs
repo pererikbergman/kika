@@ -6,6 +6,7 @@ pub mod diff;
 pub mod fake;
 pub mod ops;
 pub mod path;
+pub mod repo_state;
 pub mod runner;
 pub mod status;
 

@@ -1,5 +1,6 @@
-use super::diff::sanitize;
+use super::diff::{sanitize, terminal_safe};
 use super::path::RepoPath;
+use super::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
 use super::runner::{GitCommand, GitRunner};
 
 /// What kind of change a status line describes.
@@ -33,36 +34,78 @@ impl FileEntry {
     }
 }
 
+/// Where `HEAD` points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Head {
+    Branch(String),
+    /// Not on a branch; holds the full commit id.
+    Detached(String),
+    /// On a branch that has no commits yet; holds its name.
+    Unborn(String),
+}
+
+/// The branch side of `git status`: where `HEAD` is, how it relates to its
+/// upstream, and what operation is half done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchStatus {
+    pub head: Head,
+    /// `None` when no upstream is configured.
+    pub upstream: Option<String>,
+    /// Commits ahead of and behind the upstream. `None` with an upstream
+    /// means git could not find it: the upstream branch is gone.
+    pub ahead_behind: Option<(u32, u32)>,
+    pub in_progress: Vec<Operation>,
+}
+
+/// One status load: the branch and the changed files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoStatus {
+    pub branch: BranchStatus,
+    pub files: Vec<FileEntry>,
+}
+
 /// `git status` in the machine-readable form we parse. `GIT_OPTIONAL_LOCKS=0`
 /// stops a background refresh from taking `index.lock` and racing the user.
 pub fn status_command() -> GitCommand {
     GitCommand::new("status")
         .arg("--porcelain=v2")
+        .arg("--branch")
         .arg("-z")
         .arg("--untracked-files=all")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
 }
 
-/// Run `git status` and parse it. Failures carry git's own message.
-pub fn read_status(runner: &dyn GitRunner) -> Result<Vec<FileEntry>, String> {
-    let output = runner.run(&status_command()).map_err(|e| e.to_string())?;
-    if !output.success {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "git status failed".to_string()
-        } else {
-            stderr
-        });
-    }
-    parse_status(&output.stdout)
+/// Run `git status`, then find the git dir and read what is in progress
+/// there. Failures carry git's own message.
+pub fn read_status(runner: &dyn GitRunner) -> Result<RepoStatus, String> {
+    let mut status = parse_status(&stdout_of(runner, &status_command(), "git status failed")?)?;
+    let git_dir = stdout_of(runner, &git_dir_command(), "git rev-parse failed")?;
+    status.branch.in_progress = in_progress(&git_dir_from(&git_dir));
+    Ok(status)
 }
 
-/// Parse `git status --porcelain=v2 -z`. Paths are taken as everything after
-/// the fixed fields, so spaces inside them survive, and are kept as raw bytes
-/// so a name that is not UTF-8 still reaches git unchanged.
-pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>, String> {
+/// The stdout of `cmd`, or git's stderr (else `fallback`) when it fails.
+fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand, fallback: &str) -> Result<Vec<u8>, String> {
+    let output = runner.run(cmd).map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(output.stdout);
+    }
+    let stderr = terminal_safe(&output.stderr);
+    Err(if stderr.is_empty() {
+        fallback.to_string()
+    } else {
+        stderr
+    })
+}
+
+/// Parse `git status --porcelain=v2 --branch -z`. Paths are taken as
+/// everything after the fixed fields, so spaces inside them survive, and are
+/// kept as raw bytes so a name that is not UTF-8 still reaches git unchanged.
+/// `in_progress` is left empty: status does not report it.
+pub fn parse_status(bytes: &[u8]) -> Result<RepoStatus, String> {
     let mut entries = Vec::new();
+    let mut headers = BranchHeaders::default();
     let mut records = bytes.split(|&b| b == 0).filter(|r| !r.is_empty());
 
     while let Some(record) = records.next() {
@@ -93,12 +136,80 @@ pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>, String> {
                 let path = record.strip_prefix(b"? ").ok_or_else(malformed)?;
                 changed(b"??", path, None, EntryKind::Untracked)
             }
-            Some(b'#' | b'!') => continue,
+            Some(b'#') => {
+                headers.read(record)?;
+                continue;
+            }
+            Some(b'!') => continue,
             _ => return Err(format!("unknown status record: {}", sanitize(record))),
         };
         entries.push(entry?);
     }
-    Ok(entries)
+    Ok(RepoStatus {
+        branch: headers.finish(),
+        files: entries,
+    })
+}
+
+/// The `# branch.*` records seen so far. Unknown headers are skipped, so a
+/// newer git that adds some still parses.
+#[derive(Default)]
+struct BranchHeaders {
+    oid: Option<String>,
+    head: Option<String>,
+    upstream: Option<String>,
+    ahead_behind: Option<(u32, u32)>,
+}
+
+impl BranchHeaders {
+    fn read(&mut self, record: &[u8]) -> Result<(), String> {
+        let Some(header) = record.strip_prefix(b"# ") else {
+            return Ok(());
+        };
+        let (key, value) = match header.iter().position(|&b| b == b' ') {
+            Some(i) => (&header[..i], &header[i + 1..]),
+            None => (header, &b""[..]),
+        };
+        match key {
+            b"branch.oid" => self.oid = Some(sanitize(value)),
+            b"branch.head" => self.head = Some(sanitize(value)),
+            b"branch.upstream" => self.upstream = Some(sanitize(value)),
+            b"branch.ab" => {
+                let counts = ahead_behind(value)
+                    .ok_or_else(|| format!("malformed status record: {}", sanitize(record)))?;
+                self.ahead_behind = Some(counts);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Without headers (status run without `--branch`) the head reads as
+    /// detached at an unknown commit, the least specific claim.
+    fn finish(self) -> BranchStatus {
+        let oid = self.oid.unwrap_or_default();
+        let head = match self.head {
+            Some(head) if head == "(detached)" => Head::Detached(oid),
+            Some(name) if oid == "(initial)" => Head::Unborn(name),
+            Some(name) => Head::Branch(name),
+            None => Head::Detached(oid),
+        };
+        BranchStatus {
+            head,
+            upstream: self.upstream,
+            ahead_behind: self.ahead_behind,
+            in_progress: Vec::new(),
+        }
+    }
+}
+
+/// `+A -B` as `(A, B)`.
+fn ahead_behind(value: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(value).ok()?;
+    let (ahead, behind) = text.split_once(' ')?;
+    let ahead = ahead.strip_prefix('+')?.parse().ok()?;
+    let behind = behind.strip_prefix('-')?.parse().ok()?;
+    Some((ahead, behind))
 }
 
 /// Split a record into its `XY` field and the path that follows `fixed` fields.
@@ -130,9 +241,15 @@ fn changed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{FakeRunner, TempDir, fail, ok};
 
-    const STATUS_ARGV: &[&str] = &["status", "--porcelain=v2", "-z", "--untracked-files=all"];
+    const STATUS_ARGV: &[&str] = &[
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=all",
+    ];
 
     fn entry(x: char, y: char, kind: EntryKind, path: &str, orig: Option<&str>) -> FileEntry {
         FileEntry {
@@ -167,17 +284,30 @@ mod tests {
         assert_eq!(envs, [("GIT_OPTIONAL_LOCKS", "0"), ("LC_ALL", "C")]);
     }
 
+    const GIT_DIR_ARGV: &[&str] = &["rev-parse", "--absolute-git-dir"];
+
     #[test]
-    fn read_status_runs_status_once_and_parses_output() {
-        let runner = FakeRunner::new().expect(STATUS_ARGV, ok(b"? new_file\0"));
-        let entries = read_status(&runner).unwrap();
+    fn read_status_runs_status_then_rev_parse_and_parses_output() {
+        let tmp = TempDir::new("read-status");
+        std::fs::write(tmp.path().join("MERGE_HEAD"), "x\n").unwrap();
+        let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
+        git_dir.push(b'\n');
+        let runner = FakeRunner::new()
+            .expect(
+                STATUS_ARGV,
+                ok(b"# branch.oid 1234567\0# branch.head main\0? new_file\0"),
+            )
+            .expect(GIT_DIR_ARGV, ok(&git_dir));
+        let status = read_status(&runner).unwrap();
         runner.assert_done();
         assert_eq!(
-            entries,
+            status.files,
             [entry('?', '?', EntryKind::Untracked, "new_file", None)]
         );
+        assert_eq!(status.branch.head, Head::Branch("main".into()));
+        assert_eq!(status.branch.in_progress, [Operation::Merge]);
         let envs = runner.envs();
-        assert_eq!(envs.len(), 1);
+        assert_eq!(envs.len(), 2);
         assert!(
             envs[0].contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into())),
             "{envs:?}"
@@ -204,8 +334,24 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_rev_parse_fails_the_load_with_its_stderr() {
+        let runner = FakeRunner::new()
+            .expect(STATUS_ARGV, ok(b"# branch.head main\0"))
+            .expect(GIT_DIR_ARGV, fail("fatal: rev-parse broke\n"));
+        assert_eq!(read_status(&runner), Err("fatal: rev-parse broke".into()));
+        runner.assert_done();
+
+        let runner = FakeRunner::new()
+            .expect(STATUS_ARGV, ok(b""))
+            .expect(GIT_DIR_ARGV, fail(""));
+        assert_eq!(read_status(&runner), Err("git rev-parse failed".into()));
+    }
+
+    #[test]
     fn parses_renames_and_staged_plus_modified() {
-        let entries = parse_status(include_bytes!("fixtures/renames.bin")).unwrap();
+        let entries = parse_status(include_bytes!("fixtures/renames.bin"))
+            .unwrap()
+            .files;
         assert_eq!(
             entries,
             [
@@ -220,7 +366,9 @@ mod tests {
 
     #[test]
     fn parses_conflicts() {
-        let entries = parse_status(include_bytes!("fixtures/conflicts.bin")).unwrap();
+        let entries = parse_status(include_bytes!("fixtures/conflicts.bin"))
+            .unwrap()
+            .files;
         assert_eq!(
             entries,
             [
@@ -232,7 +380,9 @@ mod tests {
 
     #[test]
     fn lists_every_untracked_file_individually() {
-        let entries = parse_status(include_bytes!("fixtures/untracked.bin")).unwrap();
+        let entries = parse_status(include_bytes!("fixtures/untracked.bin"))
+            .unwrap()
+            .files;
         assert_eq!(
             letters_and_paths(&entries),
             [
@@ -245,7 +395,9 @@ mod tests {
 
     #[test]
     fn keeps_unicode_and_space_containing_paths_intact() {
-        let entries = parse_status(include_bytes!("fixtures/unicode.bin")).unwrap();
+        let entries = parse_status(include_bytes!("fixtures/unicode.bin"))
+            .unwrap()
+            .files;
         assert_eq!(
             letters_and_paths(&entries),
             [
@@ -263,11 +415,70 @@ mod tests {
     #[test]
     fn skips_headers_and_ignored_entries() {
         let bytes = b"# branch.oid abc\0! ignored.log\0? kept\0";
-        let entries = parse_status(bytes).unwrap();
+        let entries = parse_status(bytes).unwrap().files;
         assert_eq!(
             letters_and_paths(&entries),
             [("??".into(), "kept".into(), None)]
         );
+    }
+
+    fn branch_of(bytes: &[u8]) -> BranchStatus {
+        parse_status(bytes).unwrap().branch
+    }
+
+    #[test]
+    fn reads_the_branch_its_upstream_and_ahead_behind() {
+        let branch = branch_of(
+            b"# branch.oid 1234567890abcdef\0# branch.head main\0\
+              # branch.upstream origin/main\0# branch.ab +2 -1\0? kept\0",
+        );
+        assert_eq!(branch.head, Head::Branch("main".into()));
+        assert_eq!(branch.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(branch.ahead_behind, Some((2, 1)));
+        assert!(branch.in_progress.is_empty());
+    }
+
+    #[test]
+    fn a_branch_without_upstream_has_none() {
+        let branch = branch_of(b"# branch.oid 1234567\0# branch.head topic\0");
+        assert_eq!(branch.head, Head::Branch("topic".into()));
+        assert_eq!(branch.upstream, None);
+        assert_eq!(branch.ahead_behind, None);
+    }
+
+    #[test]
+    fn a_detached_head_keeps_its_oid() {
+        let branch = branch_of(b"# branch.oid abcdef1234567890\0# branch.head (detached)\0");
+        assert_eq!(branch.head, Head::Detached("abcdef1234567890".into()));
+    }
+
+    #[test]
+    fn an_initial_oid_is_an_unborn_branch() {
+        let branch = branch_of(b"# branch.oid (initial)\0# branch.head main\0");
+        assert_eq!(branch.head, Head::Unborn("main".into()));
+    }
+
+    #[test]
+    fn an_upstream_without_counts_is_gone() {
+        let branch =
+            branch_of(b"# branch.oid 1234567\0# branch.head main\0# branch.upstream origin/old\0");
+        assert_eq!(branch.upstream.as_deref(), Some("origin/old"));
+        assert_eq!(branch.ahead_behind, None);
+    }
+
+    #[test]
+    fn branch_names_are_made_terminal_safe() {
+        let branch = branch_of(
+            b"# branch.oid 1234567\0# branch.head evil\x1b[2J\0# branch.upstream o/\x07x\0",
+        );
+        assert_eq!(branch.head, Head::Branch("evil\u{FFFD}[2J".into()));
+        assert_eq!(branch.upstream.as_deref(), Some("o/\u{FFFD}x"));
+    }
+
+    #[test]
+    fn malformed_ahead_behind_is_an_error() {
+        assert!(parse_status(b"# branch.ab +x -1\0").is_err());
+        assert!(parse_status(b"# branch.ab +1\0").is_err());
     }
 
     #[test]
@@ -281,7 +492,7 @@ mod tests {
     fn keeps_the_raw_bytes_of_names_that_are_not_utf8() {
         use std::os::unix::ffi::OsStrExt;
         let bytes = b"2 R. N... 100644 100644 100644 aaa aaa R100 new\xfe\0old\xff\0? x\xff\0";
-        let entries = parse_status(bytes).unwrap();
+        let entries = parse_status(bytes).unwrap().files;
         assert_eq!(entries[0].path.as_os_str().as_bytes(), b"new\xfe");
         let orig = entries[0].orig_path.as_ref().unwrap();
         assert_eq!(orig.as_os_str().as_bytes(), b"old\xff");

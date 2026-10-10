@@ -8,7 +8,6 @@ use std::time::Duration;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Modifier;
 use ratatui::widgets::Block;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
@@ -102,11 +101,8 @@ impl Harness {
         self.draw();
         let buffer = self.terminal.backend().buffer();
         // The same split `view::render` makes, down to the panel's inside.
-        let [main, _] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(buffer.area);
-        let [files, _] =
-            Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
-        let inner = Block::bordered().inner(files);
+        let [main, _] = view::screen_layout(buffer.area);
+        let inner = Block::bordered().inner(view::workspace_layout(main).files);
         (inner.top()..inner.bottom())
             .find(|&y| {
                 buffer[(inner.x, y)]

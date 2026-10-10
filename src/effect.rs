@@ -131,14 +131,27 @@ mod tests {
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, ok};
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
-    use crate::git::status::EntryKind;
+    use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
     #[tokio::test]
     async fn load_status_reports_back_with_the_same_tag() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
-            ok(b"? new_file\0"),
-        ));
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &[
+                        "status",
+                        "--porcelain=v2",
+                        "--branch",
+                        "-z",
+                        "--untracked-files=all",
+                    ],
+                    ok(b"# branch.oid 1234567\0# branch.head main\0? new_file\0"),
+                )
+                .expect(
+                    &["rev-parse", "--absolute-git-dir"],
+                    ok(b"/no/such/kika/repo/.git\n"),
+                ),
+        );
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(runner.clone(), tx);
         let tag = Tag {
@@ -153,13 +166,21 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::StatusLoaded {
                 tag,
-                result: Ok(vec![FileEntry {
-                    path: "new_file".into(),
-                    orig_path: None,
-                    index: '?',
-                    worktree: '?',
-                    kind: EntryKind::Untracked,
-                }]),
+                result: Ok(RepoStatus {
+                    branch: BranchStatus {
+                        head: Head::Branch("main".into()),
+                        upstream: None,
+                        ahead_behind: None,
+                        in_progress: vec![],
+                    },
+                    files: vec![FileEntry {
+                        path: "new_file".into(),
+                        orig_path: None,
+                        index: '?',
+                        worktree: '?',
+                        kind: EntryKind::Untracked,
+                    }],
+                }),
             })
         );
         runner.assert_done();
