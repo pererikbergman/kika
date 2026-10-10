@@ -22,26 +22,32 @@ pub async fn run(
     let runtime = Runtime::new(runner, tx.clone());
     spawn_input_listener(tx);
 
-    // Know the pane height before the first diff request sizes itself.
     let size = terminal.size()?;
-    state.update(AppIntent::Resize {
-        width: size.width,
-        height: size.height,
-    });
-    // Start the first load before the first draw, so the frame shows "Loading…"
-    // instead of waiting on git.
-    for effect in state.update(AppIntent::RefreshStatus) {
-        runtime.spawn(effect);
-    }
+    boot(&mut state, &runtime, size.width, size.height);
 
     while !state.should_quit {
         terminal.draw(|frame| view::render(&state, frame))?;
         let Some(intent) = rx.recv().await else { break };
-        for effect in state.update(intent) {
-            runtime.spawn(effect);
-        }
+        dispatch(&mut state, &runtime, intent);
     }
     Ok(())
+}
+
+/// Size the state to the screen, then start the first status load. Shared
+/// with the headless harness so tests start the app exactly as `run` does.
+pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
+    // Know the pane height before the first diff request sizes itself.
+    dispatch(state, runtime, AppIntent::Resize { width, height });
+    // Start the first load before the first draw, so the frame shows "Loading…"
+    // instead of waiting on git.
+    dispatch(state, runtime, AppIntent::RefreshStatus);
+}
+
+/// Apply one intent and run the effects it asks for.
+pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) {
+    for effect in state.update(intent) {
+        runtime.spawn(effect);
+    }
 }
 
 /// Forward terminal events to the message bus from a dedicated thread,

@@ -2,6 +2,8 @@ mod app;
 mod cli;
 mod diff_pane;
 mod diff_stream;
+#[cfg(test)]
+mod e2e;
 mod effect;
 mod git;
 mod intent;
