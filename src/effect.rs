@@ -1,8 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
+use crate::git::diff::DiffRequest;
 use crate::git::status::read_status;
 use crate::intent::AppIntent;
 
@@ -19,19 +22,47 @@ pub struct Tag {
 /// Work the reducer asks for. Executed by [`Runtime`], never by `update`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    LoadStatus { tag: Tag },
+    LoadStatus {
+        tag: Tag,
+    },
+    /// Stream the diff for `request`, reading `want` lines before pausing.
+    /// Supersedes any diff still streaming.
+    LoadDiff {
+        tag: Tag,
+        request: DiffRequest,
+        want: usize,
+    },
+    /// Let the stream for `seq` read on until it has `want` lines.
+    DiffDemand {
+        seq: u64,
+        want: usize,
+    },
+    /// Stop the current diff stream and its `git` process.
+    CancelDiff,
+    /// Report `DiffSlow` after [`DIFF_LOADING_DELAY`], so fast loads never flash "Loading…".
+    DiffLoadingDelay {
+        tag: Tag,
+    },
 }
+
+/// How long a diff may take before "Loading…" is shown.
+pub const DIFF_LOADING_DELAY: Duration = Duration::from_millis(150);
 
 /// Executes effects off the UI loop and reports each result as an intent.
 /// Makes no decisions: staleness and bookkeeping belong to the reducer.
 pub struct Runtime {
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
+    diff: DiffStreamer,
 }
 
 impl Runtime {
     pub fn new(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>) -> Self {
-        Self { runner, tx }
+        Self {
+            diff: DiffStreamer::new(Arc::clone(&runner), tx.clone()),
+            runner,
+            tx,
+        }
     }
 
     /// Start an effect on tokio's blocking pool and return at once. The
@@ -50,6 +81,15 @@ impl Runtime {
                     let _ = tx.send(AppIntent::StatusLoaded { tag, result });
                 });
             }
+            Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
+            Effect::DiffDemand { seq, want } => self.diff.demand(seq, want),
+            Effect::CancelDiff => self.diff.cancel(),
+            Effect::DiffLoadingDelay { tag } => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(DIFF_LOADING_DELAY).await;
+                    let _ = tx.send(AppIntent::DiffSlow { tag });
+                });
+            }
         }
     }
 }
@@ -60,7 +100,8 @@ mod tests {
 
     use super::*;
     use crate::git::FileEntry;
-    use crate::git::fake::{FakeRunner, ok};
+    use crate::git::diff::DiffSide;
+    use crate::git::fake::{FakeChild, FakeRunner, ok};
     use crate::git::status::EntryKind;
 
     #[tokio::test]
@@ -118,5 +159,60 @@ mod tests {
             }
             other => panic!("expected a failed StatusLoaded, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn loading_delay_reports_slow_after_the_delay() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: false,
+        };
+        let start = std::time::Instant::now();
+
+        runtime.spawn(Effect::DiffLoadingDelay { tag });
+
+        assert_eq!(rx.recv().await, Some(AppIntent::DiffSlow { tag }));
+        assert!(start.elapsed() >= DIFF_LOADING_DELAY);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_diff_streams_through_the_diff_streamer() {
+        let runner = Arc::new(FakeRunner::new().expect_spawn(
+            &["diff", "--no-color", "--no-ext-diff", "--", "a.rs"],
+            FakeChild::lines(2),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 9,
+            user: false,
+        };
+
+        runtime.spawn(Effect::LoadDiff {
+            tag,
+            request: DiffRequest {
+                path: "a.rs".into(),
+                orig_path: None,
+                side: DiffSide::Worktree,
+            },
+            want: 100,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::DiffLoaded {
+                tag: got,
+                result: Ok(chunk),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(chunk.lines.len(), 2);
+                assert!(chunk.done);
+            }
+            other => panic!("expected a diff chunk, got {other:?}"),
+        }
+        runner.assert_done();
     }
 }

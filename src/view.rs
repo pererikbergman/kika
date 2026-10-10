@@ -1,7 +1,10 @@
+use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
+use crate::git::diff::{DiffLine, LineKind};
 use crate::model::{AppState, Context};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
@@ -12,12 +15,15 @@ pub fn render(state: &AppState, frame: &mut Frame) {
 
     match state.context {
         Context::Workspace => {
-            render_files_panel(state, frame, main);
+            let [files, diff] =
+                Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
+            render_files_panel(state, frame, files);
+            render_diff_pane(&state.diff, frame, diff);
             // The busy indicator goes first so a narrow bar clips the hints, not it.
             let bar = if state.busy > 0 {
-                " loading…  r refresh  q quit"
+                " loading…  j/k select  J/K scroll  r refresh  q quit"
             } else {
-                " r refresh  q quit"
+                " j/k select  J/K scroll  r refresh  q quit"
             };
             frame.render_widget(Line::from(bar), status);
         }
@@ -44,25 +50,98 @@ fn render_files_panel(state: &AppState, frame: &mut Frame, area: Rect) {
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
     } else {
-        Paragraph::new(file_lines(&state.files, inner))
+        Paragraph::new(file_lines(&state.files, state.selected, inner))
     };
     frame.render_widget(panel.block(block), area);
 }
 
-/// One line per file that fits in `area`. When some do not, the last row says
-/// how many are hidden, so the cut is never silent.
-fn file_lines(files: &[FileEntry], area: Rect) -> Vec<Line<'static>> {
+/// The files that fit in `area`, scrolled so `selected` is visible and drawn
+/// reversed. When files below the window are cut, the last row says how many,
+/// so the cut is never silent.
+fn file_lines(files: &[FileEntry], selected: Option<usize>, area: Rect) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
+    let line = |(i, f): (usize, &FileEntry)| {
+        let line = file_line(f, width);
+        if Some(i) == selected {
+            reversed(line, width)
+        } else {
+            line
+        }
+    };
     if files.len() <= rows {
-        return files.iter().map(|f| file_line(f, width)).collect();
+        return files.iter().enumerate().map(line).collect();
     }
-    let shown = rows.saturating_sub(1);
-    let mut lines: Vec<Line> = files[..shown].iter().map(|f| file_line(f, width)).collect();
-    if rows > 0 {
-        lines.push(Line::from(format!("+{} more", files.len() - shown)));
+    let selected = selected.unwrap_or(0);
+    if rows <= 1 {
+        // No room for a "+N more" row; the selection matters more.
+        return files
+            .iter()
+            .enumerate()
+            .skip(selected)
+            .take(rows)
+            .map(line)
+            .collect();
     }
+    // One row is kept for "+N more" unless the window reaches the end.
+    let shown = rows - 1;
+    let start = selected.saturating_sub(shown - 1);
+    if start + rows >= files.len() {
+        let start = files.len() - rows;
+        return files.iter().enumerate().skip(start).map(line).collect();
+    }
+    let mut lines: Vec<Line> = files
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(shown)
+        .map(line)
+        .collect();
+    lines.push(Line::from(format!("+{} more", files.len() - start - shown)));
     lines
+}
+
+/// Highlight a whole row, not just its text, by padding it to `width`.
+fn reversed(mut line: Line<'static>, width: usize) -> Line<'static> {
+    let pad = width.saturating_sub(line.width());
+    line.spans.push(Span::raw(" ".repeat(pad)));
+    line.style(Style::new().add_modifier(Modifier::REVERSED))
+}
+
+/// The Diff pane: an error, a delayed "Loading…", "No diff", or the visible lines.
+fn render_diff_pane(diff: &DiffPane, frame: &mut Frame, area: Rect) {
+    let block = Block::bordered().title(" Diff ");
+    let rows = usize::from(block.inner(area).height);
+    let pane = if let Some(error) = &diff.error {
+        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
+    } else if diff.show_loading {
+        Paragraph::new("Loading…")
+    } else if diff.done && diff.lines.is_empty() {
+        Paragraph::new("No diff")
+    } else {
+        // Only the visible slice: a 50,000-line diff costs a screenful per frame.
+        let start = diff.scroll.min(diff.lines.len());
+        let end = start.saturating_add(rows).min(diff.lines.len());
+        Paragraph::new(
+            diff.lines[start..end]
+                .iter()
+                .map(styled_diff_line)
+                .collect::<Vec<_>>(),
+        )
+    };
+    frame.render_widget(pane.block(block), area);
+}
+
+/// Colour by kind; `---`/`+++` arrive as headers, so they are never red or green.
+fn styled_diff_line(line: &DiffLine) -> Line<'_> {
+    let style = match line.kind {
+        LineKind::Added => Style::new().fg(Color::Green),
+        LineKind::Removed => Style::new().fg(Color::Red),
+        LineKind::Hunk => Style::new().fg(Color::Cyan),
+        LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
+        LineKind::Context => Style::new(),
+    };
+    Line::styled(line.text.as_str(), style)
 }
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`
@@ -122,6 +201,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::git::diff::{DiffLine, LineKind};
     use crate::git::status::EntryKind;
 
     /// Draw into a `width` x `height` buffer and return its rows as text.
@@ -140,6 +220,31 @@ mod tests {
                     x += width_of(symbol).max(1) as u16;
                 }
                 row
+            })
+            .collect()
+    }
+
+    /// Draw a workspace whose Files panel is exactly `panel` columns wide and
+    /// return only that panel's columns of each row.
+    fn draw_files(state: &AppState, panel: u16, height: u16) -> Vec<String> {
+        let width = (panel..panel * 4)
+            .find(|&w| {
+                let [files, _] =
+                    Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)])
+                        .areas::<2>(Rect::new(0, 0, w, 1));
+                files.width == panel
+            })
+            .expect("a total width for this panel width");
+        draw(state, width, height)
+            .into_iter()
+            .map(|row| {
+                let mut used = 0;
+                row.chars()
+                    .take_while(|c| {
+                        used += width_of(c.encode_utf8(&mut [0; 4])).max(1);
+                        used <= usize::from(panel)
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -205,7 +310,10 @@ mod tests {
         assert!(contains(&rows, "│R  old.txt → new.txt "), "{rows:#?}");
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
-        assert!(rows[23].contains("r refresh  q quit"), "{rows:#?}");
+        assert!(
+            rows[23].starts_with(" j/k select  J/K scroll  r refresh  q quit"),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -218,7 +326,7 @@ mod tests {
         let mut state = loaded(vec![]);
         state.status_error =
             Some("fatal: not a git repository (or any of the parent directories): .git".into());
-        let rows = draw(&state, 40, 8);
+        let rows = draw_files(&state, 40, 8);
         assert!(contains(&rows, "│fatal: not a git repository"), "{rows:#?}");
         assert!(contains(&rows, "directories): .git"), "{rows:#?}");
         assert!(contains(&rows, "│Press r to retry"), "{rows:#?}");
@@ -228,7 +336,7 @@ mod tests {
     fn multi_line_error_keeps_its_lines() {
         let mut state = loaded(vec![]);
         state.status_error = Some("error: first\nhint: second".into());
-        let rows = draw(&state, 40, 8);
+        let rows = draw_files(&state, 40, 8);
         assert!(contains(&rows, "│error: first "), "{rows:#?}");
         assert!(contains(&rows, "│hint: second "), "{rows:#?}");
     }
@@ -237,7 +345,7 @@ mod tests {
     fn long_path_is_left_elided_to_fit_the_panel() {
         // Inner width 18: " M " leaves 15 columns for the path.
         let state = loaded(vec![file("src/deeply/nested/module/file.rs")]);
-        let rows = draw(&state, 20, 6);
+        let rows = draw_files(&state, 20, 6);
         assert_eq!(rows[1], "│ M …module/file.rs│", "{rows:#?}");
     }
 
@@ -245,14 +353,14 @@ mod tests {
     fn long_rename_keeps_the_new_path_and_elides_the_old_one_first() {
         // Inner width 28: "R  " + orig + " → " + path.
         let state = loaded(vec![renamed("src/old/location/a.rs", "src/new/b.rs")]);
-        let rows = draw(&state, 30, 6);
+        let rows = draw_files(&state, 30, 6);
         assert_eq!(rows[1], "│R  …tion/a.rs → src/new/b.rs│", "{rows:#?}");
     }
 
     #[test]
     fn very_long_rename_elides_both_paths() {
         let state = loaded(vec![renamed("old/name.rs", "src/brand/new/location/b.rs")]);
-        let rows = draw(&state, 20, 6);
+        let rows = draw_files(&state, 20, 6);
         assert_eq!(rows[1], "│R  … → …ation/b.rs│", "{rows:#?}");
     }
 
@@ -260,7 +368,7 @@ mod tests {
     fn wide_characters_are_measured_by_display_width() {
         // Each CJK glyph is two columns wide; inner width 14 leaves 11 for the path.
         let state = loaded(vec![file("日本語/日本語/長い名前.md")]);
-        let rows = draw(&state, 16, 6);
+        let rows = draw_files(&state, 16, 6);
         assert_eq!(rows[1], "│ M …い名前.md │", "{rows:#?}");
         assert!(width_of(&rows[1]) <= 16, "{rows:#?}");
     }
@@ -269,7 +377,7 @@ mod tests {
     fn overflowing_list_says_how_many_files_are_hidden() {
         // Height 7: one status row and two borders leave 4 rows, so 3 files and "+N more".
         let files = (0..10).map(|i| file(&format!("f{i}"))).collect();
-        let rows = draw(&loaded(files), 30, 7);
+        let rows = draw_files(&loaded(files), 30, 7);
         assert!(contains(&rows, "│ M f2 "), "{rows:#?}");
         assert!(!contains(&rows, "│ M f3 "), "{rows:#?}");
         assert!(contains(&rows, "│+7 more "), "{rows:#?}");
@@ -278,7 +386,7 @@ mod tests {
     #[test]
     fn list_that_fits_exactly_has_no_more_line() {
         let files = (0..4).map(|i| file(&format!("f{i}"))).collect();
-        let rows = draw(&loaded(files), 30, 7);
+        let rows = draw_files(&loaded(files), 30, 7);
         assert!(contains(&rows, "│ M f3 "), "{rows:#?}");
         assert!(!contains(&rows, "more"), "{rows:#?}");
     }
@@ -302,6 +410,210 @@ mod tests {
             state.status_error = Some("boom".into());
             draw(&state, w, h);
             state.status_error = None;
+        }
+    }
+
+    fn draw_buffer(state: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn diff_line(kind: LineKind, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            text: text.into(),
+        }
+    }
+
+    /// A workspace with one file selected and `lines` fully loaded.
+    fn with_diff(lines: Vec<DiffLine>) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.diff.seq = Some(0);
+        state.diff.path = Some("a.rs".into());
+        state.diff.lines = lines;
+        state.diff.done = true;
+        state
+    }
+
+    /// Where `needle` starts on screen, by cell.
+    fn find(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
+        let first = needle.chars().next().unwrap().to_string();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let rest: String = (x..buffer.area.width)
+                    .take(needle.chars().count())
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if buffer[(x, y)].symbol() == first && rest == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle:?} not on screen");
+    }
+
+    #[test]
+    fn diff_lines_are_coloured_inside_the_diff_block() {
+        use LineKind::*;
+        let state = with_diff(vec![
+            diff_line(Header, "diff --git a/a.rs b/a.rs"),
+            diff_line(Header, "--- a/a.rs"),
+            diff_line(Header, "+++ b/a.rs"),
+            diff_line(Hunk, "@@ -1 +1 @@"),
+            diff_line(Removed, "-old"),
+            diff_line(Added, "+new"),
+            diff_line(Context, " same"),
+        ]);
+        let buffer = draw_buffer(&state, 80, 12);
+        let (title_x, title_y) = find(&buffer, " Diff ");
+        let style = |needle| {
+            let (x, y) = find(&buffer, needle);
+            assert!(
+                x >= title_x && y > title_y,
+                "{needle:?} is inside the block"
+            );
+            buffer[(x, y)].style()
+        };
+
+        assert_eq!(style("-old").fg, Some(Color::Red));
+        assert_eq!(style("+new").fg, Some(Color::Green));
+        assert_eq!(style("@@ -1").fg, Some(Color::Cyan));
+        let header = style("diff --git");
+        assert!(header.add_modifier.contains(Modifier::BOLD));
+        for needle in ["--- a/a.rs", "+++ b/a.rs"] {
+            let header = style(needle);
+            assert!(header.add_modifier.contains(Modifier::BOLD), "{needle}");
+            assert!(
+                matches!(header.fg, None | Some(Color::Reset)),
+                "{needle} is not coloured as a change"
+            );
+        }
+        assert!(matches!(style(" same").fg, None | Some(Color::Reset)));
+    }
+
+    #[test]
+    fn only_the_scrolled_window_of_a_long_diff_is_drawn() {
+        let mut state = with_diff(
+            (0..50_000)
+                .map(|i| diff_line(LineKind::Context, &format!("line {i}")))
+                .collect(),
+        );
+        state.diff.scroll = 1_000;
+        let rows = draw(&state, 80, 10);
+        assert!(contains(&rows, "│line 1000 "), "{rows:#?}");
+        assert!(contains(&rows, "│line 1006 "), "{rows:#?}");
+        assert!(!contains(&rows, "line 999 "), "{rows:#?}");
+        assert!(!contains(&rows, "line 1007 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn slow_diff_shows_loading_in_the_diff_pane() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+old file")]);
+        state.diff.pending = true;
+        state.diff.done = false;
+        state.diff.show_loading = true;
+        let rows = draw(&state, 80, 8);
+        assert!(contains(&rows, "│Loading…"), "{rows:#?}");
+        assert!(!contains(&rows, "+old file"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_pending_diff_keeps_showing_the_previous_lines() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+old file")]);
+        state.diff.pending = true;
+        state.diff.done = false;
+        let rows = draw(&state, 80, 8);
+        assert!(contains(&rows, "│+old file "), "{rows:#?}");
+        assert!(!contains(&rows, "Loading"), "{rows:#?}");
+    }
+
+    #[test]
+    fn an_empty_finished_diff_says_no_diff() {
+        let rows = draw(&with_diff(vec![]), 80, 8);
+        assert!(contains(&rows, "│No diff"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_diff_error_is_shown_in_the_diff_pane() {
+        let mut state = with_diff(vec![]);
+        state.diff.error = Some("fatal: bad object".into());
+        let rows = draw(&state, 80, 8);
+        assert!(contains(&rows, "│fatal: bad object"), "{rows:#?}");
+        assert!(!contains(&rows, "No diff"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_selected_file_row_is_reversed_across_the_panel() {
+        let mut state = loaded(vec![file("a.rs"), file("b.rs")]);
+        state.selected = Some(1);
+        let buffer = draw_buffer(&state, 100, 8);
+        let (x, y) = find(&buffer, " M b.rs");
+        assert!(
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        // The padding after the name is highlighted too.
+        assert!(
+            buffer[(x + 10, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        let (x, y) = find(&buffer, " M a.rs");
+        assert!(
+            !buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn a_selection_below_the_first_screen_stays_visible() {
+        // Height 7: 4 rows, so 3 files plus "+N more" at a time.
+        let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
+        state.selected = Some(5);
+        let rows = draw_files(&state, 30, 7);
+        assert!(contains(&rows, "│ M f5 "), "{rows:#?}");
+        assert!(!contains(&rows, "│ M f2 "), "{rows:#?}");
+        assert!(contains(&rows, "│+4 more "), "{rows:#?}");
+
+        // Near the end the window shows the last files and no "more" row.
+        state.selected = Some(8);
+        let rows = draw_files(&state, 30, 7);
+        for name in ["f6", "f7", "f8", "f9"] {
+            assert!(contains(&rows, &format!("│ M {name} ")), "{rows:#?}");
+        }
+        assert!(!contains(&rows, "more"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_one_row_list_shows_the_selection() {
+        // Height 4: one row inside the Files border.
+        let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
+        state.selected = Some(4);
+        let rows = draw_files(&state, 30, 4);
+        assert!(contains(&rows, "│ M f4 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_a_diff_loaded() {
+        let mut state = with_diff(
+            (0..100)
+                .map(|i| diff_line(LineKind::Added, &format!("+\u{65e5}\u{672c} {i}")))
+                .collect(),
+        );
+        state.files = (0..20).map(|i| file(&format!("file-{i}"))).collect();
+        for (selected, scroll) in [(0, 0), (19, 99), (10, 500)] {
+            state.selected = Some(selected);
+            state.diff.scroll = scroll;
+            for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (7, 5)] {
+                draw(&state, w, h);
+            }
         }
     }
 }
