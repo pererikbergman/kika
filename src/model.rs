@@ -1,3 +1,4 @@
+use crate::commit_editor::CommitEditor;
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
@@ -15,6 +16,22 @@ pub enum Context {
     Workspace,
     /// A remote pull/merge request.
     Review { number: u64 },
+}
+
+/// The commit popup. One popup at a time, so a state machine rather than a stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitFlow {
+    Closed,
+    /// Nothing is staged; asking whether to stage everything and commit.
+    ConfirmStageAll,
+    Editing(CommitEditor),
+    /// `git commit` is running with this message; the text cannot change.
+    Running(CommitEditor),
+    /// `git commit` failed. The message is kept for another try.
+    Failed {
+        editor: CommitEditor,
+        output: String,
+    },
 }
 
 /// The single source of truth for the UI.
@@ -46,6 +63,7 @@ pub struct AppState {
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
     pub help_open: bool,
+    pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
     pub notice: Option<&'static str>,
 }
@@ -69,6 +87,7 @@ impl AppState {
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
+            commit: CommitFlow::Closed,
             notice: None,
         }
     }
@@ -81,7 +100,12 @@ impl AppState {
                 match keymap::resolve(keymap::registry(), self.key_focus(), self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
                     Resolution::Disabled(reason) => self.notice = Some(reason),
-                    Resolution::Unbound => {}
+                    // Only the editor takes text; elsewhere unbound keys are dropped.
+                    Resolution::Unbound => {
+                        if let CommitFlow::Editing(editor) = &mut self.commit {
+                            editor.edit(key);
+                        }
+                    }
                 }
             }
             AppIntent::Quit => self.should_quit = true,
@@ -113,6 +137,33 @@ impl AppState {
                 return self.start_op(Ok(op));
             }
             AppIntent::ToggleStageAll => return self.start_op(GitOp::toggle_all(&self.files)),
+            AppIntent::OpenCommit => self.open_commit(),
+            AppIntent::ConfirmStageAll => {
+                if self.commit == CommitFlow::ConfirmStageAll {
+                    self.commit = CommitFlow::Editing(CommitEditor::new(true));
+                }
+            }
+            AppIntent::CancelCommit => {
+                if matches!(
+                    self.commit,
+                    CommitFlow::ConfirmStageAll | CommitFlow::Editing(_)
+                ) {
+                    self.commit = CommitFlow::Closed;
+                }
+            }
+            AppIntent::SubmitCommit => return self.submit_commit(),
+            AppIntent::ToggleCommitField => {
+                if let CommitFlow::Editing(editor) = &mut self.commit {
+                    editor.toggle_field();
+                }
+            }
+            AppIntent::DismissCommitError => {
+                let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
+                self.commit = match commit {
+                    CommitFlow::Failed { editor, .. } => CommitFlow::Editing(editor),
+                    other => other,
+                };
+            }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
         }
         vec![]
@@ -127,8 +178,15 @@ impl AppState {
         }
     }
 
-    /// Where key lookup starts: the help menu while it is open.
+    /// Where key lookup starts: the commit popup or the help menu while
+    /// one is open.
     pub fn key_focus(&self) -> KeyScope {
+        match self.commit {
+            CommitFlow::Closed => {}
+            CommitFlow::ConfirmStageAll => return KeyScope::CommitConfirm,
+            CommitFlow::Editing(_) | CommitFlow::Running(_) => return KeyScope::CommitEditor,
+            CommitFlow::Failed { .. } => return KeyScope::CommitError,
+        }
         if self.help_open {
             KeyScope::Help
         } else {
@@ -225,6 +283,40 @@ impl AppState {
         vec![Effect::RunOp { tag, op }]
     }
 
+    /// Open the commit popup: straight to the editor when something is
+    /// staged, else ask whether to stage everything first.
+    fn open_commit(&mut self) {
+        if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
+            return;
+        }
+        let staged = self.files.iter().any(|f| !matches!(f.index, '.' | '?'));
+        self.commit = if staged {
+            CommitFlow::Editing(CommitEditor::new(false))
+        } else {
+            CommitFlow::ConfirmStageAll
+        };
+    }
+
+    fn submit_commit(&mut self) -> Vec<Effect> {
+        let CommitFlow::Editing(editor) = &self.commit else {
+            return vec![];
+        };
+        if editor.subject.trim().is_empty() {
+            self.notice = Some("Write a subject first");
+            return vec![];
+        }
+        let editor = editor.clone();
+        let op = GitOp::Commit {
+            message: editor.message(),
+            stage_all: editor.stage_all,
+        };
+        let effects = self.start_op(Ok(Some(op)));
+        if !effects.is_empty() {
+            self.commit = CommitFlow::Running(editor);
+        }
+        effects
+    }
+
     fn op_finished(&mut self, tag: Tag, op: GitOp, result: Result<(), String>) -> Vec<Effect> {
         // As with status loads: every user effect reports once, stale or not.
         if tag.user {
@@ -233,13 +325,38 @@ impl AppState {
         if Some(tag.seq) == self.op_seq {
             self.op_seq = None;
         }
+        let commit = matches!(op, GitOp::Commit { .. });
         if tag.generation != self.generation {
+            // The result is for another repository; give the message back.
+            if commit {
+                self.end_commit(None);
+            }
             return vec![];
         }
-        self.op_error = result.err();
+        if commit {
+            // A commit's failure shows in its own popup, not the status bar.
+            self.end_commit(Some(result));
+        } else {
+            self.op_error = result.err();
+        }
         // Refresh even after a failure: a failed `add` of several paths can
         // still have changed the index.
         self.apply_plan(refresh::plan(&op))
+    }
+
+    /// Leave `Running`: closed on success, `Failed` with the output on
+    /// failure, back to `Editing` when there is no result to show.
+    fn end_commit(&mut self, result: Option<Result<(), String>>) {
+        let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
+        let CommitFlow::Running(editor) = commit else {
+            self.commit = commit;
+            return;
+        };
+        self.commit = match result {
+            Some(Ok(())) => CommitFlow::Closed,
+            Some(Err(output)) => CommitFlow::Failed { editor, output },
+            None => CommitFlow::Editing(editor),
+        };
     }
 
     /// Reload what the plan says is stale. Reloading files reselects, which
@@ -305,6 +422,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commit_editor::{CommitEditor, Field};
     use crate::diff_pane::DIFF_PREFETCH;
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::status::EntryKind;
@@ -1133,5 +1251,244 @@ mod tests {
         diff_tag(&effects);
         assert_eq!(state.selected, Some(1));
         assert_eq!(state.diff.path, Some("b.rs".into()));
+    }
+
+    fn ctrl(state: &mut AppState, c: char) -> Vec<Effect> {
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    fn type_text(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            let code = if c == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(c)
+            };
+            press(state, code);
+        }
+    }
+
+    fn editor(state: &AppState) -> &CommitEditor {
+        match &state.commit {
+            CommitFlow::Editing(editor) => editor,
+            other => panic!("expected Editing, got {other:?}"),
+        }
+    }
+
+    /// A workspace with a staged file, the commit popup open on it.
+    fn editing() -> AppState {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('c'));
+        editor(&state);
+        state
+    }
+
+    #[test]
+    fn typing_a_message_and_ctrl_s_runs_the_commit() {
+        let mut state = editing();
+        let busy = state.busy;
+        type_text(&mut state, "subj\nline 1\nline 2");
+
+        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: "subj\n\nline 1\nline 2\n".into(),
+                stage_all: false,
+            }
+        );
+        assert!(tag.user);
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.busy, busy + 1);
+        assert!(matches!(&state.commit, CommitFlow::Running(e) if e.subject == "subj"));
+    }
+
+    #[test]
+    fn an_empty_subject_is_refused_with_a_notice() {
+        let mut state = editing();
+        type_text(&mut state, "  ");
+        assert_eq!(ctrl(&mut state, 's'), vec![]);
+        assert_eq!(state.notice, Some("Write a subject first"));
+        assert_eq!(state.op_seq, None);
+        assert_eq!(editor(&state).subject, "  ");
+    }
+
+    #[test]
+    fn with_nothing_staged_c_asks_to_stage_all_and_y_opens_the_editor() {
+        let files = vec![changed("a.rs", '.', 'M'), untracked("n.txt")];
+        let (mut state, _) = with_files(files, 24);
+        press(&mut state, KeyCode::Char('c'));
+        assert_eq!(state.commit, CommitFlow::ConfirmStageAll);
+        assert_eq!(state.key_focus(), KeyScope::CommitConfirm);
+
+        press(&mut state, KeyCode::Char('y'));
+        assert!(editor(&state).stage_all);
+        type_text(&mut state, "all");
+        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: "all\n".into(),
+                stage_all: true,
+            }
+        );
+    }
+
+    #[test]
+    fn enter_also_confirms_staging_everything() {
+        let (mut state, _) = with_files(vec![changed("a.rs", '.', 'M')], 24);
+        press(&mut state, KeyCode::Char('c'));
+        press(&mut state, KeyCode::Enter);
+        assert!(editor(&state).stage_all);
+    }
+
+    #[test]
+    fn n_or_esc_declines_staging_everything_and_nothing_runs() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let (mut state, _) = with_files(vec![changed("a.rs", '.', 'M')], 24);
+            press(&mut state, KeyCode::Char('c'));
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.commit, CommitFlow::Closed);
+            assert!(!state.should_quit);
+        }
+    }
+
+    #[test]
+    fn a_staged_file_opens_the_editor_directly() {
+        let state = editing();
+        assert!(!editor(&state).stage_all);
+        assert_eq!(state.key_focus(), KeyScope::CommitEditor);
+    }
+
+    #[test]
+    fn c_with_a_conflict_or_no_files_is_disabled_with_a_reason() {
+        let conflict = FileEntry {
+            kind: EntryKind::Conflicted,
+            ..changed("both.rs", 'U', 'U')
+        };
+        let (mut state, _) = with_files(vec![changed("a.rs", 'M', '.'), conflict], 24);
+        press(&mut state, KeyCode::Char('c'));
+        assert_eq!(state.notice, Some("Resolve conflicts before committing"));
+        assert_eq!(state.commit, CommitFlow::Closed);
+
+        let (mut state, _) = with_files(vec![], 24);
+        press(&mut state, KeyCode::Char('c'));
+        assert_eq!(state.notice, Some("Nothing to commit"));
+
+        let (mut state, _) = with_files(three_files(), 24);
+        state.op_seq = Some(5);
+        press(&mut state, KeyCode::Char('c'));
+        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn q_and_question_mark_are_typed_and_esc_cancels_while_editing() {
+        let mut state = editing();
+        type_text(&mut state, "q?");
+        assert!(!state.should_quit);
+        assert!(!state.help_open);
+        assert_eq!(editor(&state).subject, "q?");
+        // Ctrl+C does not quit while typing either.
+        ctrl(&mut state, 'c');
+        assert!(!state.should_quit);
+
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn tab_moves_between_the_fields() {
+        let mut state = editing();
+        type_text(&mut state, "s");
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(editor(&state).field, Field::Body);
+        state.update(AppIntent::ToggleCommitField);
+        assert_eq!(editor(&state).field, Field::Subject);
+    }
+
+    /// Submit "subj" with a body and return the op's tag and op.
+    fn submitted() -> (AppState, Tag, GitOp) {
+        let mut state = editing();
+        type_text(&mut state, "subj\nbody");
+        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        (state, tag, op)
+    }
+
+    #[test]
+    fn keys_do_nothing_while_the_commit_runs() {
+        let (mut state, _, _) = submitted();
+        let before = state.commit.clone();
+        type_text(&mut state, "xq");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(ctrl(&mut state, 's'), vec![]);
+        assert_eq!(state.commit, before);
+        assert_eq!(state.notice, Some("An operation is running"));
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn a_successful_commit_closes_the_popup_and_refreshes() {
+        let (mut state, tag, op) = submitted();
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.op_seq, None);
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_commit_shows_its_output_and_esc_returns_to_the_kept_message() {
+        let (mut state, tag, op) = submitted();
+        let effects = state.update(finished(tag, op, Err("lint failed".into())));
+
+        assert_eq!(state.op_error, None);
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            "{effects:?}"
+        );
+        match &state.commit {
+            CommitFlow::Failed { editor, output } => {
+                assert_eq!(output, "lint failed");
+                assert_eq!(editor.subject, "subj");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(state.key_focus(), KeyScope::CommitError);
+        // Other keys are dropped while the error shows.
+        press(&mut state, KeyCode::Char('q'));
+        assert!(!state.should_quit);
+
+        press(&mut state, KeyCode::Esc);
+        let editor = editor(&state);
+        assert_eq!(editor.subject, "subj");
+        assert_eq!(editor.body, ["body"]);
+    }
+
+    #[test]
+    fn enter_also_dismisses_the_commit_error() {
+        let (mut state, tag, op) = submitted();
+        state.update(finished(tag, op, Err("no".into())));
+        press(&mut state, KeyCode::Enter);
+        editor(&state);
+    }
+
+    #[test]
+    fn a_stale_commit_result_returns_to_editing_without_a_refresh() {
+        let (mut state, tag, op) = submitted();
+        let busy = state.busy;
+        state.generation += 1;
+        let effects = state.update(finished(tag, op, Err("boom".into())));
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.op_seq, None);
+        assert_eq!(editor(&state).subject, "subj");
     }
 }

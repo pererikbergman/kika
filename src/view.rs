@@ -1,8 +1,9 @@
+use crate::commit_editor::{CommitEditor, Field};
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::diff::{DiffLine, LineKind};
 use crate::keymap::{KeyPattern, available, registry};
-use crate::model::{AppState, Context};
+use crate::model::{AppState, CommitFlow, Context};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -31,7 +32,134 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.help_open {
         render_help(state, frame, main);
     }
+    render_commit(&state.commit, frame, main);
     frame.render_widget(status_bar(state), status);
+}
+
+/// The border colour of the commit box that has the cursor.
+const FOCUSED: Color = Color::Cyan;
+
+/// Popups wider than this are harder to read; it is a common message width.
+const COMMIT_WIDTH: u16 = 72;
+
+/// The commit popup for the current step, over `area`.
+fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
+    match commit {
+        CommitFlow::Closed => {}
+        CommitFlow::ConfirmStageAll => {
+            let text = "Nothing is staged. Stage all changes and commit? (y/n)";
+            let width = u16::try_from(width_of(text) + 4).unwrap_or(u16::MAX);
+            let popup = centered(area, width, 3);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(format!(" {text}"))
+                    .wrap(Wrap { trim: false })
+                    .block(Block::bordered().title(" Commit ")),
+                popup,
+            );
+        }
+        CommitFlow::Editing(editor) => render_commit_editor(editor, true, frame, area),
+        CommitFlow::Running(editor) => render_commit_editor(editor, false, frame, area),
+        CommitFlow::Failed { output, .. } => render_commit_failed(output, frame, area),
+    }
+}
+
+/// The message popup: a one-line Subject box over a Body box. While
+/// `editing`, the focused box is highlighted and holds the terminal cursor.
+fn render_commit_editor(editor: &CommitEditor, editing: bool, frame: &mut Frame, area: Rect) {
+    let title = if editing {
+        " Commit message "
+    } else {
+        " Committing… "
+    };
+    // Two outer borders, a three-row Subject box and a Body box of ten text rows.
+    let popup = centered(area, COMMIT_WIDTH, 2 + 3 + 12);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(title);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [subject_area, body_area] =
+        Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+
+    let subject = text_box(
+        frame,
+        subject_area,
+        " Subject ",
+        std::slice::from_ref(&editor.subject),
+        (editing && editor.field == Field::Subject).then_some((0, editor.col)),
+    );
+    let body = text_box(
+        frame,
+        body_area,
+        " Body ",
+        &editor.body,
+        (editing && editor.field == Field::Body).then_some((editor.row, editor.col)),
+    );
+    if let Some(position) = subject.or(body) {
+        frame.set_cursor_position(position);
+    }
+}
+
+/// A bordered box of `lines`. With a `(row, col)` cursor the box is
+/// focused: highlighted and scrolled so the cursor is in view, and the
+/// cursor's screen position is returned if the box has room to show it.
+/// Without one it shows its start.
+fn text_box(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: &[String],
+    cursor: Option<(usize, usize)>,
+) -> Option<(u16, u16)> {
+    let (row, col) = cursor.unwrap_or_default();
+    let border = if cursor.is_some() {
+        Style::new().fg(FOCUSED)
+    } else {
+        Style::new()
+    };
+    let block = Block::bordered().title(title).border_style(border);
+    let inner = block.inner(area);
+    let line = lines.get(row).map_or("", String::as_str);
+    let before: String = line.chars().take(col).collect();
+    let x = u16::try_from(width_of(&before)).unwrap_or(u16::MAX);
+    let y = u16::try_from(row).unwrap_or(u16::MAX);
+    // Scroll just enough that the cursor's row and column are inside.
+    let scroll_y = y.saturating_add(1).saturating_sub(inner.height);
+    let scroll_x = x.saturating_add(1).saturating_sub(inner.width);
+    let text: Vec<Line> = lines.iter().map(|l| Line::raw(l.as_str())).collect();
+    frame.render_widget(
+        Paragraph::new(text)
+            .scroll((scroll_y, scroll_x))
+            .block(block),
+        area,
+    );
+    (cursor.is_some() && !inner.is_empty())
+        .then(|| (inner.x + x - scroll_x, inner.y + y - scroll_y))
+}
+
+/// The output of a failed commit, wrapped and clipped, with the way back
+/// always on the last row.
+fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
+    let width = COMMIT_WIDTH.min(area.width);
+    let text_width = usize::from(width.saturating_sub(2)).max(1);
+    // Rows the wrapped output needs, plus the hint and two borders.
+    let rows: usize = output
+        .lines()
+        .map(|line| width_of(line).div_ceil(text_width).max(1))
+        .sum();
+    let height = u16::try_from(rows + 3).unwrap_or(u16::MAX);
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(" Commit failed ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [text, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let lines: Vec<Line> = output.lines().map(Line::raw).collect();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text);
+    frame.render_widget(
+        Line::styled("Esc: back to the message", Style::new().fg(Color::Yellow)),
+        hint,
+    );
 }
 
 /// The busy indicator, then why the last key did nothing, else the last
@@ -322,8 +450,10 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::commit_editor::{CommitEditor, Field};
     use crate::git::diff::{DiffLine, LineKind};
     use crate::git::status::EntryKind;
+    use crate::model::CommitFlow;
 
     /// Draw into a `width` x `height` buffer and return its rows as text.
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -518,7 +648,7 @@ mod tests {
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
-            rows[23].starts_with(" space stage  a all  r refresh  ? keys  q quit"),
+            rows[23].starts_with(" space stage  a all  c commit  r refresh  ? keys  q quit"),
             "{rows:#?}"
         );
     }
@@ -859,5 +989,175 @@ mod tests {
                 draw(&state, w, h);
             }
         }
+    }
+
+    fn commit_editor(subject: &str, body: &[&str]) -> CommitEditor {
+        let mut editor = CommitEditor::new(false);
+        editor.subject = subject.into();
+        editor.body = body.iter().map(|line| line.to_string()).collect();
+        editor.col = subject.chars().count();
+        editor
+    }
+
+    fn with_commit(commit: CommitFlow) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.commit = commit;
+        state
+    }
+
+    #[test]
+    fn the_stage_all_confirm_asks_and_the_bar_offers_its_keys() {
+        let rows = draw(&with_commit(CommitFlow::ConfirmStageAll), 80, 12);
+        assert!(contains(&rows, " Commit "), "{rows:#?}");
+        assert!(
+            contains(
+                &rows,
+                "Nothing is staged. Stage all changes and commit? (y/n)"
+            ),
+            "{rows:#?}"
+        );
+        assert!(rows[11].starts_with(" y stage all  n cancel"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_editor_shows_subject_and_body_with_the_cursor_in_the_subject() {
+        let editor = commit_editor("Fix the thing", &["line 1", "line 2"]);
+        let state = with_commit(CommitFlow::Editing(editor));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = buffer_rows(&buffer);
+
+        assert!(contains(&rows, " Commit message "), "{rows:#?}");
+        assert!(contains(&rows, " Subject "), "{rows:#?}");
+        assert!(contains(&rows, " Body "), "{rows:#?}");
+        let (x, y) = find(&buffer, "Fix the thing");
+        assert!(contains(&rows, "│line 1 "), "{rows:#?}");
+        assert!(contains(&rows, "│line 2 "), "{rows:#?}");
+        let line1 = find(&buffer, "line 1");
+        assert!(line1.1 > y, "the body is below the subject");
+        // The cursor sits after the subject, and its box is highlighted.
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (x + 13, y));
+        assert_eq!(buffer[(x - 1, y)].style().fg, Some(FOCUSED));
+        assert_ne!(buffer[(line1.0 - 1, line1.1)].style().fg, Some(FOCUSED));
+        assert!(
+            rows[23].starts_with(" ctrl-s commit  Tab subject/body  esc cancel"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_follows_the_body_row_and_col() {
+        let mut editor = commit_editor("s", &["ab", "日本x", "cd"]);
+        editor.field = Field::Body;
+        editor.row = 1;
+        editor.col = 2;
+        let state = with_commit(CommitFlow::Editing(editor));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        // `find` reads one cell per char, so locate the wide line by its neighbour.
+        let (x, below) = find(&buffer, "cd");
+        let y = below - 1;
+        assert_eq!(buffer[(x, y)].symbol(), "日");
+        let cursor = terminal.get_cursor_position().unwrap();
+        // Two wide glyphs before the cursor: four columns.
+        assert_eq!((cursor.x, cursor.y), (x + 4, y));
+        assert_eq!(buffer[(x - 1, y)].style().fg, Some(FOCUSED));
+    }
+
+    #[test]
+    fn a_long_body_scrolls_to_keep_the_cursor_row_visible() {
+        let lines: Vec<String> = (0..40).map(|i| format!("body {i}")).collect();
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let mut editor = commit_editor("s", &refs);
+        editor.field = Field::Body;
+        editor.row = 39;
+        editor.col = 0;
+        let state = with_commit(CommitFlow::Editing(editor));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "│body 39 "), "{rows:#?}");
+        assert!(!contains(&rows, "│body 0 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn only_the_focused_box_scrolls_to_the_cursor() {
+        let long = |start: &str| format!("{start}{}", "x".repeat(100));
+        let editor = commit_editor(&long("subject"), &[&long("body")]);
+        let rows = draw(&with_commit(CommitFlow::Editing(editor)), 80, 24);
+        assert!(contains(&rows, "│bodyxxx"), "{rows:#?}");
+        assert!(!contains(&rows, "│subjectxxx"), "{rows:#?}");
+
+        let mut editor = commit_editor(&long("subject"), &[&long("body")]);
+        editor.field = Field::Body;
+        editor.col = 104;
+        let rows = draw(&with_commit(CommitFlow::Editing(editor)), 80, 24);
+        assert!(contains(&rows, "│subjectxxx"), "{rows:#?}");
+        assert!(!contains(&rows, "│bodyxxx"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_running_commit_says_committing() {
+        let state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " Committing… "), "{rows:#?}");
+        assert!(contains(&rows, "subj"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_failed_commit_shows_the_output_and_how_to_go_back() {
+        let state = with_commit(CommitFlow::Failed {
+            editor: commit_editor("subj", &[""]),
+            output: "lint failed\nsrc/a.rs:3: unused import".into(),
+        });
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " Commit failed "), "{rows:#?}");
+        assert!(contains(&rows, "lint failed"), "{rows:#?}");
+        assert!(contains(&rows, "src/a.rs:3: unused import"), "{rows:#?}");
+        assert!(contains(&rows, "Esc: back to the message"), "{rows:#?}");
+    }
+
+    #[test]
+    fn long_failure_output_keeps_the_way_back_visible() {
+        let output: Vec<String> = (0..100).map(|i| format!("error {i}")).collect();
+        let state = with_commit(CommitFlow::Failed {
+            editor: commit_editor("subj", &[""]),
+            output: output.join("\n"),
+        });
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "error 0 "), "{rows:#?}");
+        assert!(contains(&rows, "Esc: back to the message"), "{rows:#?}");
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_a_commit_popup() {
+        let mut editor = commit_editor("a long subject line", &["one", "two", "three"]);
+        editor.field = Field::Body;
+        editor.row = 2;
+        editor.col = 5;
+        let flows = [
+            CommitFlow::ConfirmStageAll,
+            CommitFlow::Editing(editor.clone()),
+            CommitFlow::Running(editor.clone()),
+            CommitFlow::Failed {
+                editor,
+                output: "a long hook failure line that wraps\nand more".into(),
+            },
+        ];
+        for flow in flows {
+            let state = with_commit(flow);
+            for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {
+                draw(&state, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn a_20_by_6_screen_still_shows_the_typed_subject() {
+        let state = with_commit(CommitFlow::Editing(commit_editor("subj", &[""])));
+        let rows = draw(&state, 20, 6);
+        assert!(contains(&rows, "subj"), "{rows:#?}");
     }
 }

@@ -16,11 +16,44 @@ pub struct TestRepo {
 }
 
 impl TestRepo {
-    /// An empty repository with no commits.
+    /// An empty repository with no commits. The app's own `git commit`
+    /// gets an identity, no signing and only this repo's hooks, whatever the
+    /// host's global config says.
     pub fn new() -> Self {
         let dir = TempDir::new("e2e");
         git(dir.path(), &["init", "-q"]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            git(dir.path(), &["config", key, value]);
+        }
         Self { dir }
+    }
+
+    /// Install an executable hook script as `.git/hooks/<name>`.
+    #[cfg(unix)]
+    pub fn hook(self, name: &str, script: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hooks = self.dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let file = hooks.join(name);
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self
+    }
+
+    /// The full message of the `HEAD` commit, as git prints it.
+    pub fn head_message(&self) -> String {
+        String::from_utf8(self.git(["log", "-1", "--format=%B"])).unwrap()
+    }
+
+    /// The commit `HEAD` points at.
+    pub fn head(&self) -> String {
+        String::from_utf8(self.git(["rev-parse", "HEAD"])).unwrap()
     }
 
     /// Write `contents` to `path`, creating parent directories as needed.

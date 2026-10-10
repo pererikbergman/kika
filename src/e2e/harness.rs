@@ -67,6 +67,20 @@ impl Harness {
         self.wait_idle().await;
     }
 
+    /// Type `text` key by key, as a terminal sends it: uppercase with
+    /// SHIFT, and `\n` as Enter.
+    pub async fn type_text(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => self.press(KeyCode::Enter).await,
+                c if c.is_uppercase() => {
+                    self.press_with(KeyCode::Char(c), KeyModifiers::SHIFT).await
+                }
+                c => self.press(KeyCode::Char(c)).await,
+            }
+        }
+    }
+
     /// Draw the current state and return the screen, one string per row.
     pub fn screen(&mut self) -> Vec<String> {
         self.draw();

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
-use crate::model::AppState;
+use crate::model::{AppState, CommitFlow};
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,14 +104,25 @@ pub enum KeyScope {
     Files,
     Review,
     Help,
+    /// "Stage everything and commit?"
+    CommitConfirm,
+    /// Typing the commit message.
+    CommitEditor,
+    /// A failed commit's output.
+    CommitError,
 }
 
 impl KeyScope {
+    /// The commit scopes have no parent, so `q`, `?` and `Esc` never quit
+    /// or open help while a commit popup is open: they are typed or cancel.
     pub fn parent(self) -> Option<KeyScope> {
         match self {
             KeyScope::Files => Some(KeyScope::Workspace),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
-            KeyScope::Global => None,
+            KeyScope::Global
+            | KeyScope::CommitConfirm
+            | KeyScope::CommitEditor
+            | KeyScope::CommitError => None,
         }
     }
 
@@ -123,6 +134,9 @@ impl KeyScope {
             KeyScope::Files => "Files",
             KeyScope::Review => "Review",
             KeyScope::Help => "Help",
+            KeyScope::CommitConfirm => "Stage all and commit",
+            KeyScope::CommitEditor => "Commit message",
+            KeyScope::CommitError => "Commit failed",
         }
     }
 
@@ -242,6 +256,24 @@ fn stage_all_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+fn commit_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if state.files.is_empty() {
+        Some("Nothing to commit")
+    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+        Some("Resolve conflicts before committing")
+    } else {
+        None
+    }
+}
+
+/// The editor's keys wait while the commit runs, so the message cannot change.
+fn commit_editor_disabled(state: &AppState) -> Option<&'static str> {
+    let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_seq.is_some();
+    running.then_some(OP_RUNNING)
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -353,6 +385,78 @@ static REGISTRY: &[Binding] = &[
         label: "all",
         bar: true,
         disabled: stage_all_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenCommit,
+        description: "Commit the staged changes with a message",
+        label: "commit",
+        bar: true,
+        disabled: commit_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('y'), NONE),
+            KeyPattern::any(KeyCode::Enter),
+        ],
+        scope: KeyScope::CommitConfirm,
+        intent: AppIntent::ConfirmStageAll,
+        description: "Stage all changes, then write the message",
+        label: "stage all",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::CommitConfirm,
+        intent: AppIntent::CancelCommit,
+        description: "Do not commit",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::SubmitCommit,
+        description: "Commit with this message",
+        label: "commit",
+        bar: true,
+        disabled: commit_editor_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Tab)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::ToggleCommitField,
+        description: "Switch between subject and body",
+        label: "subject/body",
+        bar: true,
+        disabled: commit_editor_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::CancelCommit,
+        description: "Close without committing",
+        label: "cancel",
+        bar: true,
+        disabled: commit_editor_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::any(KeyCode::Enter),
+        ],
+        scope: KeyScope::CommitError,
+        intent: AppIntent::DismissCommitError,
+        description: "Back to the message",
+        label: "back",
+        bar: true,
+        disabled: never,
     },
     Binding {
         keys: &[
@@ -568,6 +672,7 @@ mod tests {
         );
         assert_eq!(files(plain(' ')), Some(ToggleStage));
         assert_eq!(files(plain('a')), Some(ToggleStageAll));
+        assert_eq!(files(plain('c')), Some(OpenCommit));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
     }
@@ -591,6 +696,86 @@ mod tests {
         );
         assert_eq!(help(plain('q')), Some(AppIntent::Quit));
         assert_eq!(from(KeyScope::Files, plain('?')), Some(AppIntent::OpenHelp));
+    }
+
+    #[test]
+    fn c_is_disabled_while_an_op_runs_without_files_or_with_conflicts_in_that_order() {
+        let c = |state: &AppState| match resolve(registry(), KeyScope::Files, state, plain('c')) {
+            Resolution::Run(binding) => Ok(binding.intent.clone()),
+            Resolution::Disabled(reason) => Err(reason),
+            Resolution::Unbound => panic!("c is unbound"),
+        };
+        let mut state = AppState::new(Context::Workspace);
+        state.op_seq = Some(1);
+        assert_eq!(c(&state), Err("An operation is running"));
+        state.op_seq = None;
+        assert_eq!(c(&state), Err("Nothing to commit"));
+        let file = |kind| crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: 'U',
+            worktree: 'U',
+            kind,
+        };
+        state.files = vec![file(EntryKind::Changed), file(EntryKind::Conflicted)];
+        assert_eq!(c(&state), Err("Resolve conflicts before committing"));
+        state.op_seq = Some(1);
+        assert_eq!(c(&state), Err("An operation is running"));
+        state.op_seq = None;
+        state.files.pop();
+        assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
+    }
+
+    #[test]
+    fn commit_popups_have_their_own_keys_and_never_reach_global_ones() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        let esc = key(KeyCode::Esc, none);
+        let enter = key(KeyCode::Enter, none);
+        let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        let confirm = |k| from(KeyScope::CommitConfirm, k);
+        assert_eq!(confirm(plain('y')), Some(ConfirmStageAll));
+        assert_eq!(confirm(enter), Some(ConfirmStageAll));
+        assert_eq!(confirm(plain('n')), Some(CancelCommit));
+        assert_eq!(confirm(esc), Some(CancelCommit));
+
+        let editor = |k| from(KeyScope::CommitEditor, k);
+        assert_eq!(editor(ctrl('s')), Some(SubmitCommit));
+        assert_eq!(editor(esc), Some(CancelCommit));
+        assert_eq!(editor(key(KeyCode::Tab, none)), Some(ToggleCommitField));
+        assert_eq!(editor(enter), None, "Enter is typed into the message");
+
+        let error = |k| from(KeyScope::CommitError, k);
+        assert_eq!(error(esc), Some(DismissCommitError));
+        assert_eq!(error(enter), Some(DismissCommitError));
+
+        for scope in [
+            KeyScope::CommitConfirm,
+            KeyScope::CommitEditor,
+            KeyScope::CommitError,
+        ] {
+            for k in [plain('q'), plain('?'), ctrl('c')] {
+                assert_eq!(from(scope, k), None, "{scope:?} {k:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_editor_keys_wait_while_the_commit_runs() {
+        let mut state = AppState::new(Context::Workspace);
+        state.commit = CommitFlow::Running(crate::commit_editor::CommitEditor::new(false));
+        state.op_seq = Some(1);
+        for k in [
+            key(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            key(KeyCode::Esc, KeyModifiers::NONE),
+            key(KeyCode::Tab, KeyModifiers::NONE),
+        ] {
+            assert!(matches!(
+                resolve(registry(), KeyScope::CommitEditor, &state, k),
+                Resolution::Disabled("An operation is running")
+            ));
+        }
     }
 
     #[test]

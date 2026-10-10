@@ -42,6 +42,18 @@ pub enum AppIntent {
     ToggleStage,
     /// Stage everything, or unstage everything when nothing is left to stage.
     ToggleStageAll,
+    /// Open the commit popup from the Files panel.
+    OpenCommit,
+    /// Nothing was staged: yes, stage everything and commit.
+    ConfirmStageAll,
+    /// Close the commit popup; the index is left as it is.
+    CancelCommit,
+    /// Commit with the typed message.
+    SubmitCommit,
+    /// Move the cursor between the subject and the body.
+    ToggleCommitField,
+    /// Close the commit error and go back to the kept message.
+    DismissCommitError,
     /// A Git operation finished, successfully or not.
     OpFinished {
         tag: Tag,

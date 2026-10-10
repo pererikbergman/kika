@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod commit_editor;
 mod diff_pane;
 mod diff_stream;
 #[cfg(test)]

@@ -14,6 +14,7 @@ pub struct FakeRunner {
     expected: Mutex<VecDeque<(Vec<String>, GitOutput)>>,
     spawns: Mutex<VecDeque<(Vec<String>, FakeChild)>>,
     envs: Mutex<Vec<Vec<(OsString, OsString)>>>,
+    inputs: Mutex<Vec<Option<Vec<u8>>>>,
 }
 
 impl FakeRunner {
@@ -39,6 +40,20 @@ impl FakeRunner {
     /// Environment of every call so far, in order.
     pub fn envs(&self) -> Vec<Vec<(OsString, OsString)>> {
         self.envs.lock().unwrap().clone()
+    }
+
+    /// Stdin of every call so far, in order; `None` where it was closed.
+    pub fn inputs(&self) -> Vec<Option<Vec<u8>>> {
+        self.inputs.lock().unwrap().clone()
+    }
+
+    /// Record what every call, run or spawn, was given besides its argv.
+    fn record(&self, cmd: &GitCommand) {
+        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(cmd.input().map(<[u8]>::to_vec));
     }
 
     pub fn assert_done(&self) {
@@ -70,7 +85,7 @@ impl GitRunner for FakeRunner {
             .pop_front()
             .unwrap_or_else(|| panic!("unexpected git spawn: {actual:?}"));
         assert_eq!(actual, expected, "git spawn argv mismatch");
-        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.record(cmd);
         child.probe.spawned.store(true, Ordering::SeqCst);
         Ok(GitChild {
             stdout: Box::new(FakeStdout {
@@ -94,7 +109,7 @@ impl GitRunner for FakeRunner {
             .pop_front()
             .unwrap_or_else(|| panic!("unexpected git call: {actual:?}"));
         assert_eq!(actual, expected, "git argv mismatch");
-        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.record(cmd);
         Ok(output)
     }
 }

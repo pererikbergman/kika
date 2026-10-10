@@ -1,15 +1,17 @@
 use std::ffi::OsString;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-/// A `git` invocation as argv plus environment. Kept as separate arguments so
-/// paths and user input can never be interpreted by a shell.
+/// A `git` invocation as argv plus environment, and optionally bytes for its
+/// stdin. Kept as separate arguments so paths and user input can never be
+/// interpreted by a shell.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitCommand {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    stdin: Option<Vec<u8>>,
 }
 
 impl GitCommand {
@@ -17,6 +19,7 @@ impl GitCommand {
         Self {
             args: vec![subcommand.into()],
             env: Vec::new(),
+            stdin: None,
         }
     }
 
@@ -30,12 +33,23 @@ impl GitCommand {
         self
     }
 
+    /// Feed `bytes` to the process's stdin, which is otherwise closed.
+    pub fn stdin(mut self, bytes: Vec<u8>) -> Self {
+        self.stdin = Some(bytes);
+        self
+    }
+
     pub fn args(&self) -> &[OsString] {
         &self.args
     }
 
     pub fn envs(&self) -> &[(OsString, OsString)] {
         &self.env
+    }
+
+    /// The bytes for stdin, if any; runners close stdin otherwise.
+    pub fn input(&self) -> Option<&[u8]> {
+        self.stdin.as_deref()
     }
 }
 
@@ -98,7 +112,28 @@ impl CliRunner {
 
 impl GitRunner for CliRunner {
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
-        let output = self.command(cmd).output()?;
+        let output = match cmd.input() {
+            None => self.command(cmd).output()?,
+            Some(input) => {
+                let mut child = self
+                    .command(cmd)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?;
+                let mut pipe = child.stdin.take().expect("stdin is piped");
+                // Write from another thread while this one drains stdout and
+                // stderr, so git filling an output pipe cannot deadlock us.
+                // Dropping the pipe afterwards sends EOF. A write error means
+                // git exited early; its exit status tells the story.
+                std::thread::scope(|scope| {
+                    scope.spawn(move || {
+                        let _ = pipe.write_all(input);
+                    });
+                    child.wait_with_output()
+                })?
+            }
+        };
         Ok(GitOutput {
             success: output.status.success(),
             stdout: output.stdout,
@@ -197,6 +232,29 @@ mod tests {
         let output = child.handle.finish().unwrap();
         assert!(!output.success);
         assert!(!output.stderr.is_empty());
+    }
+
+    #[test]
+    fn run_passes_stdin_bytes_to_the_process() {
+        let runner = CliRunner::new(std::env::temp_dir());
+        let cmd = GitCommand::new("hash-object")
+            .arg("--stdin")
+            .stdin(b"hello\n".to_vec());
+        let output = runner.run(&cmd).unwrap();
+        assert!(
+            output.success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"ce013625030ba8dba906f756967f9e9ca394464a\n");
+    }
+
+    #[test]
+    fn stdin_larger_than_a_pipe_buffer_does_not_deadlock() {
+        let runner = CliRunner::new(std::env::temp_dir());
+        let big = vec![b'x'; 1 << 20];
+        let cmd = GitCommand::new("hash-object").arg("--stdin").stdin(big);
+        assert!(runner.run(&cmd).unwrap().success);
     }
 
     #[test]
