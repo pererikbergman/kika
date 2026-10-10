@@ -1,10 +1,23 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
+use crate::effect::Tag;
+use crate::git::FileEntry;
+
 /// Everything that can change the model: user input and async task results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppIntent {
     Quit,
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
+    /// Reload `git status`. Also issued once at startup.
+    RefreshStatus,
+    /// A status load finished; `tag` says which one.
+    StatusLoaded {
+        tag: Tag,
+        result: Result<Vec<FileEntry>, String>,
+    },
 }
 
 impl AppIntent {
@@ -21,6 +34,7 @@ impl AppIntent {
         match (key.code, key.modifiers) {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Self::Quit),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Self::Quit),
+            (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RefreshStatus),
             _ => None,
         }
     }
@@ -40,6 +54,18 @@ mod tests {
     fn ctrl_c_maps_to_quit() {
         let event = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert_eq!(AppIntent::from_event(event), Some(AppIntent::Quit));
+    }
+
+    #[test]
+    fn esc_maps_to_quit() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(AppIntent::from_event(event), Some(AppIntent::Quit));
+    }
+
+    #[test]
+    fn r_maps_to_refresh_status() {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(AppIntent::from_event(event), Some(AppIntent::RefreshStatus));
     }
 
     #[test]
