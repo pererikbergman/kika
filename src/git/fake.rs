@@ -291,7 +291,24 @@ impl Drop for TempDir {
 /// and system config shut out. Arguments are `OsStr`s so tests can pass
 /// names that are not UTF-8.
 pub fn git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> Vec<u8> {
-    let out = std::process::Command::new("git")
+    let out = setup_git(dir, args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// Like [`git`], for a step expected to fail, such as a merge that stops
+/// on a conflict. Returns whether git succeeded.
+pub fn try_git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> bool {
+    setup_git(dir, args).output().unwrap().status.success()
+}
+
+fn setup_git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
         .current_dir(dir)
         .envs(super::runner::isolation_env())
         .args([
@@ -303,14 +320,8 @@ pub fn git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> Vec<u8> {
             "commit.gpgsign=false",
         ])
         .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
+        .stdin(std::process::Stdio::null());
+    command
 }
 
 /// A file name that is not UTF-8, and a different file whose name is what
@@ -360,6 +371,7 @@ pub fn entry_named(runner: &dyn GitRunner, raw: &[u8]) -> Option<crate::git::Fil
 
     crate::git::status::read_status(runner)
         .unwrap()
+        .files
         .into_iter()
         .find(|e| e.path.as_os_str().as_bytes() == raw)
 }

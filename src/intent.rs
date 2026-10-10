@@ -1,9 +1,9 @@
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::effect::Tag;
-use crate::git::FileEntry;
 use crate::git::diff::DiffChunk;
 use crate::git::ops::GitOp;
+use crate::git::status::RepoStatus;
 use crate::keymap::KeyPress;
 
 /// Everything that can change the model: user input and async task results.
@@ -23,7 +23,7 @@ pub enum AppIntent {
     /// A status load finished; `tag` says which one.
     StatusLoaded {
         tag: Tag,
-        result: Result<Vec<FileEntry>, String>,
+        result: Result<RepoStatus, String>,
     },
     /// Move the file selection down or up.
     SelectNext,

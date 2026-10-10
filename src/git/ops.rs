@@ -372,6 +372,7 @@ mod tests {
         let letters = || {
             let mut files: Vec<_> = read_status(&runner)
                 .unwrap()
+                .files
                 .into_iter()
                 .map(|f| {
                     let xy = f.status_letters();
