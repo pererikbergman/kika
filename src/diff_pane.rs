@@ -1,5 +1,6 @@
 use crate::effect::Effect;
 use crate::git::diff::{DiffChunk, DiffLine};
+use crate::git::path::RepoPath;
 use crate::intent::Scroll;
 
 /// Lines read beyond the bottom of the pane, so scrolling rarely waits on git.
@@ -12,7 +13,7 @@ pub const DIFF_PREFETCH: usize = 200;
 pub struct DiffPane {
     /// The request whose chunks are accepted; older ones are dropped.
     pub seq: Option<u64>,
-    pub path: Option<String>,
+    pub path: Option<RepoPath>,
     pub lines: Vec<DiffLine>,
     /// The stream has ended, so there is nothing more to demand.
     pub done: bool,
@@ -31,9 +32,9 @@ impl DiffPane {
     /// Start showing request `seq` for `path`. The old lines stay on screen
     /// until the first chunk arrives, so switching files does not flicker.
     /// Returns how many lines to ask for.
-    pub fn begin(&mut self, seq: u64, path: &str, rows: usize) -> usize {
-        if self.path.as_deref() != Some(path) {
-            self.path = Some(path.to_string());
+    pub fn begin(&mut self, seq: u64, path: &RepoPath, rows: usize) -> usize {
+        if self.path.as_ref() != Some(path) {
+            self.path = Some(path.clone());
             self.scroll = 0;
         }
         self.seq = Some(seq);

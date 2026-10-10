@@ -3,6 +3,7 @@ use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
 use crate::git::diff::{DiffChunk, DiffRequest};
 use crate::git::ops::GitOp;
+use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 
@@ -145,7 +146,7 @@ impl AppState {
 
     /// Keep the selection on the same file across a refresh when it still
     /// exists, else near the same place.
-    fn reselect(&mut self, old_path: Option<String>) -> Vec<Effect> {
+    fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
         if self.files.is_empty() {
             self.selected = None;
             self.diff = DiffPane::default();
@@ -277,7 +278,7 @@ mod tests {
 
     fn untracked(path: &str) -> FileEntry {
         FileEntry {
-            path: path.to_string(),
+            path: path.into(),
             orig_path: None,
             index: '?',
             worktree: '?',
@@ -446,7 +447,7 @@ mod tests {
 
     fn changed(path: &str, index: char, worktree: char) -> FileEntry {
         FileEntry {
-            path: path.to_string(),
+            path: path.into(),
             orig_path: None,
             index,
             worktree,
@@ -651,7 +652,7 @@ mod tests {
         });
         diff_tag(&effects);
         assert_eq!(state.selected, Some(1));
-        assert_eq!(state.diff.path.as_deref(), Some("z.rs"));
+        assert_eq!(state.diff.path, Some("z.rs".into()));
         assert_eq!(state.diff.scroll, 0);
     }
 
@@ -811,7 +812,7 @@ mod tests {
     }
 
     fn select_path(state: &mut AppState, path: &str) {
-        while state.files[state.selected.unwrap()].path != path {
+        while state.files[state.selected.unwrap()].path != path.into() {
             state.update(AppIntent::SelectNext);
         }
     }
@@ -1001,6 +1002,6 @@ mod tests {
         });
         diff_tag(&effects);
         assert_eq!(state.selected, Some(1));
-        assert_eq!(state.diff.path.as_deref(), Some("b.rs"));
+        assert_eq!(state.diff.path, Some("b.rs".into()));
     }
 }

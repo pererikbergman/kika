@@ -166,17 +166,17 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
     let prefix = width_of(&letters) + 1;
     let text = match &entry.orig_path {
         None => {
-            let path = elide_left(&entry.path, width.saturating_sub(prefix));
+            let path = elide_left(entry.path.display(), width.saturating_sub(prefix));
             format!("{letters} {path}")
         }
         Some(orig) => {
             let room = width.saturating_sub(prefix + width_of(" → "));
             let orig_room = room
-                .saturating_sub(width_of(&entry.path))
+                .saturating_sub(width_of(entry.path.display()))
                 .max(1)
-                .min(width_of(orig));
-            let orig = elide_left(orig, orig_room);
-            let path = elide_left(&entry.path, room.saturating_sub(orig_room));
+                .min(width_of(orig.display()));
+            let orig = elide_left(orig.display(), orig_room);
+            let path = elide_left(entry.path.display(), room.saturating_sub(orig_room));
             format!("{letters} {orig} → {path}")
         }
     };

@@ -5,7 +5,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
-use crate::git::diff::DiffRequest;
+use crate::git::diff::{DiffRequest, terminal_safe};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::status::read_status;
 use crate::intent::AppIntent;
@@ -103,7 +103,10 @@ impl Runtime {
                     let result =
                         tokio::task::spawn_blocking(move || run_op(runner.as_ref(), &task_op))
                             .await
-                            .unwrap_or_else(|e| Err(format!("git crashed: {e}")));
+                            // The panic text may quote a path; it is drawn in the status bar.
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(format!("git crashed: {e}").as_bytes()))
+                            });
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
@@ -113,12 +116,15 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, ok};
+    use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::EntryKind;
 
     #[tokio::test]
@@ -229,6 +235,47 @@ mod tests {
             }) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git crashed: "), "{message}");
+            }
+            other => panic!("expected a failed OpFinished, got {other:?}"),
+        }
+    }
+
+    /// Panics with terminal control bytes, like a panic that quotes a path.
+    struct HostilePanic;
+
+    impl GitRunner for HostilePanic {
+        fn run(&self, _: &GitCommand) -> io::Result<GitOutput> {
+            panic!("bad \x1b[2J name");
+        }
+
+        fn spawn(&self, _: &GitCommand) -> io::Result<GitChild> {
+            panic!("bad \x1b[2J name");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_panic_text_of_an_op_carries_no_control_characters() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 3,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RunOp {
+            tag,
+            op: GitOp::StageAll,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::OpFinished {
+                result: Err(message),
+                ..
+            }) => {
+                assert!(message.starts_with("git crashed: "), "{message:?}");
+                assert!(message.contains("[2J name"), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
         }

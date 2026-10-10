@@ -2,14 +2,15 @@
 //! work, and the refresh planner can say what it invalidates.
 
 use super::diff::terminal_safe;
+use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
 
 /// One index-changing Git operation. Payloads are repo file names, in argv order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitOp {
-    Stage(Vec<String>),
-    Unstage(Vec<String>),
+    Stage(Vec<RepoPath>),
+    Unstage(Vec<RepoPath>),
     StageAll,
     UnstageAll,
 }
@@ -58,8 +59,11 @@ impl GitOp {
 /// `GIT_OPTIONAL_LOCKS=0` is not set. File names come from the repo, so they
 /// are read literally, never as globs or pathspec magic.
 pub fn op_command(op: &GitOp) -> GitCommand {
-    let with_paths =
-        |cmd: GitCommand, paths: &[String]| paths.iter().fold(cmd.arg("--"), |cmd, p| cmd.arg(p));
+    let with_paths = |cmd: GitCommand, paths: &[RepoPath]| {
+        paths
+            .iter()
+            .fold(cmd.arg("--"), |cmd, p| cmd.arg(p.as_os_str()))
+    };
     let cmd = match op {
         GitOp::Stage(paths) => with_paths(GitCommand::new("add"), paths),
         GitOp::Unstage(paths) => with_paths(GitCommand::new("reset").arg("-q"), paths),
@@ -106,13 +110,11 @@ mod tests {
     }
 
     fn stage(paths: &[&str]) -> Option<GitOp> {
-        Some(GitOp::Stage(paths.iter().map(|p| p.to_string()).collect()))
+        Some(GitOp::Stage(paths.iter().map(|&p| p.into()).collect()))
     }
 
     fn unstage(paths: &[&str]) -> Option<GitOp> {
-        Some(GitOp::Unstage(
-            paths.iter().map(|p| p.to_string()).collect(),
-        ))
+        Some(GitOp::Unstage(paths.iter().map(|&p| p.into()).collect()))
     }
 
     #[test]
@@ -182,8 +184,8 @@ mod tests {
         );
     }
 
-    fn paths(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|p| p.to_string()).collect()
+    fn paths(paths: &[&str]) -> Vec<RepoPath> {
+        paths.iter().map(|&p| p.into()).collect()
     }
 
     #[test]
@@ -263,7 +265,7 @@ mod tests {
                 .into_iter()
                 .map(|f| {
                     let xy = f.status_letters();
-                    (f.path, xy)
+                    (f.path.display().to_string(), xy)
                 })
                 .collect();
             files.sort();
@@ -282,5 +284,31 @@ mod tests {
             letters(),
             [("*.rs".into(), " M".into()), ("a.rs".into(), " M".into())]
         );
+    }
+
+    /// Regression: a name that is not UTF-8 used to be decoded lossily into
+    /// argv, so toggling it staged its look-alike instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_stages_and_unstages_itself_not_its_look_alike() {
+        use crate::git::fake::{LOOK_ALIKE, RAW_NAME, entry_named, git, look_alike_repo};
+
+        let tmp = look_alike_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join(LOOK_ALIKE), "look-alike new\n").unwrap();
+        let runner = crate::git::CliRunner::new(dir);
+        let letters = |raw: &[u8]| entry_named(&runner, raw).map(|e| e.status_letters());
+        assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
+
+        let raw = entry_named(&runner, RAW_NAME).unwrap();
+        run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
+        assert_eq!(letters(RAW_NAME).as_deref(), Some("D "));
+        assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some(" M"));
+
+        git(dir, &["add", "--", LOOK_ALIKE]);
+        let raw = entry_named(&runner, RAW_NAME).unwrap();
+        run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
+        assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
+        assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
     }
 }
