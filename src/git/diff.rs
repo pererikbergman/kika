@@ -147,6 +147,17 @@ pub fn sanitize(raw: &[u8]) -> String {
     text
 }
 
+/// git's message, line by line through the same sanitiser as diff lines,
+/// since it can quote repo-controlled paths.
+pub fn terminal_safe(stderr: &[u8]) -> String {
+    stderr
+        .trim_ascii()
+        .split(|&b| b == b'\n')
+        .map(|line| sanitize(line.strip_suffix(b"\r").unwrap_or(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,31 +326,9 @@ mod tests {
         }
     }
 
-    /// Run git in `dir` for test setup, failing loudly.
-    fn git(dir: &std::path::Path, args: &[&str]) -> Vec<u8> {
-        let out = std::process::Command::new("git")
-            .current_dir(dir)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
-    }
-
     #[test]
     fn hostile_file_names_diff_only_themselves_in_real_git() {
+        use crate::git::fake::git;
         let tmp = crate::git::fake::TempDir::new("pathspec");
         let dir = tmp.path();
         let names = ["other", ":(top)other", "x1", "x*"];

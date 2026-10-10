@@ -6,6 +6,7 @@ mod effect;
 mod git;
 mod intent;
 mod model;
+mod refresh;
 mod view;
 
 use std::sync::Arc;

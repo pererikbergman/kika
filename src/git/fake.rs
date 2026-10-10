@@ -261,3 +261,26 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// Run git in `dir` for test setup, failing loudly.
+pub fn git(dir: &std::path::Path, args: &[&str]) -> Vec<u8> {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}

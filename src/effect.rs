@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
 use crate::git::diff::DiffRequest;
+use crate::git::ops::{GitOp, run_op};
 use crate::git::status::read_status;
 use crate::intent::AppIntent;
 
@@ -42,6 +43,11 @@ pub enum Effect {
     /// Report `DiffSlow` after [`DIFF_LOADING_DELAY`], so fast loads never flash "Loading…".
     DiffLoadingDelay {
         tag: Tag,
+    },
+    /// Run a Git operation; always answered by one `OpFinished`.
+    RunOp {
+        tag: Tag,
+        op: GitOp,
     },
 }
 
@@ -88,6 +94,17 @@ impl Runtime {
                 tokio::spawn(async move {
                     tokio::time::sleep(DIFF_LOADING_DELAY).await;
                     let _ = tx.send(AppIntent::DiffSlow { tag });
+                });
+            }
+            Effect::RunOp { tag, op } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or `op_seq` would block every later op.
+                    let task_op = op.clone();
+                    let result =
+                        tokio::task::spawn_blocking(move || run_op(runner.as_ref(), &task_op))
+                            .await
+                            .unwrap_or_else(|e| Err(format!("git crashed: {e}")));
+                    let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
         }
@@ -158,6 +175,62 @@ mod tests {
                 assert!(message.contains("git status"), "{message}");
             }
             other => panic!("expected a failed StatusLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_op_reports_back_with_the_same_tag_and_op() {
+        let runner = Arc::new(FakeRunner::new().expect(&["add", "-A"], ok(b"")));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 3,
+            seq: 8,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RunOp {
+            tag,
+            op: GitOp::StageAll,
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::OpFinished {
+                tag,
+                op: GitOp::StageAll,
+                result: Ok(()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_op_still_reports_back() {
+        // No expectations queued, so the fake panics on the call.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 2,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RunOp {
+            tag,
+            op: GitOp::UnstageAll,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::OpFinished {
+                tag: got,
+                op: GitOp::UnstageAll,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git crashed: "), "{message}");
+            }
+            other => panic!("expected a failed OpFinished, got {other:?}"),
         }
     }
 
