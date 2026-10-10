@@ -19,13 +19,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
                 Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
             render_files_panel(state, frame, files);
             render_diff_pane(&state.diff, frame, diff);
-            // The busy indicator goes first so a narrow bar clips the hints, not it.
-            let bar = if state.busy > 0 {
-                " loading…  j/k select  J/K scroll  r refresh  q quit"
-            } else {
-                " j/k select  J/K scroll  r refresh  q quit"
-            };
-            frame.render_widget(Line::from(bar), status);
+            frame.render_widget(workspace_status_bar(state), status);
         }
         Context::Review { number } => {
             frame.render_widget(
@@ -35,6 +29,26 @@ pub fn render(state: &AppState, frame: &mut Frame) {
             frame.render_widget(Line::from(" q quit"), status);
         }
     }
+}
+
+/// Key hints, or the last operation's error in their place until the next
+/// stage key or a successful operation clears it. The busy indicator goes
+/// first so a narrow bar clips the rest, not it.
+fn workspace_status_bar(state: &AppState) -> Line<'_> {
+    let mut spans = Vec::new();
+    if state.busy > 0 {
+        spans.push(Span::raw(" loading… "));
+    }
+    match &state.op_error {
+        Some(error) => spans.push(Span::styled(
+            format!(" error: {}", error.lines().next().unwrap_or_default()),
+            Style::new().fg(Color::Red),
+        )),
+        None => spans.push(Span::raw(
+            " j/k select  J/K scroll  space stage  a all  r refresh  q quit",
+        )),
+    }
+    Line::from(spans)
 }
 
 /// The Files panel: an error, a placeholder until the first load, or one line per file.
@@ -152,17 +166,17 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
     let prefix = width_of(&letters) + 1;
     let text = match &entry.orig_path {
         None => {
-            let path = elide_left(&entry.path, width.saturating_sub(prefix));
+            let path = elide_left(entry.path.display(), width.saturating_sub(prefix));
             format!("{letters} {path}")
         }
         Some(orig) => {
             let room = width.saturating_sub(prefix + width_of(" → "));
             let orig_room = room
-                .saturating_sub(width_of(&entry.path))
+                .saturating_sub(width_of(entry.path.display()))
                 .max(1)
-                .min(width_of(orig));
-            let orig = elide_left(orig, orig_room);
-            let path = elide_left(&entry.path, room.saturating_sub(orig_room));
+                .min(width_of(orig.display()));
+            let orig = elide_left(orig.display(), orig_room);
+            let path = elide_left(entry.path.display(), room.saturating_sub(orig_room));
             format!("{letters} {orig} → {path}")
         }
     };
@@ -311,7 +325,7 @@ mod tests {
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
-            rows[23].starts_with(" j/k select  J/K scroll  r refresh  q quit"),
+            rows[23].starts_with(" j/k select  J/K scroll  space stage  a all  r refresh  q quit"),
             "{rows:#?}"
         );
     }
@@ -410,6 +424,43 @@ mod tests {
             state.status_error = Some("boom".into());
             draw(&state, w, h);
             state.status_error = None;
+        }
+    }
+
+    #[test]
+    fn an_op_error_replaces_the_hints_with_its_first_line_in_red() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.op_error = Some("fatal: Unable to create index.lock\nhint: another git".into());
+        let buffer = draw_buffer(&state, 80, 8);
+        let rows = draw(&state, 80, 8);
+        assert!(
+            rows[7].starts_with(" error: fatal: Unable to create index.lock"),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "hint: another git"), "{rows:#?}");
+        assert!(!contains(&rows, "space stage"), "{rows:#?}");
+        let (x, y) = find(&buffer, "error:");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn an_op_error_keeps_the_busy_indicator_in_front() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.op_error = Some("boom".into());
+        state.busy = 1;
+        let rows = draw(&state, 80, 8);
+        assert!(rows[7].starts_with(" loading…  error: boom"), "{rows:#?}");
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_an_op_error() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.op_error = Some("fatal: a long error line\nsecond".into());
+        for busy in [0, 1] {
+            state.busy = busy;
+            for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4)] {
+                draw(&state, w, h);
+            }
         }
     }
 

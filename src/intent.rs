@@ -3,6 +3,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::effect::Tag;
 use crate::git::FileEntry;
 use crate::git::diff::DiffChunk;
+use crate::git::ops::GitOp;
 
 /// Everything that can change the model: user input and async task results.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,16 @@ pub enum AppIntent {
     DiffSlow {
         tag: Tag,
     },
+    /// Stage the selected file, or unstage it when it is fully staged.
+    ToggleStage,
+    /// Stage everything, or unstage everything when nothing is left to stage.
+    ToggleStageAll,
+    /// A Git operation finished, successfully or not.
+    OpFinished {
+        tag: Tag,
+        op: GitOp,
+        result: Result<(), String>,
+    },
 }
 
 /// How far to scroll the diff pane.
@@ -58,6 +69,8 @@ impl AppIntent {
             (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Self::Quit),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Self::Quit),
             (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RefreshStatus),
+            (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ToggleStage),
+            (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::ToggleStageAll),
             (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => Some(Self::SelectNext),
             (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => Some(Self::SelectPrev),
             // Terminals send uppercase letters with SHIFT, so any modifiers match.
@@ -121,6 +134,17 @@ mod tests {
         assert_eq!(key(KeyCode::Char('J'), none), scroll(Scroll::LineDown));
         assert_eq!(key(KeyCode::PageDown, none), scroll(Scroll::PageDown));
         assert_eq!(key(KeyCode::PageUp, none), scroll(Scroll::PageUp));
+    }
+
+    #[test]
+    fn space_toggles_the_file_and_a_toggles_everything() {
+        let none = KeyModifiers::NONE;
+        assert_eq!(key(KeyCode::Char(' '), none), Some(AppIntent::ToggleStage));
+        assert_eq!(
+            key(KeyCode::Char('a'), none),
+            Some(AppIntent::ToggleStageAll)
+        );
+        assert_eq!(key(KeyCode::Char('a'), KeyModifiers::CONTROL), None);
     }
 
     #[test]

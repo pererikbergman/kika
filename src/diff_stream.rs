@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{Classifier, DiffChunk, DiffRequest, diff_command, sanitize};
+use crate::git::diff::{Classifier, DiffChunk, DiffRequest, diff_command, terminal_safe};
 use crate::git::runner::ChildHandle;
 use crate::intent::AppIntent;
 
@@ -206,17 +206,6 @@ pub fn pump(
         })),
         Err(e) => emit(Err(format!("git diff: {e}"))),
     }
-}
-
-/// git's message, line by line through the same sanitiser as diff lines,
-/// since it can quote repo-controlled paths.
-fn terminal_safe(stderr: &[u8]) -> String {
-    stderr
-        .trim_ascii()
-        .split(|&b| b == b'\n')
-        .map(|line| sanitize(line.strip_suffix(b"\r").unwrap_or(line)))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// A poisoned lock only means another thread panicked mid-cancel; the state is still usable.

@@ -1,3 +1,4 @@
+use super::path::RepoPath;
 use super::runner::GitCommand;
 use super::status::{EntryKind, FileEntry};
 
@@ -15,8 +16,8 @@ pub enum DiffSide {
 /// One diff to load. Built from a status entry so the model never spells argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffRequest {
-    pub path: String,
-    pub orig_path: Option<String>,
+    pub path: RepoPath,
+    pub orig_path: Option<RepoPath>,
     pub side: DiffSide,
 }
 
@@ -46,20 +47,20 @@ pub fn diff_command(request: &DiffRequest) -> GitCommand {
         .arg("--no-color")
         .arg("--no-ext-diff");
     match request.side {
-        DiffSide::Worktree => cmd = cmd.arg("--").arg(&request.path),
+        DiffSide::Worktree => cmd = cmd.arg("--").arg(request.path.as_os_str()),
         DiffSide::Index => {
             cmd = cmd.arg("--cached").arg("-M").arg("--");
             if let Some(orig) = &request.orig_path {
-                cmd = cmd.arg(orig);
+                cmd = cmd.arg(orig.as_os_str());
             }
-            cmd = cmd.arg(&request.path);
+            cmd = cmd.arg(request.path.as_os_str());
         }
         DiffSide::Untracked => {
             cmd = cmd
                 .arg("--no-index")
                 .arg("--")
                 .arg("/dev/null")
-                .arg(&request.path)
+                .arg(request.path.as_os_str())
         }
     }
     // File names come from the repo, so a hostile `:(top)x` or `x*` must not
@@ -147,6 +148,17 @@ pub fn sanitize(raw: &[u8]) -> String {
     text
 }
 
+/// git's message, line by line through the same sanitiser as diff lines,
+/// since it can quote repo-controlled paths.
+pub fn terminal_safe(stderr: &[u8]) -> String {
+    stderr
+        .trim_ascii()
+        .split(|&b| b == b'\n')
+        .map(|line| sanitize(line.strip_suffix(b"\r").unwrap_or(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,7 +195,7 @@ mod tests {
     fn request(side: DiffSide, orig: Option<&str>) -> DiffRequest {
         DiffRequest {
             path: "new name.rs".into(),
-            orig_path: orig.map(str::to_string),
+            orig_path: orig.map(Into::into),
             side,
         }
     }
@@ -193,7 +205,7 @@ mod tests {
         for (x, y) in [('.', 'M'), ('M', 'M')] {
             let req = DiffRequest::for_entry(&entry(x, y, EntryKind::Changed));
             assert_eq!(req.side, DiffSide::Worktree, "{x}{y}");
-            assert_eq!(req.path, "src/a.rs");
+            assert_eq!(req.path, "src/a.rs".into());
         }
     }
 
@@ -315,31 +327,9 @@ mod tests {
         }
     }
 
-    /// Run git in `dir` for test setup, failing loudly.
-    fn git(dir: &std::path::Path, args: &[&str]) -> Vec<u8> {
-        let out = std::process::Command::new("git")
-            .current_dir(dir)
-            .args([
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-            ])
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        out.stdout
-    }
-
     #[test]
     fn hostile_file_names_diff_only_themselves_in_real_git() {
+        use crate::git::fake::git;
         let tmp = crate::git::fake::TempDir::new("pathspec");
         let dir = tmp.path();
         let names = ["other", ":(top)other", "x1", "x*"];
@@ -366,6 +356,43 @@ mod tests {
             assert!(!text.contains(other), "{name} leaked {other}: {text}");
             assert_eq!(text.matches("diff --git").count(), 1, "{name}: {text}");
         }
+    }
+
+    /// Regression: a name that is not UTF-8 used to be decoded lossily into
+    /// argv, so its diff showed its look-alike's changes instead.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_diffs_itself_not_its_look_alike() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::git::fake::{LOOK_ALIKE, RAW_NAME, entry_named, git, look_alike_repo};
+
+        let tmp = look_alike_repo();
+        let dir = tmp.path();
+        // The look-alike has both staged and unstaged changes, so a diff of
+        // the wrong name on either side would show them.
+        std::fs::write(dir.join(LOOK_ALIKE), "look-alike new\n").unwrap();
+        git(dir, &["add", "--", LOOK_ALIKE]);
+        std::fs::write(dir.join(LOOK_ALIKE), "look-alike newer\n").unwrap();
+        let runner = crate::git::CliRunner::new(dir);
+        let diff_of_raw = |side| {
+            let request = DiffRequest::for_entry(&entry_named(&runner, RAW_NAME).unwrap());
+            assert_eq!(request.side, side);
+            let out = crate::git::GitRunner::run(&runner, &diff_command(&request)).unwrap();
+            assert!(out.success, "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        let text = diff_of_raw(DiffSide::Worktree);
+        assert!(text.contains("-raw old"), "{text}");
+        assert!(!text.contains("look-alike"), "{text}");
+
+        let rm = ["rm", "-q", "--cached", "--"].map(OsStr::new);
+        git(dir, &[&rm[..], &[OsStr::from_bytes(RAW_NAME)]].concat());
+        let text = diff_of_raw(DiffSide::Index);
+        assert!(text.contains("-raw old"), "{text}");
+        assert!(!text.contains("look-alike"), "{text}");
     }
 
     fn kinds(lines: &[&str]) -> Vec<LineKind> {

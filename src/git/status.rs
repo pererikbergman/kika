@@ -1,3 +1,5 @@
+use super::diff::sanitize;
+use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
 
 /// What kind of change a status line describes.
@@ -14,8 +16,8 @@ pub enum EntryKind {
 /// letters, kept raw so the view decides how to show them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
-    pub path: String,
-    pub orig_path: Option<String>,
+    pub path: RepoPath,
+    pub orig_path: Option<RepoPath>,
     pub index: char,
     pub worktree: char,
     pub kind: EntryKind,
@@ -57,44 +59,42 @@ pub fn read_status(runner: &dyn GitRunner) -> Result<Vec<FileEntry>, String> {
 }
 
 /// Parse `git status --porcelain=v2 -z`. Paths are taken as everything after
-/// the fixed fields, so spaces inside them survive.
+/// the fixed fields, so spaces inside them survive, and are kept as raw bytes
+/// so a name that is not UTF-8 still reaches git unchanged.
 pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    let mut records = bytes
-        .split(|&b| b == 0)
-        .filter(|r| !r.is_empty())
-        .map(String::from_utf8_lossy);
+    let mut records = bytes.split(|&b| b == 0).filter(|r| !r.is_empty());
 
     while let Some(record) = records.next() {
-        let entry = match record.as_bytes().first() {
+        let malformed = || format!("malformed status record: {}", sanitize(record));
+        let entry = match record.first() {
             Some(b'1') => {
-                let (xy, path) = fields(&record, 8)?;
+                let (xy, path) = fields(record, 8).ok_or_else(malformed)?;
                 changed(xy, path, None, EntryKind::Changed)
             }
             Some(b'2') => {
-                let (xy, path) = fields(&record, 9)?;
+                let (xy, path) = fields(record, 9).ok_or_else(malformed)?;
                 let orig = records
                     .next()
-                    .ok_or_else(|| format!("rename without original path: {record}"))?;
-                let kind = if record.split(' ').nth(8).is_some_and(|s| s.starts_with('C')) {
+                    .ok_or_else(|| format!("rename without original path: {}", sanitize(record)))?;
+                let score = record.split(|&b| b == b' ').nth(8);
+                let kind = if score.is_some_and(|s| s.starts_with(b"C")) {
                     EntryKind::Copied
                 } else {
                     EntryKind::Renamed
                 };
-                changed(xy, path, Some(orig.into_owned()), kind)
+                changed(xy, path, Some(RepoPath::from_bytes(orig)), kind)
             }
             Some(b'u') => {
-                let (xy, path) = fields(&record, 10)?;
+                let (xy, path) = fields(record, 10).ok_or_else(malformed)?;
                 changed(xy, path, None, EntryKind::Conflicted)
             }
             Some(b'?') => {
-                let path = record
-                    .strip_prefix("? ")
-                    .ok_or_else(|| format!("malformed status record: {record}"))?;
-                changed("??", path, None, EntryKind::Untracked)
+                let path = record.strip_prefix(b"? ").ok_or_else(malformed)?;
+                changed(b"??", path, None, EntryKind::Untracked)
             }
             Some(b'#' | b'!') => continue,
-            _ => return Err(format!("unknown status record: {record}")),
+            _ => return Err(format!("unknown status record: {}", sanitize(record))),
         };
         entries.push(entry?);
     }
@@ -102,30 +102,27 @@ pub fn parse_status(bytes: &[u8]) -> Result<Vec<FileEntry>, String> {
 }
 
 /// Split a record into its `XY` field and the path that follows `fixed` fields.
-fn fields(record: &str, fixed: usize) -> Result<(&str, &str), String> {
-    let mut parts = record.splitn(fixed + 1, ' ');
+fn fields(record: &[u8], fixed: usize) -> Option<(&[u8], &[u8])> {
+    let mut parts = record.splitn(fixed + 1, |&b| b == b' ');
     let xy = parts.nth(1);
     let path = parts.nth(fixed - 2);
     xy.zip(path)
-        .ok_or_else(|| format!("malformed status record: {record}"))
 }
 
 fn changed(
-    xy: &str,
-    path: &str,
-    orig_path: Option<String>,
+    xy: &[u8],
+    path: &[u8],
+    orig_path: Option<RepoPath>,
     kind: EntryKind,
 ) -> Result<FileEntry, String> {
-    let mut letters = xy.chars();
-    let (Some(index), Some(worktree), None) = (letters.next(), letters.next(), letters.next())
-    else {
-        return Err(format!("malformed status letters: {xy}"));
+    let &[index, worktree] = xy else {
+        return Err(format!("malformed status letters: {}", sanitize(xy)));
     };
     Ok(FileEntry {
-        path: path.to_string(),
+        path: RepoPath::from_bytes(path),
         orig_path,
-        index,
-        worktree,
+        index: char::from(index),
+        worktree: char::from(worktree),
         kind,
     })
 }
@@ -139,8 +136,8 @@ mod tests {
 
     fn entry(x: char, y: char, kind: EntryKind, path: &str, orig: Option<&str>) -> FileEntry {
         FileEntry {
-            path: path.to_string(),
-            orig_path: orig.map(str::to_string),
+            path: path.into(),
+            orig_path: orig.map(Into::into),
             index: x,
             worktree: y,
             kind,
@@ -150,7 +147,10 @@ mod tests {
     fn letters_and_paths(entries: &[FileEntry]) -> Vec<(String, String, Option<String>)> {
         entries
             .iter()
-            .map(|e| (e.status_letters(), e.path.clone(), e.orig_path.clone()))
+            .map(|e| {
+                let orig = e.orig_path.as_ref().map(|o| o.display().to_string());
+                (e.status_letters(), e.path.display().to_string(), orig)
+            })
             .collect()
     }
 
@@ -274,5 +274,18 @@ mod tests {
     fn rename_without_original_path_is_an_error() {
         let bytes = b"2 R. N... 100644 100644 100644 aaa aaa R100 new.txt\0";
         assert!(parse_status(bytes).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_the_raw_bytes_of_names_that_are_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let bytes = b"2 R. N... 100644 100644 100644 aaa aaa R100 new\xfe\0old\xff\0? x\xff\0";
+        let entries = parse_status(bytes).unwrap();
+        assert_eq!(entries[0].path.as_os_str().as_bytes(), b"new\xfe");
+        let orig = entries[0].orig_path.as_ref().unwrap();
+        assert_eq!(orig.as_os_str().as_bytes(), b"old\xff");
+        assert_eq!(entries[1].path.as_os_str().as_bytes(), b"x\xff");
+        assert_eq!(entries[1].path.display(), "x\u{FFFD}");
     }
 }
