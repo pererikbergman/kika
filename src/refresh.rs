@@ -36,9 +36,11 @@ const DEPENDS: &[(Scope, Scope)] = &[(Scope::Files, Scope::Diff)];
 /// The table. No `_` arm, so a new [`GitOp`] does not compile without a row.
 pub fn plan(op: &GitOp) -> RefreshPlan {
     let (scopes, selection) = match op {
-        GitOp::Stage(_) | GitOp::Unstage(_) | GitOp::StageAll | GitOp::UnstageAll => {
-            ([Scope::Files], Selection::KeepPath)
-        }
+        GitOp::Stage(_)
+        | GitOp::Unstage(_)
+        | GitOp::StageAll
+        | GitOp::UnstageAll
+        | GitOp::Commit { .. } => ([Scope::Files], Selection::KeepPath),
     };
     RefreshPlan {
         scopes: expand(scopes.into()),
@@ -70,12 +72,16 @@ mod tests {
     }
 
     #[test]
-    fn every_index_op_reloads_files_and_diff_and_keeps_the_path() {
+    fn every_op_reloads_files_and_diff_and_keeps_the_path() {
         let ops = [
             GitOp::Stage(vec!["a".into()]),
             GitOp::Unstage(vec!["a".into()]),
             GitOp::StageAll,
             GitOp::UnstageAll,
+            GitOp::Commit {
+                message: "subj\n".into(),
+                stage_all: true,
+            },
         ];
         for op in ops {
             assert_eq!(

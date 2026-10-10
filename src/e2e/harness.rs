@@ -16,7 +16,6 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
-use crate::git::CliRunner;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context};
 use crate::view;
@@ -42,7 +41,7 @@ impl Harness {
 
     pub async fn start_sized(repo: &TestRepo, width: u16, height: u16) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(CliRunner::new(repo.path())), tx);
+        let runtime = Runtime::new(Arc::new(repo.runner()), tx);
         let mut harness = Self {
             state: AppState::new(Context::Workspace),
             rx,
@@ -60,11 +59,36 @@ impl Harness {
 
     /// Send a key through the same mapping real input takes, then wait for idle.
     pub async fn press_with(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.send(code, modifiers);
+        self.wait_idle().await;
+    }
+
+    /// Send a key without waiting, as a user does while git is still busy.
+    /// Follow with [`Harness::settle`].
+    pub fn send(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let event = Event::Key(KeyEvent::new(code, modifiers));
         if let Some(intent) = AppIntent::from_event(event) {
             app::dispatch(&mut self.state, &self.runtime, intent);
         }
+    }
+
+    /// Wait until the app is idle.
+    pub async fn settle(&mut self) {
         self.wait_idle().await;
+    }
+
+    /// Type `text` key by key, as a terminal sends it: uppercase with
+    /// SHIFT, and `\n` as Enter.
+    pub async fn type_text(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => self.press(KeyCode::Enter).await,
+                c if c.is_uppercase() => {
+                    self.press_with(KeyCode::Char(c), KeyModifiers::SHIFT).await
+                }
+                c => self.press(KeyCode::Char(c)).await,
+            }
+        }
     }
 
     /// Draw the current state and return the screen, one string per row.
