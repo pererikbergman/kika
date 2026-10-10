@@ -176,8 +176,49 @@ async fn cancelling_the_commit_leaves_the_index_untouched() {
     app.press(KeyCode::Char('y')).await;
     app.type_text("never").await;
     app.press(KeyCode::Esc).await;
+    app.assert_screen_contains("Discard the typed message? (y/n)");
+    app.press(KeyCode::Char('y')).await;
 
+    assert!(!app.screen().iter().any(|row| row.contains("Commit")));
     assert!(repo.staged().is_empty());
     assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
     assert!(!app.state().should_quit);
+}
+
+/// A hook that waits forever must not trap the user: Ctrl+C quits, and git
+/// and the hook are stopped without leaving `index.lock` behind.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_c_while_a_hook_hangs_quits_and_stops_git_cleanly() {
+    use std::time::{Duration, Instant};
+
+    let repo = modified_repo()
+        .stage("a.txt")
+        .hook("pre-commit", "#!/bin/sh\ntouch .git/started\nsleep 30\n");
+    let head = repo.head();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('c')).await;
+    app.type_text("Stuck").await;
+    app.send(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !repo.exists(".git/started") {
+        assert!(Instant::now() < deadline, "the hook never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    app.assert_screen_contains("ctrl-c quits Kika");
+
+    let start = Instant::now();
+    app.send(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(app.state().should_quit);
+    app.settle().await;
+
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(!repo.exists(".git/index.lock"));
+    assert_eq!(repo.head(), head);
+    assert_eq!(repo.staged(), ["a.txt"]);
 }

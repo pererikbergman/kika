@@ -46,116 +46,263 @@ const COMMIT_WIDTH: u16 = 72;
 fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
     match commit {
         CommitFlow::Closed => {}
-        CommitFlow::ConfirmStageAll => {
-            let text = "Nothing is staged. Stage all changes and commit? (y/n)";
-            let width = u16::try_from(width_of(text) + 4).unwrap_or(u16::MAX);
-            let popup = centered(area, width, 3);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(
-                Paragraph::new(format!(" {text}"))
-                    .wrap(Wrap { trim: false })
-                    .block(Block::bordered().title(" Commit ")),
-                popup,
-            );
-        }
+        CommitFlow::ConfirmStageAll => render_question(
+            " Commit ",
+            "Nothing is staged. Stage all changes and commit? (y/n)",
+            frame,
+            area,
+        ),
+        CommitFlow::ConfirmDiscard(_) => render_question(
+            " Discard message ",
+            "Discard the typed message? (y/n)",
+            frame,
+            area,
+        ),
         CommitFlow::Editing(editor) => render_commit_editor(editor, true, frame, area),
         CommitFlow::Running(editor) => render_commit_editor(editor, false, frame, area),
         CommitFlow::Failed { output, .. } => render_commit_failed(output, frame, area),
     }
 }
 
+/// A small popup asking `question`, wrapped to fit and grown to hold it,
+/// so the answer keys at its end are never cut off.
+fn render_question(title: &str, question: &str, frame: &mut Frame, area: Rect) {
+    let width = u16::try_from(width_of(question) + 4)
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    // One column of padding on each side inside the border.
+    let rows = wrap(question, usize::from(width.saturating_sub(4)));
+    let height = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
+    let popup = centered(area, width, height);
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|row| Line::raw(format!(" {row}")))
+        .collect();
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        popup,
+    );
+}
+
 /// The message popup: a one-line Subject box over a Body box. While
-/// `editing`, the focused box is highlighted and holds the terminal cursor.
+/// `editing`, the focused box is marked and holds the terminal cursor.
+/// When there is no room for both, only the focused one is drawn.
 fn render_commit_editor(editor: &CommitEditor, editing: bool, frame: &mut Frame, area: Rect) {
-    let title = if editing {
-        " Commit message "
-    } else {
-        " Committing… "
-    };
     // Two outer borders, a three-row Subject box and a Body box of ten text rows.
     let popup = centered(area, COMMIT_WIDTH, 2 + 3 + 12);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered().title(title);
+    let block = if editing {
+        Block::bordered().title(" Commit message ")
+    } else {
+        Block::bordered()
+            .title(" Committing… ")
+            .title_bottom(" waiting for git · ctrl-c quits Kika ")
+    };
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let [subject_area, body_area] =
-        Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
 
-    let subject = text_box(
-        frame,
-        subject_area,
-        " Subject ",
-        std::slice::from_ref(&editor.subject),
-        (editing && editor.field == Field::Subject).then_some((0, editor.col)),
-    );
-    let body = text_box(
-        frame,
-        body_area,
-        " Body ",
-        &editor.body,
-        (editing && editor.field == Field::Body).then_some((editor.row, editor.col)),
-    );
-    if let Some(position) = subject.or(body) {
+    let focus = editing.then_some(editor.field);
+    let subject = TextBox {
+        title: "Subject",
+        lines: std::slice::from_ref(&editor.subject),
+        cursor: (focus == Some(Field::Subject)).then_some((0, editor.col)),
+    };
+    let body = TextBox {
+        title: "Body",
+        lines: &editor.body,
+        cursor: (focus == Some(Field::Body)).then_some((editor.row, editor.col)),
+    };
+    // Each box needs three rows to show one line of text.
+    let cursor = if inner.height >= 6 {
+        let [top, bottom] =
+            Layout::vertical([Constraint::Length(3), Constraint::Fill(1)]).areas(inner);
+        subject.render(frame, top).or(body.render(frame, bottom))
+    } else if focus == Some(Field::Body) {
+        body.render(frame, inner)
+    } else {
+        subject.render(frame, inner)
+    };
+    if let Some(position) = cursor {
         frame.set_cursor_position(position);
     }
 }
 
-/// A bordered box of `lines`. With a `(row, col)` cursor the box is
-/// focused: highlighted and scrolled so the cursor is in view, and the
-/// cursor's screen position is returned if the box has room to show it.
-/// Without one it shows its start.
-fn text_box(
-    frame: &mut Frame,
-    area: Rect,
-    title: &str,
-    lines: &[String],
+/// A bordered box of text lines. With a `(row, col)` cursor it is focused:
+/// marked, and scrolled so the cursor is in view. Without one it shows its
+/// start. Text cut off at either side is marked with `…`.
+struct TextBox<'a> {
+    title: &'a str,
+    lines: &'a [String],
     cursor: Option<(usize, usize)>,
-) -> Option<(u16, u16)> {
-    let (row, col) = cursor.unwrap_or_default();
-    let border = if cursor.is_some() {
-        Style::new().fg(FOCUSED)
-    } else {
-        Style::new()
-    };
-    let block = Block::bordered().title(title).border_style(border);
-    let inner = block.inner(area);
-    let line = lines.get(row).map_or("", String::as_str);
-    let before: String = line.chars().take(col).collect();
-    let x = u16::try_from(width_of(&before)).unwrap_or(u16::MAX);
-    let y = u16::try_from(row).unwrap_or(u16::MAX);
-    // Scroll just enough that the cursor's row and column are inside.
-    let scroll_y = y.saturating_add(1).saturating_sub(inner.height);
-    let scroll_x = x.saturating_add(1).saturating_sub(inner.width);
-    let text: Vec<Line> = lines.iter().map(|l| Line::raw(l.as_str())).collect();
-    frame.render_widget(
-        Paragraph::new(text)
-            .scroll((scroll_y, scroll_x))
-            .block(block),
-        area,
-    );
-    (cursor.is_some() && !inner.is_empty())
-        .then(|| (inner.x + x - scroll_x, inner.y + y - scroll_y))
 }
 
-/// The output of a failed commit, wrapped and clipped, with the way back
-/// always on the last row.
+impl TextBox<'_> {
+    /// Draw into `area`; return the cursor's screen position if it shows.
+    fn render(&self, frame: &mut Frame, area: Rect) -> Option<(u16, u16)> {
+        let block = match self.cursor {
+            Some(_) => Block::bordered()
+                .title(format!(" ▸ {} ", self.title))
+                .title_style(Style::new().add_modifier(Modifier::BOLD))
+                .border_style(Style::new().fg(FOCUSED)),
+            None => Block::bordered().title(format!(" {} ", self.title)),
+        };
+        let inner = block.inner(area);
+        if inner.is_empty() {
+            frame.render_widget(block, area);
+            return None;
+        }
+        let (width, height) = (usize::from(inner.width), usize::from(inner.height));
+        let (row, col) = self.cursor.unwrap_or_default();
+        let line = self.lines.get(row).map_or("", String::as_str);
+        let before: String = line.chars().take(col).collect();
+        let x = width_of(&before);
+        // Scroll just enough that the cursor's row is inside, and its column
+        // is inside with one column to spare for a `…` after it.
+        let top = (row + 1).saturating_sub(height);
+        let left = (x + 2).saturating_sub(width.max(2));
+        let text: Vec<Line> = self
+            .lines
+            .iter()
+            .skip(top)
+            .take(height)
+            .map(|line| Line::raw(clip(line, left, width)))
+            .collect();
+        frame.render_widget(Paragraph::new(text).block(block), area);
+        let at = |offset: usize, start: u16| start + u16::try_from(offset).unwrap_or(u16::MAX);
+        self.cursor
+            .map(|_| (at(x - left, inner.x), at(row - top, inner.y)))
+    }
+}
+
+/// One terminal cell of clipped text.
+#[derive(Clone)]
+enum Cell {
+    Blank,
+    Glyph(String),
+    /// The right half of the wide glyph before it.
+    Rest,
+}
+
+/// Columns `from..from + width` of `line`. A wide glyph cut by an edge
+/// becomes blank, and a `…` replaces the edge cell where text is cut off.
+fn clip(line: &str, from: usize, width: usize) -> String {
+    let mut cells = vec![Cell::Blank; width];
+    let mut col: usize = 0;
+    for c in line.chars() {
+        let w = width_of(c.encode_utf8(&mut [0; 4]));
+        if w == 0 {
+            // A combining mark stays with the glyph before it.
+            if let Some(Cell::Glyph(glyph)) = col
+                .checked_sub(1)
+                .and_then(|last| last.checked_sub(from))
+                .and_then(|i| cells.get_mut(i))
+            {
+                glyph.push(c);
+            }
+            continue;
+        }
+        if col >= from && col + w <= from + width {
+            cells[col - from] = Cell::Glyph(c.to_string());
+            for rest in &mut cells[col - from + 1..col - from + w] {
+                *rest = Cell::Rest;
+            }
+        }
+        col += w;
+    }
+    if width > 0 && from > 0 && col > 0 {
+        if let Some(Cell::Rest) = cells.get(1) {
+            cells[1] = Cell::Blank;
+        }
+        cells[0] = Cell::Glyph("…".into());
+    }
+    if width > 0 && col > from + width {
+        if let Cell::Rest = cells[width - 1] {
+            cells[width - 2] = Cell::Blank;
+        }
+        cells[width - 1] = Cell::Glyph("…".into());
+    }
+    cells
+        .iter()
+        .map(|cell| match cell {
+            Cell::Blank => " ",
+            Cell::Glyph(glyph) => glyph,
+            Cell::Rest => "",
+        })
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// `text` broken into rows of at most `width` columns, at a space where
+/// one fits, else mid-word. Leading indentation is kept.
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let mut rest = line;
+        let first = rows.len();
+        while width_of(rest) > width {
+            let mut used = 0;
+            let mut cut = 0;
+            let mut space = None;
+            for (i, c) in rest.char_indices() {
+                used += width_of(c.encode_utf8(&mut [0; 4]));
+                if used > width {
+                    // A space just past the edge is the best place to break.
+                    if c == ' ' {
+                        space = Some(i);
+                    }
+                    break;
+                }
+                cut = i + c.len_utf8();
+                if c == ' ' && i > 0 {
+                    space = Some(i);
+                }
+            }
+            // A glyph wider than the row still has to go somewhere.
+            let cut = cut.max(rest.chars().next().map_or(0, char::len_utf8));
+            let (row, next) = match space {
+                Some(i) => (&rest[..i], &rest[i + 1..]),
+                None => (&rest[..cut], &rest[cut..]),
+            };
+            rows.push(row.to_string());
+            rest = next;
+        }
+        // An empty line is one row; an empty tail after a break is none.
+        if !rest.is_empty() || rows.len() == first {
+            rows.push(rest.to_string());
+        }
+    }
+    rows
+}
+
+/// The output of a failed commit, wrapped. When it does not fit, the end is
+/// shown, since that is where hooks usually say what went wrong, and the
+/// first row says how much is cut. The way back is always on the last row.
 fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
-    let text_width = usize::from(width.saturating_sub(2)).max(1);
-    // Rows the wrapped output needs, plus the hint and two borders.
-    let rows: usize = output
-        .lines()
-        .map(|line| width_of(line).div_ceil(text_width).max(1))
-        .sum();
-    let height = u16::try_from(rows + 3).unwrap_or(u16::MAX);
+    let rows = wrap(output, usize::from(width.saturating_sub(2)).max(1));
+    let height = u16::try_from(rows.len() + 3).unwrap_or(u16::MAX);
     let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
     let block = Block::bordered().title(" Commit failed ");
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [text, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-    let lines: Vec<Line> = output.lines().map(Line::raw).collect();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), text);
+    let room = usize::from(text.height);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut shown = &rows[..];
+    if rows.len() > room && room >= 2 {
+        shown = &rows[rows.len() - (room - 1)..];
+        lines.push(Line::styled(
+            format!("… {} earlier lines", rows.len() - shown.len()),
+            Style::new().fg(Color::DarkGray),
+        ));
+    } else if rows.len() > room {
+        shown = &rows[rows.len() - room..];
+    }
+    lines.extend(shown.iter().map(|row| Line::raw(row.as_str())));
+    frame.render_widget(Paragraph::new(lines), text);
     frame.render_widget(
         Line::styled("Esc: back to the message", Style::new().fg(Color::Yellow)),
         hint,
@@ -182,11 +329,20 @@ fn status_bar(state: &AppState) -> Line<'_> {
             Style::new().fg(Color::Red),
         ));
     } else {
-        let hints = available(registry(), state.key_focus(), state)
+        let focus = state.key_focus();
+        let note = focus.bar_note();
+        if let Some(note) = note {
+            spans.push(Span::styled(
+                format!(" {note}"),
+                Style::new().fg(Color::DarkGray),
+            ));
+        }
+        let hints = available(registry(), focus, state)
             .into_iter()
             .filter(|(binding, _)| binding.bar);
         for (i, (binding, disabled)) in hints.enumerate() {
-            spans.push(Span::raw(if i == 0 { " " } else { "  " }));
+            let first = i == 0 && note.is_none();
+            spans.push(Span::raw(if first { " " } else { "  " }));
             let key = binding.keys.first().map(KeyPattern::label);
             let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
             spans.push(Span::styled(hint, dimmed_if(disabled.is_some())));
@@ -1043,7 +1199,9 @@ mod tests {
         assert_eq!(buffer[(x - 1, y)].style().fg, Some(FOCUSED));
         assert_ne!(buffer[(line1.0 - 1, line1.1)].style().fg, Some(FOCUSED));
         assert!(
-            rows[23].starts_with(" ctrl-s commit  Tab subject/body  esc cancel"),
+            rows[23].starts_with(
+                " q and ? are typed  ctrl-s commit  Tab subject/body  esc cancel  ctrl-c quit"
+            ),
             "{rows:#?}"
         );
     }
@@ -1120,15 +1278,163 @@ mod tests {
     }
 
     #[test]
-    fn long_failure_output_keeps_the_way_back_visible() {
+    fn long_failure_output_shows_its_tail_and_says_what_is_cut() {
         let output: Vec<String> = (0..100).map(|i| format!("error {i}")).collect();
         let state = with_commit(CommitFlow::Failed {
             editor: commit_editor("subj", &[""]),
             output: output.join("\n"),
         });
         let rows = draw(&state, 80, 24);
-        assert!(contains(&rows, "error 0 "), "{rows:#?}");
+        // 23 rows: two borders and the hint leave 20, one of them the cut line.
+        assert!(contains(&rows, "│… 81 earlier lines "), "{rows:#?}");
+        assert!(contains(&rows, "│error 81 "), "{rows:#?}");
+        assert!(contains(&rows, "│error 99 "), "{rows:#?}");
+        assert!(!contains(&rows, "│error 80 "), "{rows:#?}");
         assert!(contains(&rows, "Esc: back to the message"), "{rows:#?}");
+    }
+
+    #[test]
+    fn failure_lines_wider_than_the_popup_wrap_and_count_as_rows() {
+        let state = with_commit(CommitFlow::Failed {
+            editor: commit_editor("subj", &[""]),
+            output: format!("{}\nlast", "w".repeat(100)),
+        });
+        let rows = draw(&state, 40, 12);
+        assert!(
+            contains(&rows, &format!("│{}│", "w".repeat(38))),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "│last "), "{rows:#?}");
+        assert!(!contains(&rows, "earlier"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_running_popup_says_how_to_get_out() {
+        let state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "ctrl-c quits Kika"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_discard_confirm_asks_before_throwing_the_message_away() {
+        let state = with_commit(CommitFlow::ConfirmDiscard(commit_editor("subj", &[""])));
+        let rows = draw(&state, 80, 12);
+        assert!(
+            contains(&rows, "Discard the typed message? (y/n)"),
+            "{rows:#?}"
+        );
+        assert!(rows[11].starts_with(" y discard  n keep"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_narrow_confirm_wraps_and_keeps_y_n_visible() {
+        let rows = draw(&with_commit(CommitFlow::ConfirmStageAll), 40, 12);
+        assert!(contains(&rows, "(y/n)"), "{rows:#?}");
+        assert!(contains(&rows, "Nothing is staged."), "{rows:#?}");
+    }
+
+    /// Draw and return the buffer and where the terminal cursor ended up.
+    fn draw_with_cursor(
+        state: &AppState,
+        width: u16,
+        height: u16,
+    ) -> (ratatui::buffer::Buffer, (u16, u16)) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        (terminal.backend().buffer().clone(), (cursor.x, cursor.y))
+    }
+
+    #[test]
+    fn wrap_breaks_at_spaces_keeps_indentation_and_splits_long_words() {
+        assert_eq!(
+            wrap("  --> src/a.rs:3 unused", 16),
+            ["  --> src/a.rs:3", "unused"]
+        );
+        assert_eq!(wrap("one two three", 7), ["one two", "three"]);
+        assert_eq!(wrap("abcdefgh", 3), ["abc", "def", "gh"]);
+        assert_eq!(wrap("a\n\nb", 5), ["a", "", "b"]);
+        // A glyph wider than the row still makes progress.
+        assert_eq!(wrap("日本", 1), ["日", "本"]);
+        assert_eq!(wrap("", 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn clip_marks_cut_text_and_blanks_split_wide_glyphs() {
+        assert_eq!(clip("abcdef", 0, 4), "abc…");
+        assert_eq!(clip("abcdef", 1, 4), "…cd…");
+        assert_eq!(clip("abcdef", 3, 4), "…ef");
+        assert_eq!(clip("ab", 0, 4), "ab");
+        assert_eq!(clip("日本語", 1, 4), "…本…");
+        assert_eq!(clip("日本語", 1, 5), "…本語");
+        assert_eq!(clip("日本語", 0, 3), "日…");
+        assert_eq!(clip("anything", 0, 0), "");
+    }
+
+    #[test]
+    fn the_focused_box_is_marked_in_text_not_only_colour() {
+        let state = with_commit(CommitFlow::Editing(commit_editor("s", &[""])));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "▸ Subject "), "{rows:#?}");
+        assert!(!contains(&rows, "▸ Body "), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_short_terminal_still_shows_the_focused_body_and_its_cursor() {
+        let mut editor = commit_editor("subj", &["body text"]);
+        editor.field = Field::Body;
+        editor.col = 4;
+        let state = with_commit(CommitFlow::Editing(editor));
+        for height in [6, 8, 9] {
+            let (buffer, cursor) = draw_with_cursor(&state, 80, height);
+            let rows = buffer_rows(&buffer);
+            assert!(contains(&rows, "▸ Body "), "{height}: {rows:#?}");
+            let (x, y) = find(&buffer, "body text");
+            assert_eq!(cursor, (x + 4, y), "{height}: {rows:#?}");
+        }
+    }
+
+    #[test]
+    fn a_long_subject_scrolls_with_a_marker_and_the_cursor_stays_inside() {
+        let editor = commit_editor(&format!("start{}", "a".repeat(95)), &[""]);
+        let state = with_commit(CommitFlow::Editing(editor));
+        let (buffer, cursor) = draw_with_cursor(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+        // The popup is 72 wide, so the Subject box has 68 text columns.
+        let (x, y) = find(&buffer, "▸ Subject");
+        // The title is " ▸ Subject ", so the box's inside starts one left of "▸".
+        let inner_x = x - 1;
+        assert_eq!(buffer[(inner_x, y + 1)].symbol(), "…", "{rows:#?}");
+        assert!(!contains(&rows, "start"), "{rows:#?}");
+        // The cursor is after the last char, one column short of the edge.
+        assert_eq!(cursor, (inner_x + 66, y + 1));
+        assert_eq!(buffer[(inner_x + 65, y + 1)].symbol(), "a");
+    }
+
+    #[test]
+    fn a_wide_glyph_cut_by_the_scroll_edge_does_not_shift_the_cursor() {
+        // A 71-column screen makes the Subject box 67 wide: an odd scroll
+        // offset cuts a two-column glyph in half.
+        let editor = commit_editor(&"日".repeat(60), &[""]);
+        let state = with_commit(CommitFlow::Editing(editor));
+        let (buffer, cursor) = draw_with_cursor(&state, 71, 24);
+        let (x, y) = find(&buffer, "▸ Subject");
+        // The title is " ▸ Subject ", so the box's inside starts one left of "▸".
+        let inner_x = x - 1;
+        assert_eq!(buffer[(inner_x, y + 1)].symbol(), "…");
+        assert_eq!(cursor, (inner_x + 65, y + 1));
+        assert_eq!(buffer[(inner_x + 63, y + 1)].symbol(), "日");
+    }
+
+    #[test]
+    fn an_unfocused_line_cut_at_the_right_ends_in_a_marker() {
+        let editor = commit_editor("s", &[&"b".repeat(100)]);
+        let state = with_commit(CommitFlow::Editing(editor));
+        let rows = draw(&state, 80, 24);
+        assert!(
+            contains(&rows, &format!("│{}…│", "b".repeat(67))),
+            "{rows:#?}"
+        );
     }
 
     #[test]

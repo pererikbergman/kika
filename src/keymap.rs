@@ -110,11 +110,14 @@ pub enum KeyScope {
     CommitEditor,
     /// A failed commit's output.
     CommitError,
+    /// "Discard the typed message?"
+    CommitDiscard,
 }
 
 impl KeyScope {
     /// The commit scopes have no parent, so `q`, `?` and `Esc` never quit
     /// or open help while a commit popup is open: they are typed or cancel.
+    /// The editor binds Ctrl+C itself, so there is always a way out.
     pub fn parent(self) -> Option<KeyScope> {
         match self {
             KeyScope::Files => Some(KeyScope::Workspace),
@@ -122,7 +125,8 @@ impl KeyScope {
             KeyScope::Global
             | KeyScope::CommitConfirm
             | KeyScope::CommitEditor
-            | KeyScope::CommitError => None,
+            | KeyScope::CommitError
+            | KeyScope::CommitDiscard => None,
         }
     }
 
@@ -137,6 +141,16 @@ impl KeyScope {
             KeyScope::CommitConfirm => "Stage all and commit",
             KeyScope::CommitEditor => "Commit message",
             KeyScope::CommitError => "Commit failed",
+            KeyScope::CommitDiscard => "Discard message",
+        }
+    }
+
+    /// What the bottom bar says before the key hints, for scopes whose
+    /// keys behave unlike everywhere else.
+    pub fn bar_note(self) -> Option<&'static str> {
+        match self {
+            KeyScope::CommitEditor => Some("q and ? are typed"),
+            _ => None,
         }
     }
 
@@ -447,6 +461,36 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_editor_disabled,
     },
     Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::Quit,
+        description: "Quit Kika, stopping a commit that is running",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::CommitDiscard,
+        intent: AppIntent::DiscardCommit,
+        description: "Throw the typed message away",
+        label: "discard",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::CommitDiscard,
+        intent: AppIntent::ResumeCommit,
+        description: "Back to the message",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::any(KeyCode::Enter),
@@ -750,12 +794,21 @@ mod tests {
         assert_eq!(error(esc), Some(DismissCommitError));
         assert_eq!(error(enter), Some(DismissCommitError));
 
+        assert_eq!(editor(ctrl('c')), Some(Quit));
+
+        let discard = |k| from(KeyScope::CommitDiscard, k);
+        assert_eq!(discard(plain('y')), Some(DiscardCommit));
+        assert_eq!(discard(plain('n')), Some(ResumeCommit));
+        assert_eq!(discard(esc), Some(ResumeCommit));
+        assert_eq!(discard(enter), None, "Enter never throws a message away");
+
         for scope in [
             KeyScope::CommitConfirm,
             KeyScope::CommitEditor,
             KeyScope::CommitError,
+            KeyScope::CommitDiscard,
         ] {
-            for k in [plain('q'), plain('?'), ctrl('c')] {
+            for k in [plain('q'), plain('?')] {
                 assert_eq!(from(scope, k), None, "{scope:?} {k:?}");
             }
         }
@@ -776,6 +829,15 @@ mod tests {
                 Resolution::Disabled("An operation is running")
             ));
         }
+        // Ctrl+C is the way out while git runs.
+        let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            resolve(registry(), KeyScope::CommitEditor, &state, ctrl_c),
+            Resolution::Run(Binding {
+                intent: AppIntent::Quit,
+                ..
+            })
+        ));
     }
 
     #[test]

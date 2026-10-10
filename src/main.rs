@@ -14,6 +14,7 @@ mod refresh;
 mod view;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -21,15 +22,18 @@ use crate::cli::Cli;
 use crate::git::CliRunner;
 use crate::model::AppState;
 
-#[tokio::main]
-async fn main() -> color_eyre::Result<()> {
+fn main() -> color_eyre::Result<()> {
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
     let runner = Arc::new(CliRunner::new(std::env::current_dir()?));
+    let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();
-    let result = app::run(terminal, AppState::new(cli.context()), runner).await;
+    let result = runtime.block_on(app::run(terminal, AppState::new(cli.context()), runner));
     ratatui::restore();
+    // Quitting interrupts git, but a process that ignores it must not keep
+    // Kika from exiting: dropping the runtime would wait for it forever.
+    runtime.shutdown_timeout(Duration::from_secs(1));
     result
 }

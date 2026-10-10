@@ -21,7 +21,8 @@ pub enum GitOp {
     /// Git runs without the terminal while Kika holds the screen, so signing
     /// and hooks that need no terminal work (ssh-agent, gpg-agent with a
     /// cached passphrase or a GUI pinentry), but a terminal pinentry is not
-    /// supported: it fails, or blocks and shows as "Committing…" until git exits.
+    /// supported: it fails, or blocks and shows as "Committing…" until git
+    /// exits or Ctrl+C quits Kika, which stops git and its hooks.
     Commit {
         message: String,
         stage_all: bool,

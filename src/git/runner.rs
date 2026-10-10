@@ -2,7 +2,9 @@ use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// A `git` invocation as argv plus environment, and optionally bytes for its
 /// stdin. Kept as separate arguments so paths and user input can never be
@@ -66,6 +68,10 @@ pub struct GitOutput {
 pub trait GitRunner: Send + Sync {
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput>;
 
+    /// Stop every `run` still in flight, so quitting never waits on git.
+    /// Each stopped run returns as failed.
+    fn interrupt(&self) {}
+
     /// Start a command whose stdout is read as it arrives. The pipe and the
     /// handle are separate so one thread can kill while another is blocked reading.
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild>;
@@ -90,12 +96,30 @@ pub trait ChildHandle: Send + Sync {
 /// The real runner: spawns the `git` binary in a working directory.
 pub struct CliRunner {
     workdir: PathBuf,
+    /// Added to every command; lets tests shut out the host's git config.
+    env: Vec<(OsString, OsString)>,
+    /// Processes started by `run` and not yet reaped, for `interrupt`.
+    running: Mutex<Vec<(u64, Arc<Mutex<Child>>)>>,
+    next_id: AtomicU64,
 }
 
 impl CliRunner {
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
         Self {
             workdir: workdir.into(),
+            env: Vec::new(),
+            running: Mutex::new(Vec::new()),
+            next_id: AtomicU64::new(0),
+        }
+    }
+
+    /// A runner that ignores the global and system git config, so tests
+    /// behave the same on every machine.
+    #[cfg(test)]
+    pub fn isolated(workdir: impl Into<PathBuf>) -> Self {
+        Self {
+            env: isolation_env(),
+            ..Self::new(workdir)
         }
     }
 
@@ -103,42 +127,126 @@ impl CliRunner {
         let mut command = Command::new("git");
         command
             .current_dir(&self.workdir)
+            .envs(self.env.iter().map(|(k, v)| (k, v)))
             .args(cmd.args())
             .envs(cmd.envs().iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
         command
     }
+
+    /// Wait for `child`, feeding it `input` and draining both outputs on
+    /// separate threads so no full pipe can deadlock. The child is locked
+    /// only to poll its exit, never while blocked, so `interrupt` can get in.
+    fn collect(child: &Mutex<Child>, input: Option<&[u8]>) -> io::Result<GitOutput> {
+        let (stdin, stdout, stderr) = {
+            let mut child = lock(child);
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        };
+        let (stdout, stderr) = std::thread::scope(|scope| {
+            if let (Some(mut pipe), Some(input)) = (stdin, input) {
+                // Dropping the pipe afterwards sends EOF. A write error means
+                // git exited early; its exit status tells the story.
+                scope.spawn(move || {
+                    let _ = pipe.write_all(input);
+                });
+            }
+            let stderr = scope.spawn(|| read_all(stderr));
+            let stdout = read_all(stdout);
+            let stderr = stderr
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (stdout, stderr)
+        });
+        let (stdout, stderr) = (stdout?, stderr?);
+        let status = loop {
+            if let Some(status) = lock(child).try_wait()? {
+                break status;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        Ok(GitOutput {
+            success: status.success(),
+            stdout,
+            stderr,
+        })
+    }
+}
+
+/// Everything left in `pipe`, or nothing if there is no pipe.
+fn read_all(pipe: Option<impl Read>) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+/// Env that makes git read only the repository's own config.
+#[cfg(test)]
+pub fn isolation_env() -> Vec<(OsString, OsString)> {
+    let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+    vec![
+        ("GIT_CONFIG_GLOBAL".into(), null.into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+    ]
+}
+
+/// Ask `child` and everything it started to stop. On unix git leads its own
+/// process group, so hooks it runs are stopped too; SIGTERM lets git remove
+/// its lock files on the way out.
+fn terminate(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let stopped = Command::new("kill")
+            .arg("-TERM")
+            .arg("--")
+            .arg(format!("-{}", child.id()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if stopped {
+            return;
+        }
+    }
+    let _ = child.kill();
 }
 
 impl GitRunner for CliRunner {
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
-        let output = match cmd.input() {
-            None => self.command(cmd).output()?,
-            Some(input) => {
-                let mut child = self
-                    .command(cmd)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()?;
-                let mut pipe = child.stdin.take().expect("stdin is piped");
-                // Write from another thread while this one drains stdout and
-                // stderr, so git filling an output pipe cannot deadlock us.
-                // Dropping the pipe afterwards sends EOF. A write error means
-                // git exited early; its exit status tells the story.
-                std::thread::scope(|scope| {
-                    scope.spawn(move || {
-                        let _ = pipe.write_all(input);
-                    });
-                    child.wait_with_output()
-                })?
+        let mut command = self.command(cmd);
+        if cmd.input().is_some() {
+            command.stdin(Stdio::piped());
+        }
+        // Its own process group, so `interrupt` reaches hooks git starts.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let child = Arc::new(Mutex::new(child));
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        lock(&self.running).push((id, Arc::clone(&child)));
+        let output = Self::collect(&child, cmd.input());
+        lock(&self.running).retain(|(other, _)| *other != id);
+        if output.is_err() {
+            let mut child = lock(&child);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        output
+    }
+
+    fn interrupt(&self) {
+        for (_, child) in lock(&self.running).iter() {
+            let mut child = lock(child);
+            // Only a child not yet reaped still owns its pid and group.
+            if matches!(child.try_wait(), Ok(None)) {
+                terminate(&mut child);
             }
-        };
-        Ok(GitOutput {
-            success: output.status.success(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+        }
     }
 
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild> {
@@ -255,6 +363,61 @@ mod tests {
         let big = vec![b'x'; 1 << 20];
         let cmd = GitCommand::new("hash-object").arg("--stdin").stdin(big);
         assert!(runner.run(&cmd).unwrap().success);
+    }
+
+    /// Regression: quitting while a hook waits used to leave git (and the
+    /// hook) running, and the blocked read kept Kika from exiting.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_stops_a_commit_whose_hook_hangs_and_git_cleans_its_lock() {
+        use crate::git::fake::{TempDir, git};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new("interrupt");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "core.hooksPath", ".git/hooks"]);
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        // `sleep` is a grandchild that holds git's output pipes open.
+        std::fs::write(&hook, "#!/bin/sh\ntouch started\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a"), "a\n").unwrap();
+        git(dir, &["add", "a"]);
+
+        let runner = Arc::new(CliRunner::new(dir));
+        let cmd = GitCommand::new("-c")
+            .arg("user.name=t")
+            .arg("-c")
+            .arg("user.email=t@t")
+            .arg("commit")
+            .arg("-F")
+            .arg("-")
+            .stdin(b"msg\n".to_vec());
+        let worker = {
+            let runner = Arc::clone(&runner);
+            std::thread::spawn(move || runner.run(&cmd))
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !dir.join("started").exists() {
+            assert!(Instant::now() < deadline, "the hook never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let start = Instant::now();
+        runner.interrupt();
+        let output = worker.join().unwrap().unwrap();
+
+        assert!(!output.success);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!dir.join(".git/index.lock").exists());
+        // Nothing is left to interrupt, so a second call is harmless.
+        runner.interrupt();
     }
 
     #[test]

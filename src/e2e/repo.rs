@@ -2,7 +2,6 @@
 //! queried afterwards to check what the app did to it.
 
 use std::ffi::OsStr;
-use std::path::Path;
 
 use crate::git::fake::{TempDir, git};
 use crate::git::path::RepoPath;
@@ -16,12 +15,13 @@ pub struct TestRepo {
 }
 
 impl TestRepo {
-    /// An empty repository with no commits. The app's own `git commit`
-    /// gets an identity, no signing and only this repo's hooks, whatever the
-    /// host's global config says.
+    /// An empty repository with no commits, made from no template. The
+    /// app's runner ignores the host's global and system config (see
+    /// [`TestRepo::runner`]), so the local config gives its `git commit` an
+    /// identity, no signing and only this repo's hooks.
     pub fn new() -> Self {
         let dir = TempDir::new("e2e");
-        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["init", "-q", "--template="]);
         for (key, value) in [
             ("user.name", "Kika Test"),
             ("user.email", "test@example.com"),
@@ -84,8 +84,8 @@ impl TestRepo {
         git(self.dir.path(), &args)
     }
 
-    pub fn path(&self) -> &Path {
-        self.dir.path()
+    pub fn exists(&self, path: &str) -> bool {
+        self.dir.path().join(path).exists()
     }
 
     pub fn read(&self, path: &str) -> String {
@@ -101,9 +101,14 @@ impl TestRepo {
             .collect()
     }
 
+    /// The runner the app uses in tests: real git, host config shut out.
+    pub fn runner(&self) -> CliRunner {
+        CliRunner::isolated(self.dir.path())
+    }
+
     /// The file's status as the app's own status reader sees it.
     pub fn entry(&self, path: &str) -> Option<FileEntry> {
-        let runner = CliRunner::new(self.dir.path());
+        let runner = self.runner();
         let path = RepoPath::from(path);
         read_status(&runner)
             .unwrap()

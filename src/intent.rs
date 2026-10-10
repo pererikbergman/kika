@@ -46,8 +46,13 @@ pub enum AppIntent {
     OpenCommit,
     /// Nothing was staged: yes, stage everything and commit.
     ConfirmStageAll,
-    /// Close the commit popup; the index is left as it is.
+    /// Close the commit popup; the index is left as it is. A typed
+    /// message is only thrown away after `DiscardCommit`.
     CancelCommit,
+    /// Yes, throw the typed message away.
+    DiscardCommit,
+    /// Back to the message instead of discarding it.
+    ResumeCommit,
     /// Commit with the typed message.
     SubmitCommit,
     /// Move the cursor between the subject and the body.

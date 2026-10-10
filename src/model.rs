@@ -25,6 +25,8 @@ pub enum CommitFlow {
     /// Nothing is staged; asking whether to stage everything and commit.
     ConfirmStageAll,
     Editing(CommitEditor),
+    /// Asking whether to throw this typed message away.
+    ConfirmDiscard(CommitEditor),
     /// `git commit` is running with this message; the text cannot change.
     Running(CommitEditor),
     /// `git commit` failed. The message is kept for another try.
@@ -108,7 +110,13 @@ impl AppState {
                     }
                 }
             }
-            AppIntent::Quit => self.should_quit = true,
+            AppIntent::Quit => {
+                self.should_quit = true;
+                // A hook or signing step may wait forever; quitting must not.
+                if self.op_seq.is_some() {
+                    return vec![Effect::InterruptGit];
+                }
+            }
             AppIntent::OpenHelp => self.help_open = true,
             AppIntent::CloseHelp => self.help_open = false,
             AppIntent::Resize { width, height } => {
@@ -144,12 +152,26 @@ impl AppState {
                 }
             }
             AppIntent::CancelCommit => {
-                if matches!(
-                    self.commit,
-                    CommitFlow::ConfirmStageAll | CommitFlow::Editing(_)
-                ) {
+                let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
+                self.commit = match commit {
+                    CommitFlow::Editing(editor) if !editor.is_blank() => {
+                        CommitFlow::ConfirmDiscard(editor)
+                    }
+                    CommitFlow::ConfirmStageAll | CommitFlow::Editing(_) => CommitFlow::Closed,
+                    other => other,
+                };
+            }
+            AppIntent::DiscardCommit => {
+                if matches!(self.commit, CommitFlow::ConfirmDiscard(_)) {
                     self.commit = CommitFlow::Closed;
                 }
+            }
+            AppIntent::ResumeCommit => {
+                let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
+                self.commit = match commit {
+                    CommitFlow::ConfirmDiscard(editor) => CommitFlow::Editing(editor),
+                    other => other,
+                };
             }
             AppIntent::SubmitCommit => return self.submit_commit(),
             AppIntent::ToggleCommitField => {
@@ -184,6 +206,7 @@ impl AppState {
         match self.commit {
             CommitFlow::Closed => {}
             CommitFlow::ConfirmStageAll => return KeyScope::CommitConfirm,
+            CommitFlow::ConfirmDiscard(_) => return KeyScope::CommitDiscard,
             CommitFlow::Editing(_) | CommitFlow::Running(_) => return KeyScope::CommitEditor,
             CommitFlow::Failed { .. } => return KeyScope::CommitError,
         }
@@ -452,6 +475,14 @@ mod tests {
             [Effect::LoadStatus { tag }] => *tag,
             other => panic!("expected one LoadStatus, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn quitting_while_an_op_runs_interrupts_git() {
+        let mut state = AppState::new(Context::Workspace);
+        state.op_seq = Some(4);
+        assert_eq!(state.update(AppIntent::Quit), vec![Effect::InterruptGit]);
+        assert!(state.should_quit);
     }
 
     #[test]
@@ -1393,13 +1424,56 @@ mod tests {
         assert!(!state.should_quit);
         assert!(!state.help_open);
         assert_eq!(editor(&state).subject, "q?");
-        // Ctrl+C does not quit while typing either.
-        ctrl(&mut state, 'c');
-        assert!(!state.should_quit);
 
+        // The message is not empty, so Esc asks before throwing it away.
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(state.commit, CommitFlow::Closed);
+        assert!(matches!(state.commit, CommitFlow::ConfirmDiscard(_)));
+        assert_eq!(state.key_focus(), KeyScope::CommitDiscard);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn esc_on_an_empty_message_closes_at_once() {
+        let mut state = editing();
+        type_text(&mut state, " \n ");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn y_discards_the_message_and_n_or_esc_goes_back_to_it() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = editing();
+            type_text(&mut state, "keep me");
+            press(&mut state, KeyCode::Esc);
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(editor(&state).subject, "keep me");
+        }
+        let mut state = editing();
+        type_text(&mut state, "drop me");
+        press(&mut state, KeyCode::Esc);
+        // Other keys, Enter included, neither discard nor quit.
+        press(&mut state, KeyCode::Enter);
+        press(&mut state, KeyCode::Char('q'));
+        assert!(matches!(state.commit, CommitFlow::ConfirmDiscard(_)));
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Char('y'));
+        assert_eq!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_editor() {
+        let mut state = editing();
+        type_text(&mut state, "abc");
+        assert_eq!(ctrl(&mut state, 'c'), vec![]);
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_while_the_commit_runs_and_interrupts_git() {
+        let (mut state, _, _) = submitted();
+        assert_eq!(ctrl(&mut state, 'c'), vec![Effect::InterruptGit]);
+        assert!(state.should_quit);
     }
 
     #[test]

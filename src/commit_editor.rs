@@ -50,6 +50,11 @@ impl CommitEditor {
         message
     }
 
+    /// Nothing worth keeping has been typed.
+    pub fn is_blank(&self) -> bool {
+        self.subject.trim().is_empty() && self.body.iter().all(|line| line.trim().is_empty())
+    }
+
     /// Jump to the start of the body, or to the end of the subject.
     pub fn toggle_field(&mut self) {
         match self.field {
@@ -67,7 +72,7 @@ impl CommitEditor {
             return;
         }
         match key.code {
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if !c.is_control() => {
                 let col = self.col;
                 let line = self.line_mut();
                 line.insert(byte_at(line, col), c);
@@ -232,6 +237,9 @@ mod tests {
         editor.edit(KeyPress::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         editor.edit(KeyPress::new(KeyCode::Char('x'), KeyModifiers::ALT));
         press(&mut editor, KeyCode::F(2));
+        // Control characters, such as a C1 CSI, are never typed.
+        press(&mut editor, KeyCode::Char('\u{9b}'));
+        press(&mut editor, KeyCode::Char('\x1b'));
         assert_eq!(editor.subject, "A");
         assert_eq!(editor.col, 1);
     }
