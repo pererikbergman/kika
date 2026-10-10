@@ -8,6 +8,8 @@ use crate::git::path::RepoPath;
 use crate::git::status::{BranchStatus, RepoStatus};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Resolution};
+use crate::menu;
+use crate::popup::{ErrorPopup, LineInput, Popup};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 
 /// What Kika is looking at.
@@ -72,6 +74,9 @@ pub struct AppState {
     pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
     pub notice: Option<&'static str>,
+    /// Menus, questions, prompts and errors, drawn bottom to top. The top
+    /// one takes the keys; closing it shows the one below again.
+    pub popups: Vec<Popup>,
 }
 
 impl AppState {
@@ -96,6 +101,7 @@ impl AppState {
             help_open: false,
             commit: CommitFlow::Closed,
             notice: None,
+            popups: Vec::new(),
         }
     }
 
@@ -107,12 +113,18 @@ impl AppState {
                 match keymap::resolve(keymap::registry(), self.key_focus(), self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
                     Resolution::Disabled(reason) => self.notice = Some(reason),
-                    // Only the editor takes text; elsewhere unbound keys are dropped.
-                    Resolution::Unbound => {
-                        if let CommitFlow::Editing(editor) = &mut self.commit {
-                            editor.edit(key);
+                    // Only a prompt or the editor takes text; elsewhere
+                    // unbound keys are dropped. A popup over the editor
+                    // keeps the keys from it.
+                    Resolution::Unbound => match self.popups.last_mut() {
+                        Some(Popup::Prompt { input, .. }) => input.edit(key),
+                        Some(_) => {}
+                        None => {
+                            if let CommitFlow::Editing(editor) = &mut self.commit {
+                                editor.edit(key);
+                            }
                         }
-                    }
+                    },
                 }
             }
             AppIntent::Quit => {
@@ -192,6 +204,36 @@ impl AppState {
                 };
             }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
+            AppIntent::OpenMenu(id) => {
+                if self.context == Context::Workspace {
+                    self.popups.push(Popup::Menu { id, cursor: 0 });
+                }
+            }
+            AppIntent::MenuNext => self.move_menu_cursor(1),
+            AppIntent::MenuPrev => self.move_menu_cursor(-1),
+            AppIntent::MenuSelect => return self.menu_select(),
+            AppIntent::Ask(kind) => self.popups.push(Popup::Confirm(kind)),
+            AppIntent::ConfirmYes => return self.answer(true),
+            AppIntent::ConfirmNo => return self.answer(false),
+            AppIntent::OpenPrompt(kind) => {
+                if self.context == Context::Workspace {
+                    self.popups.push(Popup::Prompt {
+                        kind,
+                        input: LineInput::default(),
+                    });
+                }
+            }
+            AppIntent::SubmitPrompt => {
+                if let Some(Popup::Prompt { kind, input }) = self.popups.last() {
+                    let submitted = kind.submit(input.text.clone());
+                    self.popups.pop();
+                    return self.update(submitted);
+                }
+            }
+            AppIntent::GoToFile(text) => return self.go_to_file(&text),
+            AppIntent::PopPopup => {
+                self.popups.pop();
+            }
         }
         vec![]
     }
@@ -205,9 +247,16 @@ impl AppState {
         }
     }
 
-    /// Where key lookup starts: the commit popup or the help menu while
-    /// one is open.
+    /// Where key lookup starts: the top popup, else the commit popup, else
+    /// the help menu while one is open.
     pub fn key_focus(&self) -> KeyScope {
+        match self.popups.last() {
+            None => {}
+            Some(Popup::Menu { .. }) => return KeyScope::Menu,
+            Some(Popup::Confirm(_)) => return KeyScope::Confirm,
+            Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
+            Some(Popup::Error(_)) => return KeyScope::Error,
+        }
         match self.commit {
             CommitFlow::Closed => {}
             CommitFlow::ConfirmStageAll => return KeyScope::CommitConfirm,
@@ -225,6 +274,71 @@ impl AppState {
     /// Text rows inside the Diff pane: the screen minus the status bar and borders.
     pub fn pane_rows(&self) -> usize {
         usize::from(self.size.1).saturating_sub(3).max(1)
+    }
+
+    fn move_menu_cursor(&mut self, delta: isize) {
+        if let Some(Popup::Menu { id, cursor }) = self.popups.last_mut() {
+            let last = menu::items(*id).len().saturating_sub(1);
+            *cursor = cursor.saturating_add_signed(delta).min(last);
+        }
+    }
+
+    /// Run the item under the top menu's cursor. A submenu opens on top;
+    /// anything else closes every menu first, so what it opens is on top.
+    fn menu_select(&mut self) -> Vec<Effect> {
+        let Some(&Popup::Menu { id, cursor }) = self.popups.last() else {
+            return vec![];
+        };
+        let Some(item) = menu::items(id).get(cursor) else {
+            return vec![];
+        };
+        if let Some(reason) = (item.disabled)(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        if !matches!(item.intent, AppIntent::OpenMenu(_)) {
+            while matches!(self.popups.last(), Some(Popup::Menu { .. })) {
+                self.popups.pop();
+            }
+        }
+        self.update(item.intent.clone())
+    }
+
+    /// Close the confirm on top and run its answer, if it has one.
+    fn answer(&mut self, yes: bool) -> Vec<Effect> {
+        let Some(&Popup::Confirm(kind)) = self.popups.last() else {
+            return vec![];
+        };
+        self.popups.pop();
+        let answer = if yes { Some(kind.yes()) } else { kind.no() };
+        answer.map_or_else(Vec::new, |intent| self.update(intent))
+    }
+
+    /// Select the first file whose path contains `text`, ignoring case.
+    fn go_to_file(&mut self, text: &str) -> Vec<Effect> {
+        let needle = text.trim().to_lowercase();
+        if needle.is_empty() {
+            return vec![];
+        }
+        let found = self
+            .files
+            .iter()
+            .position(|f| f.path.display().to_lowercase().contains(&needle));
+        match found {
+            Some(index) => self.select(index),
+            None => {
+                self.notice = Some("No file matches");
+                vec![]
+            }
+        }
+    }
+
+    /// Show an error, unless the same one is already on top: a repeated
+    /// failure should not need dismissing twice.
+    fn push_error(&mut self, error: ErrorPopup) {
+        if self.popups.last() != Some(&Popup::Error(error.clone())) {
+            self.popups.push(Popup::Error(error));
+        }
     }
 
     fn take_seq(&mut self) -> u64 {
@@ -365,7 +479,15 @@ impl AppState {
             // A commit's failure shows in its own popup, not the status bar.
             self.end_commit(Some(result));
         } else {
-            self.op_error = result.err();
+            // A failed git command gets a popup; `op_error` is for refusals.
+            self.op_error = None;
+            if let Err(message) = result {
+                self.push_error(ErrorPopup::new(
+                    failure_title(&op),
+                    &message,
+                    "The file list was reloaded. Fix the cause above, then try again.",
+                ));
+            }
         }
         // Refresh even after a failure: a failed `add` of several paths can
         // still have changed the index.
@@ -442,10 +564,26 @@ impl AppState {
                 }
             }
             Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not read the repository status",
+                    &message,
+                    "Close this, fix the cause, then press r to retry.",
+                ));
                 self.status_error = Some(message);
                 vec![]
             }
         }
+    }
+}
+
+/// What the error popup calls a failed operation.
+fn failure_title(op: &GitOp) -> &'static str {
+    match op {
+        GitOp::Stage(_) => "Could not stage",
+        GitOp::Unstage(_) => "Could not unstage",
+        GitOp::StageAll => "Could not stage everything",
+        GitOp::UnstageAll => "Could not unstage everything",
+        GitOp::Commit { .. } => "Could not commit",
     }
 }
 
@@ -458,6 +596,8 @@ mod tests {
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
+    use crate::menu::MenuId;
+    use crate::popup::{ConfirmKind, PromptKind};
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
@@ -1336,7 +1476,15 @@ mod tests {
 
         let effects = state.update(finished(tag, op, Err("fatal: index.lock".into())));
 
-        assert_eq!(state.op_error.as_deref(), Some("fatal: index.lock"));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not stage");
+                assert_eq!(error.message, "fatal: index.lock");
+                assert!(!error.next.is_empty());
+            }
+            other => panic!("expected one error popup, got {other:?}"),
+        }
+        assert_eq!(state.op_error, None);
         assert_eq!(state.op_seq, None);
         assert!(
             matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
@@ -1661,5 +1809,266 @@ mod tests {
         assert_eq!(state.busy, busy - 1);
         assert_eq!(state.op_seq, None);
         assert_eq!(editor(&state).subject, "subj");
+    }
+
+    fn menu(id: MenuId, cursor: usize) -> Popup {
+        Popup::Menu { id, cursor }
+    }
+
+    #[test]
+    fn a_submenu_opens_on_its_parent_and_esc_goes_back_one_level() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('m'));
+        assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
+        assert_eq!(state.key_focus(), KeyScope::Menu);
+
+        // "Stage…" is the first item.
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            state.popups,
+            [menu(MenuId::Actions, 0), menu(MenuId::Stage, 0)]
+        );
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+        assert!(!state.should_quit);
+        assert_eq!(state.key_focus(), KeyScope::Files);
+    }
+
+    #[test]
+    fn the_menu_cursor_moves_and_stops_at_the_ends() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
+        for _ in 0..10 {
+            press(&mut state, KeyCode::Char('j'));
+        }
+        assert_eq!(state.popups, [menu(MenuId::Actions, 4)]);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 3)]);
+        // The file selection did not move.
+        assert_eq!(state.selected, Some(0));
+    }
+
+    #[test]
+    fn a_disabled_menu_item_says_why_and_leaves_the_stack_alone() {
+        let (mut state, _) = with_files(vec![], 24);
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        state.update(AppIntent::OpenMenu(MenuId::Stage));
+        let before = state.popups.clone();
+
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+
+        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.popups, before);
+    }
+
+    #[test]
+    fn selecting_a_stage_item_runs_it_and_closes_every_menu() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('m'));
+        press(&mut state, KeyCode::Enter);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, GitOp::Stage(vec!["a.rs".into()]));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn menus_and_prompts_only_open_on_the_workspace() {
+        let mut state = AppState::new(Context::Review { number: 1 });
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        state.update(AppIntent::OpenPrompt(PromptKind::GoToFile));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn the_quit_item_asks_first_and_y_quits() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        for _ in 0..4 {
+            state.update(AppIntent::MenuNext);
+        }
+        state.update(AppIntent::MenuSelect);
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.key_focus(), KeyScope::Confirm);
+        assert!(!state.should_quit);
+
+        press(&mut state, KeyCode::Char('y'));
+        assert!(state.should_quit);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_or_esc_declines_the_confirm_without_quitting() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = AppState::new(Context::Workspace);
+            state.update(AppIntent::Ask(ConfirmKind::Quit));
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.popups, []);
+            assert!(!state.should_quit);
+        }
+    }
+
+    fn two_txt_files() -> AppState {
+        with_files(vec![untracked("a.txt"), untracked("b.txt")], 24).0
+    }
+
+    fn prompt_text(state: &AppState) -> &str {
+        match state.popups.last() {
+            Some(Popup::Prompt { input, .. }) => &input.text,
+            other => panic!("expected a prompt on top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_go_to_file_prompt_selects_a_match_ignoring_case() {
+        let mut state = two_txt_files();
+        state.update(AppIntent::OpenPrompt(PromptKind::GoToFile));
+        assert_eq!(state.key_focus(), KeyScope::Prompt);
+
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('B'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(prompt_text(&state), "B");
+        let effects = press(&mut state, KeyCode::Enter);
+
+        let tag = diff_tag(&effects);
+        assert!(tag.seq > 0);
+        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.diff.path, Some("b.txt".into()));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn q_and_question_mark_are_typed_into_the_prompt_and_esc_cancels() {
+        let mut state = two_txt_files();
+        state.update(AppIntent::OpenPrompt(PromptKind::GoToFile));
+        type_text(&mut state, "q?b");
+        assert_eq!(prompt_text(&state), "q?b");
+        assert!(!state.should_quit);
+        assert!(!state.help_open);
+
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.selected, Some(0));
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn going_to_a_missing_file_says_so_and_empty_text_does_nothing() {
+        let mut state = two_txt_files();
+        assert_eq!(state.update(AppIntent::GoToFile("zzz".into())), vec![]);
+        assert_eq!(state.notice, Some("No file matches"));
+        assert_eq!(state.selected, Some(0));
+
+        state.notice = None;
+        assert_eq!(state.update(AppIntent::GoToFile("  ".into())), vec![]);
+        assert_eq!(state.notice, None);
+        assert_eq!(state.selected, Some(0));
+    }
+
+    fn failed_stage(state: &mut AppState, message: &str) -> Vec<Effect> {
+        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        state.update(finished(tag, op, Err(message.into())))
+    }
+
+    #[test]
+    fn the_same_error_is_never_pushed_twice_in_a_row() {
+        let (mut state, _) = with_files(three_files(), 24);
+        failed_stage(&mut state, "fatal: index.lock");
+        failed_stage(&mut state, "fatal: index.lock");
+        assert_eq!(state.popups.len(), 1);
+        failed_stage(&mut state, "fatal: other");
+        assert_eq!(state.popups.len(), 2);
+    }
+
+    #[test]
+    fn a_stale_failed_op_pushes_no_error() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        state.generation += 1;
+        state.update(finished(tag, op, Err("boom".into())));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_failed_unstage_all_names_what_failed() {
+        let (mut state, _) = with_files(vec![changed("b.rs", 'M', '.')], 24);
+        let (tag, op) = op_of(&state.update(AppIntent::ToggleStageAll));
+        state.update(finished(tag, op, Err("no".into())));
+        assert!(
+            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not unstage everything"),
+            "{:?}",
+            state.popups
+        );
+    }
+
+    #[test]
+    fn a_failed_status_load_keeps_its_error_and_shows_a_popup() {
+        let mut state = AppState::new(Context::Workspace);
+        let tag = refresh_tag(&mut state);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Err("fatal: not a git repository".into()),
+        });
+        assert_eq!(
+            state.status_error.as_deref(),
+            Some("fatal: not a git repository")
+        );
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not read the repository status");
+                assert_eq!(error.message, "fatal: not a git repository");
+                assert_eq!(
+                    error.next,
+                    "Close this, fix the cause, then press r to retry."
+                );
+            }
+            other => panic!("expected one error popup, got {other:?}"),
+        }
+        assert_eq!(state.key_focus(), KeyScope::Error);
+    }
+
+    /// Fail a status load while `state` is in some popup.
+    fn fail_status(state: &mut AppState) {
+        let tag = refresh_tag(state);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Err("boom".into()),
+        });
+    }
+
+    #[test]
+    fn an_error_over_the_commit_editor_keeps_the_typed_text() {
+        let mut state = editing();
+        type_text(&mut state, "half a mess");
+        fail_status(&mut state);
+        assert_eq!(state.key_focus(), KeyScope::Error);
+        // Keys meant for the error never reach the message.
+        type_text(&mut state, "xyz");
+        assert_eq!(editor(&state).subject, "half a mess");
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.key_focus(), KeyScope::CommitEditor);
+        type_text(&mut state, "!");
+        assert_eq!(editor(&state).subject, "half a mess!");
+    }
+
+    #[test]
+    fn an_error_over_a_prompt_keeps_the_typed_text() {
+        let mut state = two_txt_files();
+        state.update(AppIntent::OpenPrompt(PromptKind::GoToFile));
+        type_text(&mut state, "b.t");
+        fail_status(&mut state);
+        assert_eq!(state.key_focus(), KeyScope::Error);
+
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.key_focus(), KeyScope::Prompt);
+        assert_eq!(prompt_text(&state), "b.t");
     }
 }

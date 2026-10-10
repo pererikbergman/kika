@@ -9,7 +9,10 @@ mod effect;
 mod git;
 mod intent;
 mod keymap;
+mod menu;
 mod model;
+mod popup;
+mod popup_view;
 mod refresh;
 mod view;
 

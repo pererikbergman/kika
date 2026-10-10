@@ -66,6 +66,11 @@ impl TestRepo {
         self
     }
 
+    /// Delete the file at `path`.
+    pub fn remove(&self, path: &str) {
+        std::fs::remove_file(self.dir.path().join(path)).unwrap();
+    }
+
     /// Commit everything in the worktree.
     pub fn commit(self, message: &str) -> Self {
         self.git(["add", "-A"]);
