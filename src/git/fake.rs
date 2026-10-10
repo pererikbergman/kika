@@ -2,7 +2,7 @@
 //! argv, and gets the canned output back.
 
 use std::collections::VecDeque;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -260,4 +260,79 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// Run git in `dir` for test setup, failing loudly. Arguments are `OsStr`s
+/// so tests can pass names that are not UTF-8.
+pub fn git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> Vec<u8> {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// A file name that is not UTF-8, and a different file whose name is what
+/// a lossy decode of it would show.
+#[cfg(unix)]
+pub const RAW_NAME: &[u8] = b"x\xff";
+#[cfg(unix)]
+pub const LOOK_ALIKE: &str = "x\u{FFFD}";
+
+/// A repo with both names committed. [`RAW_NAME`] exists only in the index,
+/// since filesystems such as APFS refuse names that are not UTF-8, so it
+/// shows as deleted in the worktree (` D`). [`LOOK_ALIKE`] holds
+/// `look-alike old` and is clean.
+#[cfg(unix)]
+pub fn look_alike_repo() -> TempDir {
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = TempDir::new("look-alike");
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    std::fs::write(dir.join(LOOK_ALIKE), "look-alike old\n").unwrap();
+    std::fs::write(dir.join("blob"), "raw old\n").unwrap();
+    let oid = git(dir, &["hash-object", "-w", "blob"]);
+    std::fs::remove_file(dir.join("blob")).unwrap();
+    let mut cacheinfo = b"100644,".to_vec();
+    cacheinfo.extend(oid.trim_ascii());
+    cacheinfo.push(b',');
+    cacheinfo.extend(RAW_NAME);
+    git(
+        dir,
+        &[
+            OsStr::new("update-index"),
+            OsStr::new("--add"),
+            OsStr::new("--cacheinfo"),
+            OsStr::from_bytes(&cacheinfo),
+        ],
+    );
+    git(dir, &["add", "--", LOOK_ALIKE]);
+    git(dir, &["commit", "-q", "-m", "init"]);
+    tmp
+}
+
+/// The status entry for the file whose raw name is `raw`, if listed.
+#[cfg(unix)]
+pub fn entry_named(runner: &dyn GitRunner, raw: &[u8]) -> Option<crate::git::FileEntry> {
+    use std::os::unix::ffi::OsStrExt;
+
+    crate::git::status::read_status(runner)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.path.as_os_str().as_bytes() == raw)
 }
