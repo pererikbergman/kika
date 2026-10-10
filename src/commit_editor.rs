@@ -174,12 +174,12 @@ impl CommitEditor {
     }
 }
 
-fn char_len(text: &str) -> usize {
+pub(crate) fn char_len(text: &str) -> usize {
     text.chars().count()
 }
 
 /// The byte offset of char `col` in `text`, or its end.
-fn byte_at(text: &str, col: usize) -> usize {
+pub(crate) fn byte_at(text: &str, col: usize) -> usize {
     text.char_indices().nth(col).map_or(text.len(), |(i, _)| i)
 }
 

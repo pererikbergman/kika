@@ -5,6 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
+use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow};
 
 /// A key as pressed: just the code and modifiers, without the event kind.
@@ -82,6 +83,8 @@ impl KeyPattern {
             KeyCode::Char(' ') => "space".to_string(),
             KeyCode::Char(c) => c.to_string(),
             KeyCode::Esc => "esc".to_string(),
+            // Some platforms call it Return; the bar should not depend on that.
+            KeyCode::Enter => "enter".to_string(),
             KeyCode::Down => "↓".to_string(),
             KeyCode::Up => "↑".to_string(),
             KeyCode::PageDown => "PgDn".to_string(),
@@ -112,12 +115,21 @@ pub enum KeyScope {
     CommitError,
     /// "Discard the typed message?"
     CommitDiscard,
+    /// A menu on top of the popup stack.
+    Menu,
+    /// A yes/no question on top of the popup stack.
+    Confirm,
+    /// A one-line text prompt on top of the popup stack.
+    Prompt,
+    /// An error on top of the popup stack.
+    Error,
 }
 
 impl KeyScope {
-    /// The commit scopes have no parent, so `q`, `?` and `Esc` never quit
-    /// or open help while a commit popup is open: they are typed or cancel.
-    /// The editor binds Ctrl+C itself, so there is always a way out.
+    /// The commit and popup scopes have no parent, so `q`, `?` and `Esc`
+    /// never quit or open help while one is open: they are typed or cancel.
+    /// Those that take text or can stay open bind Ctrl+C themselves, so
+    /// there is always a way out.
     pub fn parent(self) -> Option<KeyScope> {
         match self {
             KeyScope::Files => Some(KeyScope::Workspace),
@@ -126,7 +138,11 @@ impl KeyScope {
             | KeyScope::CommitConfirm
             | KeyScope::CommitEditor
             | KeyScope::CommitError
-            | KeyScope::CommitDiscard => None,
+            | KeyScope::CommitDiscard
+            | KeyScope::Menu
+            | KeyScope::Confirm
+            | KeyScope::Prompt
+            | KeyScope::Error => None,
         }
     }
 
@@ -142,6 +158,10 @@ impl KeyScope {
             KeyScope::CommitEditor => "Commit message",
             KeyScope::CommitError => "Commit failed",
             KeyScope::CommitDiscard => "Discard message",
+            KeyScope::Menu => "Menu",
+            KeyScope::Confirm => "Question",
+            KeyScope::Prompt => "Prompt",
+            KeyScope::Error => "Error",
         }
     }
 
@@ -238,14 +258,14 @@ pub fn available<'a>(
     out
 }
 
-/// For bindings that always run.
-fn never(_: &AppState) -> Option<&'static str> {
+/// For bindings and menu items that always run.
+pub(crate) fn never(_: &AppState) -> Option<&'static str> {
     None
 }
 
 const OP_RUNNING: &str = "An operation is running";
 
-fn stage_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
     }
@@ -258,7 +278,7 @@ fn stage_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
-fn stage_all_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn stage_all_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING)
     } else if state.files.is_empty() {
@@ -270,7 +290,7 @@ fn stage_all_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
-fn commit_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn commit_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING)
     } else if state.files.is_empty() {
@@ -410,6 +430,17 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_disabled,
     },
     Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenMenu(MenuId::Actions),
+        description: "Open the actions menu",
+        label: "menu",
+        // Left out of the bar until the layout review (#10): the bar's
+        // hints for this panel are pinned by existing tests.
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         keys: &[
             KeyPattern::exact(KeyCode::Char('y'), NONE),
             KeyPattern::any(KeyCode::Enter),
@@ -511,6 +542,129 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::CloseHelp,
         description: "Close this menu",
         label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Menu,
+        intent: AppIntent::MenuNext,
+        description: "Move down the menu",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Menu,
+        intent: AppIntent::MenuPrev,
+        description: "Move up the menu",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Menu,
+        intent: AppIntent::MenuSelect,
+        description: "Run the highlighted item",
+        label: "select",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Menu,
+        intent: AppIntent::PopPopup,
+        description: "Close this menu and go back to the one below",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Menu,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('y'), NONE),
+            KeyPattern::any(KeyCode::Enter),
+        ],
+        scope: KeyScope::Confirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes",
+        label: "yes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::Confirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No",
+        label: "no",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Prompt,
+        intent: AppIntent::SubmitPrompt,
+        description: "Use the typed text",
+        label: "ok",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Prompt,
+        intent: AppIntent::PopPopup,
+        description: "Close without using the text",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Prompt,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::any(KeyCode::Enter),
+        ],
+        scope: KeyScope::Error,
+        intent: AppIntent::PopPopup,
+        description: "Close this message",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Error,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
         bar: true,
         disabled: never,
     },
@@ -815,6 +969,57 @@ mod tests {
     }
 
     #[test]
+    fn popups_have_their_own_keys_and_never_reach_global_ones() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        let esc = key(KeyCode::Esc, none);
+        let enter = key(KeyCode::Enter, none);
+        let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            from(KeyScope::Files, plain('m')),
+            Some(OpenMenu(MenuId::Actions))
+        );
+
+        let menu = |k| from(KeyScope::Menu, k);
+        assert_eq!(menu(plain('j')), Some(MenuNext));
+        assert_eq!(menu(key(KeyCode::Down, none)), Some(MenuNext));
+        assert_eq!(menu(plain('k')), Some(MenuPrev));
+        assert_eq!(menu(key(KeyCode::Up, none)), Some(MenuPrev));
+        assert_eq!(menu(enter), Some(MenuSelect));
+        assert_eq!(menu(esc), Some(PopPopup));
+        assert_eq!(menu(ctrl_c), Some(Quit));
+
+        let confirm = |k| from(KeyScope::Confirm, k);
+        assert_eq!(confirm(plain('y')), Some(ConfirmYes));
+        assert_eq!(confirm(enter), Some(ConfirmYes));
+        assert_eq!(confirm(plain('n')), Some(ConfirmNo));
+        assert_eq!(confirm(esc), Some(ConfirmNo));
+
+        let prompt = |k| from(KeyScope::Prompt, k);
+        assert_eq!(prompt(enter), Some(SubmitPrompt));
+        assert_eq!(prompt(esc), Some(PopPopup));
+        assert_eq!(prompt(ctrl_c), Some(Quit));
+        assert_eq!(prompt(plain('j')), None, "j is typed");
+
+        let error = |k| from(KeyScope::Error, k);
+        assert_eq!(error(esc), Some(PopPopup));
+        assert_eq!(error(enter), Some(PopPopup));
+        assert_eq!(error(ctrl_c), Some(Quit));
+
+        for scope in [
+            KeyScope::Menu,
+            KeyScope::Confirm,
+            KeyScope::Prompt,
+            KeyScope::Error,
+        ] {
+            for k in [plain('q'), plain('?'), plain('r'), plain(' ')] {
+                assert_eq!(from(scope, k), None, "{scope:?} {k:?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_editor_keys_wait_while_the_commit_runs() {
         let mut state = AppState::new(Context::Workspace);
         state.commit = CommitFlow::Running(crate::commit_editor::CommitEditor::new(false));
@@ -861,6 +1066,7 @@ mod tests {
         let label = |p: KeyPattern| p.label();
         assert_eq!(label(KeyPattern::any(KeyCode::Char(' '))), "space");
         assert_eq!(label(KeyPattern::any(KeyCode::Esc)), "esc");
+        assert_eq!(label(KeyPattern::any(KeyCode::Enter)), "enter");
         assert_eq!(
             label(KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             "ctrl-c"

@@ -6,6 +6,7 @@ use crate::git::repo_state::Operation;
 use crate::git::status::Head;
 use crate::keymap::{KeyPattern, available, registry};
 use crate::model::{AppState, CommitFlow, Context};
+use crate::popup_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -34,6 +35,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
         render_help(state, frame, main);
     }
     render_commit(&state.commit, frame, main);
+    popup_view::render_popups(state, frame, main);
     frame.render_widget(status_bar(state), status);
 }
 
@@ -173,7 +175,7 @@ fn doing(op: Operation) -> &'static str {
 const FOCUSED: Color = Color::Cyan;
 
 /// Popups wider than this are harder to read; it is a common message width.
-const COMMIT_WIDTH: u16 = 72;
+pub(crate) const COMMIT_WIDTH: u16 = 72;
 
 /// The commit popup for the current step, over `area`.
 fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
@@ -199,7 +201,7 @@ fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
 
 /// A small popup asking `question`, wrapped to fit and grown to hold it,
 /// so the answer keys at its end are never cut off.
-fn render_question(title: &str, question: &str, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_question(title: &str, question: &str, frame: &mut Frame, area: Rect) {
     let width = u16::try_from(width_of(question) + 4)
         .unwrap_or(u16::MAX)
         .min(area.width);
@@ -319,7 +321,7 @@ enum Cell {
 
 /// Columns `from..from + width` of `line`. A wide glyph cut by an edge
 /// becomes blank, and a `…` replaces the edge cell where text is cut off.
-fn clip(line: &str, from: usize, width: usize) -> String {
+pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
     let mut cells = vec![Cell::Blank; width];
     let mut col: usize = 0;
     for c in line.chars() {
@@ -369,7 +371,7 @@ fn clip(line: &str, from: usize, width: usize) -> String {
 
 /// `text` broken into rows of at most `width` columns, at a space where
 /// one fits, else mid-word. Leading indentation is kept.
-fn wrap(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let mut rest = line;
@@ -422,9 +424,19 @@ fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     let [text, hint] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-    let room = usize::from(text.height);
+    frame.render_widget(Paragraph::new(tail(&rows, usize::from(text.height))), text);
+    frame.render_widget(
+        Line::styled("Esc: back to the message", Style::new().fg(Color::Yellow)),
+        hint,
+    );
+}
+
+/// The last `room` of `rows`. When they do not all fit, the first row
+/// says how many earlier ones are cut, since the end of git's output is
+/// usually where it says what went wrong.
+pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
     let mut lines: Vec<Line> = Vec::new();
-    let mut shown = &rows[..];
+    let mut shown = rows;
     if rows.len() > room && room >= 2 {
         shown = &rows[rows.len() - (room - 1)..];
         lines.push(Line::styled(
@@ -435,11 +447,7 @@ fn render_commit_failed(output: &str, frame: &mut Frame, area: Rect) {
         shown = &rows[rows.len() - room..];
     }
     lines.extend(shown.iter().map(|row| Line::raw(row.as_str())));
-    frame.render_widget(Paragraph::new(lines), text);
-    frame.render_widget(
-        Line::styled("Esc: back to the message", Style::new().fg(Color::Yellow)),
-        hint,
-    );
+    lines
 }
 
 /// The busy indicator, then why the last key did nothing, else the last
@@ -538,7 +546,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
 }
 
 /// A `width` x `height` rectangle centred in `area`, shrunk to fit it.
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
     Rect::new(
@@ -703,7 +711,7 @@ fn elide_left(text: &str, max: usize) -> String {
 }
 
 /// Display width in terminal columns, measured the way ratatui lays text out.
-fn width_of(text: &str) -> usize {
+pub(crate) fn width_of(text: &str) -> usize {
     Span::raw(text).width()
 }
 

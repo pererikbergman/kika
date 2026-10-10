@@ -321,3 +321,71 @@ async fn committing_in_the_app_updates_the_ahead_count() {
 
     app.assert_screen_contains("│base ↑1 ↓0 ");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nested_menu_esc_returns_to_the_parent_menu() {
+    let repo = modified_repo();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('m')).await;
+    app.assert_screen_contains(" Actions ");
+    // "Stage…" is the first item.
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains(" Stage ");
+    app.assert_screen_contains("Selected file");
+    assert_eq!(app.state().popups.len(), 2);
+
+    app.press(KeyCode::Esc).await;
+    assert_eq!(app.state().popups.len(), 1);
+    app.assert_screen_contains(" Actions ");
+    assert!(!app.screen().iter().any(|row| row.contains("Selected file")));
+
+    app.press(KeyCode::Esc).await;
+    assert!(app.state().popups.is_empty());
+    assert!(!app.screen().iter().any(|row| row.contains(" Actions ")));
+    assert!(!app.state().should_quit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_stage_submenu_stages_the_selected_file_and_closes_the_menus() {
+    let repo = modified_repo();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('m')).await;
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(repo.staged(), ["a.txt"]);
+    assert!(app.state().popups.is_empty());
+    assert!(!app.screen().iter().any(|row| row.contains(" Stage ")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_git_command_shows_an_error_popup_and_the_app_keeps_running() {
+    let repo = modified_repo();
+    let mut app = Harness::start(&repo).await;
+    // Another git process seems to hold the index, so `git add` fails.
+    let repo = repo.write(".git/index.lock", "");
+
+    app.press(KeyCode::Char(' ')).await;
+
+    app.assert_screen_contains(" Could not stage ");
+    app.assert_screen_contains("index.lock");
+    app.assert_screen_contains("Fix the cause above, then try again.");
+    assert!(!app.state().should_quit);
+    assert!(repo.staged().is_empty());
+
+    app.press(KeyCode::Esc).await;
+    assert!(app.state().popups.is_empty());
+    assert!(
+        !app.screen()
+            .iter()
+            .any(|row| row.contains("Could not stage"))
+    );
+    assert!(!app.state().should_quit);
+
+    repo.remove(".git/index.lock");
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(repo.staged(), ["a.txt"]);
+    assert!(app.state().popups.is_empty());
+}
