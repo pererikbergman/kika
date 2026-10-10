@@ -290,6 +290,32 @@ fn width_of(text: &str) -> usize {
     Span::raw(text).width()
 }
 
+/// A drawn buffer's rows as text, for tests.
+#[cfg(test)]
+pub(crate) fn buffer_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|y| row_text(buffer, y, 0..buffer.area.width))
+        .collect()
+}
+
+/// Columns `xs` of row `y` as text. The blank cell after a wide glyph is
+/// skipped so the text reads like the screen.
+#[cfg(test)]
+pub(crate) fn row_text(
+    buffer: &ratatui::buffer::Buffer,
+    y: u16,
+    xs: std::ops::Range<u16>,
+) -> String {
+    let mut row = String::new();
+    let mut x = xs.start;
+    while x < xs.end {
+        let symbol = buffer[(x, y)].symbol();
+        row.push_str(symbol);
+        x += width_of(symbol).max(1) as u16;
+    }
+    row
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
@@ -300,23 +326,10 @@ mod tests {
     use crate::git::status::EntryKind;
 
     /// Draw into a `width` x `height` buffer and return its rows as text.
-    /// The blank cell after a wide glyph is skipped so rows read like the screen.
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(state, frame)).unwrap();
-        let buffer = terminal.backend().buffer();
-        (0..buffer.area.height)
-            .map(|y| {
-                let mut row = String::new();
-                let mut x = 0;
-                while x < buffer.area.width {
-                    let symbol = buffer[(x, y)].symbol();
-                    row.push_str(symbol);
-                    x += width_of(symbol).max(1) as u16;
-                }
-                row
-            })
-            .collect()
+        buffer_rows(terminal.backend().buffer())
     }
 
     /// Draw a workspace whose Files panel is exactly `panel` columns wide and
