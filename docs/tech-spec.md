@@ -15,7 +15,18 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 * **`syntect`**: High-performance syntax highlighting for the diff viewer, parsing large hunks in real time.
 
 ### Repository and Version Control
-* **`git2`**: Rust bindings for `libgit2`. Used for programmatic, safe traversal of the commit graph, memory-based diff building, and hunk staging without shelling out to the git executable.
+Kika uses a hybrid model: `git2` for fast reads, the `git` executable for everything that mutates the repository or talks to the network.
+
+* **`git2`**: Rust bindings for `libgit2`. Used for read-only queries where avoiding process spawns pays off: commit graph traversal with lazy pagination, refs and reflog, blob/tree reads, merge-base and ahead/behind counts, and cheap ref snapshots for detecting external changes. `git2` objects are `!Send`, so each blocking task opens its own `Repository`.
+* **`git` CLI (via `tokio::process`)**: Used for all mutations and network operations: commit, stage/unstage, partial (hunk/line) staging, checkout, merge, rebase, stash, fetch, pull and push. The real `git` binary runs the user's hooks, commit signing (GPG/SSH), credential helpers, `.gitattributes` filters (LFS, CRLF) and pagers, none of which `libgit2` fully supports.
+
+#### Git command conventions
+* **Typed argument builder:** commands are built as argv (never shell strings) through one builder, with a fake runner in unit tests that asserts the exact argv sequence and returns canned output.
+* **Machine-readable output:** NUL-separated formats everywhere (`status --porcelain=v2 -z`, `--pretty=format:` with `%x00`), and `LANG=C` when output must be parsed.
+* **Lock hygiene:** background commands set `GIT_OPTIONAL_LOCKS=0`; commands that fail on `index.lock` are retried with backoff.
+* **Partial staging:** parse the plain `git diff` for the file, keep only the selected change lines (unselected `-` lines become context, unselected `+` lines are dropped; mirrored when unstaging), then `git apply --cached [--reverse]`. If every change in the file is selected, use `git add` / `git reset` on the file instead.
+* **Interactive rebase:** `git rebase -i` with `GIT_SEQUENCE_EDITOR` pointing at Kika itself, which rewrites the todo list and exits.
+* **Concurrency:** subprocesses are bounded by a `tokio::sync::Semaphore`; each diff pane keeps at most one running command and kills it when superseded.
 
 ### Event Loop and State Management
 * **`tokio`**: Async runtime preventing the UI thread from blocking during large diff fetches or Git graph parsing.
