@@ -44,6 +44,9 @@ pub enum Effect {
     DiffLoadingDelay {
         tag: Tag,
     },
+    /// Stop git commands still running, because Kika is quitting. Answered
+    /// by nothing; the stopped operation reports as failed, if anyone listens.
+    InterruptGit,
     /// Run a Git operation; always answered by one `OpFinished`.
     RunOp {
         tag: Tag,
@@ -96,6 +99,9 @@ impl Runtime {
                     let _ = tx.send(AppIntent::DiffSlow { tag });
                 });
             }
+            // Synchronous: the loop exits right after, and the runtime's
+            // shutdown must not wait on git.
+            Effect::InterruptGit => self.runner.interrupt(),
             Effect::RunOp { tag, op } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or `op_seq` would block every later op.
@@ -279,6 +285,17 @@ mod tests {
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn interrupt_git_stops_the_runner_before_returning() {
+        let runner = Arc::new(FakeRunner::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::InterruptGit);
+
+        assert_eq!(runner.interrupts(), 1);
     }
 
     #[tokio::test]

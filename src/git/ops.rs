@@ -1,18 +1,32 @@
-//! Mutations of the index. Each is a [`GitOp`] so the reducer can name the
-//! work, and the refresh planner can say what it invalidates.
+//! Mutations of the index and history. Each is a [`GitOp`] so the reducer can
+//! name the work, and the refresh planner can say what it invalidates.
 
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
 
-/// One index-changing Git operation. Payloads are repo file names, in argv order.
+/// One repository-changing Git operation. Path payloads are repo file names,
+/// in argv order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitOp {
     Stage(Vec<RepoPath>),
     Unstage(Vec<RepoPath>),
     StageAll,
     UnstageAll,
+    /// Plain `git commit` with `message` on stdin, so the user's hooks,
+    /// signing and cleanup config apply exactly as on the command line.
+    /// With `stage_all`, everything is staged first, at submit time.
+    ///
+    /// Git runs without the terminal while Kika holds the screen, so signing
+    /// and hooks that need no terminal work (ssh-agent, gpg-agent with a
+    /// cached passphrase or a GUI pinentry), but a terminal pinentry is not
+    /// supported: it fails, or blocks and shows as "Committing…" until git
+    /// exits or Ctrl+C quits Kika, which stops git and its hooks.
+    Commit {
+        message: String,
+        stage_all: bool,
+    },
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -58,9 +72,12 @@ impl GitOp {
     }
 }
 
-/// The argv for `op`. Unlike reads, these need `index.lock`, so
+/// The command for `op`. Unlike reads, these need `index.lock`, so
 /// `GIT_OPTIONAL_LOCKS=0` is not set. File names come from the repo, so they
-/// are read literally, never as globs or pathspec magic.
+/// are read literally, never as globs or pathspec magic. A commit adds no
+/// env at all: its hooks inherit it, and must see what they would see
+/// outside Kika. Git runs hooks with stdin closed, so the message on stdin
+/// never reaches them.
 pub fn op_command(op: &GitOp) -> GitCommand {
     let with_paths = |cmd: GitCommand, paths: &[RepoPath]| {
         paths
@@ -72,19 +89,40 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::Unstage(paths) => with_paths(GitCommand::new("reset").arg("-q"), paths),
         GitOp::StageAll => GitCommand::new("add").arg("-A"),
         GitOp::UnstageAll => GitCommand::new("reset").arg("-q"),
+        GitOp::Commit { message, .. } => {
+            return GitCommand::new("commit")
+                .arg("-F")
+                .arg("-")
+                .stdin(message.clone().into_bytes());
+        }
     };
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
 }
 
 /// Run `op`. Failures carry git's message, made safe to draw since it can
-/// quote repo-controlled paths.
+/// quote repo-controlled paths. A commit's failure also carries stdout:
+/// hooks print to stderr, but git says "nothing to commit" on stdout.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
+    if let GitOp::Commit {
+        stage_all: true, ..
+    } = op
+    {
+        run_op(runner, &GitOp::StageAll)?;
+    }
     let cmd = op_command(op);
     let output = runner.run(&cmd).map_err(|e| e.to_string())?;
     if output.success {
         return Ok(());
     }
-    let message = terminal_safe(&output.stderr);
+    let message = match op {
+        GitOp::Commit { .. } => [&output.stderr, &output.stdout]
+            .map(|bytes| terminal_safe(bytes))
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => terminal_safe(&output.stderr),
+    };
     if message.is_empty() {
         let subcommand = cmd.args()[0].to_string_lossy();
         return Err(format!("git {subcommand} failed"));
@@ -101,6 +139,7 @@ fn has_unstaged(entry: &FileEntry) -> bool {
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::GitOutput;
 
     fn entry(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
         FileEntry {
@@ -242,6 +281,74 @@ mod tests {
         assert_eq!(
             run_op(&runner, &GitOp::UnstageAll),
             Err("git reset failed".into())
+        );
+    }
+
+    fn commit(message: &str, stage_all: bool) -> GitOp {
+        GitOp::Commit {
+            message: message.into(),
+            stage_all,
+        }
+    }
+
+    #[test]
+    fn commit_is_plain_git_commit_with_the_message_on_stdin_and_no_env() {
+        let runner = FakeRunner::new().expect(&["commit", "-F", "-"], ok(b""));
+        assert_eq!(run_op(&runner, &commit("subj\n\nbody\n", false)), Ok(()));
+        runner.assert_done();
+        assert_eq!(runner.envs(), [vec![]]);
+        assert_eq!(runner.inputs(), [Some(b"subj\n\nbody\n".to_vec())]);
+    }
+
+    #[test]
+    fn commit_with_stage_all_runs_add_first() {
+        let runner = FakeRunner::new()
+            .expect(&["add", "-A"], ok(b""))
+            .expect(&["commit", "-F", "-"], ok(b""));
+        assert_eq!(run_op(&runner, &commit("subj\n", true)), Ok(()));
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [None, Some(b"subj\n".to_vec())]);
+    }
+
+    #[test]
+    fn a_failed_stage_all_returns_its_error_and_does_not_commit() {
+        let runner = FakeRunner::new().expect(&["add", "-A"], fail("fatal: index.lock\n"));
+        assert_eq!(
+            run_op(&runner, &commit("subj\n", true)),
+            Err("fatal: index.lock".into())
+        );
+        // The fake panics on any call not expected, so no commit was attempted.
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_commit_shows_stderr_then_stdout_made_safe() {
+        let output = GitOutput {
+            success: false,
+            stdout: b"nothing added to commit\n".to_vec(),
+            stderr: b"lint \x1b[31mfailed\n".to_vec(),
+        };
+        let runner = FakeRunner::new().expect(&["commit", "-F", "-"], output);
+        assert_eq!(
+            run_op(&runner, &commit("subj\n", false)),
+            Err("lint \u{FFFD}[31mfailed\nnothing added to commit".into())
+        );
+
+        let stdout_only = GitOutput {
+            success: false,
+            stdout: b"nothing to commit, working tree clean\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        let runner = FakeRunner::new().expect(&["commit", "-F", "-"], stdout_only);
+        assert_eq!(
+            run_op(&runner, &commit("subj\n", false)),
+            Err("nothing to commit, working tree clean".into())
+        );
+
+        let runner = FakeRunner::new().expect(&["commit", "-F", "-"], fail(""));
+        assert_eq!(
+            run_op(&runner, &commit("subj\n", false)),
+            Err("git commit failed".into())
         );
     }
 

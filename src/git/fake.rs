@@ -14,6 +14,8 @@ pub struct FakeRunner {
     expected: Mutex<VecDeque<(Vec<String>, GitOutput)>>,
     spawns: Mutex<VecDeque<(Vec<String>, FakeChild)>>,
     envs: Mutex<Vec<Vec<(OsString, OsString)>>>,
+    inputs: Mutex<Vec<Option<Vec<u8>>>>,
+    interrupts: AtomicUsize,
 }
 
 impl FakeRunner {
@@ -39,6 +41,25 @@ impl FakeRunner {
     /// Environment of every call so far, in order.
     pub fn envs(&self) -> Vec<Vec<(OsString, OsString)>> {
         self.envs.lock().unwrap().clone()
+    }
+
+    /// Stdin of every call so far, in order; `None` where it was closed.
+    pub fn inputs(&self) -> Vec<Option<Vec<u8>>> {
+        self.inputs.lock().unwrap().clone()
+    }
+
+    /// How many times `interrupt` was called.
+    pub fn interrupts(&self) -> usize {
+        self.interrupts.load(Ordering::SeqCst)
+    }
+
+    /// Record what every call, run or spawn, was given besides its argv.
+    fn record(&self, cmd: &GitCommand) {
+        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(cmd.input().map(<[u8]>::to_vec));
     }
 
     pub fn assert_done(&self) {
@@ -70,7 +91,7 @@ impl GitRunner for FakeRunner {
             .pop_front()
             .unwrap_or_else(|| panic!("unexpected git spawn: {actual:?}"));
         assert_eq!(actual, expected, "git spawn argv mismatch");
-        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.record(cmd);
         child.probe.spawned.store(true, Ordering::SeqCst);
         Ok(GitChild {
             stdout: Box::new(FakeStdout {
@@ -94,8 +115,12 @@ impl GitRunner for FakeRunner {
             .pop_front()
             .unwrap_or_else(|| panic!("unexpected git call: {actual:?}"));
         assert_eq!(actual, expected, "git argv mismatch");
-        self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.record(cmd);
         Ok(output)
+    }
+
+    fn interrupt(&self) {
+        self.interrupts.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -262,11 +287,13 @@ impl Drop for TempDir {
     }
 }
 
-/// Run git in `dir` for test setup, failing loudly. Arguments are `OsStr`s
-/// so tests can pass names that are not UTF-8.
+/// Run git in `dir` for test setup, failing loudly, with the host's global
+/// and system config shut out. Arguments are `OsStr`s so tests can pass
+/// names that are not UTF-8.
 pub fn git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> Vec<u8> {
     let out = std::process::Command::new("git")
         .current_dir(dir)
+        .envs(super::runner::isolation_env())
         .args([
             "-c",
             "user.name=t",

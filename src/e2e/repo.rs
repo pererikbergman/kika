@@ -2,7 +2,6 @@
 //! queried afterwards to check what the app did to it.
 
 use std::ffi::OsStr;
-use std::path::Path;
 
 use crate::git::fake::{TempDir, git};
 use crate::git::path::RepoPath;
@@ -16,11 +15,45 @@ pub struct TestRepo {
 }
 
 impl TestRepo {
-    /// An empty repository with no commits.
+    /// An empty repository with no commits, made from no template. The
+    /// app's runner ignores the host's global and system config (see
+    /// [`TestRepo::runner`]), so the local config gives its `git commit` an
+    /// identity, no signing and only this repo's hooks.
     pub fn new() -> Self {
         let dir = TempDir::new("e2e");
-        git(dir.path(), &["init", "-q"]);
+        git(dir.path(), &["init", "-q", "--template="]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            git(dir.path(), &["config", key, value]);
+        }
         Self { dir }
+    }
+
+    /// Install an executable hook script as `.git/hooks/<name>`.
+    #[cfg(unix)]
+    pub fn hook(self, name: &str, script: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let hooks = self.dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let file = hooks.join(name);
+        std::fs::write(&file, script).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self
+    }
+
+    /// The full message of the `HEAD` commit, as git prints it.
+    pub fn head_message(&self) -> String {
+        String::from_utf8(self.git(["log", "-1", "--format=%B"])).unwrap()
+    }
+
+    /// The commit `HEAD` points at.
+    pub fn head(&self) -> String {
+        String::from_utf8(self.git(["rev-parse", "HEAD"])).unwrap()
     }
 
     /// Write `contents` to `path`, creating parent directories as needed.
@@ -51,8 +84,8 @@ impl TestRepo {
         git(self.dir.path(), &args)
     }
 
-    pub fn path(&self) -> &Path {
-        self.dir.path()
+    pub fn exists(&self, path: &str) -> bool {
+        self.dir.path().join(path).exists()
     }
 
     pub fn read(&self, path: &str) -> String {
@@ -68,9 +101,14 @@ impl TestRepo {
             .collect()
     }
 
+    /// The runner the app uses in tests: real git, host config shut out.
+    pub fn runner(&self) -> CliRunner {
+        CliRunner::isolated(self.dir.path())
+    }
+
     /// The file's status as the app's own status reader sees it.
     pub fn entry(&self, path: &str) -> Option<FileEntry> {
-        let runner = CliRunner::new(self.dir.path());
+        let runner = self.runner();
         let path = RepoPath::from(path);
         read_status(&runner)
             .unwrap()
