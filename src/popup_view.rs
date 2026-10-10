@@ -17,15 +17,21 @@ const PROMPT_WIDTH: u16 = 50;
 
 /// Every popup on the stack over `area`, the top one last. Each one is
 /// nudged down and right by its depth, so the ones below stay in sight.
+/// Only the top one, which has the keys, marks its cursor.
 pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
+    let count = state.popups.len();
     for (depth, popup) in state.popups.iter().enumerate() {
         let area = nudge(area, depth);
+        let top = depth + 1 == count;
         match popup {
-            Popup::Menu { id, cursor } => render_menu(state, *id, *cursor, frame, area),
+            Popup::Menu { id, cursor } => {
+                let cursor = top.then_some(*cursor);
+                render_menu(state, *id, cursor, frame, area)
+            }
             Popup::Confirm(kind) => {
                 render_question(&format!(" {} ", kind.title()), kind.question(), frame, area)
             }
-            Popup::Prompt { kind, input } => render_prompt(*kind, input, frame, area),
+            Popup::Prompt { kind, input } => render_prompt(*kind, input, top, frame, area),
             Popup::Error(error) => render_error(error, frame, area),
         }
     }
@@ -46,9 +52,11 @@ fn nudge(area: Rect, depth: usize) -> Rect {
     )
 }
 
-/// A box of items with the cursor row reversed. A disabled item is dimmed
-/// and says why after its label.
-fn render_menu(state: &AppState, id: MenuId, cursor: usize, frame: &mut Frame, area: Rect) {
+/// A box of items with the `cursor` row reversed, scrolled so that row is
+/// in view on a short screen. A menu below the top has no cursor. A
+/// disabled item is dimmed and italic, not only grey, and says why after
+/// its label.
+fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
     let rows: Vec<(String, bool)> = menu::items(id)
         .iter()
@@ -70,9 +78,11 @@ fn render_menu(state: &AppState, id: MenuId, cursor: usize, frame: &mut Frame, a
             let pad = " ".repeat(width - width_of(&text));
             let mut style = Style::new();
             if disabled {
-                style = style.fg(Color::DarkGray);
+                style = style
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM | Modifier::ITALIC);
             }
-            if i == cursor {
+            if Some(i) == cursor {
                 style = style.add_modifier(Modifier::REVERSED);
             }
             Line::styled(format!("{text}{pad}"), style)
@@ -84,15 +94,21 @@ fn render_menu(state: &AppState, id: MenuId, cursor: usize, frame: &mut Frame, a
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
     );
     frame.render_widget(Clear, popup);
+    let rows = usize::from(popup.height.saturating_sub(2)).max(1);
+    let first = cursor.map_or(0, |cursor| cursor.saturating_sub(rows - 1));
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
+        Paragraph::new(lines)
+            .scroll((first, 0))
+            .block(Block::bordered().title(title)),
         popup,
     );
 }
 
-/// A one-line box holding the typed text and the terminal cursor. Long
-/// text scrolls to keep the cursor inside, with `…` where it is cut.
-fn render_prompt(kind: PromptKind, input: &LineInput, frame: &mut Frame, area: Rect) {
+/// A one-line box holding the typed text, and the terminal cursor when it
+/// is the `top` popup. Long text scrolls to keep the cursor inside, with
+/// `…` where it is cut.
+fn render_prompt(kind: PromptKind, input: &LineInput, top: bool, frame: &mut Frame, area: Rect) {
     let popup = centered(area, PROMPT_WIDTH, 3);
     frame.render_widget(Clear, popup);
     let block = Block::bordered().title(format!(" {} ", kind.title()));
@@ -107,12 +123,15 @@ fn render_prompt(kind: PromptKind, input: &LineInput, frame: &mut Frame, area: R
     // One column to spare after the cursor for a `…`.
     let left = (x + 2).saturating_sub(width.max(2));
     frame.render_widget(Line::raw(clip(&input.text, left, width)), inner);
-    let column = u16::try_from(x - left).unwrap_or(u16::MAX);
-    frame.set_cursor_position((inner.x.saturating_add(column), inner.y));
+    if top {
+        let column = u16::try_from(x - left).unwrap_or(u16::MAX);
+        frame.set_cursor_position((inner.x.saturating_add(column), inner.y));
+    }
 }
 
 /// What failed in the red border's title, git's words below it, then what
-/// to do next and how to close. Long output shows its tail.
+/// to do next and how to close. Long output shows its tail. On a short
+/// screen the next step gives way first, so git's words always get a row.
 fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(2)).max(1);
@@ -126,7 +145,10 @@ fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
         .border_style(Style::new().fg(Color::Red));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    let next_height = u16::try_from(next.len()).unwrap_or(u16::MAX);
+    // The hint takes one row and the message keeps at least one.
+    let next_height = u16::try_from(next.len())
+        .unwrap_or(u16::MAX)
+        .min(inner.height.saturating_sub(2));
     let [text, next_area, hint] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(next_height),
@@ -341,6 +363,104 @@ mod tests {
         let (_, rows) = draw(&state, 80, 24);
         assert!(contains(&rows, "│…xxx"), "{rows:#?}");
         assert!(!contains(&rows, "start"), "{rows:#?}");
+    }
+
+    fn reversed(buffer: &Buffer, (x, y): (u16, u16)) -> bool {
+        buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED)
+    }
+
+    #[test]
+    fn only_the_top_menu_marks_its_cursor_row() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![
+            Popup::Menu {
+                id: MenuId::Actions,
+                cursor: 0,
+            },
+            Popup::Menu {
+                id: MenuId::Stage,
+                cursor: 1,
+            },
+        ];
+        let (buffer, rows) = draw(&state, 80, 24);
+        assert!(!reversed(&buffer, find(&rows, "Stage…")), "{rows:#?}");
+        assert!(reversed(&buffer, find(&rows, "Everything")), "{rows:#?}");
+        assert!(
+            !reversed(&buffer, find(&rows, "Selected file")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_short_screen_scrolls_the_menu_to_its_cursor() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Actions,
+            cursor: 4,
+        }];
+        // Six rows: the bar leaves five, so three of the five items show.
+        let (buffer, rows) = draw(&state, 20, 6);
+        assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
+        assert!(!contains(&rows, "Stage…"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_disabled_item_is_marked_by_more_than_colour() {
+        let mut state = workspace(&[]);
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Actions,
+            cursor: 0,
+        }];
+        let (buffer, rows) = draw(&state, 80, 24);
+        let style = buffer[find(&rows, "Commit…")].style();
+        assert!(
+            style
+                .add_modifier
+                .contains(Modifier::DIM | Modifier::ITALIC),
+            "{style:?}"
+        );
+        let style = buffer[find(&rows, "Refresh")].style();
+        assert!(
+            !style
+                .add_modifier
+                .intersects(Modifier::DIM | Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn a_covered_prompt_does_not_take_the_terminal_cursor() {
+        let prompt = Popup::Prompt {
+            kind: PromptKind::GoToFile,
+            input: LineInput {
+                text: "b".into(),
+                col: 1,
+            },
+        };
+        let mut state = workspace(&["a.rs"]);
+        let cursor_shown = |state: &AppState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| render(state, frame)).unwrap();
+            terminal.backend().cursor_visible()
+        };
+        state.popups = vec![prompt.clone()];
+        assert!(cursor_shown(&state));
+        state.popups = vec![prompt, Popup::Error(error())];
+        assert!(!cursor_shown(&state));
+    }
+
+    #[test]
+    fn a_short_screen_still_shows_some_of_git_message() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Error(error())];
+        // Five rows over the bar: two borders, the hint, and two to share.
+        let (_, rows) = draw(&state, 80, 6);
+        assert!(contains(&rows, "File exists."), "{rows:#?}");
+        assert!(contains(&rows, "Esc: close"), "{rows:#?}");
+        let (_, rows) = draw(&state, 80, 5);
+        assert!(contains(&rows, "File exists."), "{rows:#?}");
     }
 
     #[test]

@@ -567,7 +567,7 @@ impl AppState {
                 self.push_error(ErrorPopup::new(
                     "Could not read the repository status",
                     &message,
-                    "Press r to retry once it is fixed.",
+                    "Close this, fix the cause, then press r to retry.",
                 ));
                 self.status_error = Some(message);
                 vec![]
@@ -2023,7 +2023,10 @@ mod tests {
             [Popup::Error(error)] => {
                 assert_eq!(error.title, "Could not read the repository status");
                 assert_eq!(error.message, "fatal: not a git repository");
-                assert_eq!(error.next, "Press r to retry once it is fixed.");
+                assert_eq!(
+                    error.next,
+                    "Close this, fix the cause, then press r to retry."
+                );
             }
             other => panic!("expected one error popup, got {other:?}"),
         }
