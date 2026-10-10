@@ -39,13 +39,18 @@ impl Runtime {
     pub fn spawn(&self, effect: Effect) {
         let runner = Arc::clone(&self.runner);
         let tx = self.tx.clone();
-        tokio::task::spawn_blocking(move || match effect {
+        match effect {
             Effect::LoadStatus { tag } => {
-                let result = read_status(runner.as_ref());
-                // A closed channel means the app is quitting; nothing to report to.
-                let _ = tx.send(AppIntent::StatusLoaded { tag, result });
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || read_status(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| Err(format!("git status crashed: {e}")));
+                    // A closed channel means the app is quitting; nothing to report to.
+                    let _ = tx.send(AppIntent::StatusLoaded { tag, result });
+                });
             }
-        });
+        }
     }
 }
 
@@ -88,5 +93,30 @@ mod tests {
             })
         );
         runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_effect_still_reports_back_so_busy_can_fall() {
+        // No expectations queued, so the fake panics on the call.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadStatus { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::StatusLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.contains("git status"), "{message}");
+            }
+            other => panic!("expected a failed StatusLoaded, got {other:?}"),
+        }
     }
 }

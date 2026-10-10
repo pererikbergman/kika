@@ -46,7 +46,12 @@ pub fn status_command() -> GitCommand {
 pub fn read_status(runner: &dyn GitRunner) -> Result<Vec<FileEntry>, String> {
     let output = runner.run(&status_command()).map_err(|e| e.to_string())?;
     if !output.success {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git status failed".to_string()
+        } else {
+            stderr
+        });
     }
     parse_status(&output.stdout)
 }
@@ -190,6 +195,12 @@ mod tests {
             Err("fatal: not a git repository (or any of the parent directories): .git".into())
         );
         runner.assert_done();
+    }
+
+    #[test]
+    fn read_status_failure_without_stderr_still_has_a_message() {
+        let runner = FakeRunner::new().expect(STATUS_ARGV, fail("  \n"));
+        assert_eq!(read_status(&runner), Err("git status failed".into()));
     }
 
     #[test]
