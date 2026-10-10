@@ -53,14 +53,24 @@ pub(crate) struct WorkspaceLayout {
 /// Height of the Status panel: three rows of text inside the border.
 const STATUS_PANEL_HEIGHT: u16 = 5;
 
+/// Rows the Files panel keeps before the Status panel gets any: its
+/// borders and three files. Files is where the user works; Status only informs.
+const FILES_MIN_HEIGHT: u16 = 5;
+
 /// A left column of the Status panel over the Files panel, and the Diff
-/// pane on the right.
+/// pane on the right. On a short screen the Status panel shrinks first,
+/// and goes when it cannot show even one row.
 pub(crate) fn workspace_layout(main: Rect) -> WorkspaceLayout {
     let [left, diff] =
         Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
+    let room = left.height.saturating_sub(FILES_MIN_HEIGHT);
+    let status_height = match STATUS_PANEL_HEIGHT.min(room) {
+        // Two borders and a row of text, or nothing.
+        h if h < 3 => 0,
+        h => h,
+    };
     let [status, files] =
-        Layout::vertical([Constraint::Length(STATUS_PANEL_HEIGHT), Constraint::Fill(1)])
-            .areas(left);
+        Layout::vertical([Constraint::Length(status_height), Constraint::Fill(1)]).areas(left);
     WorkspaceLayout {
         status,
         files,
@@ -69,32 +79,75 @@ pub(crate) fn workspace_layout(main: Rect) -> WorkspaceLayout {
 }
 
 /// Where the user is: the branch, its upstream, and any operation in
-/// progress. Rows wider than the panel are clipped. Blank when no load has
-/// succeeded yet; the Files panel shows why.
+/// progress. Names too wide for the panel lose their start to `…`, so the
+/// counts and markers after them stay visible. Blank when no load has
+/// succeeded yet, since the Files panel shows why; dimmed when the last
+/// refresh failed, since it may be out of date.
 fn render_status_panel(state: &AppState, frame: &mut Frame, area: Rect) {
-    let block = Block::bordered().title(" Status ");
+    if area.is_empty() {
+        return;
+    }
+    let stale = state.status_error.is_some() && state.branch.is_some();
+    let block = if stale {
+        Block::bordered()
+            .title(" Status (stale) ")
+            .style(Style::new().fg(Color::DarkGray))
+    } else {
+        Block::bordered().title(" Status ")
+    };
+    let width = usize::from(block.inner(area).width);
     let Some(branch) = &state.branch else {
         let text = if state.files_loaded { "" } else { "Loading…" };
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
     let head = match &branch.head {
-        Head::Branch(name) => name.clone(),
-        Head::Detached(oid) => format!("detached {}", short_hash(oid)),
-        Head::Unborn(name) => format!("{name} (no commits)"),
+        Head::Branch(name) => fit(name, "", width),
+        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
+        Head::Unborn(name) => fit(name, " (no commits)", width),
     };
     let upstream = match (&branch.upstream, branch.ahead_behind) {
-        (None, _) => "no upstream".to_string(),
-        (Some(name), Some((ahead, behind))) => format!("{name} ↑{ahead} ↓{behind}"),
-        (Some(name), None) => format!("{name} (gone)"),
+        (None, _) => fit("no upstream", "", width),
+        (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
+        (Some(name), None) => fit(name, " (gone)", width),
     };
     let operations: Vec<&str> = branch.in_progress.iter().map(|&op| doing(op)).collect();
     let lines = vec![
         Line::raw(head),
         Line::raw(upstream),
-        Line::styled(operations.join(", "), Style::new().fg(Color::Yellow)),
+        Line::styled(
+            elide_right(&operations.join(", "), width),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
     ];
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// `name` then `suffix` in `width` columns. The name gives way first, so
+/// the suffix (counts, markers) is cut only when it cannot fit at all.
+fn fit(name: &str, suffix: &str, width: usize) -> String {
+    let room = width.saturating_sub(width_of(suffix)).max(1);
+    format!("{}{suffix}", elide_left(name, room))
+}
+
+/// Fit `text` into `max` columns by replacing its end with `…`.
+fn elide_right(text: &str, max: usize) -> String {
+    if width_of(text) <= max {
+        return text.to_string();
+    }
+    let mut used = 0;
+    let kept: String = text
+        .chars()
+        .take_while(|c| {
+            used += width_of(c.encode_utf8(&mut [0; 4]));
+            used < max
+        })
+        .collect();
+    if max == 0 {
+        String::new()
+    } else {
+        format!("{kept}…")
+    }
 }
 
 /// Commit ids are shown at this length; enough to recognise one.
@@ -827,6 +880,8 @@ mod tests {
         let buffer = draw_buffer(&state, 80, 24);
         let (x, y) = find(&buffer, "merging");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
+        // Bold too, so it stands out where yellow reads poorly.
+        assert!(buffer[(x, y)].style().add_modifier.contains(Modifier::BOLD));
 
         main.in_progress = vec![Operation::Rebase];
         assert!(panel_rows(&on(main.clone()))[2].starts_with("│rebasing "));
@@ -860,13 +915,110 @@ mod tests {
     }
 
     #[test]
-    fn a_long_branch_name_is_clipped_to_the_panel() {
-        let rows = draw(&on(branch(Head::Branch("b".repeat(100)))), 80, 24);
-        // The panel is 24 columns wide; the Diff pane starts right after it.
+    fn a_long_branch_name_is_elided_with_a_marker() {
+        let rows = panel_rows(&on(branch(Head::Branch(format!("{}end", "b".repeat(100))))));
+        // 22 columns inside the panel: the start gives way, the end stays.
         assert!(
-            rows[1].starts_with(&format!("│{}││", "b".repeat(22))),
+            rows[0].starts_with(&format!("│…{}end││", "b".repeat(18))),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn a_long_upstream_keeps_its_counts_on_screen() {
+        let mut main = branch(Head::Branch("main".into()));
+        main.upstream = Some("origin/feature/a-really-long-status-panel".into());
+        main.ahead_behind = Some((2, 1));
+        let rows = panel_rows(&on(main.clone()));
+        assert!(
+            rows[1].starts_with("│…ng-status-panel ↑2 ↓1││"),
+            "{rows:#?}"
+        );
+
+        main.ahead_behind = None;
+        let rows = panel_rows(&on(main));
+        assert!(
+            rows[1].starts_with("│…") && rows[1].contains(" (gone)"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_long_unborn_branch_keeps_no_commits_on_screen() {
+        let rows = panel_rows(&on(branch(Head::Unborn("x".repeat(40)))));
+        assert!(
+            rows[0].starts_with("│…xxx") && rows[0].contains(" (no commits)"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn an_overflowing_operations_row_ends_in_a_marker() {
+        let mut main = branch(Head::Branch("main".into()));
+        main.in_progress = vec![Operation::Rebase, Operation::Merge, Operation::CherryPick];
+        let rows = panel_rows(&on(main));
+        assert!(
+            rows[2].starts_with("│rebasing, merging, ch…││"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_refresh_marks_the_panel_stale() {
+        let mut state = on(branch(Head::Branch("main".into())));
+        state.status_error = Some("fatal: index file corrupt".into());
+        let buffer = draw_buffer(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(rows[0].contains(" Status (stale) "), "{rows:#?}");
+        let (x, y) = find(&buffer, "main");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+    }
+
+    /// The Files panel's title row and the row below it.
+    fn files_rows(rows: &[String]) -> (usize, &String) {
+        let title = rows
+            .iter()
+            .position(|row| row.contains(" Files "))
+            .unwrap_or_else(|| panic!("no Files panel: {rows:#?}"));
+        (title, &rows[title + 1])
+    }
+
+    #[test]
+    fn a_short_terminal_shrinks_the_status_panel_before_files() {
+        let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
+        state.selected = Some(0);
+
+        // 80x12: the full panel still fits above four file rows.
+        let rows = draw(&state, 80, 12);
+        assert!(rows[0].contains(" Status "), "{rows:#?}");
+        let (title, first) = files_rows(&rows);
+        assert_eq!(title, 5, "{rows:#?}");
+        assert!(first.starts_with("│ M f0 "), "{rows:#?}");
+        assert!(contains(&rows, "│ M f2 "), "{rows:#?}");
+
+        // 80x8: no room for both, so Files gets the column.
+        let rows = draw(&state, 80, 8);
+        assert!(!contains(&rows, " Status "), "{rows:#?}");
+        let (title, first) = files_rows(&rows);
+        assert_eq!(title, 0, "{rows:#?}");
+        assert!(first.starts_with("│ M f0 "), "{rows:#?}");
+        assert!(contains(&rows, "│ M f3 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_medium_terminal_keeps_branch_and_upstream_rows() {
+        let mut main = branch(Head::Branch("main".into()));
+        main.upstream = Some("origin/main".into());
+        main.ahead_behind = Some((0, 3));
+        let mut state = on(main);
+        state.files = vec![file("a.rs")];
+        // Height 10: 9 rows over the bar; Files keeps 5, Status gets 4.
+        let rows = draw(&state, 80, 10);
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(rows[2].starts_with("│origin/main ↑0 ↓3 "), "{rows:#?}");
+        let (title, first) = files_rows(&rows);
+        assert_eq!(title, 4, "{rows:#?}");
+        assert!(first.starts_with("│ M a.rs "), "{rows:#?}");
     }
 
     #[test]
@@ -1574,6 +1726,26 @@ mod tests {
         // A glyph wider than the row still makes progress.
         assert_eq!(wrap("日本", 1), ["日", "本"]);
         assert_eq!(wrap("", 0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn fit_shortens_the_name_before_the_suffix() {
+        assert_eq!(fit("origin/main", " ↑2 ↓1", 40), "origin/main ↑2 ↓1");
+        assert_eq!(fit("origin/main", " ↑2 ↓1", 12), "…/main ↑2 ↓1");
+        // No room for the name: one `…` stands in for it.
+        assert_eq!(fit("origin/main", " ↑2 ↓1", 3), "… ↑2 ↓1");
+        assert_eq!(fit("detached", " abc1234", 12), "…hed abc1234");
+        assert_eq!(fit("main", "", 0), "…");
+    }
+
+    #[test]
+    fn elide_right_keeps_the_start() {
+        assert_eq!(elide_right("rebasing, merging", 40), "rebasing, merging");
+        assert_eq!(elide_right("rebasing, merging", 10), "rebasing,…");
+        assert_eq!(elide_right("日本語", 4), "日…");
+        assert_eq!(elide_right("abc", 1), "…");
+        assert_eq!(elide_right("abc", 0), "");
+        assert_eq!(elide_right("", 0), "");
     }
 
     #[test]
