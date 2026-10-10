@@ -22,6 +22,12 @@ pub async fn run(
     let runtime = Runtime::new(runner, tx.clone());
     spawn_input_listener(tx);
 
+    // Know the pane height before the first diff request sizes itself.
+    let size = terminal.size()?;
+    state.update(AppIntent::Resize {
+        width: size.width,
+        height: size.height,
+    });
     // Start the first load before the first draw, so the frame shows "Loading…"
     // instead of waiting on git.
     for effect in state.update(AppIntent::RefreshStatus) {

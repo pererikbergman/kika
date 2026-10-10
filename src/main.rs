@@ -1,5 +1,7 @@
 mod app;
 mod cli;
+mod diff_pane;
+mod diff_stream;
 mod effect;
 mod git;
 mod intent;
