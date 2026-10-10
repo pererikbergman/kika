@@ -1,12 +1,17 @@
 mod app;
 mod cli;
+mod effect;
+mod git;
 mod intent;
 mod model;
 mod view;
 
+use std::sync::Arc;
+
 use clap::Parser;
 
 use crate::cli::Cli;
+use crate::git::CliRunner;
 use crate::model::AppState;
 
 #[tokio::main]
@@ -14,9 +19,10 @@ async fn main() -> color_eyre::Result<()> {
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
+    let runner = Arc::new(CliRunner::new(std::env::current_dir()?));
 
     let terminal = ratatui::init();
-    let result = app::run(terminal, AppState::new(cli.context())).await;
+    let result = app::run(terminal, AppState::new(cli.context()), runner).await;
     ratatui::restore();
     result
 }
