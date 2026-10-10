@@ -5,6 +5,7 @@ mod diff_stream;
 mod effect;
 mod git;
 mod intent;
+mod keymap;
 mod model;
 mod refresh;
 mod view;
