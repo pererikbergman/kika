@@ -5,6 +5,8 @@ use crate::git::diff::DiffChunk;
 use crate::git::ops::GitOp;
 use crate::git::status::RepoStatus;
 use crate::keymap::KeyPress;
+use crate::menu::MenuId;
+use crate::popup::{ConfirmKind, PromptKind};
 
 /// Everything that can change the model: user input and async task results.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +67,24 @@ pub enum AppIntent {
         op: GitOp,
         result: Result<(), String>,
     },
+    /// Push a menu, over any menu already open.
+    OpenMenu(MenuId),
+    /// Move the top menu's cursor down or up.
+    MenuNext,
+    MenuPrev,
+    /// Run the item under the top menu's cursor.
+    MenuSelect,
+    /// Ask a yes/no question; the answer comes back as the kind's intent.
+    Ask(ConfirmKind),
+    ConfirmYes,
+    ConfirmNo,
+    /// Ask for a line of text; the text comes back as the kind's intent.
+    OpenPrompt(PromptKind),
+    SubmitPrompt,
+    /// Select the first file whose path contains this text, ignoring case.
+    GoToFile(String),
+    /// Close the top popup: back in a menu, cancel in a prompt, dismiss an error.
+    PopPopup,
 }
 
 /// How far to scroll the diff pane.
