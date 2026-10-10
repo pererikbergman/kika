@@ -1,11 +1,9 @@
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph, Wrap};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
 use crate::git::FileEntry;
 use crate::model::{AppState, Context};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 
 /// Draw the state. Reads the model only; never mutates it.
 pub fn render(state: &AppState, frame: &mut Frame) {
@@ -72,18 +70,18 @@ fn file_lines(files: &[FileEntry], area: Rect) -> Vec<Line<'static>> {
 /// for renames the new path keeps as much room as it can.
 fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
     let letters = entry.status_letters();
-    let prefix = letters.width() + 1;
+    let prefix = width_of(&letters) + 1;
     let text = match &entry.orig_path {
         None => {
             let path = elide_left(&entry.path, width.saturating_sub(prefix));
             format!("{letters} {path}")
         }
         Some(orig) => {
-            let room = width.saturating_sub(prefix + " → ".width());
+            let room = width.saturating_sub(prefix + width_of(" → "));
             let orig_room = room
-                .saturating_sub(entry.path.width())
+                .saturating_sub(width_of(&entry.path))
                 .max(1)
-                .min(orig.width());
+                .min(width_of(orig));
             let orig = elide_left(orig, orig_room);
             let path = elide_left(&entry.path, room.saturating_sub(orig_room));
             format!("{letters} {orig} → {path}")
@@ -94,7 +92,7 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
 
 /// Fit `text` into `max` columns by replacing its start with `…`.
 fn elide_left(text: &str, max: usize) -> String {
-    if text.width() <= max {
+    if width_of(text) <= max {
         return text.to_string();
     }
     if max == 0 {
@@ -105,7 +103,7 @@ fn elide_left(text: &str, max: usize) -> String {
         .char_indices()
         .rev()
         .take_while(|(_, c)| {
-            kept += c.width().unwrap_or(0);
+            kept += width_of(c.encode_utf8(&mut [0; 4]));
             kept < max
         })
         .last()
@@ -113,11 +111,15 @@ fn elide_left(text: &str, max: usize) -> String {
     format!("…{}", &text[start..])
 }
 
+/// Display width in terminal columns, measured the way ratatui lays text out.
+fn width_of(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::git::status::EntryKind;
@@ -135,7 +137,7 @@ mod tests {
                 while x < buffer.area.width {
                     let symbol = buffer[(x, y)].symbol();
                     row.push_str(symbol);
-                    x += symbol.width().max(1) as u16;
+                    x += width_of(symbol).max(1) as u16;
                 }
                 row
             })
@@ -260,7 +262,7 @@ mod tests {
         let state = loaded(vec![file("日本語/日本語/長い名前.md")]);
         let rows = draw(&state, 16, 6);
         assert_eq!(rows[1], "│ M …い名前.md │", "{rows:#?}");
-        assert!(rows[1].width() <= 16, "{rows:#?}");
+        assert!(width_of(&rows[1]) <= 16, "{rows:#?}");
     }
 
     #[test]
