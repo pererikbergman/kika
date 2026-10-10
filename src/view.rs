@@ -1,12 +1,13 @@
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::diff::{DiffLine, LineKind};
+use crate::keymap::{KeyPattern, available, registry};
 use crate::model::{AppState, Context};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 /// Draw the state. Reads the model only; never mutates it.
 pub fn render(state: &AppState, frame: &mut Frame) {
@@ -19,36 +20,116 @@ pub fn render(state: &AppState, frame: &mut Frame) {
                 Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
             render_files_panel(state, frame, files);
             render_diff_pane(&state.diff, frame, diff);
-            frame.render_widget(workspace_status_bar(state), status);
         }
         Context::Review { number } => {
             frame.render_widget(
                 Paragraph::new("").block(Block::bordered().title(format!(" Review #{number} "))),
                 main,
             );
-            frame.render_widget(Line::from(" q quit"), status);
         }
     }
+    if state.help_open {
+        render_help(state, frame, main);
+    }
+    frame.render_widget(status_bar(state), status);
 }
 
-/// Key hints, or the last operation's error in their place until the next
-/// stage key or a successful operation clears it. The busy indicator goes
-/// first so a narrow bar clips the rest, not it.
-fn workspace_status_bar(state: &AppState) -> Line<'_> {
+/// The busy indicator, then why the last key did nothing, else the last
+/// operation's error, else the key hints. The indicator goes first so a
+/// narrow bar clips the rest, not it. Hints come from the keymap, so the bar
+/// always matches what the keys do; disabled ones are dimmed.
+fn status_bar(state: &AppState) -> Line<'_> {
     let mut spans = Vec::new();
     if state.busy > 0 {
         spans.push(Span::raw(" loading… "));
     }
-    match &state.op_error {
-        Some(error) => spans.push(Span::styled(
+    if let Some(notice) = state.notice {
+        spans.push(Span::styled(
+            format!(" {notice}"),
+            Style::new().fg(Color::Yellow),
+        ));
+    } else if let Some(error) = &state.op_error {
+        spans.push(Span::styled(
             format!(" error: {}", error.lines().next().unwrap_or_default()),
             Style::new().fg(Color::Red),
-        )),
-        None => spans.push(Span::raw(
-            " j/k select  J/K scroll  space stage  a all  r refresh  q quit",
-        )),
+        ));
+    } else {
+        let hints = available(registry(), state.key_focus(), state)
+            .into_iter()
+            .filter(|(binding, _)| binding.bar);
+        for (i, (binding, disabled)) in hints.enumerate() {
+            spans.push(Span::raw(if i == 0 { " " } else { "  " }));
+            let key = binding.keys.first().map(KeyPattern::label);
+            let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
+            spans.push(Span::styled(hint, dimmed_if(disabled.is_some())));
+        }
     }
     Line::from(spans)
+}
+
+fn dimmed_if(disabled: bool) -> Style {
+    if disabled {
+        Style::new().fg(Color::DarkGray)
+    } else {
+        Style::new()
+    }
+}
+
+/// A popup over `area` listing every key the focused panel answers to.
+/// Rows that do not fit are clipped.
+fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
+    let focus = state.panel_focus();
+    let entries: Vec<(String, &str, bool)> = available(registry(), focus, state)
+        .into_iter()
+        .map(|(binding, disabled)| {
+            let keys: Vec<String> = binding.keys.iter().map(KeyPattern::label).collect();
+            (keys.join("/"), binding.description, disabled.is_some())
+        })
+        .collect();
+    let key_width = entries
+        .iter()
+        .map(|(k, _, _)| width_of(k))
+        .max()
+        .unwrap_or(0);
+    let lines: Vec<Line> = entries
+        .iter()
+        .map(|(keys, description, disabled)| {
+            let pad = key_width - width_of(keys);
+            Line::styled(
+                format!(" {keys}{}  {description} ", " ".repeat(pad)),
+                dimmed_if(*disabled),
+            )
+        })
+        .collect();
+    let title = format!(" Keys: {} ", focus.title());
+    let content_width = lines
+        .iter()
+        .map(Line::width)
+        .chain([width_of(&title)])
+        .max()
+        .unwrap_or(0);
+    let popup = centered(
+        area,
+        u16::try_from(content_width + 2).unwrap_or(u16::MAX),
+        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(title)),
+        popup,
+    );
+}
+
+/// A `width` x `height` rectangle centred in `area`, shrunk to fit it.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    )
 }
 
 /// The Files panel: an error, a placeholder until the first load, or one line per file.
@@ -295,6 +376,105 @@ mod tests {
     }
 
     #[test]
+    fn review_bar_shows_only_global_keys() {
+        let rows = draw(&AppState::new(Context::Review { number: 1 }), 40, 5);
+        assert!(rows[4].starts_with(" ? keys  q quit "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_bar_offers_close_while_help_is_open() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.help_open = true;
+        let rows = draw(&state, 80, 20);
+        assert!(rows[19].starts_with(" ? close  q quit "), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_disabled_hint_is_dimmed() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let buffer = draw_buffer(&state, 80, 8);
+        let (x, y) = find(&buffer, "space stage");
+        assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let (x, y) = find(&buffer, "r refresh");
+        assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+
+        state.op_seq = Some(1);
+        let buffer = draw_buffer(&state, 80, 8);
+        let (x, y) = find(&buffer, "space stage");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let (x, y) = find(&buffer, "r refresh");
+        assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn a_notice_replaces_the_hints_in_yellow_after_loading() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.notice = Some("An operation is running");
+        state.op_error = Some("older failure".into());
+        state.busy = 1;
+        let buffer = draw_buffer(&state, 80, 8);
+        let rows = draw(&state, 80, 8);
+        assert!(
+            rows[7].starts_with(" loading…  An operation is running"),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "space stage"), "{rows:#?}");
+        assert!(!contains(&rows, "older failure"), "{rows:#?}");
+        let (x, y) = find(&buffer, "An operation");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn help_lists_the_keys_of_the_focused_panel() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.help_open = true;
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " Keys: Files "), "{rows:#?}");
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in {rows:#?}"))
+                .clone()
+        };
+        assert!(
+            row("Stage the selected file").contains("space "),
+            "{rows:#?}"
+        );
+        assert!(row("Reload the list").contains(" r "), "{rows:#?}");
+        assert!(row("Quit Kika").contains("q/esc/ctrl-c "), "{rows:#?}");
+        assert!(row("Select the next file").contains("j/↓ "), "{rows:#?}");
+        // Help's own close key is in the bar, not in the panel's list.
+        assert!(!contains(&rows, "Close this menu"), "{rows:#?}");
+    }
+
+    #[test]
+    fn disabled_help_rows_are_dimmed() {
+        let mut state = loaded(vec![]);
+        state.help_open = true;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (x, y) = find(&buffer, "Stage the selected file");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let (x, y) = find(&buffer, "Quit Kika");
+        assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_help_open() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.help_open = true;
+        state.notice = Some("No file selected");
+        for context in [Context::Workspace, Context::Review { number: 2 }] {
+            state.context = context;
+            for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {
+                draw(&state, w, h);
+            }
+        }
+    }
+
+    #[test]
     fn review_context_shows_number_in_title() {
         let rows = draw(&AppState::new(Context::Review { number: 123 }), 30, 5);
         assert!(rows[0].contains("Review #123"), "{rows:#?}");
@@ -325,7 +505,7 @@ mod tests {
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
-            rows[23].starts_with(" j/k select  J/K scroll  space stage  a all  r refresh  q quit"),
+            rows[23].starts_with(" space stage  a all  r refresh  ? keys  q quit"),
             "{rows:#?}"
         );
     }

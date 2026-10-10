@@ -1,14 +1,19 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyEventKind};
 
 use crate::effect::Tag;
 use crate::git::FileEntry;
 use crate::git::diff::DiffChunk;
 use crate::git::ops::GitOp;
+use crate::keymap::KeyPress;
 
 /// Everything that can change the model: user input and async task results.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppIntent {
+    /// A raw key press, resolved against the keymap in `update`.
+    Key(KeyPress),
     Quit,
+    OpenHelp,
+    CloseHelp,
     Resize {
         width: u16,
         height: u16,
@@ -56,28 +61,12 @@ pub enum Scroll {
 
 impl AppIntent {
     /// Map a raw terminal event to an intent. Unmapped events are dropped.
+    /// Key presses go to the model as they are: what a key does depends on
+    /// focus and state, which only the model knows.
     pub fn from_event(event: Event) -> Option<Self> {
         match event {
-            Event::Key(key) if key.kind == KeyEventKind::Press => Self::from_key(key),
+            Event::Key(key) if key.kind == KeyEventKind::Press => Some(Self::Key(key.into())),
             Event::Resize(width, height) => Some(Self::Resize { width, height }),
-            _ => None,
-        }
-    }
-
-    fn from_key(key: KeyEvent) -> Option<Self> {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => Some(Self::Quit),
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Self::Quit),
-            (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Self::RefreshStatus),
-            (KeyCode::Char(' '), KeyModifiers::NONE) => Some(Self::ToggleStage),
-            (KeyCode::Char('a'), KeyModifiers::NONE) => Some(Self::ToggleStageAll),
-            (KeyCode::Char('j'), KeyModifiers::NONE) | (KeyCode::Down, _) => Some(Self::SelectNext),
-            (KeyCode::Char('k'), KeyModifiers::NONE) | (KeyCode::Up, _) => Some(Self::SelectPrev),
-            // Terminals send uppercase letters with SHIFT, so any modifiers match.
-            (KeyCode::Char('J'), _) => Some(Self::ScrollDiff(Scroll::LineDown)),
-            (KeyCode::Char('K'), _) => Some(Self::ScrollDiff(Scroll::LineUp)),
-            (KeyCode::PageDown, _) => Some(Self::ScrollDiff(Scroll::PageDown)),
-            (KeyCode::PageUp, _) => Some(Self::ScrollDiff(Scroll::PageUp)),
             _ => None,
         }
     }
@@ -85,71 +74,40 @@ impl AppIntent {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
     use super::*;
 
     #[test]
-    fn q_maps_to_quit() {
-        let event = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert_eq!(AppIntent::from_event(event), Some(AppIntent::Quit));
-    }
-
-    #[test]
-    fn ctrl_c_maps_to_quit() {
-        let event = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert_eq!(AppIntent::from_event(event), Some(AppIntent::Quit));
-    }
-
-    #[test]
-    fn esc_maps_to_quit() {
+    fn a_key_press_becomes_a_key_intent() {
         let event = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(AppIntent::from_event(event), Some(AppIntent::Quit));
-    }
-
-    #[test]
-    fn r_maps_to_refresh_status() {
-        let event = Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert_eq!(AppIntent::from_event(event), Some(AppIntent::RefreshStatus));
-    }
-
-    fn key(code: KeyCode, modifiers: KeyModifiers) -> Option<AppIntent> {
-        AppIntent::from_event(Event::Key(KeyEvent::new(code, modifiers)))
-    }
-
-    #[test]
-    fn j_k_and_arrows_move_the_selection() {
-        let none = KeyModifiers::NONE;
-        assert_eq!(key(KeyCode::Char('j'), none), Some(AppIntent::SelectNext));
-        assert_eq!(key(KeyCode::Down, none), Some(AppIntent::SelectNext));
-        assert_eq!(key(KeyCode::Char('k'), none), Some(AppIntent::SelectPrev));
-        assert_eq!(key(KeyCode::Up, none), Some(AppIntent::SelectPrev));
-    }
-
-    #[test]
-    fn shifted_j_k_and_page_keys_scroll_the_diff() {
-        let shift = KeyModifiers::SHIFT;
-        let none = KeyModifiers::NONE;
-        let scroll = |s| Some(AppIntent::ScrollDiff(s));
-        assert_eq!(key(KeyCode::Char('J'), shift), scroll(Scroll::LineDown));
-        assert_eq!(key(KeyCode::Char('K'), shift), scroll(Scroll::LineUp));
-        assert_eq!(key(KeyCode::Char('J'), none), scroll(Scroll::LineDown));
-        assert_eq!(key(KeyCode::PageDown, none), scroll(Scroll::PageDown));
-        assert_eq!(key(KeyCode::PageUp, none), scroll(Scroll::PageUp));
-    }
-
-    #[test]
-    fn space_toggles_the_file_and_a_toggles_everything() {
-        let none = KeyModifiers::NONE;
-        assert_eq!(key(KeyCode::Char(' '), none), Some(AppIntent::ToggleStage));
         assert_eq!(
-            key(KeyCode::Char('a'), none),
-            Some(AppIntent::ToggleStageAll)
+            AppIntent::from_event(event),
+            Some(AppIntent::Key(KeyPress::new(
+                KeyCode::Esc,
+                KeyModifiers::NONE
+            )))
         );
-        assert_eq!(key(KeyCode::Char('a'), KeyModifiers::CONTROL), None);
     }
 
     #[test]
-    fn unmapped_key_is_dropped() {
-        let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    fn a_key_release_is_dropped() {
+        let event = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
         assert_eq!(AppIntent::from_event(event), None);
+    }
+
+    #[test]
+    fn resize_is_mapped() {
+        assert_eq!(
+            AppIntent::from_event(Event::Resize(80, 24)),
+            Some(AppIntent::Resize {
+                width: 80,
+                height: 24
+            })
+        );
     }
 }
