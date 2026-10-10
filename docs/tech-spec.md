@@ -17,6 +17,8 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 ### Repository and Version Control
 Kika uses a hybrid model: `git2` for fast reads, the `git` executable for everything that mutates the repository or talks to the network.
 
+**The `git` CLI is the default.** All git access goes through one interface, implemented first with the CLI. A read moves to `git2` only when profiling shows a measured need (likely candidates: commit-graph paging and blob reads for PR review). `git status` always stays on the CLI, because `libgit2` status can disagree with git (untracked cache, fsmonitor, sparse checkout).
+
 * **`git2`**: Rust bindings for `libgit2`. Used for read-only queries where avoiding process spawns pays off: commit graph traversal with lazy pagination, refs and reflog, blob/tree reads, merge-base and ahead/behind counts, and cheap ref snapshots for detecting external changes. `git2` objects are `!Send`, so each blocking task opens its own `Repository`.
 * **`git` CLI (via `tokio::process`)**: Used for all mutations and network operations: commit, stage/unstage, partial (hunk/line) staging, checkout, merge, rebase, stash, fetch, pull and push. The real `git` binary runs the user's hooks, commit signing (GPG/SSH), credential helpers, `.gitattributes` filters (LFS, CRLF) and pagers, none of which `libgit2` fully supports.
 
