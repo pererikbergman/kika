@@ -15,6 +15,9 @@ pub enum GitOp {
     UnstageAll,
 }
 
+/// Why staging everything is refused while conflicts exist.
+pub const CONFLICTS_REFUSAL: &str = "Resolve conflicts before staging everything";
+
 impl GitOp {
     /// What one key press does to `entry`: stage it while it has unstaged
     /// changes, else unstage it. Conflicts are never touched, since staging
@@ -42,7 +45,7 @@ impl GitOp {
     /// conflict stages.
     pub fn toggle_all(files: &[FileEntry]) -> Result<Option<GitOp>, String> {
         if files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-            return Err("Resolve conflicts before staging everything".into());
+            return Err(CONFLICTS_REFUSAL.into());
         }
         if files.is_empty() {
             return Ok(None);

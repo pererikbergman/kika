@@ -5,6 +5,7 @@ use crate::git::diff::{DiffChunk, DiffRequest};
 use crate::git::ops::GitOp;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope, Resolution};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 
 /// What Kika is looking at.
@@ -44,6 +45,9 @@ pub struct AppState {
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
+    pub help_open: bool,
+    /// Why the last key did nothing, shown in the bottom bar until the next key.
+    pub notice: Option<&'static str>,
 }
 
 impl AppState {
@@ -64,13 +68,25 @@ impl AppState {
             op_seq: None,
             op_error: None,
             status_selection: Selection::KeepPath,
+            help_open: false,
+            notice: None,
         }
     }
 
     /// Apply an intent and return the effects to run. Pure: no I/O, no rendering.
     pub fn update(&mut self, intent: AppIntent) -> Vec<Effect> {
         match intent {
+            AppIntent::Key(key) => {
+                self.notice = None;
+                match keymap::resolve(keymap::registry(), self.key_focus(), self, key) {
+                    Resolution::Run(binding) => return self.update(binding.intent.clone()),
+                    Resolution::Disabled(reason) => self.notice = Some(reason),
+                    Resolution::Unbound => {}
+                }
+            }
             AppIntent::Quit => self.should_quit = true,
+            AppIntent::OpenHelp => self.help_open = true,
+            AppIntent::CloseHelp => self.help_open = false,
             AppIntent::Resize { width, height } => {
                 self.size = (width, height);
                 return self.diff.demand(self.pane_rows());
@@ -100,6 +116,24 @@ impl AppState {
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
         }
         vec![]
+    }
+
+    /// The panel keys go to. Derived from the context until panels can
+    /// take focus themselves.
+    pub fn panel_focus(&self) -> KeyScope {
+        match self.context {
+            Context::Workspace => KeyScope::Files,
+            Context::Review { .. } => KeyScope::Review,
+        }
+    }
+
+    /// Where key lookup starts: the help menu while it is open.
+    pub fn key_focus(&self) -> KeyScope {
+        if self.help_open {
+            KeyScope::Help
+        } else {
+            self.panel_focus()
+        }
     }
 
     /// Text rows inside the Diff pane: the screen minus the status bar and borders.
@@ -275,6 +309,8 @@ mod tests {
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::status::EntryKind;
     use crate::intent::Scroll;
+    use crate::keymap::KeyPress;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
         FileEntry {
@@ -802,6 +838,100 @@ mod tests {
             height: 2,
         });
         assert_eq!(state.pane_rows(), 1);
+    }
+
+    fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+        state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))
+    }
+
+    #[test]
+    fn a_bound_key_runs_its_intent() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 1);
+        assert_eq!(state.busy, 1);
+        press(&mut state, KeyCode::Char('q'));
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn question_mark_opens_help_and_closes_it_again() {
+        let mut state = AppState::new(Context::Workspace);
+        press(&mut state, KeyCode::Char('?'));
+        assert!(state.help_open);
+        assert_eq!(state.key_focus(), KeyScope::Help);
+        press(&mut state, KeyCode::Char('?'));
+        assert!(!state.help_open);
+    }
+
+    #[test]
+    fn esc_closes_help_instead_of_quitting() {
+        let mut state = AppState::new(Context::Workspace);
+        press(&mut state, KeyCode::Char('?'));
+        press(&mut state, KeyCode::Esc);
+        assert!(!state.help_open);
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn panel_keys_do_nothing_while_help_is_open_but_q_still_quits() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('?'));
+        assert_eq!(press(&mut state, KeyCode::Char('j')), vec![]);
+        assert_eq!(state.selected, Some(0));
+        press(&mut state, KeyCode::Char('q'));
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn space_while_an_op_runs_shows_why_and_does_nothing() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.op_seq = Some(99);
+        let busy = state.busy;
+        assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
+        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.busy, busy);
+    }
+
+    #[test]
+    fn space_without_a_selection_says_so() {
+        let (mut state, _) = with_files(vec![], 24);
+        assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
+        assert_eq!(state.notice, Some("No file selected"));
+    }
+
+    #[test]
+    fn a_with_a_conflict_shows_the_reason_as_a_notice_not_an_error() {
+        let conflict = FileEntry {
+            kind: EntryKind::Conflicted,
+            ..changed("both.rs", 'U', 'U')
+        };
+        let (mut state, _) = with_files(vec![changed("a.rs", '.', 'M'), conflict], 24);
+        assert_eq!(press(&mut state, KeyCode::Char('a')), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("Resolve conflicts before staging everything")
+        );
+        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn the_next_key_clears_the_notice() {
+        let (mut state, _) = with_files(vec![], 24);
+        press(&mut state, KeyCode::Char(' '));
+        assert!(state.notice.is_some());
+        press(&mut state, KeyCode::Char('x'));
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn space_on_a_stageable_file_runs_the_op() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+        assert_eq!(op, GitOp::Stage(vec!["a.rs".into()]));
+        assert_eq!(state.notice, None);
     }
 
     fn op_of(effects: &[Effect]) -> (Tag, GitOp) {
