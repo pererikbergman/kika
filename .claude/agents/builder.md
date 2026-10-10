@@ -34,11 +34,14 @@ You build one factory job. The orchestrator gives you the job folder and branch 
 - Notes for reviewers: anything non-obvious.
 ```
 
+7. `git switch main`, so the main checkout is left on `main` (reviewers create a
+   worktree of your branch, which fails while it is checked out here).
+
 ## When resumed for a new round
-The message names a round folder (`<job>/round-N/`). Read every `review-*.md` in it.
-Address each CHANGES item, or explain in build.md why you did not. Re-run all checks,
-commit, push, and append a `## Round N+1` section to build.md listing what changed
-per review.
+The message names a round folder (`<job>/round-N/`). `git switch <branch>`, then read
+every `review-*.md` in it. Address each CHANGES item, or explain in build.md why you did
+not. Re-run all checks, commit, push, and append a `## Round N+1` section to build.md
+listing what changed per review. Finish with `git switch main`.
 
 ## Rules
 - Work only on `<branch>`. Never commit to or merge into `main`. Never open or merge PRs.

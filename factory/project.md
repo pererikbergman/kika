@@ -42,3 +42,8 @@ A change is only done when all four pass.
 - Views are tested by drawing into `ratatui::backend::TestBackend` and reading the buffer.
 - Doc comments on public items say *why*, briefly. Match the existing comment density.
 - Keep modules small; one concern per file.
+- Never name other git clients (as precedent, comparison or otherwise) in code, comments,
+  tests, commit messages, specs or reviews. Describe behaviour on its own terms.
+- Security defaults for git commands: put `--` before paths, set `GIT_LITERAL_PATHSPECS=1`
+  on any command that takes repo file names, and build argv from raw path bytes
+  (`RepoPath`), never from the lossy display string.
