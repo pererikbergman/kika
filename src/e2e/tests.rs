@@ -222,3 +222,102 @@ async fn ctrl_c_while_a_hook_hangs_quits_and_stops_git_cleanly() {
     assert_eq!(repo.head(), head);
     assert_eq!(repo.staged(), ["a.txt"]);
 }
+
+/// One commit on branch `main`, whatever the default branch name is.
+fn on_main() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.git(["checkout", "-q", "-b", "main"]);
+    repo.write("a.txt", "one\n").commit("init")
+}
+
+/// `main` and a branch `other` that both changed `a.txt`, so merging or
+/// rebasing one onto the other stops on a conflict.
+fn diverged() -> TestRepo {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "other"]);
+    let repo = repo.write("a.txt", "theirs\n").commit("theirs");
+    repo.git(["checkout", "-q", "main"]);
+    repo.write("a.txt", "ours\n").commit("ours")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
+    let repo = on_main();
+    repo.git(["branch", "base"]);
+    repo.git(["checkout", "-q", "base"]);
+    let repo = repo.write("b.txt", "base\n").commit("on base");
+    repo.git(["checkout", "-q", "-b", "work", "main"]);
+    repo.git(["branch", "-q", "--set-upstream-to=base"]);
+    let repo = repo
+        .write("c.txt", "1\n")
+        .commit("first")
+        .write("c.txt", "2\n")
+        .commit("second");
+
+    let mut app = Harness::start(&repo).await;
+
+    app.assert_screen_contains("│work ");
+    app.assert_screen_contains("│base ↑2 ↓1 ");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_without_upstream_says_so() {
+    let repo = on_main();
+    let mut app = Harness::start(&repo).await;
+    app.assert_screen_contains("│main ");
+    app.assert_screen_contains("│no upstream ");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_detached_head_shows_its_short_hash() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "--detach"]);
+    let head = repo.head();
+
+    let mut app = Harness::start(&repo).await;
+
+    app.assert_screen_contains(&format!("│detached {} ", &head[..7]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicting_merge_shows_merging() {
+    let repo = diverged();
+    assert!(
+        !repo.try_git(["merge", "other"]),
+        "the merge should conflict"
+    );
+
+    let mut app = Harness::start(&repo).await;
+
+    app.assert_screen_contains("│merging ");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicting_rebase_shows_rebasing() {
+    let repo = diverged();
+    assert!(
+        !repo.try_git(["rebase", "other"]),
+        "the rebase should conflict"
+    );
+
+    let mut app = Harness::start(&repo).await;
+
+    app.assert_screen_contains("│rebasing ");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn committing_in_the_app_updates_the_ahead_count() {
+    let repo = on_main();
+    repo.git(["branch", "base"]);
+    repo.git(["branch", "-q", "--set-upstream-to=base"]);
+    let repo = repo.write("a.txt", "two\n").stage("a.txt");
+    let mut app = Harness::start(&repo).await;
+    app.assert_screen_contains("│base ↑0 ↓0 ");
+
+    app.press(KeyCode::Char('c')).await;
+    app.type_text("Ahead").await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    app.assert_screen_contains("│base ↑1 ↓0 ");
+}

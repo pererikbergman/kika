@@ -5,6 +5,7 @@ use crate::git::FileEntry;
 use crate::git::diff::{DiffChunk, DiffRequest};
 use crate::git::ops::GitOp;
 use crate::git::path::RepoPath;
+use crate::git::status::{BranchStatus, RepoStatus};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Resolution};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -54,6 +55,9 @@ pub struct AppState {
     /// False until the first status result arrives, to tell "loading" from "clean".
     pub files_loaded: bool,
     pub status_error: Option<String>,
+    /// Branch, upstream and operations in progress. `None` until the first
+    /// status load succeeds; a failed load keeps the last one.
+    pub branch: Option<BranchStatus>,
     /// Index into `files` of the file whose diff is shown.
     pub selected: Option<usize>,
     pub diff: DiffPane,
@@ -83,6 +87,7 @@ impl AppState {
             files: Vec::new(),
             files_loaded: false,
             status_error: None,
+            branch: None,
             selected: None,
             diff: DiffPane::default(),
             op_seq: None,
@@ -382,10 +387,11 @@ impl AppState {
         };
     }
 
-    /// Reload what the plan says is stale. Reloading files reselects, which
-    /// reloads the diff too.
+    /// Reload what the plan says is stale. One status load serves both the
+    /// files and the branch; reloading files reselects, which reloads the
+    /// diff too.
     fn apply_plan(&mut self, plan: RefreshPlan) -> Vec<Effect> {
-        if plan.scopes.contains(&Scope::Files) {
+        if plan.scopes.contains(&Scope::Files) || plan.scopes.contains(&Scope::Branch) {
             self.status_selection = plan.selection;
             return self.refresh_status();
         }
@@ -412,7 +418,7 @@ impl AppState {
         }]
     }
 
-    fn status_loaded(&mut self, tag: Tag, result: Result<Vec<FileEntry>, String>) -> Vec<Effect> {
+    fn status_loaded(&mut self, tag: Tag, result: Result<RepoStatus, String>) -> Vec<Effect> {
         // Every user effect reports back exactly once, stale or not, so
         // decrement before the staleness check or the counter would leak.
         if tag.user {
@@ -423,12 +429,13 @@ impl AppState {
         }
         self.files_loaded = true;
         match result {
-            Ok(files) => {
+            Ok(status) => {
                 let old_path = self
                     .selected
                     .and_then(|i| self.files.get(i))
                     .map(|f| f.path.clone());
-                self.files = files;
+                self.files = status.files;
+                self.branch = Some(status.branch);
                 self.status_error = None;
                 match self.status_selection {
                     Selection::KeepPath => self.reselect(old_path),
@@ -448,7 +455,7 @@ mod tests {
     use crate::commit_editor::{CommitEditor, Field};
     use crate::diff_pane::DIFF_PREFETCH;
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
-    use crate::git::status::EntryKind;
+    use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -463,10 +470,27 @@ mod tests {
         }
     }
 
+    fn on_branch(name: &str) -> BranchStatus {
+        BranchStatus {
+            head: Head::Branch(name.into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![],
+        }
+    }
+
+    /// A status load of `files` on branch `main`.
+    fn repo(files: Vec<FileEntry>) -> RepoStatus {
+        RepoStatus {
+            branch: on_branch("main"),
+            files,
+        }
+    }
+
     fn loaded(tag: Tag, paths: &[&str]) -> AppIntent {
         AppIntent::StatusLoaded {
             tag,
-            result: Ok(paths.iter().map(|p| untracked(p)).collect()),
+            result: Ok(repo(paths.iter().map(|p| untracked(p)).collect())),
         }
     }
 
@@ -575,6 +599,73 @@ mod tests {
         assert_eq!(state.files, []);
     }
 
+    fn loaded_on(tag: Tag, branch: &str) -> AppIntent {
+        AppIntent::StatusLoaded {
+            tag,
+            result: Ok(RepoStatus {
+                branch: on_branch(branch),
+                files: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn the_branch_is_unknown_until_the_first_load() {
+        assert_eq!(AppState::new(Context::Workspace).branch, None);
+    }
+
+    #[test]
+    fn a_fresh_status_load_sets_the_branch() {
+        let mut state = AppState::new(Context::Workspace);
+        let tag = refresh_tag(&mut state);
+        state.update(loaded_on(tag, "topic"));
+        assert_eq!(state.branch, Some(on_branch("topic")));
+    }
+
+    #[test]
+    fn a_stale_status_load_leaves_the_branch_alone() {
+        let mut state = AppState::new(Context::Workspace);
+        let old = refresh_tag(&mut state);
+        let new = refresh_tag(&mut state);
+        state.update(loaded_on(new, "fresh"));
+        state.update(loaded_on(old, "stale"));
+        assert_eq!(state.branch, Some(on_branch("fresh")));
+
+        let tag = refresh_tag(&mut state);
+        state.generation += 1;
+        state.update(loaded_on(tag, "other-repo"));
+        assert_eq!(state.branch, Some(on_branch("fresh")));
+    }
+
+    #[test]
+    fn a_failed_status_load_keeps_the_old_branch() {
+        let mut state = AppState::new(Context::Workspace);
+        let tag = refresh_tag(&mut state);
+        state.update(loaded_on(tag, "main"));
+        let tag = refresh_tag(&mut state);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Err("boom".into()),
+        });
+        assert_eq!(state.branch, Some(on_branch("main")));
+        assert_eq!(state.status_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn a_branch_only_plan_loads_status_once() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let busy = state.busy;
+        let effects = state.apply_plan(RefreshPlan {
+            scopes: [Scope::Branch].into(),
+            selection: Selection::KeepPath,
+        });
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            "{effects:?}"
+        );
+        assert_eq!(state.busy, busy + 1);
+    }
+
     #[test]
     fn error_result_is_recorded_and_cleared_by_the_next_success() {
         let mut state = AppState::new(Context::Workspace);
@@ -648,7 +739,7 @@ mod tests {
         let tag = refresh_tag(&mut state);
         let effects = state.update(AppIntent::StatusLoaded {
             tag,
-            result: Ok(files),
+            result: Ok(repo(files)),
         });
         (state, effects)
     }
@@ -815,7 +906,7 @@ mod tests {
         let status = refresh_tag(&mut state);
         let effects = state.update(AppIntent::StatusLoaded {
             tag: status,
-            result: Ok(vec![untracked("c.txt"), changed("a.rs", '.', 'M')]),
+            result: Ok(repo(vec![untracked("c.txt"), changed("a.rs", '.', 'M')])),
         });
         diff_tag(&effects);
         assert_eq!(state.selected, Some(0));
@@ -833,7 +924,10 @@ mod tests {
         let status = refresh_tag(&mut state);
         let effects = state.update(AppIntent::StatusLoaded {
             tag: status,
-            result: Ok(vec![changed("a.rs", '.', 'M'), changed("z.rs", '.', 'M')]),
+            result: Ok(repo(vec![
+                changed("a.rs", '.', 'M'),
+                changed("z.rs", '.', 'M'),
+            ])),
         });
         diff_tag(&effects);
         assert_eq!(state.selected, Some(1));
@@ -1215,7 +1309,10 @@ mod tests {
         // b.rs is now unstaged and moved to the front.
         let effects = state.update(AppIntent::StatusLoaded {
             tag: status,
-            result: Ok(vec![changed("b.rs", '.', 'M'), changed("a.rs", '.', 'M')]),
+            result: Ok(repo(vec![
+                changed("b.rs", '.', 'M'),
+                changed("a.rs", '.', 'M'),
+            ])),
         });
         diff_tag(&effects);
         assert_eq!(state.selected, Some(0));

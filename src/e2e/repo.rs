@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 
-use crate::git::fake::{TempDir, git};
+use crate::git::fake::{TempDir, git, try_git};
 use crate::git::path::RepoPath;
 use crate::git::status::read_status;
 use crate::git::{CliRunner, FileEntry};
@@ -84,6 +84,13 @@ impl TestRepo {
         git(self.dir.path(), &args)
     }
 
+    /// Run a git command that may fail, such as a merge that stops on a
+    /// conflict. Returns whether it succeeded.
+    pub fn try_git<A: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = A>) -> bool {
+        let args: Vec<A> = args.into_iter().collect();
+        try_git(self.dir.path(), &args)
+    }
+
     pub fn exists(&self, path: &str) -> bool {
         self.dir.path().join(path).exists()
     }
@@ -112,6 +119,7 @@ impl TestRepo {
         let path = RepoPath::from(path);
         read_status(&runner)
             .unwrap()
+            .files
             .into_iter()
             .find(|entry| entry.path == path)
     }
