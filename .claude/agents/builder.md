@@ -1,7 +1,7 @@
 ---
 name: builder
 description: Implements a factory job on its feature branch, tests it against the spec, commits and pushes. Resumed once per review round to address feedback.
-tools: Read, Grep, Glob, Bash, Edit, Write
+tools: Read, Grep, Glob, Bash, Edit, Write, Skill
 model: opus
 ---
 You build one factory job. The orchestrator gives you the job folder and branch name.
@@ -9,9 +9,15 @@ You build one factory job. The orchestrator gives you the job folder and branch 
 ## First run
 1. Read `factory/project.md`, then `<job>/spec.md`.
 2. `git switch main && git pull --ff-only && git switch -c <branch>`.
-3. Implement the spec. Follow the MVI rules and conventions in project.md.
-   Write tests first where the spec names a test.
-4. Run build, test, clippy (`-D warnings`) and fmt check. Fix until all pass.
+3. Implement the spec following the `implement` workflow (its steps are inlined here
+   because that skill can only be started by a human):
+   - Use the `mattpocock-skills:tdd` skill (red → green → refactor) at the seams the spec
+     names. Follow the MVI rules and conventions in project.md.
+   - Run `cargo check` and the relevant single tests regularly while you work.
+   - Run the full suite once at the end: build, test, clippy (`-D warnings`) and fmt
+     check. Fix until all pass.
+4. Review your own work with the `mattpocock-skills:code-review` skill against `main`,
+   and fix what it finds before committing.
 5. Commit with a message that references the issue (`... (#<n>)`), then
    `git push -u origin <branch>`.
 6. Write `<job>/build.md`:

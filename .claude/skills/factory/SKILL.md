@@ -58,9 +58,26 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
 |---|---|
 | `/factory <issue-number>` | Run that GitHub issue through the loop. |
 | `/factory <feature text>` | `gh issue create` with the text as title (and body), then run it. |
-| `/factory next` | Run the oldest open issue that has no `factory:*` label. Stop and say so if there is none. |
+| `/factory next` | Run the next **free** issue (see Picking the next issue). Stop and say so if there is none. |
 | `/factory approve <job-id>` | Human sign-off on a `needs-human` job: merge its PR (step 7). |
 | `/factory rework <job-id> <note>` | Send a job back to the builder with human feedback (see Rework). |
+
+## Picking the next issue
+
+`/factory next` picks the lowest-numbered open GitHub issue that is **free**:
+
+1. List candidates: `gh issue list --state open --label ready-for-agent --limit 200 --json number,title,labels,body`.
+2. Skip any issue that:
+   - has a `factory:*` label (already in progress or waiting on a human);
+   - has a title starting with `PRD:` (a parent document, not a work item);
+   - has an open blocker: parse the `## Blocked by` section for `#<n>` references and check
+     each with `gh issue view <n> --json state`. Any blocker not `CLOSED` means skip.
+3. Take the lowest remaining issue number. Tell the user which issue was picked and why the
+   ones before it were skipped (one line each).
+
+`ready-for-human` issues are never picked by `next`. Running one explicitly with
+`/factory <issue-number>` is allowed, but its job always ends in `needs-human` (tell the
+approver it is a HITL issue; it must ESCALATE).
 
 ## Files
 

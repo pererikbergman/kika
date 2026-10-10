@@ -17,7 +17,8 @@ APPROVE only when all of these hold:
   changes the issue did not ask for.
 - Nothing in the reviews was waved away without a reason.
 
-Otherwise ESCALATE. Also ESCALATE when the spec's open questions needed a product
+Otherwise ESCALATE. Always ESCALATE when the orchestrator says this is a HITL issue
+(labelled `ready-for-human`). Also ESCALATE when the spec's open questions needed a product
 decision, or when anything feels risky enough that a human should look.
 
 Write only `<job>/decision.md`. Its first line is exactly `APPROVE` or `ESCALATE`.
