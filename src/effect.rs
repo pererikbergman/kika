@@ -33,6 +33,7 @@ use crate::git::remotes::list_remotes;
 use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
+use crate::git::tags::list_tags;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::recent;
@@ -122,6 +123,10 @@ pub enum Effect {
     /// List the remotes and their remote-tracking branches; always
     /// answered by one `RemotesLoaded`.
     LoadRemotes {
+        tag: Tag,
+    },
+    /// List the tags; always answered by one `TagsLoaded`.
+    LoadTags {
         tag: Tag,
     },
     /// Read the recent-repositories list; answered by `RecentLoaded`
@@ -384,6 +389,19 @@ impl Runtime {
                             ))
                         });
                     let _ = tx.send(AppIntent::RemotesLoaded { tag, result });
+                });
+            }
+            Effect::LoadTags { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || list_tags(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git for-each-ref crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::TagsLoaded { tag, result });
                 });
             }
             // Synchronous, so no later effect runs in the old repository.
@@ -692,9 +710,10 @@ impl Runtime {
                 tokio::spawn(async move {
                     let bridge_tx = tx.clone();
                     // A panic still reports back, or `op_seq` would block every later op.
+                    let task_op = op.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         let bridge = Bridge::open(tag, bridge_tx, slot);
-                        run_remote(runner.as_ref(), op, bridge.env.as_ref())
+                        run_remote(runner.as_ref(), &task_op, bridge.env.as_ref())
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -1527,6 +1546,47 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::RemotesLoaded { result: Err(_), .. })
         ));
+        runtime.spawn(Effect::LoadTags { tag });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::TagsLoaded { result: Err(_), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tags_load_reports_back_with_the_same_tag() {
+        let oid = "1".repeat(40);
+        let record = format!("refs/tags/v1\0commit\0{oid}\0\0\0\0d\0s\n");
+        let list = crate::git::tags::list_command();
+        let argv: Vec<String> = list
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let runner = Arc::new(FakeRunner::new().expect(&argv, ok(record.as_bytes())));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: false,
+        };
+
+        runtime.spawn(Effect::LoadTags { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::TagsLoaded {
+                tag: got,
+                result: Ok(tags),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(tags.len(), 1);
+                assert_eq!(tags[0].name.display(), "v1");
+            }
+            other => panic!("expected TagsLoaded, got {other:?}"),
+        }
+        runner.assert_done();
     }
 
     #[tokio::test]
@@ -2270,7 +2330,10 @@ mod tests {
             force_with_lease: false,
         };
 
-        runtime.spawn(Effect::Remote { tag, op });
+        runtime.spawn(Effect::Remote {
+            tag,
+            op: op.clone(),
+        });
 
         assert_eq!(
             rx.recv().await,

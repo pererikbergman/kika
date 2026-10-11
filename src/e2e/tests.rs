@@ -1680,3 +1680,109 @@ async fn ctrl_z_undoes_a_whole_completed_rebase() {
     assert!(!repo.exists("m.txt"));
     assert_eq!(repo.read("t.txt"), "two\n");
 }
+
+fn tag_names(repo: &TestRepo) -> Vec<String> {
+    String::from_utf8(repo.git(["for-each-ref", "--format=%(refname:short)", "refs/tags"]))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What `git cat-file -t` says the tag ref holds: `commit` or `tag`.
+fn tag_kind(repo: &TestRepo, name: &str) -> String {
+    let kind = repo.git(["cat-file", "-t", &format!("refs/tags/{name}")]);
+    String::from_utf8(kind).unwrap().trim().to_string()
+}
+
+/// Focus the Branches panel and show its Tags tab.
+async fn show_tags(app: &mut Harness) {
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.assert_screen_contains("Loc Rem [Tags]");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_and_shift_t_tag_a_commit_and_the_tags_tab_lists_and_deletes_them() {
+    let (repo, first) = two_commits();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('t')).await;
+    app.assert_screen_contains(&format!("New tag on {}", &first[..7]));
+    app.type_text("light\n").await;
+    app.press(KeyCode::Char('T')).await;
+    app.type_text("heavy\n").await;
+    app.assert_screen_contains("Message of tag heavy");
+    app.type_text("-m looks like an option\n").await;
+
+    assert_eq!(tag_kind(&repo, "light"), "commit");
+    assert_eq!(tag_kind(&repo, "heavy"), "tag");
+    for peeled in ["light^{commit}", "heavy^{commit}"] {
+        let oid = String::from_utf8(repo.git(["rev-parse", peeled])).unwrap();
+        assert_eq!(oid.trim(), first, "{peeled}");
+    }
+    let message = repo.git(["tag", "-l", "--format=%(contents:subject)", "heavy"]);
+    assert_eq!(message, b"-m looks like an option\n");
+
+    show_tags(&mut app).await;
+    app.assert_screen_contains("◆ heavy");
+    app.assert_screen_contains(&format!("  light  {}", &first[..7]));
+    if app.state().branches.tags.selected_tag().unwrap().name != "light".into() {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.assert_screen_contains("Commits · light");
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Delete tag light? It is not deleted on any remote.");
+    // Enter does not answer; the tag is still there.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(tag_names(&repo), ["heavy", "light"]);
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(tag_names(&repo), ["heavy"]);
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("  light  ")),
+        "{}",
+        screen.join("\n")
+    );
+    app.assert_screen_contains("◆ heavy");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_made_tag_named_like_an_option_is_listed_and_deleted() {
+    let repo = on_main();
+    repo.git(["update-ref", "refs/tags/-x", "HEAD"]);
+    let mut app = Harness::start(&repo).await;
+
+    show_tags(&mut app).await;
+    app.assert_screen_contains("  -x  ");
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Delete tag -x?");
+    app.press(KeyCode::Char('y')).await;
+
+    assert!(tag_names(&repo).is_empty());
+    app.assert_screen_contains("No tags");
+    assert_eq!(app.state().popups, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_p_on_the_tags_tab_pushes_the_tag_to_the_upstreams_remote() {
+    let (repo, remote) = with_origin();
+    repo.git(["tag", "-a", "-m", "one", "v1"]);
+    let mut app = Harness::start(&repo).await;
+
+    show_tags(&mut app).await;
+    app.press_with(KeyCode::Char('P'), KeyModifiers::SHIFT)
+        .await;
+
+    let listed = git(
+        remote.path().join("origin.git").as_path(),
+        &["ls-remote", "--tags", "."],
+    );
+    let listed = String::from_utf8(listed).unwrap();
+    assert!(listed.contains("refs/tags/v1"), "{listed}");
+    assert_eq!(app.state().popups, []);
+}

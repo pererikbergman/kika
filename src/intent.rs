@@ -26,6 +26,7 @@ use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
+use crate::git::tags::TagRef;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -360,8 +361,34 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<Vec<Remote>, String>,
     },
-    /// Show the Branches panel's other tab: local branches or remotes.
+    /// Show the Branches panel's next tab: local branches, remotes, tags.
     SwitchBranchesTab,
+    /// Show the Branches panel's previous tab.
+    PrevBranchesTab,
+    /// The tags were read; `tag` says which load.
+    TagsLoaded {
+        tag: Tag,
+        result: Result<Vec<TagRef>, String>,
+    },
+    /// Move the Tags tab's selection down or up.
+    TagNext,
+    TagPrev,
+    /// Ask for a name, to tag the selected commit with a lightweight tag.
+    NewTag,
+    /// Ask for a name and then a message, to tag the selected commit with
+    /// an annotated tag.
+    NewAnnotatedTag,
+    /// The tag's name, typed into the `TagName` prompt.
+    TagNamed(String),
+    /// The annotated tag's message, typed into the `TagMessage` prompt.
+    TagMessaged(String),
+    /// Ask before deleting the selected tag.
+    DeleteTag,
+    /// Delete the tag the open question names.
+    ConfirmDeleteTag,
+    /// Push the selected tag to the current branch's remote, or the only
+    /// one.
+    PushTag,
     /// Move the Remotes tab's selection down or up, over remote and
     /// branch rows alike.
     RemoteNext,

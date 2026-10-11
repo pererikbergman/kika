@@ -34,6 +34,7 @@ use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
+use crate::git::tags::{TagRef, validate_tag_name};
 use crate::git::undo;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
@@ -42,8 +43,9 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
-    ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,
-    LineInput, Popup, PromptKind, RemoveRemoteConfirm, ResetHardConfirm, TravelConfirm,
+    ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
+    DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RemoveRemoteConfirm, ResetHardConfirm,
+    TravelConfirm,
 };
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -51,6 +53,7 @@ use crate::remote_run::RemoteRun;
 use crate::remotes::RemotePending;
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
+use crate::tags::PendingTag;
 use crate::watch::{WatchEvent, WatchState};
 
 /// What Kika is looking at.
@@ -609,6 +612,10 @@ impl AppState {
                         | PromptKind::RenameRemote,
                     ..
                 }) => self.branches.remotes.pending = None,
+                Some(Popup::Prompt {
+                    kind: PromptKind::TagName | PromptKind::TagMessage,
+                    ..
+                }) => self.branches.pending_tag = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -749,7 +756,18 @@ impl AppState {
                 result,
             } => self.branch_log_loaded(tag, refname, result),
             AppIntent::RemotesLoaded { tag, result } => return self.remotes_loaded(tag, result),
-            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(),
+            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(BranchesTab::next),
+            AppIntent::PrevBranchesTab => return self.switch_branches_tab(BranchesTab::prev),
+            AppIntent::TagsLoaded { tag, result } => return self.tags_loaded(tag, result),
+            AppIntent::TagNext => return self.move_tag(1),
+            AppIntent::TagPrev => return self.move_tag(-1),
+            AppIntent::NewTag => self.ask_tag_name(false),
+            AppIntent::NewAnnotatedTag => self.ask_tag_name(true),
+            AppIntent::TagNamed(text) => return self.tag_named(text),
+            AppIntent::TagMessaged(text) => return self.tag_messaged(&text),
+            AppIntent::DeleteTag => self.ask_delete_tag(),
+            AppIntent::ConfirmDeleteTag => return self.confirm_delete_tag(),
+            AppIntent::PushTag => return self.push_tag(),
             AppIntent::RemoteNext => return self.move_remote(1),
             AppIntent::RemotePrev => return self.move_remote(-1),
             AppIntent::TrackRemoteBranch => self.ask_track_name(),
@@ -910,6 +928,7 @@ impl AppState {
             (Context::Workspace, Focus::Branches) => match self.branches.tab {
                 BranchesTab::Local => KeyScope::Branches,
                 BranchesTab::Remotes => KeyScope::Remotes,
+                BranchesTab::Tags => KeyScope::Tags,
             },
             (Context::Workspace, Focus::Commits) if self.commits.tab == CommitsTab::Reflog => {
                 KeyScope::Reflog
@@ -943,6 +962,7 @@ impl AppState {
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
             Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
+            Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
@@ -1197,12 +1217,13 @@ impl AppState {
             Some(Popup::Discard(_)) => vec![],
             // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
             // resets, only `ConfirmRemoveRemote` removes and only
-            // `ConfirmTravel` undoes or redoes; yes here keeps the question,
-            // no closes it.
+            // `ConfirmDeleteTag` deletes a tag and only `ConfirmTravel`
+            // undoes or redoes; yes here keeps the question, no closes it.
             Some(
                 Popup::DeleteBranch(_)
                 | Popup::ResetHard(_)
                 | Popup::RemoveRemote(_)
+                | Popup::DeleteTag(_)
                 | Popup::Travel(_),
             ) if !yes => vec![],
             // Not a question: leave it where it was.
@@ -1575,6 +1596,21 @@ impl AppState {
                 PromptKind::SetUpstream => return format!("Upstream of {}", name.display()),
                 _ => {}
             }
+        }
+        match (kind, &self.branches.pending_tag) {
+            (PromptKind::TagName, Some(pending)) => {
+                let short = self.commits.short_oid(&pending.target);
+                return format!("New tag on {short}");
+            }
+            (
+                PromptKind::TagMessage,
+                Some(PendingTag {
+                    name: Some(name), ..
+                }),
+            ) => {
+                return format!("Message of tag {}", sanitize(name.as_bytes()));
+            }
+            _ => {}
         }
         match (kind, &self.branches.remotes.pending) {
             (PromptKind::TrackBranch, Some(RemotePending::Track(from))) => {
@@ -3186,6 +3222,11 @@ impl AppState {
         if user {
             self.busy += 1;
         }
+        let tags = self.take_seq();
+        self.branches.tags.list_seq = Some(tags);
+        if user {
+            self.busy += 1;
+        }
         let tag = |seq| Tag {
             generation: self.generation,
             seq,
@@ -3194,6 +3235,7 @@ impl AppState {
         vec![
             Effect::LoadBranches { tag: tag(seq) },
             Effect::LoadRemotes { tag: tag(remotes) },
+            Effect::LoadTags { tag: tag(tags) },
         ]
     }
 
@@ -3261,6 +3303,11 @@ impl AppState {
                 .remotes
                 .selected_branch()
                 .map(|b| b.refname.clone()),
+            BranchesTab::Tags => self
+                .branches
+                .tags
+                .selected_tag()
+                .map(|t| t.name.ref_bytes()),
         };
         let Some(refname) = refname else {
             self.branches.log = Default::default();
@@ -3291,13 +3338,40 @@ impl AppState {
         log.apply(tag.seq, result);
     }
 
-    /// Show the other tab, and the log of what is selected there.
-    fn switch_branches_tab(&mut self) -> Vec<Effect> {
+    /// Show the tab `step` gives, and the log of what is selected there.
+    fn switch_branches_tab(&mut self, step: fn(BranchesTab) -> BranchesTab) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        self.branches.tab = self.branches.tab.other();
+        self.branches.tab = step(self.branches.tab);
         self.load_branch_log(true)
+    }
+
+    fn move_tag(&mut self, delta: isize) -> Vec<Effect> {
+        if self.branches.tags.move_by(delta) {
+            self.load_branch_log(true)
+        } else {
+            vec![]
+        }
+    }
+
+    /// Show the tags, and on their tab load the selected tag's log afresh,
+    /// as for the local list.
+    fn tags_loaded(&mut self, tag: Tag, result: Result<Vec<TagRef>, String>) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        let tags = &mut self.branches.tags;
+        if tag.generation != self.generation || tags.list_seq != Some(tag.seq) {
+            return vec![];
+        }
+        tags.list_seq = None;
+        tags.loaded(result);
+        if self.branches.tab == BranchesTab::Tags {
+            self.load_branch_log(tag.user)
+        } else {
+            vec![]
+        }
     }
 
     fn move_remote(&mut self, delta: isize) -> Vec<Effect> {
@@ -3768,6 +3842,160 @@ impl AppState {
     }
 }
 
+/// Tags: made from the Commits panel, deleted and pushed from the Tags
+/// tab. The commit, and the tag asked about, are taken when the prompt or
+/// question opens, so nothing that moves underneath can change them.
+impl AppState {
+    /// Ask for the new tag's name, keeping the selected commit as its
+    /// target.
+    fn ask_tag_name(&mut self, annotated: bool) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        if let Some(reason) = keymap::tag_commit_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(target) = self
+            .commits
+            .rows
+            .get(self.commits.selected)
+            .and_then(|row| CommitId::parse(&row.oid))
+        else {
+            return;
+        };
+        self.branches.pending_tag = Some(PendingTag {
+            target,
+            annotated,
+            name: None,
+        });
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::TagName,
+            input: LineInput::default(),
+        });
+    }
+
+    /// Check the typed name: a bad one keeps the prompt open with the
+    /// reason; a good one makes a lightweight tag, or asks for the
+    /// annotated tag's message.
+    fn tag_named(&mut self, text: String) -> Vec<Effect> {
+        let Some(pending) = self.branches.pending_tag.as_mut() else {
+            return vec![];
+        };
+        let text = text.trim().to_string();
+        if let Err(reason) = validate_tag_name(&text) {
+            self.notice = Some(reason);
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagName,
+                input: LineInput::with_text(&text),
+            });
+            return vec![];
+        }
+        if pending.annotated {
+            pending.name = Some(text);
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                input: LineInput::default(),
+            });
+            return vec![];
+        }
+        let target = pending.target.clone();
+        self.branches.pending_tag = None;
+        self.create_tag(GitOp::CreateTag {
+            name: text,
+            target,
+            message: None,
+        })
+    }
+
+    /// Make the annotated tag named before, once its message has words.
+    fn tag_messaged(&mut self, text: &str) -> Vec<Effect> {
+        let Some(PendingTag {
+            name: Some(name),
+            target,
+            ..
+        }) = self.branches.pending_tag.clone()
+        else {
+            return vec![];
+        };
+        if text.trim().is_empty() {
+            self.notice = Some("An annotated tag needs a message");
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                input: LineInput::with_text(text),
+            });
+            return vec![];
+        }
+        self.branches.pending_tag = None;
+        self.create_tag(GitOp::CreateTag {
+            name,
+            target,
+            message: Some(text.to_string()),
+        })
+    }
+
+    fn create_tag(&mut self, op: GitOp) -> Vec<Effect> {
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        self.start_op(Ok(Some(op)))
+    }
+
+    /// Ask before deleting the selected tag, here only.
+    fn ask_delete_tag(&mut self) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        if let Some(reason) = keymap::delete_tag_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(tag) = self.branches.tags.selected_tag() else {
+            return;
+        };
+        let op = GitOp::DeleteTag {
+            name: tag.name.clone(),
+            oid: tag.ref_oid.clone(),
+        };
+        self.popups.push(Popup::DeleteTag(DeleteTagConfirm {
+            name: tag.name.display(),
+            op,
+        }));
+    }
+
+    /// Delete the tag the open question names, and only if one is open.
+    fn confirm_delete_tag(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::DeleteTag(_))) {
+            return vec![];
+        }
+        let Some(Popup::DeleteTag(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+
+    /// Push the selected tag to the remote Kika chooses; the network only
+    /// on this key.
+    fn push_tag(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::push_tag_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let (Some(tag), Ok(remote)) = (
+            self.branches.tags.selected_tag(),
+            keymap::push_tag_remote(self),
+        ) else {
+            return vec![];
+        };
+        let tag = tag.name.clone();
+        self.start_remote(RemoteOp::PushTag { remote, tag })
+    }
+}
+
 /// Fetch, pull and push, and the questions git and ssh ask while they run.
 impl AppState {
     /// Start `op` on the current branch, unless something else runs: it
@@ -3779,6 +4007,7 @@ impl AppState {
         let disabled = match op {
             RemoteOp::Fetch => keymap::fetch_disabled,
             RemoteOp::Pull | RemoteOp::Push { .. } => keymap::pull_push_disabled,
+            RemoteOp::PushTag { .. } => keymap::push_tag_disabled,
         };
         if let Some(reason) = disabled(self) {
             self.notice = Some(reason);
@@ -3789,7 +4018,7 @@ impl AppState {
         self.op_seq = Some(seq);
         self.busy += 1;
         let branch = self.branches.current().map(|b| b.name.clone());
-        self.remote = Some(RemoteRun::new(op, seq, branch));
+        self.remote = Some(RemoteRun::new(op.clone(), seq, branch));
         let tag = Tag {
             generation: self.generation,
             seq,
@@ -3874,7 +4103,7 @@ impl AppState {
             }
         }
         if reload {
-            self.apply_plan(refresh::remote_plan(op))
+            self.apply_plan(refresh::remote_plan(&op))
         } else {
             vec![]
         }
@@ -4108,7 +4337,9 @@ fn failure_next(op: &GitOp) -> &'static str {
         | GitOp::UnsetUpstream(_)
         | GitOp::AddRemote { .. }
         | GitOp::RenameRemote { .. }
-        | GitOp::RemoveRemote(_) => {
+        | GitOp::RemoveRemote(_)
+        | GitOp::CreateTag { .. }
+        | GitOp::DeleteTag { .. } => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
         GitOp::MergeTool(_) => {
@@ -4162,6 +4393,8 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::AddRemote { .. } => "Could not add the remote",
         GitOp::RenameRemote { .. } => "Could not rename the remote",
         GitOp::RemoveRemote(_) => "Could not remove the remote",
+        GitOp::CreateTag { .. } => "Could not create the tag",
+        GitOp::DeleteTag { .. } => "Could not delete the tag",
         GitOp::Travel {
             direction: undo::Direction::Undo,
             ..
@@ -4230,16 +4463,21 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
-                let (tag, list, remotes) = (*tag, *list, *remotes);
+                let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
                 state.update(AppIntent::BranchesLoaded {
                     tag: list,
                     result: Ok(vec![]),
                 });
                 state.update(AppIntent::RemotesLoaded {
                     tag: remotes,
+                    result: Ok(vec![]),
+                });
+                state.update(AppIntent::TagsLoaded {
+                    tag: tags,
                     result: Ok(vec![]),
                 });
                 tag
@@ -4292,12 +4530,12 @@ mod tests {
             }
         );
         // Seq 1 went to the branch list `r` reloads too, 2 to the remotes,
-        // 3 and 4 to the commits.
+        // 3 to the tags, 4 and 5 to the commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 5,
+                seq: 6,
                 user: true
             }
         );
@@ -4846,10 +5084,13 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        // The status, the branch list, the remotes, then the commits and
-        // their markers.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 5);
-        assert_eq!(state.busy, 3, "the status, the branch list and the remotes");
+        // The status, the branch list, the remotes, the tags, then the
+        // commits and their markers.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 6);
+        assert_eq!(
+            state.busy, 4,
+            "the status, the branch list, the remotes and the tags"
+        );
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
@@ -5419,6 +5660,7 @@ mod tests {
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
                     Effect::LoadRemotes { .. },
+                    Effect::LoadTags { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                 ]
@@ -5440,6 +5682,7 @@ mod tests {
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
                     Effect::LoadRemotes { .. },
+                    Effect::LoadTags { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                 ]
@@ -8071,6 +8314,7 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -8140,6 +8384,7 @@ mod tests {
                 Effect::LoadStatus { tag: status },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -8231,6 +8476,7 @@ mod tests {
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -8385,8 +8631,8 @@ mod tests {
         });
 
         assert_eq!(
-            state.busy, 3,
-            "only the status, branch and remotes loads are left"
+            state.busy, 4,
+            "only the status, branch, remotes and tags loads are left"
         );
         assert_eq!(state.repo, Some("/w".into()));
         assert_eq!(state.popups, []);
@@ -8397,6 +8643,7 @@ mod tests {
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
@@ -8472,6 +8719,7 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
@@ -8521,11 +8769,12 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 6..],
+            effects[effects.len() - 7..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { .. }
@@ -9226,9 +9475,10 @@ mod tests {
             [
                 Effect::LoadBranches { tag },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
-            ] => assert!(!tag.user && !remotes.user),
+            ] => assert!(!tag.user && !remotes.user && !tags.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
@@ -9427,14 +9677,15 @@ mod tests {
     fn entering_a_submodule_makes_its_first_snapshot_a_baseline() {
         let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
         state.watch.refs = Some(RefsSnapshot::of(b"parent"));
-        let (tag, list, remotes) = match press(&mut state, KeyCode::Enter).as_slice() {
+        let (tag, list, remotes, tags) = match press(&mut state, KeyCode::Enter).as_slice() {
             [
                 _,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 ..,
-            ] => (*tag, *list, *remotes),
+            ] => (*tag, *list, *remotes, *tags),
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
@@ -9444,6 +9695,10 @@ mod tests {
         });
         state.update(AppIntent::RemotesLoaded {
             tag: remotes,
+            result: Ok(vec![]),
+        });
+        state.update(AppIntent::TagsLoaded {
+            tag: tags,
             result: Ok(vec![]),
         });
         assert_eq!(state.busy, 0);
@@ -10851,7 +11106,7 @@ mod tests {
     fn brackets_switch_the_tab_and_j_and_k_move_over_remotes_and_branches() {
         let mut state = with_remotes();
         assert_eq!(
-            press_char(&mut state, '['),
+            press_char(&mut state, ']'),
             vec![],
             "a header row has no log"
         );
@@ -10884,7 +11139,7 @@ mod tests {
             "origin/main"
         );
 
-        let (_, refname) = log_load(&press_char(&mut state, ']')).unwrap();
+        let (_, refname) = log_load(&press_char(&mut state, '[')).unwrap();
         assert_eq!(refname, b"refs/heads/main", "the local selection's log");
         assert_eq!(state.branches.tab, BranchesTab::Local);
         assert_eq!(state.key_focus(), KeyScope::Branches);
@@ -12043,7 +12298,7 @@ mod tests {
     /// The tag and op of the one `Remote` effect in `effects`.
     fn remote_of(effects: &[Effect]) -> (Tag, RemoteOp) {
         match effects {
-            [Effect::Remote { tag, op }] => (*tag, *op),
+            [Effect::Remote { tag, op }] => (*tag, op.clone()),
             other => panic!("expected one Remote effect, got {other:?}"),
         }
     }
@@ -12077,7 +12332,7 @@ mod tests {
             assert_eq!(state.op_seq, Some(tag.seq));
             assert_eq!(state.busy, 1);
             let run = state.remote.as_ref().expect("a run is recorded");
-            assert_eq!((run.op, run.seq), (op, tag.seq));
+            assert_eq!((&run.op, run.seq), (&op, tag.seq));
             assert_eq!(run.branch, Some(BranchName::from("main")));
         }
     }
@@ -12184,7 +12439,7 @@ mod tests {
             );
             assert_eq!(state.popups, []);
             // Only the reloads count as busy now.
-            assert_eq!(state.busy, 3);
+            assert_eq!(state.busy, 4);
         }
     }
 
@@ -12254,7 +12509,7 @@ mod tests {
             let seq = state.take_seq();
             state.op_seq = Some(seq);
             state.busy = 1;
-            state.remote = Some(RemoteRun::new(op, seq, None));
+            state.remote = Some(RemoteRun::new(op.clone(), seq, None));
             let tag = Tag {
                 generation: state.generation,
                 seq,
@@ -12263,7 +12518,7 @@ mod tests {
             let message = " ! [rejected]        main -> main (stale info)";
             let effects = state.update(remote_finished(
                 tag,
-                op,
+                op.clone(),
                 Err(RemoteFailure::Failed(message.into())),
             ));
             assert_eq!(effects, [], "{op:?}: nothing reloads");
@@ -12863,5 +13118,303 @@ mod tests {
             Some(Popup::Error(error)) => assert_eq!(error.title, "Could not undo"),
             other => panic!("expected an error, got {other:?}"),
         }
+    }
+
+    // --- Tags ---
+
+    fn tag_ref(name: &str, oid: char) -> TagRef {
+        let oid = oid.to_string().repeat(40);
+        TagRef {
+            name: name.into(),
+            target: CommitId::parse(&oid).unwrap(),
+            target_short: oid[..7].into(),
+            ref_oid: oid,
+            annotated: false,
+            date: "2026-10-01".into(),
+            subject: "s".into(),
+        }
+    }
+
+    /// The tag of the one `LoadTags` in `effects`.
+    fn tags_tag(effects: &[Effect]) -> Tag {
+        let found = effects.iter().find_map(|e| match e {
+            Effect::LoadTags { tag } => Some(*tag),
+            _ => None,
+        });
+        found.unwrap_or_else(|| panic!("expected LoadTags in {effects:?}"))
+    }
+
+    /// Reload the lists, answering the tags with `tags`.
+    fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
+        let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::TagsLoaded {
+            tag,
+            result: Ok(tags),
+        })
+    }
+
+    /// `v2` then `v1`, newest first.
+    fn two_tags() -> Vec<TagRef> {
+        vec![tag_ref("v2", 'b'), tag_ref("v1", 'a')]
+    }
+
+    /// `with_branches`, with `two_tags` loaded and the Tags tab shown.
+    fn on_tags() -> AppState {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        press_char(&mut state, ']');
+        press_char(&mut state, ']');
+        assert_eq!(state.branches.tab, BranchesTab::Tags);
+        state
+    }
+
+    #[test]
+    fn brackets_cycle_local_remotes_tags_and_back() {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        let mut tabs = vec![];
+        for key in [']', ']', ']', '[', '[', '['] {
+            press_char(&mut state, key);
+            tabs.push((state.branches.tab, state.key_focus()));
+        }
+        use BranchesTab::*;
+        assert_eq!(
+            tabs,
+            [
+                (Remotes, KeyScope::Remotes),
+                (Tags, KeyScope::Tags),
+                (Local, KeyScope::Branches),
+                (Tags, KeyScope::Tags),
+                (Remotes, KeyScope::Remotes),
+                (Local, KeyScope::Branches),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tags_tab_shows_the_selected_tags_log_and_moves_with_j_and_k() {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        press_char(&mut state, ']');
+        let (_, refname) = log_load(&press_char(&mut state, ']')).unwrap();
+        assert_eq!(refname, b"refs/tags/v2");
+        let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
+        assert_eq!(refname, b"refs/tags/v1");
+        assert!(tag.user);
+        assert_eq!(press_char(&mut state, 'j'), vec![], "at the end");
+        log_load(&press(&mut state, KeyCode::Up)).unwrap();
+        assert_eq!(
+            state.branches.tags.selected_tag().unwrap().name,
+            "v2".into()
+        );
+        // A reload while the tab is shown reloads its log too.
+        let effects = reload_tags(&mut state, two_tags());
+        assert_eq!(log_load(&effects).unwrap().1, b"refs/tags/v2");
+    }
+
+    #[test]
+    fn a_stale_or_other_repository_tags_load_is_dropped() {
+        let mut state = with_branches();
+        let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+        let newer = tags_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::TagsLoaded {
+            tag,
+            result: Ok(two_tags()),
+        });
+        assert!(!state.branches.tags.loaded);
+        state.generation += 1;
+        state.update(AppIntent::TagsLoaded {
+            tag: newer,
+            result: Ok(two_tags()),
+        });
+        assert!(!state.branches.tags.loaded);
+    }
+
+    #[test]
+    fn t_then_a_name_tags_the_commit_selected_when_t_was_pressed() {
+        let mut state = on_commit();
+        assert_eq!(press_char(&mut state, 't'), vec![]);
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagName,
+                ..
+            }]
+        ));
+        assert_eq!(state.prompt_title(PromptKind::TagName), "New tag on c1");
+        // The selection moves while the user types.
+        state.commits.selected = 2;
+        type_text(&mut state, " v1.0 ");
+        let effects = press(&mut state, KeyCode::Enter);
+        let (_, op) = op_of(&effects);
+        assert_eq!(
+            op,
+            GitOp::CreateTag {
+                name: "v1.0".into(),
+                target: cid("c1"),
+                message: None,
+            }
+        );
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending_tag, None);
+    }
+
+    #[test]
+    fn shift_t_asks_a_name_then_a_message_and_refuses_an_empty_one() {
+        let mut state = on_commit();
+        shift(&mut state, 'T');
+        type_text(&mut state, "v2\n");
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state.prompt_title(PromptKind::TagMessage),
+            "Message of tag v2"
+        );
+        type_text(&mut state, "  ");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("An annotated tag needs a message"));
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                ..
+            }]
+        ));
+        press(&mut state, KeyCode::Backspace);
+        press(&mut state, KeyCode::Backspace);
+        type_text(&mut state, "-m Release two");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::CreateTag {
+                name: "v2".into(),
+                target: cid("c1"),
+                message: Some("-m Release two".into()),
+            }
+        );
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending_tag, None);
+    }
+
+    #[test]
+    fn an_invalid_tag_name_keeps_the_prompt_open_with_the_reason() {
+        let mut state = on_commit();
+        press_char(&mut state, 't');
+        for (bad, reason) in [
+            ("-x", "A tag name cannot start with -"),
+            ("a..b", "A tag name cannot contain .. or @{"),
+            ("HEAD", "A tag cannot be called @ or HEAD"),
+        ] {
+            type_text(&mut state, bad);
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{bad}");
+            assert_eq!(state.notice, Some(reason), "{bad}");
+            match state.popups.as_slice() {
+                [Popup::Prompt { kind, input }] => {
+                    assert_eq!(*kind, PromptKind::TagName);
+                    assert_eq!(input.text, bad, "the text stays to fix");
+                }
+                other => panic!("expected the prompt kept open, got {other:?}"),
+            }
+            for _ in bad.chars() {
+                press(&mut state, KeyCode::Backspace);
+            }
+        }
+        assert!(state.branches.pending_tag.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.branches.pending_tag, None);
+        assert_eq!(state.update(AppIntent::TagNamed("v1".into())), vec![]);
+    }
+
+    #[test]
+    fn a_tag_answer_waits_for_a_running_op_and_no_commit_opens_nothing() {
+        let mut state = on_commit();
+        press_char(&mut state, 't');
+        state.op_seq = Some(99);
+        type_text(&mut state, "v1");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING));
+
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        assert_eq!(state.update(AppIntent::NewTag), vec![]);
+        assert_eq!(state.notice, Some("No commit"));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn d_asks_and_only_y_deletes_the_tag_as_listed() {
+        let mut state = on_tags();
+        press_char(&mut state, 'd');
+        assert_eq!(state.key_focus(), KeyScope::DeleteTag);
+        let expected = GitOp::DeleteTag {
+            name: "v2".into(),
+            oid: "b".repeat(40),
+        };
+        match state.popups.as_slice() {
+            [Popup::DeleteTag(confirm)] => {
+                assert_eq!(confirm.name, "v2");
+                assert_eq!(confirm.op, expected);
+            }
+            other => panic!("expected the question, got {other:?}"),
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1, "enter does not answer");
+        // A reload under the question cannot change what it deletes.
+        reload_tags(&mut state, vec![tag_ref("v9", 'c')]);
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, expected);
+        assert_eq!(state.popups, []);
+        // The lists, tags among them, reload once it is done.
+        tags_tag(&state.update(finished(tag, op, Ok(()))));
+
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_tags();
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.popups, [], "{key:?}");
+            assert_eq!(state.update(AppIntent::ConfirmDeleteTag), vec![]);
+        }
+    }
+
+    #[test]
+    fn shift_p_pushes_the_selected_tag_to_the_upstreams_remote() {
+        let mut state = remote_ready();
+        state.branches.branches[0].upstream = Some("origin/main".into());
+        reload_remotes(
+            &mut state,
+            vec![
+                git_remote("fork", true, &[]),
+                git_remote("origin", true, &["main"]),
+            ],
+        );
+        reload_tags(&mut state, two_tags());
+        state.busy = 0;
+        press_char(&mut state, ']');
+        press_char(&mut state, ']');
+        let (tag, op) = remote_of(&shift(&mut state, 'P'));
+        assert_eq!(
+            op,
+            RemoteOp::PushTag {
+                remote: "origin".into(),
+                tag: "v2".into(),
+            }
+        );
+        assert_eq!(state.remote.as_ref().map(|r| &r.op), Some(&op));
+        let effects = state.update(remote_finished(tag, op, Ok(())));
+        tags_tag(&effects);
+
+        // Two remotes and no upstream: nothing to choose from.
+        state.branches.branches[0].upstream = None;
+        assert_eq!(shift(&mut state, 'P'), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("Several remotes and no upstream to choose from")
+        );
+        assert_eq!(state.remote, None);
     }
 }

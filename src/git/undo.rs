@@ -133,6 +133,17 @@ impl Logical<'_> {
 
 /// Plan the step that undoes or redoes the last action.
 pub fn plan(direction: Direction, reflog: &Reflog, ctx: &Context) -> Result<Plan, String> {
+    // A symbolic `HEAD` on a remote-tracking ref or a tag would move that
+    // ref, while the preview could only call it a detached `HEAD`.
+    if let Some(head_ref) = &reflog.head_ref
+        && !head_ref.starts_with(b"refs/heads/")
+    {
+        return Err(format!(
+            "HEAD is on {}, not a branch; nothing is {}",
+            elide(&terminal_safe(head_ref).replace('\n', " ")),
+            direction.done()
+        ));
+    }
     let actions = fold(&reflog.entries);
     let target = match direction {
         Direction::Undo => undo_target(&actions).ok_or("Nothing to undo")?,
@@ -628,6 +639,27 @@ mod tests {
         log.branch_entries[0].message =
             format!("rebase (finish): refs/heads/x onto {}", id('c')).into_bytes();
         assert_eq!(undo(&log, &ctx(Some("topic"), &topic)), refused);
+    }
+
+    #[test]
+    fn a_head_on_a_ref_outside_refs_heads_is_refused_by_name() {
+        let main = branches(&["main"]);
+        for (direction, done) in [(Direction::Undo, "undone"), (Direction::Redo, "redone")] {
+            let mut log = reflog(&[COMMIT], 'c');
+            log.head_ref = Some(b"refs/remotes/origin/main".to_vec());
+            assert_eq!(
+                plan(direction, &log, &ctx(None, &main)),
+                Err(format!(
+                    "HEAD is on refs/remotes/origin/main, not a branch; nothing is {done}"
+                ))
+            );
+            log.head_ref = Some(b"refs/tags/v\x1b[2J1".to_vec());
+            let refused = plan(direction, &log, &ctx(None, &main)).unwrap_err();
+            assert!(!refused.contains(char::is_control), "{refused:?}");
+        }
+        let mut log = reflog(&[COMMIT], 'c');
+        log.head_ref = Some(b"refs/heads/main".to_vec());
+        assert!(undo(&log, &ctx(Some("main"), &main)).is_ok());
     }
 
     #[test]
