@@ -112,12 +112,14 @@ async fn c_commits_the_staged_file_with_the_typed_message() {
     app.assert_screen_contains("No changes");
 }
 
+/// A hook may ask the user something, so the commit runs on the terminal;
+/// what it printed went there, and the popup says so.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
+async fn a_failing_pre_commit_hook_runs_on_the_terminal_and_commits_nothing() {
     let repo = modified_repo()
         .stage("a.txt")
-        .hook("pre-commit", "#!/bin/sh\necho 'lint failed'\nexit 1\n");
+        .hook("pre-commit", "#!/bin/sh\ntouch .git/ran\nexit 1\n");
     let head = repo.head();
     let mut app = Harness::start(&repo).await;
 
@@ -126,8 +128,9 @@ async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
+    assert!(repo.exists(".git/ran"));
     app.assert_screen_contains(" Commit failed ");
-    app.assert_screen_contains("lint failed");
+    app.assert_screen_contains("git commit exited with status 1");
     assert_eq!(repo.head(), head);
     assert_eq!(repo.staged(), ["a.txt"]);
 
@@ -136,23 +139,26 @@ async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
     app.assert_screen_contains("Try this");
 }
 
+/// Skipped hooks cannot ask anything, so the commit runs detached and the
+/// failing commit-msg hook never runs.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_commit_msg_hook_shows_its_output_and_commits_nothing() {
+async fn with_hooks_skipped_a_commit_msg_hook_does_not_stop_the_commit() {
     let repo = modified_repo()
         .stage("a.txt")
-        .hook("commit-msg", "#!/bin/sh\necho 'bad message' >&2\nexit 1\n");
-    let head = repo.head();
+        .hook("commit-msg", "#!/bin/sh\ntouch .git/ran\nexit 1\n");
     let mut app = Harness::start(&repo).await;
 
     app.press(KeyCode::Char('c')).await;
+    app.press_with(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        .await;
     app.type_text("wip").await;
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
-    app.assert_screen_contains("bad message");
-    assert_eq!(repo.head(), head);
-    assert_eq!(repo.staged(), ["a.txt"]);
+    assert!(!repo.exists(".git/ran"));
+    assert_eq!(repo.head_message(), "wip\n\n");
+    assert!(repo.staged().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,44 +197,6 @@ async fn cancelling_the_commit_leaves_the_index_untouched() {
     assert!(repo.staged().is_empty());
     assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
     assert!(!app.state().should_quit);
-}
-
-/// A hook that waits forever must not trap the user: Ctrl+C quits, and git
-/// and the hook are stopped without leaving `index.lock` behind.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn ctrl_c_while_a_hook_hangs_quits_and_stops_git_cleanly() {
-    use std::time::{Duration, Instant};
-
-    let repo = modified_repo()
-        .stage("a.txt")
-        .hook("pre-commit", "#!/bin/sh\ntouch .git/started\nsleep 30\n");
-    let head = repo.head();
-    let mut app = Harness::start(&repo).await;
-
-    app.press(KeyCode::Char('c')).await;
-    app.type_text("Stuck").await;
-    app.send(KeyCode::Char('s'), KeyModifiers::CONTROL);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !repo.exists(".git/started") {
-        assert!(Instant::now() < deadline, "the hook never started");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    app.assert_screen_contains("ctrl-c quits Kika");
-
-    let start = Instant::now();
-    app.send(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(app.state().should_quit);
-    app.settle().await;
-
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        start.elapsed()
-    );
-    assert!(!repo.exists(".git/index.lock"));
-    assert_eq!(repo.head(), head);
-    assert_eq!(repo.staged(), ["a.txt"]);
 }
 
 /// One commit on branch `main`, whatever the default branch name is.

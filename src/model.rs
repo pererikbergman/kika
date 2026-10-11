@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::CommitEditor;
 use crate::config::ConfigError;
-use crate::custom_command::{CustomCommand, OutputMode, Target};
+use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
@@ -17,6 +17,7 @@ use crate::git::diff::{
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
+use crate::git::prompts::{PromptFacts, needs_terminal};
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
@@ -181,6 +182,8 @@ pub struct AppState {
     /// Sequence of the Git operation in flight. Operations run one at a
     /// time so two quick presses never race for `index.lock`.
     pub op_seq: Option<u64>,
+    /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
+    pub commit_on_terminal: bool,
     /// The last operation's failure, or why one was refused.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
@@ -254,6 +257,7 @@ impl AppState {
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
             op_seq: None,
+            commit_on_terminal: false,
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
@@ -506,6 +510,9 @@ impl AppState {
                     other => other,
                 };
             }
+            AppIntent::CommitProbed { tag, op, facts } => {
+                return self.commit_probed(tag, op, facts);
+            }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
             AppIntent::OpenMenu(id) => {
                 if self.context == Context::Workspace {
@@ -551,6 +558,12 @@ impl AppState {
                 output,
                 result,
             } => return self.command_finished(&title, output, result),
+            AppIntent::CancelCommand => {
+                // The flag stays set until the command answers.
+                if self.command_running {
+                    return vec![Effect::CancelCommand];
+                }
+            }
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
@@ -674,9 +687,13 @@ impl AppState {
     fn scroll_help(&mut self, by: Scroll) {
         let rows = self.pane_rows();
         let focus = self.panel_focus();
-        // As help lists them: the built-in keys, then the user's commands.
+        // As help lists them: the built-in keys, then a rule and the
+        // user's commands, if there are any.
+        let commands = keymap::available_commands(&self.keymap, focus).len();
+        let rule = usize::from(commands > 0);
         let total = keymap::available(keymap::registry(), &self.keymap, focus, self).len()
-            + keymap::available_commands(&self.keymap, focus).len();
+            + rule
+            + commands;
         let scroll = match by {
             Scroll::LineDown => self.help_scroll.saturating_add(1),
             Scroll::LineUp => self.help_scroll.saturating_sub(1),
@@ -1270,23 +1287,30 @@ impl AppState {
     }
 
     /// Show what the command printed or why it failed, then reload: it
-    /// may have changed the repository.
+    /// may have changed the repository. Only a command that could not run
+    /// points at the config file.
     fn command_finished(
         &mut self,
         title: &str,
         output: OutputMode,
-        result: Result<String, String>,
+        result: Result<String, CommandFailure>,
     ) -> Vec<Effect> {
         if output != OutputMode::Terminal && self.command_running {
             self.command_running = false;
             self.busy = self.busy.saturating_sub(1);
         }
         match result {
-            Err(message) => self.push_error(ErrorPopup::new(
+            Err(CommandFailure::Launch(message)) => self.push_error(ErrorPopup::new(
                 format!("{title} failed"),
                 &message,
                 "Check the command in your config file, then try again.",
             )),
+            Err(CommandFailure::Exited(message)) => self.push_error(ErrorPopup::new(
+                format!("{title} failed"),
+                &message,
+                "Press Esc to close",
+            )),
+            Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled"),
             Ok(text) if output == OutputMode::Popup => {
                 let text = if text.is_empty() {
                     "(no output)"
@@ -1700,6 +1724,16 @@ impl AppState {
     /// Run the operation a stage key chose. Only one runs at a time, and
     /// only on the local workspace.
     fn start_op(&mut self, op: Result<Option<GitOp>, String>) -> Vec<Effect> {
+        self.start_op_as(op, |tag, op| Effect::RunOp { tag, op })
+    }
+
+    /// [`Self::start_op`], with `effect` saying what work starts it: a
+    /// commit is probed first, everything else runs at once.
+    fn start_op_as(
+        &mut self,
+        op: Result<Option<GitOp>, String>,
+        effect: fn(Tag, GitOp) -> Effect,
+    ) -> Vec<Effect> {
         if self.context != Context::Workspace || self.op_seq.is_some() {
             return vec![];
         }
@@ -1720,7 +1754,7 @@ impl AppState {
             seq,
             user: true,
         };
-        vec![Effect::RunOp { tag, op }]
+        vec![effect(tag, op)]
     }
 
     /// Open the commit popup: straight to the editor when something is
@@ -1802,11 +1836,35 @@ impl AppState {
             amend: editor.amend.is_some(),
             no_verify: editor.no_verify,
         };
-        let effects = self.start_op(Ok(Some(op)));
+        // Whether it needs the terminal is read first; see `commit_probed`.
+        let effects = self.start_op_as(Ok(Some(op)), |tag, op| Effect::ProbeCommit { tag, op });
         if !effects.is_empty() {
             self.commit = CommitFlow::Running(editor);
         }
         effects
+    }
+
+    /// Run the probed commit on the terminal when it may ask something,
+    /// else detached. `busy` and `op_seq` stay as they are until
+    /// `OpFinished`; a probe for another repository or op ends the commit
+    /// here, giving the message back.
+    fn commit_probed(&mut self, tag: Tag, op: GitOp, facts: Option<PromptFacts>) -> Vec<Effect> {
+        if tag.generation != self.generation || self.op_seq != Some(tag.seq) {
+            if tag.user {
+                self.busy = self.busy.saturating_sub(1);
+            }
+            if self.op_seq == Some(tag.seq) {
+                self.op_seq = None;
+            }
+            self.end_commit(None);
+            return vec![];
+        }
+        if needs_terminal(&op, facts.as_ref()) {
+            self.commit_on_terminal = true;
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        } else {
+            vec![Effect::RunOp { tag, op }]
+        }
     }
 
     /// Back from writing the message in the editor: commit it as written,
@@ -1902,6 +1960,7 @@ impl AppState {
     /// Leave `Running`: closed on success, `Failed` with the output on
     /// failure, back to `Editing` when there is no result to show.
     fn end_commit(&mut self, result: Option<Result<(), String>>) {
+        self.commit_on_terminal = false;
         let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
         let CommitFlow::Running(editor) = commit else {
             self.commit = commit;
@@ -3226,6 +3285,14 @@ mod tests {
         }
     }
 
+    /// The commit a submit asked to probe before running it.
+    fn probe_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [Effect::ProbeCommit { tag, op }] => (*tag, op.clone()),
+            other => panic!("expected one ProbeCommit, got {other:?}"),
+        }
+    }
+
     fn select_path(state: &mut AppState, path: &str) {
         while state.files[state.selected.unwrap()].path != path.into() {
             state.update(AppIntent::SelectNext);
@@ -3471,7 +3538,7 @@ mod tests {
         let busy = state.busy;
         type_text(&mut state, "subj\nline 1\nline 2");
 
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
 
         assert_eq!(
             op,
@@ -3509,7 +3576,7 @@ mod tests {
         press(&mut state, KeyCode::Char('y'));
         assert!(editor(&state).stage_all);
         type_text(&mut state, "all");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3665,7 +3732,7 @@ mod tests {
     fn submitted() -> (AppState, Tag, GitOp) {
         let mut state = editing();
         type_text(&mut state, "subj\nbody");
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
         (state, tag, op)
     }
 
@@ -3741,6 +3808,128 @@ mod tests {
         assert_eq!(editor(&state).subject, "subj");
     }
 
+    fn probed(tag: Tag, op: &GitOp, facts: Option<PromptFacts>) -> AppIntent {
+        AppIntent::CommitProbed {
+            tag,
+            op: op.clone(),
+            facts,
+        }
+    }
+
+    fn signing() -> Option<PromptFacts> {
+        Some(PromptFacts {
+            signs: true,
+            hooks: vec![],
+        })
+    }
+
+    /// Commits as each way of submitting makes them: typed, amended with
+    /// HEAD's message, with hooks skipped, and from the editor.
+    fn submissions() -> Vec<(AppState, Tag, GitOp)> {
+        let mut amend = amending();
+        let (tag, op) = probe_of(&ctrl(&mut amend, 's'));
+        let amended = (amend, tag, op);
+
+        let mut skip = editing();
+        ctrl(&mut skip, 'n');
+        type_text(&mut skip, "subj");
+        let (tag, op) = probe_of(&ctrl(&mut skip, 's'));
+        let skipped = (skip, tag, op);
+
+        let mut edited = editing();
+        let effects = edited.update(AppIntent::CommitMessageEdited {
+            result: Ok(Some("x\n".into())),
+        });
+        let (tag, op) = probe_of(&effects);
+        let from_editor = (edited, tag, op);
+
+        vec![submitted(), amended, skipped, from_editor]
+    }
+
+    #[test]
+    fn a_submitted_commit_is_probed_once_and_counts_as_running() {
+        for (state, tag, op) in submissions() {
+            assert!(matches!(op, GitOp::Commit { .. }), "{op:?}");
+            assert!(tag.user);
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn a_commit_that_signs_is_handed_the_terminal() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(
+                effects,
+                vec![Effect::HandOff(HandOff::Commit {
+                    tag,
+                    op: op.clone()
+                })]
+            );
+            assert_eq!(state.busy, busy, "OpFinished still settles busy");
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn only_a_handed_over_commit_is_marked_as_on_the_terminal_until_it_ends() {
+        let (mut state, tag, op) = submitted();
+        assert!(!state.commit_on_terminal);
+        state.update(probed(tag, &op, signing()));
+        assert!(state.commit_on_terminal);
+        state.update(finished(tag, op, Err("no".into())));
+        assert!(!state.commit_on_terminal);
+
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, Some(PromptFacts::default())));
+        assert!(!state.commit_on_terminal);
+    }
+
+    #[test]
+    fn a_commit_with_no_signing_and_no_hooks_runs_detached() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, Some(PromptFacts::default())));
+            assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
+            assert_eq!(state.busy, busy);
+            assert_eq!(state.op_seq, Some(tag.seq));
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_hands_the_terminal_over() {
+        let (mut state, tag, op) = submitted();
+        assert_eq!(
+            state.update(probed(tag, &op, None)),
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        );
+    }
+
+    #[test]
+    fn a_handed_over_commit_ends_like_a_detached_one() {
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, signing()));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.op_seq, None);
+        assert!(!effects.is_empty(), "the status is reloaded");
+    }
+
+    #[test]
+    fn a_stale_probe_gives_the_message_back_and_frees_the_slot() {
+        for (mut state, tag, op) in submissions() {
+            state.generation += 1;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.busy, 0);
+            assert_eq!(state.op_seq, None);
+            editor(&state);
+        }
+    }
+
     fn head_load(effects: &[Effect]) -> Tag {
         match effects {
             [Effect::LoadHeadMessage { tag }] => *tag,
@@ -3790,7 +3979,7 @@ mod tests {
     #[test]
     fn an_untouched_amend_keeps_heads_message() {
         let mut state = amending();
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3807,7 +3996,7 @@ mod tests {
     fn an_edited_amend_commits_the_new_message() {
         let mut state = amending();
         type_text(&mut state, "!");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3912,7 +4101,7 @@ mod tests {
         assert!(!editor(&state).no_verify);
         ctrl(&mut state, 'n');
         type_text(&mut state, "subj");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert!(
             matches!(
                 op,
@@ -3959,7 +4148,7 @@ mod tests {
         let effects = state.update(AppIntent::CommitMessageEdited {
             result: Ok(Some("x\n\ny\n".into())),
         });
-        let (tag, op) = op_of(&effects);
+        let (tag, op) = probe_of(&effects);
         assert_eq!(
             op,
             GitOp::Commit {
@@ -7564,7 +7753,7 @@ mod tests {
 
     // --- Custom commands ---
 
-    use crate::custom_command::{CommandTable, Panel, test_table};
+    use crate::custom_command::{CommandFailure, CommandTable, Panel, test_table};
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
@@ -7814,12 +8003,16 @@ mod tests {
         assert!(state.popups.is_empty());
     }
 
-    fn command_finished(output: OutputMode, result: Result<&str, &str>) -> AppIntent {
+    fn command_finished(output: OutputMode, result: Result<&str, CommandFailure>) -> AppIntent {
         AppIntent::CommandFinished {
             title: "Show it".into(),
             output,
-            result: result.map(String::from).map_err(String::from),
+            result: result.map(String::from),
         }
+    }
+
+    fn exited(text: &str) -> CommandFailure {
+        CommandFailure::Exited(text.into())
     }
 
     fn is_status_load(effects: &[Effect]) -> bool {
@@ -7860,23 +8053,89 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_command_says_so_and_still_reloads() {
+    fn a_command_that_exited_non_zero_says_so_and_still_reloads() {
         let mut state = hostile_file();
         for output in [OutputMode::None, OutputMode::Popup, OutputMode::Terminal] {
             state.popups.clear();
             let effects = state.update(command_finished(
                 output,
-                Err("exited with exit status: 3\nno"),
+                Err(exited("exited with exit status: 3\nno")),
             ));
             assert!(is_status_load(&effects), "{effects:?}");
             match state.popups.as_slice() {
                 [Popup::Error(popup)] => {
                     assert_eq!(popup.title, "Show it failed");
                     assert_eq!(popup.message, "exited with exit status: 3\nno");
+                    // It ran as configured: the config is not to blame.
+                    assert_eq!(popup.next, "Press Esc to close");
                 }
                 other => panic!("expected the failure popup, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_command_that_could_not_launch_points_at_the_config() {
+        let mut state = hostile_file();
+        let effects = state.update(command_finished(
+            OutputMode::None,
+            Err(CommandFailure::Launch(
+                "Could not start nope: not found".into(),
+            )),
+        ));
+        assert!(is_status_load(&effects), "{effects:?}");
+        match state.popups.as_slice() {
+            [Popup::Error(popup)] => {
+                assert_eq!(popup.title, "Show it failed");
+                assert_eq!(popup.message, "Could not start nope: not found");
+                assert_eq!(
+                    popup.next,
+                    "Check the command in your config file, then try again."
+                );
+            }
+            other => panic!("expected the failure popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cancel_key_stops_only_a_running_command() {
+        let mut state = hostile_file();
+        assert_eq!(state.update(AppIntent::CancelCommand), []);
+
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        assert_eq!(
+            state.update(AppIntent::CancelCommand),
+            [Effect::CancelCommand]
+        );
+        // Still running until the command answers.
+        assert!(state.command_running);
+    }
+
+    #[test]
+    fn a_cancelled_command_says_so_without_a_popup_and_reloads() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        let busy = state.busy;
+
+        let effects = state.update(command_finished(
+            OutputMode::Popup,
+            Err(CommandFailure::Cancelled),
+        ));
+
+        assert!(is_status_load(&effects), "{effects:?}");
+        assert!(!state.command_running);
+        // One down for the command, one up for the reload.
+        assert_eq!(state.busy, busy);
+        assert!(state.popups.is_empty(), "{:?}", state.popups);
+        assert_eq!(state.notice, Some("Command cancelled"));
     }
 
     #[test]

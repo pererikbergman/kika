@@ -4,13 +4,14 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
 use crate::config::ConfigError;
-use crate::custom_command::OutputMode;
+use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
+use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
@@ -138,6 +139,13 @@ pub enum AppIntent {
     /// to commit, `None` if the user emptied it.
     CommitMessageEdited {
         result: Result<Option<String>, String>,
+    },
+    /// The config and hooks a commit depends on were read; `facts` is
+    /// `None` when they could not be. Decides where the commit runs.
+    CommitProbed {
+        tag: Tag,
+        op: GitOp,
+        facts: Option<PromptFacts>,
     },
     /// A Git operation finished, successfully or not.
     OpFinished {
@@ -267,13 +275,15 @@ pub enum AppIntent {
     /// The answer to a custom command's current prompt.
     CommandPromptAnswered(String),
     /// A custom command finished. `Ok` holds the captured output, empty
-    /// unless `output` is `Popup`; `Err` why it could not start, or its
-    /// exit status followed by its output. Both are terminal-safe.
+    /// unless `output` is `Popup`; `Err` says how it failed. Text is
+    /// terminal-safe.
     CommandFinished {
         title: String,
         output: OutputMode,
-        result: Result<String, String>,
+        result: Result<String, CommandFailure>,
     },
+    /// Stop the captured command that is running, if one is.
+    CancelCommand,
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

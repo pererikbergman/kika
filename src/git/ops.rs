@@ -1,6 +1,8 @@
 //! Mutations of the index and history. Each is a [`GitOp`] so the reducer can
 //! name the work, and the refresh planner can say what it invalidates.
 
+use std::path::Path;
+
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
@@ -18,11 +20,11 @@ pub enum GitOp {
     /// signing and cleanup config apply exactly as on the command line.
     /// With `stage_all`, everything is staged first, at submit time.
     ///
-    /// Git runs without the terminal while Kika holds the screen, so signing
-    /// and hooks that need no terminal work (ssh-agent, gpg-agent with a
-    /// cached passphrase or a GUI pinentry), but a terminal pinentry is not
-    /// supported: it fails, or blocks and shows as "Committing…" until git
-    /// exits or Ctrl+C quits Kika, which stops git and its hooks.
+    /// When signing is configured or a hook would run, Kika hands the
+    /// terminal over and git runs on it, so a terminal pinentry, a key
+    /// passphrase or a hook that asks a question works (see
+    /// `git::prompts`). Otherwise git runs detached, with the message on
+    /// stdin.
     ///
     /// With `amend`, the staged changes are folded into `HEAD` instead; a
     /// `None` message keeps `HEAD`'s, and is only valid with `amend`. With
@@ -181,20 +183,31 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             no_verify,
             ..
         } => {
-            let cmd = GitCommand::new("commit");
-            let cmd = if *amend { cmd.arg("--amend") } else { cmd };
-            let cmd = if *no_verify {
-                cmd.arg("--no-verify")
-            } else {
-                cmd
-            };
             return match message {
-                Some(message) => cmd.arg("-F").arg("-").stdin(message.clone().into_bytes()),
-                None => cmd.arg("--no-edit"),
+                Some(message) => commit_command(*amend, *no_verify, Some(Path::new("-")))
+                    .stdin(message.clone().into_bytes()),
+                None => commit_command(*amend, *no_verify, None),
             };
         }
     };
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
+}
+
+/// `git commit` taking its message from `message_file` (`-` is stdin), or
+/// keeping `HEAD`'s with none. Shared by the detached run and the one on
+/// the terminal, whose stdin is the user's, so the two differ only there.
+pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>) -> GitCommand {
+    let cmd = GitCommand::new("commit");
+    let cmd = if amend { cmd.arg("--amend") } else { cmd };
+    let cmd = if no_verify {
+        cmd.arg("--no-verify")
+    } else {
+        cmd
+    };
+    match message_file {
+        Some(file) => cmd.arg("-F").arg(file),
+        None => cmd.arg("--no-edit"),
+    }
 }
 
 /// Run `op`. Failures carry git's message, made safe to draw since it can
