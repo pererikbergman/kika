@@ -1160,3 +1160,80 @@ async fn a_commit_made_outside_is_noticed_by_the_refs_poll() {
 
     assert!(app.state().files.is_empty());
 }
+
+/// Every local branch's name, as git lists them.
+fn branch_names(repo: &TestRepo) -> Vec<String> {
+    String::from_utf8(repo.git(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn current_branch(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["symbolic-ref", "--short", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_in_the_branches_panel_checks_out_the_selected_branch() {
+    let repo = on_main();
+    repo.git(["branch", "side"]);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.assert_screen_contains("* main");
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("[0] Commits · side");
+    app.press(KeyCode::Char(' ')).await;
+
+    assert_eq!(current_branch(&repo), "side");
+    app.assert_screen_contains("* side");
+    // The Status panel follows, collapsed to its branch row.
+    let status = app.screen()[1].clone();
+    assert!(status.contains("│side "), "{status:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn n_creates_a_branch_from_the_selection_and_checks_it_out() {
+    let repo = on_main();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('n')).await;
+    app.assert_screen_contains("New branch from main");
+    app.type_text("fresh\n").await;
+
+    assert_eq!(current_branch(&repo), "fresh");
+    assert_eq!(branch_names(&repo), ["fresh", "main"]);
+    app.assert_screen_contains("* fresh");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn d_then_shift_d_force_deletes_an_unmerged_branch() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "wip"]);
+    let repo = repo.write("b.txt", "wip\n").commit("wip work");
+    repo.git(["checkout", "-q", "main"]);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("wip is not fully merged; its commits may be lost.");
+    // `y` does not answer this question.
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(branch_names(&repo), ["main", "wip"]);
+    app.press_with(KeyCode::Char('D'), KeyModifiers::SHIFT)
+        .await;
+
+    assert_eq!(branch_names(&repo), ["main"]);
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("wip")),
+        "{}",
+        screen.join("\n")
+    );
+}

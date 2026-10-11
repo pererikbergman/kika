@@ -42,6 +42,8 @@ pub struct WatchState {
     pub refs: Option<RefsSnapshot>,
     pub refs_pending: bool,
     pub status_pending: bool,
+    /// The branch list, or the log loaded after it, is on its way.
+    pub branches_pending: bool,
     pub fetch_pending: bool,
     /// Whether the user opted in to auto-fetch; off unless they did.
     pub fetch_enabled: bool,
@@ -53,6 +55,7 @@ impl Default for WatchState {
             refs: None,
             refs_pending: false,
             status_pending: false,
+            branches_pending: false,
             fetch_pending: false,
             fetch_enabled: DEFAULT_WATCH.fetch.is_some(),
         }
@@ -81,7 +84,7 @@ impl WatchState {
     /// Whether any background load has yet to report; tests wait on it.
     #[cfg(test)]
     pub fn is_pending(&self) -> bool {
-        self.refs_pending || self.status_pending || self.fetch_pending
+        self.refs_pending || self.status_pending || self.branches_pending || self.fetch_pending
     }
 }
 

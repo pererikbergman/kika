@@ -50,7 +50,7 @@ pub fn path_from_stdout(stdout: &[u8]) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn os_string(bytes: &[u8]) -> OsString {
+pub(crate) fn os_string(bytes: &[u8]) -> OsString {
     use std::os::unix::ffi::OsStringExt;
     OsString::from_vec(bytes.to_vec())
 }
@@ -58,7 +58,7 @@ fn os_string(bytes: &[u8]) -> OsString {
 /// Elsewhere an `OsString` cannot hold arbitrary bytes; git for those
 /// platforms reports names as UTF-8 anyway.
 #[cfg(not(unix))]
-fn os_string(bytes: &[u8]) -> OsString {
+pub(crate) fn os_string(bytes: &[u8]) -> OsString {
     String::from_utf8_lossy(bytes).into_owned().into()
 }
 

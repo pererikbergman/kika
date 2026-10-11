@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use super::branches::BranchName;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
@@ -66,6 +67,24 @@ pub enum GitOp {
     /// Clone the submodule if needed and check out the commit the parent
     /// records, initializing it first.
     SubmoduleUpdate(RepoPath),
+    /// Switch to this local branch. Git refuses when it would overwrite
+    /// changes in the worktree, so no work is lost.
+    Checkout(BranchName),
+    /// Make branch `name` at `from` and switch to it, the usual next step.
+    CreateBranch {
+        name: String,
+        from: BranchName,
+    },
+    RenameBranch {
+        from: BranchName,
+        to: String,
+    },
+    /// Delete a local branch. Without `force`, git refuses when its
+    /// commits are not merged; the user confirms `force` separately.
+    DeleteBranch {
+        name: BranchName,
+        force: bool,
+    },
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -177,6 +196,38 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             std::slice::from_ref(path),
         )
         .env("GIT_TERMINAL_PROMPT", "0"),
+        // A short name, since a full ref would detach `HEAD`; `--` keeps
+        // it from being read as a path. A ref made outside git's porcelain
+        // can be named like an option, such as `-f`, which would force the
+        // checkout and lose the worktree's changes; `--end-of-options`
+        // keeps it a name. Only then: it needs git 2.24, newer than Kika
+        // requires, and an older git fails on it without touching anything.
+        GitOp::Checkout(name) => {
+            let cmd = GitCommand::new("checkout").arg("-q");
+            let cmd = if name.0.starts_with(b"-") {
+                cmd.arg("--end-of-options")
+            } else {
+                cmd
+            };
+            cmd.arg(name.as_os_string()).arg("--")
+        }
+        // The start point as a full ref, so a tag of the same name, or a
+        // name like an option, cannot stand in for it.
+        GitOp::CreateBranch { name, from } => GitCommand::new("checkout")
+            .arg("-q")
+            .arg("-b")
+            .arg(name)
+            .arg(from.full_ref())
+            .arg("--"),
+        GitOp::RenameBranch { from, to } => GitCommand::new("branch")
+            .arg("-m")
+            .arg("--")
+            .arg(from.as_os_string())
+            .arg(to),
+        GitOp::DeleteBranch { name, force } => GitCommand::new("branch")
+            .arg(if *force { "-D" } else { "-d" })
+            .arg("--")
+            .arg(name.as_os_string()),
         GitOp::Commit {
             message,
             amend,
@@ -368,6 +419,189 @@ mod tests {
             GitOp::toggle_all(&files),
             Err("Resolve conflicts before staging everything".into())
         );
+    }
+
+    #[test]
+    fn branch_ops_issue_exact_argv_with_the_separator_and_full_refs() {
+        let cases: [(GitOp, &[&str]); 7] = [
+            (
+                GitOp::Checkout("feature".into()),
+                &["checkout", "-q", "feature", "--"],
+            ),
+            // A ref made outside git's porcelain can look like an option;
+            // it must stay a branch name, never become `-f`.
+            (
+                GitOp::Checkout("-f".into()),
+                &["checkout", "-q", "--end-of-options", "-f", "--"],
+            ),
+            (
+                GitOp::Checkout("--force".into()),
+                &["checkout", "-q", "--end-of-options", "--force", "--"],
+            ),
+            (
+                GitOp::CreateBranch {
+                    name: "new".into(),
+                    from: "feature".into(),
+                },
+                &["checkout", "-q", "-b", "new", "refs/heads/feature", "--"],
+            ),
+            (
+                GitOp::RenameBranch {
+                    from: "-old".into(),
+                    to: "fresh".into(),
+                },
+                &["branch", "-m", "--", "-old", "fresh"],
+            ),
+            (
+                GitOp::DeleteBranch {
+                    name: "done".into(),
+                    force: false,
+                },
+                &["branch", "-d", "--", "done"],
+            ),
+            (
+                GitOp::DeleteBranch {
+                    name: "done".into(),
+                    force: true,
+                },
+                &["branch", "-D", "--", "done"],
+            ),
+        ];
+        for (op, argv) in cases {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn branch_ops_put_the_raw_bytes_of_a_name_in_argv() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = crate::git::branches::BranchName::from_bytes(b"x\xff");
+        let create = op_command(&GitOp::CreateBranch {
+            name: "new".into(),
+            from: raw.clone(),
+        });
+        assert_eq!(create.args()[4].as_bytes(), b"refs/heads/x\xff");
+        let delete = op_command(&GitOp::DeleteBranch {
+            name: raw,
+            force: true,
+        });
+        assert_eq!(delete.args()[3].as_bytes(), b"x\xff");
+    }
+
+    /// A repo on `main` with `a.txt` committed and then changed in the
+    /// worktree, so a forced checkout would lose the change.
+    fn dirty_repo() -> crate::git::fake::TempDir {
+        let tmp = crate::git::fake::TempDir::new("branch-dash");
+        let dir = tmp.path();
+        crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        crate::git::fake::git(dir, &["add", "-A"]);
+        crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn checking_out_a_branch_named_like_an_option_keeps_the_worktree_in_real_git() {
+        let tmp = dirty_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        // `git branch` refuses such names; plumbing does not.
+        crate::git::fake::git(dir, &["update-ref", "refs/heads/-f", "HEAD"]);
+        crate::git::fake::git(dir, &["update-ref", "refs/heads/--force", "HEAD"]);
+        use crate::git::version::{GitVersion, parse_version};
+        let version = parse_version(&crate::git::fake::git(dir, &["--version"]));
+        // Older git has no `--end-of-options`: the checkout fails instead.
+        let modern = version.is_some_and(|v| {
+            v >= GitVersion {
+                major: 2,
+                minor: 24,
+                patch: 0,
+            }
+        });
+
+        for name in ["-f", "--force"] {
+            let result = run_op(&runner, &GitOp::Checkout(name.into()));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+                "work in progress\n",
+                "{name}: the change survives"
+            );
+            if modern {
+                assert_eq!(result, Ok(()), "{name}");
+                let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+                assert_eq!(head, format!("refs/heads/{name}\n").as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_branch_named_like_an_option_is_refused_by_git_in_real_git() {
+        let tmp = dirty_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        for name in ["-f", "--orphan"] {
+            let create = GitOp::CreateBranch {
+                name: name.into(),
+                from: "main".into(),
+            };
+            assert!(run_op(&runner, &create).is_err(), "{name}");
+            let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+            assert_eq!(head, b"refs/heads/main\n", "{name}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+                "work in progress\n"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_create_rename_and_delete_change_branches_in_real_git() {
+        let tmp = crate::git::fake::TempDir::new("branch-ops");
+        let dir = tmp.path();
+        crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        crate::git::fake::git(dir, &["add", "-A"]);
+        crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+        crate::git::fake::git(dir, &["branch", "side"]);
+        let runner = crate::git::CliRunner::isolated(dir);
+        let head = || {
+            String::from_utf8(crate::git::fake::git(
+                dir,
+                &["symbolic-ref", "--short", "HEAD"],
+            ))
+            .unwrap()
+        };
+        let branches = || {
+            String::from_utf8(crate::git::fake::git(
+                dir,
+                &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+            ))
+            .unwrap()
+        };
+
+        run_op(&runner, &GitOp::Checkout("side".into())).unwrap();
+        assert_eq!(head(), "side\n");
+        let create = GitOp::CreateBranch {
+            name: "made".into(),
+            from: "main".into(),
+        };
+        run_op(&runner, &create).unwrap();
+        assert_eq!(head(), "made\n");
+        let rename = GitOp::RenameBranch {
+            from: "side".into(),
+            to: "renamed".into(),
+        };
+        run_op(&runner, &rename).unwrap();
+        let delete = GitOp::DeleteBranch {
+            name: "renamed".into(),
+            force: false,
+        };
+        run_op(&runner, &delete).unwrap();
+        assert_eq!(branches(), "made\nmain\n");
     }
 
     fn paths(paths: &[&str]) -> Vec<RepoPath> {

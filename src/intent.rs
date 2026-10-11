@@ -8,6 +8,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
+use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
@@ -284,6 +285,37 @@ pub enum AppIntent {
     },
     /// Stop the captured command that is running, if one is.
     CancelCommand,
+    /// The branch list was read; `tag` says which load.
+    BranchesLoaded {
+        tag: Tag,
+        result: Result<Vec<Branch>, String>,
+    },
+    /// `name`'s log was read; `tag` says which load.
+    BranchLogLoaded {
+        tag: Tag,
+        name: BranchName,
+        result: Result<Vec<LogRow>, String>,
+    },
+    /// Move the branch selection down or up.
+    BranchNext,
+    BranchPrev,
+    /// Switch to the selected branch.
+    CheckoutBranch,
+    /// Ask for a name, to make a branch at the selected one.
+    NewBranch,
+    /// Ask for a new name for the selected branch, the old one filled in.
+    RenameBranch,
+    /// Ask before deleting the selected branch.
+    DeleteBranch,
+    /// The new branch's name, typed into the `NewBranch` prompt.
+    CreateBranchNamed(String),
+    /// The new name, typed into the `RenameBranch` prompt.
+    RenameBranchTo(String),
+    /// Delete the branch the open question names: plainly, or with
+    /// `force` when its commits are not merged.
+    ConfirmDeleteBranch {
+        force: bool,
+    },
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {
