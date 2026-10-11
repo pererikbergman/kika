@@ -13,13 +13,14 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
+use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
 use crate::git::GitRunner;
 use crate::handoff::{self, HandOff};
 use crate::intent::AppIntent;
 use crate::model::AppState;
 use crate::view;
-use crate::watch::{DEFAULT_WATCH, WatchConfig, WatchEvent};
+use crate::watch::{WatchConfig, WatchEvent};
 
 /// The main loop: render, wait for the next intent, update, run its effects.
 /// The loop only ever awaits the channel; effects report back as intents.
@@ -29,12 +30,23 @@ pub async fn run(
     mut state: AppState,
     runner: Arc<dyn GitRunner>,
     recent_store: Option<PathBuf>,
+    global_config: Option<PathBuf>,
+    config: Loaded,
 ) -> color_eyre::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let runtime = Runtime::new(Arc::clone(&runner), tx.clone()).with_recent_store(recent_store);
+    let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
+        .with_recent_store(recent_store)
+        .with_global_config(global_config);
     let input = Arc::new(InputGate::default());
-    spawn_watch_timers(tx.clone(), &DEFAULT_WATCH);
+    // Watch settings apply from startup only: the timers are spawned once.
+    spawn_watch_timers(tx.clone(), &config.watch);
     spawn_input_listener(tx, Arc::clone(&input));
+    state.watch.fetch_enabled = config.watch.fetch.is_some();
+    let loaded = AppIntent::ConfigLoaded {
+        keymap: config.keymap,
+        errors: config.errors,
+    };
+    dispatch(&mut state, &runtime, loaded);
 
     let size = terminal.size()?;
     boot(&mut state, &runtime, size.width, size.height);

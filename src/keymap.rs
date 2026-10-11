@@ -1,6 +1,8 @@
 //! Every key Kika understands, declared once. The same records drive
 //! dispatch, the help menu and the bottom bar, so they cannot drift apart.
 
+use std::collections::BTreeMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -106,6 +108,76 @@ impl KeyPattern {
             Mods::Exact(mods) if mods.contains(KeyModifiers::CONTROL) => format!("ctrl-{key}"),
             _ => key,
         }
+    }
+}
+
+/// Read a key as a config file writes it: the names [`KeyPattern::label`]
+/// uses where they are ASCII, any letter case, plus `up`, `down`, `left` and
+/// `right` for the arrows. A `ctrl-` prefix wants exactly Ctrl.
+pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
+    if let Some(rest) = text.strip_prefix("ctrl-") {
+        if rest.chars().any(|c| c.is_uppercase()) {
+            return Err(format!(
+                "bad key \"{text}\": write ctrl- keys in lower case"
+            ));
+        }
+        let key = parse_key(rest).map_err(|_| bad_key(text))?;
+        return Ok(KeyPattern::exact(key.code, KeyModifiers::CONTROL));
+    }
+    let mut chars = text.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        return if printable(c) {
+            Ok(char_pattern(c))
+        } else {
+            Err(bad_key(text))
+        };
+    }
+    let code = match text.to_ascii_lowercase().as_str() {
+        "space" => return Ok(char_pattern(' ')),
+        "esc" => KeyCode::Esc,
+        "enter" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "bksp" => KeyCode::Backspace,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "pgup" => KeyCode::PageUp,
+        "pgdn" => KeyCode::PageDown,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        _ => return Err(bad_key(text)),
+    };
+    Ok(KeyPattern::any(code))
+}
+
+/// Says what would have been accepted, since there is no list in Kika.
+fn bad_key(text: &str) -> String {
+    format!(
+        "bad key \"{}\": use one character, or space, esc, enter, tab, bksp, up, down, \
+         left, right, pgup, pgdn, home or end, with an optional ctrl- prefix",
+        text.escape_debug()
+    )
+}
+
+/// A character a key can type and the help menu can show. Control and
+/// format characters (bidi overrides, zero-width marks) could never be
+/// pressed, and would garble the help a repository file shows.
+fn printable(c: char) -> bool {
+    c.is_ascii_graphic()
+        || ('\u{a1}'..='\u{ff}').contains(&c) && c != '\u{ad}'
+        || c.is_alphanumeric()
+}
+
+/// A typed character as the built-in bindings declare it: keys typed
+/// without Shift on a US layout want no modifiers, so Ctrl or Alt with them
+/// stays free; the rest need Shift (or more), so any modifiers match.
+fn char_pattern(c: char) -> KeyPattern {
+    let unshifted = c.is_ascii_lowercase() || c.is_ascii_digit() || " `-=[]\\;',./".contains(c);
+    if unshifted {
+        KeyPattern::exact(KeyCode::Char(c), KeyModifiers::NONE)
+    } else {
+        KeyPattern::any(KeyCode::Char(c))
     }
 }
 
@@ -225,6 +297,9 @@ impl KeyScope {
 /// One entry in the keymap.
 #[derive(Debug)]
 pub struct Binding {
+    /// `<scope>.<action>`, the name a config file uses to remap it.
+    pub id: &'static str,
+    /// The built-in keys; a [`Keymap`] may replace them.
     pub keys: &'static [KeyPattern],
     pub scope: KeyScope,
     pub intent: AppIntent,
@@ -239,9 +314,162 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// Whether the built-in keys match; tests ask about the defaults.
+    #[cfg(test)]
     fn matches(&self, key: KeyPress) -> bool {
         self.keys.iter().any(|pattern| pattern.matches(key))
     }
+}
+
+/// A config file's `[keys]` table: binding id to the keys it should have.
+/// An empty list disables the binding.
+pub type KeysTable = BTreeMap<String, Vec<String>>;
+
+/// How far a `[keys]` table is trusted. A repository file arrives with a
+/// clone, so whoever wrote it is not necessarily the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trust {
+    Global,
+    Repo,
+}
+
+/// Bindings a repository file may not change: they quit, start other
+/// programs, reach the network, destroy work, answer a question, create a
+/// repository or switch to another one. Moving
+/// one onto an innocent key, taking quit away, or letting the key that
+/// asks also answer, would let a cloned repository trap or trick the user.
+pub const REPO_LOCKED: &[&str] = &[
+    "global.quit",
+    "commit_editor.quit",
+    "commit_loading.quit",
+    "menu.quit",
+    "prompt.quit",
+    "error.quit",
+    "discard_confirm.quit",
+    "submodules.quit",
+    "files.open",
+    "diff.open",
+    "lines.open",
+    "diff.edit_hunk",
+    "commit_editor.edit_externally",
+    "submodules.init",
+    "submodules.update",
+    "files.discard",
+    "diff.discard",
+    "lines.discard",
+    "commit_discard.discard",
+    "confirm.yes",
+    "confirm.no",
+    "discard_confirm.yes",
+    "discard_confirm.no",
+    "recent.quit",
+    "recent.open",
+    "recent.init",
+];
+
+/// The keys in force: the registry's, except where the user's config
+/// changed them. Only the changes are stored, so the state stays cheap to
+/// clone and compare.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Keymap {
+    overrides: BTreeMap<&'static str, Vec<KeyPattern>>,
+}
+
+impl Keymap {
+    /// The keys `b` answers to.
+    pub fn keys<'a>(&'a self, b: &'a Binding) -> &'a [KeyPattern] {
+        self.overrides.get(b.id).map_or(b.keys, Vec::as_slice)
+    }
+
+    /// `base` with `layer` applied on top. Fails, leaving nothing applied,
+    /// on an unknown id or key, a key bound twice in one scope, quit left
+    /// without keys, or a repository layer reaching past its trust.
+    pub fn build(base: &Keymap, layer: &KeysTable, trust: Trust) -> Result<Keymap, String> {
+        let mut keymap = base.clone();
+        for (id, texts) in layer {
+            let binding = REGISTRY
+                .iter()
+                .find(|b| b.id == id)
+                .ok_or_else(|| format!("unknown binding \"{id}\""))?;
+            if trust == Trust::Repo && REPO_LOCKED.contains(&binding.id) {
+                return Err(format!(
+                    "\"{id}\" can only be changed in the global config file"
+                ));
+            }
+            let keys = texts
+                .iter()
+                .map(|text| parse_key(text).map_err(|e| format!("\"{id}\": {e}")))
+                .collect::<Result<Vec<_>, _>>()?;
+            keymap.overrides.insert(binding.id, keys);
+        }
+        keymap.check_scopes()?;
+        if trust == Trust::Repo {
+            keymap.check_locked_not_hidden(base)?;
+        }
+        let quit = REGISTRY.iter().find(|b| b.id == "global.quit");
+        if quit.is_some_and(|b| keymap.keys(b).is_empty()) {
+            return Err("\"global.quit\" needs at least one key".to_string());
+        }
+        Ok(keymap)
+    }
+
+    /// No key press may match two bindings of one scope.
+    fn check_scopes(&self) -> Result<(), String> {
+        let patterns: Vec<(&Binding, &KeyPattern)> = REGISTRY
+            .iter()
+            .flat_map(|b| self.keys(b).iter().map(move |k| (b, k)))
+            .collect();
+        for (i, (a, ka)) in patterns.iter().enumerate() {
+            for (b, kb) in &patterns[i + 1..] {
+                if a.scope == b.scope && ka.overlaps(kb) {
+                    return Err(format!(
+                        "key \"{}\" is bound to both \"{}\" and \"{}\"",
+                        kb.label(),
+                        a.id,
+                        b.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A key a repository file adds in a nearer scope would take a locked
+    /// binding's key away from it, as surely as removing it would.
+    fn check_locked_not_hidden(&self, base: &Keymap) -> Result<(), String> {
+        for binding in REGISTRY {
+            let added = self
+                .keys(binding)
+                .iter()
+                .filter(|k| !base.keys(binding).contains(k));
+            for key in added {
+                let hidden = REGISTRY.iter().find(|locked| {
+                    REPO_LOCKED.contains(&locked.id)
+                        && binding.scope.chain().skip(1).any(|s| s == locked.scope)
+                        && self.keys(locked).iter().any(|k| k.overlaps(key))
+                });
+                if let Some(locked) = hidden {
+                    return Err(format!(
+                        "\"{}\": key \"{}\" would hide \"{}\"",
+                        binding.id,
+                        key.label(),
+                        locked.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A keymap from one global `[keys]` table, for tests elsewhere.
+#[cfg(test)]
+pub(crate) fn remap(entries: &[(&str, &[&str])]) -> Keymap {
+    let table: KeysTable = entries
+        .iter()
+        .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
+        .collect();
+    Keymap::build(&Keymap::default(), &table, Trust::Global).expect("a valid layer")
 }
 
 /// What a key press does from a given focus.
@@ -258,12 +486,15 @@ pub enum Resolution<'a> {
 /// silently replaced by a global binding of the same key.
 pub fn resolve<'a>(
     bindings: &'a [Binding],
+    keymap: &Keymap,
     focus: KeyScope,
     state: &AppState,
     key: KeyPress,
 ) -> Resolution<'a> {
     for scope in focus.chain() {
-        let found = bindings.iter().find(|b| b.scope == scope && b.matches(key));
+        let found = bindings
+            .iter()
+            .find(|b| b.scope == scope && keymap.keys(b).iter().any(|p| p.matches(key)));
         if let Some(binding) = found {
             return match (binding.disabled)(state) {
                 Some(reason) => Resolution::Disabled(reason),
@@ -277,8 +508,10 @@ pub fn resolve<'a>(
 /// The bindings reachable from `focus`, nearest scope first and in table
 /// order within a scope, each with why it is disabled. A binding whose keys
 /// are all taken by a nearer scope can never run, so it is left out.
+/// A binding the keymap left without keys can never run either.
 pub fn available<'a>(
     bindings: &'a [Binding],
+    keymap: &Keymap,
     focus: KeyScope,
     state: &AppState,
 ) -> Vec<(&'a Binding, Option<&'static str>)> {
@@ -287,15 +520,15 @@ pub fn available<'a>(
     for scope in focus.chain() {
         let in_scope: Vec<&Binding> = bindings.iter().filter(|b| b.scope == scope).collect();
         for binding in &in_scope {
-            let shadowed = binding
-                .keys
+            let shadowed = keymap
+                .keys(binding)
                 .iter()
                 .all(|key| claimed.iter().any(|c| c.overlaps(key)));
             if !shadowed {
                 out.push((*binding, (binding.disabled)(state)));
             }
         }
-        claimed.extend(in_scope.iter().flat_map(|b| b.keys.iter().copied()));
+        claimed.extend(in_scope.iter().flat_map(|b| keymap.keys(b).iter().copied()));
     }
     out
 }
@@ -565,6 +798,7 @@ const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
     Binding {
+        id: "global.help",
         keys: &[KeyPattern::any(KeyCode::Char('?'))],
         scope: KeyScope::Global,
         intent: AppIntent::OpenHelp,
@@ -574,6 +808,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "global.quit",
         keys: &[
             KeyPattern::any(KeyCode::Char('q')),
             KeyPattern::any(KeyCode::Esc),
@@ -587,6 +822,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.refresh",
         keys: &[KeyPattern::exact(KeyCode::Char('r'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::RefreshStatus,
@@ -596,6 +832,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.scroll_down",
         keys: &[KeyPattern::any(KeyCode::Char('J'))],
         scope: KeyScope::Workspace,
         intent: AppIntent::ScrollDiff(Scroll::LineDown),
@@ -605,6 +842,7 @@ static REGISTRY: &[Binding] = &[
         disabled: blame_open,
     },
     Binding {
+        id: "workspace.scroll_up",
         keys: &[KeyPattern::any(KeyCode::Char('K'))],
         scope: KeyScope::Workspace,
         intent: AppIntent::ScrollDiff(Scroll::LineUp),
@@ -614,6 +852,7 @@ static REGISTRY: &[Binding] = &[
         disabled: blame_open,
     },
     Binding {
+        id: "workspace.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::Workspace,
         intent: AppIntent::ScrollDiff(Scroll::PageDown),
@@ -623,6 +862,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::Workspace,
         intent: AppIntent::ScrollDiff(Scroll::PageUp),
@@ -632,6 +872,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.parent",
         keys: &[KeyPattern::any(KeyCode::Backspace)],
         scope: KeyScope::Workspace,
         intent: AppIntent::LeaveSubmodule,
@@ -643,6 +884,7 @@ static REGISTRY: &[Binding] = &[
     // Diff settings, in Workspace so they work from Files, Diff and Lines.
     // Out of the bar, which is full at 80 columns; the help menu lists them.
     Binding {
+        id: "workspace.more_context",
         keys: &[
             KeyPattern::any(KeyCode::Char('+')),
             KeyPattern::exact(KeyCode::Char('='), NONE),
@@ -655,6 +897,7 @@ static REGISTRY: &[Binding] = &[
         disabled: most_context,
     },
     Binding {
+        id: "workspace.less_context",
         keys: &[KeyPattern::exact(KeyCode::Char('-'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::LessContext,
@@ -664,6 +907,7 @@ static REGISTRY: &[Binding] = &[
         disabled: least_context,
     },
     Binding {
+        id: "workspace.whitespace",
         keys: &[KeyPattern::exact(KeyCode::Char('w'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::ToggleWhitespace,
@@ -675,6 +919,7 @@ static REGISTRY: &[Binding] = &[
     // Moving between panels and zooming. Out of the bar, which is full at
     // 80 columns; the help menu lists them.
     Binding {
+        id: "workspace.focus_status",
         keys: &[KeyPattern::exact(KeyCode::Char('1'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Status)),
@@ -684,6 +929,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.focus_files",
         keys: &[KeyPattern::exact(KeyCode::Char('2'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Files)),
@@ -693,6 +939,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.focus_branches",
         keys: &[KeyPattern::exact(KeyCode::Char('3'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Branches)),
@@ -702,6 +949,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.focus_commits",
         keys: &[KeyPattern::exact(KeyCode::Char('4'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Commits)),
@@ -711,6 +959,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.focus_stash",
         keys: &[KeyPattern::exact(KeyCode::Char('5'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Stash)),
@@ -720,6 +969,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.focus_diff",
         keys: &[
             KeyPattern::exact(KeyCode::Char('0'), NONE),
             KeyPattern::exact(KeyCode::Char('l'), NONE),
@@ -733,6 +983,7 @@ static REGISTRY: &[Binding] = &[
         disabled: no_file_selected,
     },
     Binding {
+        id: "workspace.next_panel",
         keys: &[KeyPattern::exact(KeyCode::Tab, NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::CycleFocus { back: false },
@@ -742,6 +993,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.prev_panel",
         keys: &[
             KeyPattern::any(KeyCode::BackTab),
             KeyPattern::exact(KeyCode::Tab, KeyModifiers::SHIFT),
@@ -754,6 +1006,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.zoom",
         keys: &[KeyPattern::exact(KeyCode::Char('z'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::CycleScreenMode,
@@ -763,6 +1016,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "files.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -775,6 +1029,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "files.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -787,6 +1042,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "files.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::ToggleStage,
@@ -796,6 +1052,7 @@ static REGISTRY: &[Binding] = &[
         disabled: stage_disabled,
     },
     Binding {
+        id: "files.stage_all",
         keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::ToggleStageAll,
@@ -805,6 +1062,7 @@ static REGISTRY: &[Binding] = &[
         disabled: stage_all_disabled,
     },
     Binding {
+        id: "files.commit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::OpenCommit,
@@ -814,6 +1072,7 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_disabled,
     },
     Binding {
+        id: "files.amend",
         keys: &[KeyPattern::any(KeyCode::Char('A'))],
         scope: KeyScope::Files,
         intent: AppIntent::OpenAmend,
@@ -824,6 +1083,7 @@ static REGISTRY: &[Binding] = &[
         disabled: amend_disabled,
     },
     Binding {
+        id: "files.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::Discard,
@@ -833,6 +1093,7 @@ static REGISTRY: &[Binding] = &[
         disabled: discard_disabled,
     },
     Binding {
+        id: "files.open",
         keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::OpenInEditor,
@@ -843,6 +1104,7 @@ static REGISTRY: &[Binding] = &[
         disabled: open_disabled,
     },
     Binding {
+        id: "files.submodules",
         keys: &[KeyPattern::any(KeyCode::Char('S'))],
         scope: KeyScope::Files,
         intent: AppIntent::OpenSubmodules,
@@ -852,6 +1114,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "workspace.recent",
         keys: &[KeyPattern::any(KeyCode::Char('O'))],
         // From the Diff pane too, so switching away can keep it focused.
         scope: KeyScope::Workspace,
@@ -862,6 +1125,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "files.blame",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::OpenBlame,
@@ -871,6 +1135,7 @@ static REGISTRY: &[Binding] = &[
         disabled: blame_disabled,
     },
     Binding {
+        id: "files.hunks",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Files,
         intent: AppIntent::FocusDiff,
@@ -881,6 +1146,7 @@ static REGISTRY: &[Binding] = &[
         disabled: no_file_selected,
     },
     Binding {
+        id: "diff.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -893,6 +1159,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "diff.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -905,6 +1172,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "diff.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::ToggleHunkStage,
@@ -914,6 +1182,7 @@ static REGISTRY: &[Binding] = &[
         disabled: hunk_disabled,
     },
     Binding {
+        id: "diff.lines",
         keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::EnterLineMode,
@@ -923,6 +1192,7 @@ static REGISTRY: &[Binding] = &[
         disabled: hunk_disabled,
     },
     Binding {
+        id: "diff.side",
         keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::ToggleDiffSide,
@@ -932,6 +1202,7 @@ static REGISTRY: &[Binding] = &[
         disabled: side_disabled,
     },
     Binding {
+        id: "diff.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::Discard,
@@ -941,6 +1212,7 @@ static REGISTRY: &[Binding] = &[
         disabled: discard_disabled,
     },
     Binding {
+        id: "diff.open",
         keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::OpenInEditor,
@@ -951,6 +1223,7 @@ static REGISTRY: &[Binding] = &[
         disabled: open_disabled,
     },
     Binding {
+        id: "diff.edit_hunk",
         keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::EditHunk,
@@ -961,6 +1234,7 @@ static REGISTRY: &[Binding] = &[
         disabled: edit_hunk_disabled,
     },
     Binding {
+        id: "diff.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
@@ -974,6 +1248,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::exact(KeyCode::Down, NONE),
@@ -986,6 +1261,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::exact(KeyCode::Up, NONE),
@@ -998,6 +1274,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.extend_down",
         keys: &[
             KeyPattern::any(KeyCode::Char('J')),
             KeyPattern::exact(KeyCode::Down, KeyModifiers::SHIFT),
@@ -1010,6 +1287,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.extend_up",
         keys: &[
             KeyPattern::any(KeyCode::Char('K')),
             KeyPattern::exact(KeyCode::Up, KeyModifiers::SHIFT),
@@ -1022,6 +1300,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Lines,
         intent: AppIntent::ToggleLinesStage,
@@ -1031,6 +1310,7 @@ static REGISTRY: &[Binding] = &[
         disabled: hunk_disabled,
     },
     Binding {
+        id: "lines.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('v'), NONE),
@@ -1043,6 +1323,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "lines.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Lines,
         intent: AppIntent::Discard,
@@ -1052,6 +1333,7 @@ static REGISTRY: &[Binding] = &[
         disabled: discard_disabled,
     },
     Binding {
+        id: "lines.open",
         keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
         scope: KeyScope::Lines,
         intent: AppIntent::OpenInEditor,
@@ -1062,6 +1344,7 @@ static REGISTRY: &[Binding] = &[
         disabled: open_disabled,
     },
     Binding {
+        id: "blame.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -1074,6 +1357,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -1086,6 +1370,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::Blame,
         intent: AppIntent::BlamePageDown,
@@ -1095,6 +1380,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::Blame,
         intent: AppIntent::BlamePageUp,
@@ -1104,6 +1390,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame.commit",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Blame,
         intent: AppIntent::OpenBlameCommit,
@@ -1113,6 +1400,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
@@ -1126,6 +1414,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame_commit.scroll_down",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -1138,6 +1427,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame_commit.scroll_up",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -1150,6 +1440,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame_commit.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::BlameCommit,
         intent: AppIntent::ScrollCommit(Scroll::PageDown),
@@ -1159,6 +1450,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame_commit.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::BlameCommit,
         intent: AppIntent::ScrollCommit(Scroll::PageUp),
@@ -1168,6 +1460,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "blame_commit.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
@@ -1181,6 +1474,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "files.menu",
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
         scope: KeyScope::Files,
         intent: AppIntent::OpenMenu(MenuId::Actions),
@@ -1190,6 +1484,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_confirm.stage_all",
         keys: &[
             KeyPattern::exact(KeyCode::Char('y'), NONE),
             KeyPattern::any(KeyCode::Enter),
@@ -1202,6 +1497,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_confirm.cancel",
         keys: &[
             KeyPattern::exact(KeyCode::Char('n'), NONE),
             KeyPattern::any(KeyCode::Esc),
@@ -1214,6 +1510,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_editor.commit",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::SubmitCommit,
@@ -1223,6 +1520,7 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_editor_disabled,
     },
     Binding {
+        id: "commit_editor.switch_field",
         keys: &[KeyPattern::any(KeyCode::Tab)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::ToggleCommitField,
@@ -1233,6 +1531,7 @@ static REGISTRY: &[Binding] = &[
     },
     // Out of the bar, which is full at 80 columns; the help menu lists them.
     Binding {
+        id: "commit_editor.skip_hooks",
         keys: &[KeyPattern::exact(KeyCode::Char('n'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::ToggleNoVerify,
@@ -1242,6 +1541,7 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_editor_disabled,
     },
     Binding {
+        id: "commit_editor.edit_externally",
         keys: &[KeyPattern::exact(KeyCode::Char('e'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::EditCommitExternally,
@@ -1251,6 +1551,7 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_editor_disabled,
     },
     Binding {
+        id: "commit_editor.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::CancelCommit,
@@ -1260,6 +1561,7 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_editor_disabled,
     },
     Binding {
+        id: "commit_editor.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
         intent: AppIntent::InterruptCommit,
@@ -1269,6 +1571,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_discard.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
         scope: KeyScope::CommitDiscard,
         intent: AppIntent::DiscardCommit,
@@ -1278,6 +1581,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_discard.keep",
         keys: &[
             KeyPattern::exact(KeyCode::Char('n'), NONE),
             KeyPattern::any(KeyCode::Esc),
@@ -1290,6 +1594,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_error.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::any(KeyCode::Enter),
@@ -1302,6 +1607,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_loading.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitLoading,
         intent: AppIntent::CancelCommit,
@@ -1311,6 +1617,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_loading.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitLoading,
         intent: AppIntent::Quit,
@@ -1320,6 +1627,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "help.close",
         keys: &[
             KeyPattern::any(KeyCode::Char('?')),
             KeyPattern::any(KeyCode::Esc),
@@ -1332,6 +1640,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "menu.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -1344,6 +1653,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "menu.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -1356,6 +1666,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "menu.select",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Menu,
         intent: AppIntent::MenuSelect,
@@ -1365,6 +1676,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "menu.back",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Menu,
         intent: AppIntent::PopPopup,
@@ -1374,6 +1686,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "menu.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Menu,
         intent: AppIntent::Quit,
@@ -1383,6 +1696,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "confirm.yes",
         keys: &[
             KeyPattern::exact(KeyCode::Char('y'), NONE),
             KeyPattern::any(KeyCode::Enter),
@@ -1395,6 +1709,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "confirm.no",
         keys: &[
             KeyPattern::exact(KeyCode::Char('n'), NONE),
             KeyPattern::any(KeyCode::Esc),
@@ -1407,6 +1722,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "prompt.ok",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Prompt,
         intent: AppIntent::SubmitPrompt,
@@ -1416,6 +1732,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "prompt.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Prompt,
         intent: AppIntent::PopPopup,
@@ -1425,6 +1742,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "prompt.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Prompt,
         intent: AppIntent::Quit,
@@ -1434,6 +1752,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "error.close",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::any(KeyCode::Enter),
@@ -1446,6 +1765,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "error.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Error,
         intent: AppIntent::Quit,
@@ -1457,6 +1777,7 @@ static REGISTRY: &[Binding] = &[
     // Only `y` throws work away. Enter is left unbound on purpose: it
     // answers yes elsewhere, and a discard cannot be undone.
     Binding {
+        id: "discard_confirm.yes",
         keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
         scope: KeyScope::DiscardConfirm,
         intent: AppIntent::ConfirmYes,
@@ -1466,6 +1787,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "discard_confirm.no",
         keys: &[
             KeyPattern::exact(KeyCode::Char('n'), NONE),
             KeyPattern::any(KeyCode::Esc),
@@ -1478,6 +1800,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "discard_confirm.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DiscardConfirm,
         intent: AppIntent::Quit,
@@ -1487,6 +1810,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "submodules.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -1499,6 +1823,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "submodules.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -1511,6 +1836,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "submodules.enter",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Submodules,
         intent: AppIntent::EnterSubmodule,
@@ -1520,6 +1846,7 @@ static REGISTRY: &[Binding] = &[
         disabled: enter_submodule_disabled,
     },
     Binding {
+        id: "submodules.update",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
         scope: KeyScope::Submodules,
         intent: AppIntent::UpdateSubmodule,
@@ -1529,6 +1856,7 @@ static REGISTRY: &[Binding] = &[
         disabled: submodule_op_disabled,
     },
     Binding {
+        id: "submodules.init",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
         scope: KeyScope::Submodules,
         intent: AppIntent::InitSubmodule,
@@ -1538,6 +1866,7 @@ static REGISTRY: &[Binding] = &[
         disabled: submodule_op_disabled,
     },
     Binding {
+        id: "submodules.close",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('q'), NONE),
@@ -1550,6 +1879,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "submodules.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Submodules,
         intent: AppIntent::Quit,
@@ -1559,6 +1889,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "recent.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
             KeyPattern::any(KeyCode::Down),
@@ -1571,6 +1902,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "recent.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
             KeyPattern::any(KeyCode::Up),
@@ -1583,6 +1915,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "recent.open",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Recent,
         intent: AppIntent::RecentSelect,
@@ -1592,6 +1925,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "recent.init",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
         scope: KeyScope::Recent,
         intent: AppIntent::InitRepo,
@@ -1601,6 +1935,7 @@ static REGISTRY: &[Binding] = &[
         disabled: init_repo_disabled,
     },
     Binding {
+        id: "recent.close",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('q'), NONE),
@@ -1613,6 +1948,7 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "recent.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Recent,
         intent: AppIntent::Quit,
@@ -1653,6 +1989,7 @@ mod tests {
 
     fn bind(keys: &'static [KeyPattern], scope: KeyScope, intent: AppIntent) -> Binding {
         Binding {
+            id: "test.binding",
             keys,
             scope,
             intent,
@@ -1684,7 +2021,7 @@ mod tests {
     }
 
     fn run(bindings: &[Binding], focus: KeyScope, state: &AppState, key: KeyPress) -> AppIntent {
-        match resolve(bindings, focus, state, key) {
+        match resolve(bindings, &Keymap::default(), focus, state, key) {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?} from {focus:?}: expected Run, got {other:?}"),
         }
@@ -1711,7 +2048,13 @@ mod tests {
         let table = table();
         let state = AppState::new(Context::Workspace);
         assert!(matches!(
-            resolve(&table, KeyScope::Files, &state, plain('w')),
+            resolve(
+                &table,
+                &Keymap::default(),
+                KeyScope::Files,
+                &state,
+                plain('w')
+            ),
             Resolution::Unbound
         ));
         assert_eq!(
@@ -1725,7 +2068,13 @@ mod tests {
         let table = table();
         let state = AppState::new(Context::Workspace);
         assert!(matches!(
-            resolve(&table, KeyScope::Files, &state, plain('v')),
+            resolve(
+                &table,
+                &Keymap::default(),
+                KeyScope::Files,
+                &state,
+                plain('v')
+            ),
             Resolution::Disabled("off")
         ));
         assert_eq!(
@@ -1739,7 +2088,7 @@ mod tests {
         let table = table();
         let state = AppState::new(Context::Workspace);
         let listed: Vec<(KeyScope, char, Option<&str>)> =
-            available(&table, KeyScope::Files, &state)
+            available(&table, &Keymap::default(), KeyScope::Files, &state)
                 .into_iter()
                 .map(|(b, reason)| {
                     let KeyCode::Char(c) = b.keys[0].code else {
@@ -1762,7 +2111,7 @@ mod tests {
     #[test]
     fn a_partly_shadowed_binding_stays_available() {
         let state = AppState::new(Context::Workspace);
-        let help = available(registry(), KeyScope::Help, &state);
+        let help = available(registry(), &Keymap::default(), KeyScope::Help, &state);
         let intents: Vec<&AppIntent> = help.iter().map(|(b, _)| &b.intent).collect();
         // Esc is taken by CloseHelp, but q still quits; `?` to open is gone.
         assert_eq!(intents, [&AppIntent::CloseHelp, &AppIntent::Quit]);
@@ -1779,7 +2128,7 @@ mod tests {
             kind: EntryKind::Changed,
         }];
         state.selected = Some(0);
-        match resolve(registry(), focus, &state, key) {
+        match resolve(registry(), &Keymap::default(), focus, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
             Resolution::Unbound => None,
@@ -1903,7 +2252,7 @@ mod tests {
         let state = AppState::new(Context::Workspace);
         for (scope, k) in [(KeyScope::Lines, plain(' ')), (KeyScope::Diff, plain('v'))] {
             assert!(matches!(
-                resolve(registry(), scope, &state, k),
+                resolve(registry(), &Keymap::default(), scope, &state, k),
                 Resolution::Disabled(NO_CHANGES)
             ));
         }
@@ -1997,7 +2346,13 @@ mod tests {
 
     #[test]
     fn c_is_disabled_while_an_op_runs_without_files_or_with_conflicts_in_that_order() {
-        let c = |state: &AppState| match resolve(registry(), KeyScope::Files, state, plain('c')) {
+        let c = |state: &AppState| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Files,
+            state,
+            plain('c'),
+        ) {
             Resolution::Run(binding) => Ok(binding.intent.clone()),
             Resolution::Disabled(reason) => Err(reason),
             Resolution::Unbound => panic!("c is unbound"),
@@ -2029,7 +2384,7 @@ mod tests {
 
         let a = |state: &AppState| {
             let k = key(KeyCode::Char('A'), KeyModifiers::SHIFT);
-            match resolve(registry(), KeyScope::Files, state, k) {
+            match resolve(registry(), &Keymap::default(), KeyScope::Files, state, k) {
                 Resolution::Run(binding) => Ok(binding.intent.clone()),
                 Resolution::Disabled(reason) => Err(reason),
                 Resolution::Unbound => panic!("A is unbound"),
@@ -2085,7 +2440,13 @@ mod tests {
         state.op_seq = Some(1);
         for c in ['n', 'e'] {
             assert!(matches!(
-                resolve(registry(), KeyScope::CommitEditor, &state, ctrl(c)),
+                resolve(
+                    registry(),
+                    &Keymap::default(),
+                    KeyScope::CommitEditor,
+                    &state,
+                    ctrl(c)
+                ),
                 Resolution::Disabled(OP_RUNNING)
             ));
         }
@@ -2178,7 +2539,13 @@ mod tests {
         }]));
         state.popups = vec![Popup::Submodules(list)];
         assert_eq!(state.key_focus(), KeyScope::Submodules);
-        let run = |k| match resolve(registry(), KeyScope::Submodules, &state, k) {
+        let run = |k| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Submodules,
+            &state,
+            k,
+        ) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
             Resolution::Unbound => None,
@@ -2213,7 +2580,7 @@ mod tests {
         for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
             assert!(
                 matches!(
-                    resolve(registry(), scope, &state, backspace),
+                    resolve(registry(), &Keymap::default(), scope, &state, backspace),
                     Resolution::Disabled("Not in a submodule")
                 ),
                 "{scope:?}"
@@ -2229,7 +2596,7 @@ mod tests {
         for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
             assert!(
                 matches!(
-                    resolve(registry(), scope, &state, backspace),
+                    resolve(registry(), &Keymap::default(), scope, &state, backspace),
                     Resolution::Run(Binding {
                         intent: AppIntent::LeaveSubmodule,
                         ..
@@ -2240,7 +2607,13 @@ mod tests {
         }
         state.op_seq = Some(1);
         assert!(matches!(
-            resolve(registry(), KeyScope::Files, &state, backspace),
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Files,
+                &state,
+                backspace
+            ),
             Resolution::Disabled("Wait for the operation to finish")
         ));
         assert_eq!(
@@ -2371,8 +2744,13 @@ mod tests {
         use crate::git::patch::parse;
         use crate::hunk_view::{HunkView, LineCursor};
 
-        let reason = |state: &AppState, scope, c| match resolve(registry(), scope, state, plain(c))
-        {
+        let reason = |state: &AppState, scope, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            scope,
+            state,
+            plain(c),
+        ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
             Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
@@ -2411,7 +2789,13 @@ mod tests {
 
     #[test]
     fn d_is_disabled_while_an_op_runs_or_without_a_file() {
-        let d = |state: &AppState| match resolve(registry(), KeyScope::Files, state, plain('d')) {
+        let d = |state: &AppState| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Files,
+            state,
+            plain('d'),
+        ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
             Resolution::Unbound => panic!("d is unbound"),
@@ -2433,14 +2817,26 @@ mod tests {
             key(KeyCode::Tab, KeyModifiers::NONE),
         ] {
             assert!(matches!(
-                resolve(registry(), KeyScope::CommitEditor, &state, k),
+                resolve(
+                    registry(),
+                    &Keymap::default(),
+                    KeyScope::CommitEditor,
+                    &state,
+                    k
+                ),
                 Resolution::Disabled("An operation is running")
             ));
         }
         // Ctrl+C is the way out while git runs.
         let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
-            resolve(registry(), KeyScope::CommitEditor, &state, ctrl_c),
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::CommitEditor,
+                &state,
+                ctrl_c
+            ),
             Resolution::Run(Binding {
                 intent: AppIntent::InterruptCommit,
                 ..
@@ -2554,7 +2950,7 @@ mod tests {
             key(KeyCode::Right, KeyModifiers::NONE),
         ] {
             assert!(matches!(
-                resolve(registry(), KeyScope::Files, &state, k),
+                resolve(registry(), &Keymap::default(), KeyScope::Files, &state, k),
                 Resolution::Disabled("No file selected")
             ));
         }
@@ -2583,12 +2979,17 @@ mod tests {
 
     #[test]
     fn context_keys_are_disabled_at_the_limits() {
-        let reason =
-            |state: &AppState, c| match resolve(registry(), KeyScope::Files, state, plain(c)) {
-                Resolution::Disabled(reason) => Some(reason),
-                Resolution::Run(_) => None,
-                Resolution::Unbound => panic!("{c} is unbound"),
-            };
+        let reason = |state: &AppState, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Files,
+            state,
+            plain(c),
+        ) {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound => panic!("{c} is unbound"),
+        };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(reason(&state, '+'), None);
         assert_eq!(reason(&state, '-'), None);
@@ -2616,8 +3017,13 @@ mod tests {
         }];
         state.selected = Some(0);
         state.diff_options.ignore_whitespace = true;
-        let reason = |state: &AppState, scope, c| match resolve(registry(), scope, state, plain(c))
-        {
+        let reason = |state: &AppState, scope, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            scope,
+            state,
+            plain(c),
+        ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
             Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
@@ -2651,6 +3057,284 @@ mod tests {
         }
         state.diff_options.ignore_whitespace = false;
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
+    }
+
+    /// The `<scope>` part of a binding id.
+    fn scope_name(scope: KeyScope) -> &'static str {
+        match scope {
+            KeyScope::Global => "global",
+            KeyScope::Workspace => "workspace",
+            KeyScope::Files => "files",
+            KeyScope::Diff => "diff",
+            KeyScope::Lines => "lines",
+            KeyScope::Blame => "blame",
+            KeyScope::BlameCommit => "blame_commit",
+            KeyScope::Review => "review",
+            KeyScope::Help => "help",
+            KeyScope::CommitConfirm => "commit_confirm",
+            KeyScope::CommitEditor => "commit_editor",
+            KeyScope::CommitError => "commit_error",
+            KeyScope::CommitDiscard => "commit_discard",
+            KeyScope::CommitLoading => "commit_loading",
+            KeyScope::Menu => "menu",
+            KeyScope::Confirm => "confirm",
+            KeyScope::Prompt => "prompt",
+            KeyScope::Error => "error",
+            KeyScope::DiscardConfirm => "discard_confirm",
+            KeyScope::Submodules => "submodules",
+            KeyScope::Recent => "recent",
+        }
+    }
+
+    #[test]
+    fn binding_ids_are_unique_and_name_their_scope() {
+        let mut seen = std::collections::HashSet::new();
+        for b in registry() {
+            assert!(seen.insert(b.id), "{} is used twice", b.id);
+            let (scope, action) = b.id.split_once('.').expect("<scope>.<action>");
+            assert_eq!(scope, scope_name(b.scope), "{}", b.id);
+            let snake = |c: char| c.is_ascii_lowercase() || c == '_';
+            assert!(!action.is_empty() && action.chars().all(snake), "{}", b.id);
+        }
+    }
+
+    #[test]
+    fn parse_key_reads_back_every_ascii_label_in_the_registry() {
+        let mut checked = 0;
+        for b in registry() {
+            for key in b.keys {
+                let label = key.label();
+                if !label.is_ascii() {
+                    continue;
+                }
+                // Some defaults accept any modifiers on a plain letter (`q`
+                // quits with Shift too), so the patterns can differ there;
+                // the key, its label and how it is shown must not.
+                let parsed = parse_key(&label).unwrap_or_else(|e| panic!("{}: {e}", b.id));
+                assert_eq!(parsed.label(), label, "{}", b.id);
+                assert_eq!(parsed.code, key.code, "{}", b.id);
+                assert!(parsed.overlaps(key), "{} {label:?}", b.id);
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} labels checked");
+    }
+
+    #[test]
+    fn parse_key_reads_the_names_a_user_writes() {
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(
+            parse_key("x"),
+            Ok(KeyPattern::exact(KeyCode::Char('x'), none))
+        );
+        assert_eq!(parse_key("X"), Ok(KeyPattern::any(KeyCode::Char('X'))));
+        assert_eq!(
+            parse_key("space"),
+            Ok(KeyPattern::exact(KeyCode::Char(' '), none))
+        );
+        assert_eq!(
+            parse_key("ctrl-s"),
+            Ok(KeyPattern::exact(KeyCode::Char('s'), ctrl))
+        );
+        assert_eq!(
+            parse_key("ctrl-up"),
+            Ok(KeyPattern::exact(KeyCode::Up, ctrl))
+        );
+        for (name, code) in [
+            ("up", KeyCode::Up),
+            ("down", KeyCode::Down),
+            ("left", KeyCode::Left),
+            ("right", KeyCode::Right),
+            ("PgDn", KeyCode::PageDown),
+            ("pgup", KeyCode::PageUp),
+            ("home", KeyCode::Home),
+            ("end", KeyCode::End),
+            ("tab", KeyCode::Tab),
+        ] {
+            assert_eq!(parse_key(name), Ok(KeyPattern::any(code)), "{name}");
+        }
+        assert_eq!(parse_key("ä"), Ok(KeyPattern::any(KeyCode::Char('ä'))));
+        assert_eq!(parse_key("§"), Ok(KeyPattern::any(KeyCode::Char('§'))));
+        for bad in [
+            "",
+            "ctrl-",
+            "ctrl-S",
+            "shift-x",
+            "f1",
+            "xy",
+            " ",
+            "\t",
+            "\u{1b}",
+            "\u{202e}",
+            "\u{200b}",
+            "\u{ad}",
+            "ctrl-\u{202e}",
+        ] {
+            let err = parse_key(bad).unwrap_err();
+            assert!(err.starts_with("bad key"), "{bad:?}: {err}");
+        }
+    }
+
+    fn layer(entries: &[(&str, &[&str])]) -> KeysTable {
+        entries
+            .iter()
+            .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
+            .collect()
+    }
+
+    fn build(entries: &[(&str, &[&str])], trust: Trust) -> Result<Keymap, String> {
+        Keymap::build(&Keymap::default(), &layer(entries), trust)
+    }
+
+    fn binding(id: &str) -> &'static Binding {
+        registry().iter().find(|b| b.id == id).expect("known id")
+    }
+
+    #[test]
+    fn a_remap_replaces_the_keys_and_an_empty_list_disables() {
+        let keymap = build(
+            &[("files.stage", &["x", "ctrl-x"]), ("files.discard", &[])],
+            Trust::Global,
+        )
+        .unwrap();
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            [
+                KeyPattern::exact(KeyCode::Char('x'), none),
+                KeyPattern::exact(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            ]
+        );
+        assert!(keymap.keys(binding("files.discard")).is_empty());
+        assert_eq!(
+            keymap.keys(binding("files.commit")),
+            binding("files.commit").keys
+        );
+
+        let state = AppState::new(Context::Workspace);
+        let files = KeyScope::Files;
+        assert!(matches!(
+            resolve(registry(), &keymap, files, &state, plain('d')),
+            Resolution::Unbound
+        ));
+        assert!(matches!(
+            resolve(registry(), &keymap, files, &state, plain(' ')),
+            Resolution::Unbound
+        ));
+        let listed = available(registry(), &keymap, files, &state);
+        assert!(!listed.iter().any(|(b, _)| b.id == "files.discard"));
+    }
+
+    #[test]
+    fn a_later_layer_overrides_an_earlier_one_binding_by_binding() {
+        let global = build(
+            &[("files.stage", &["x"]), ("files.commit", &["C"])],
+            Trust::Global,
+        )
+        .unwrap();
+        let merged =
+            Keymap::build(&global, &layer(&[("files.stage", &["y"])]), Trust::Repo).unwrap();
+        assert_eq!(merged.keys(binding("files.stage")), [char_pattern('y')]);
+        assert_eq!(merged.keys(binding("files.commit")), [char_pattern('C')]);
+    }
+
+    #[test]
+    fn a_broken_layer_says_what_is_wrong() {
+        let err = |entries: &[(&str, &[&str])]| build(entries, Trust::Global).unwrap_err();
+        assert_eq!(
+            err(&[("files.stag", &["s"])]),
+            r#"unknown binding "files.stag""#
+        );
+        let bad = err(&[("files.stage", &["shift-s"])]);
+        assert!(
+            bad.starts_with(r#""files.stage": bad key "shift-s": use one character, or space"#),
+            "{bad}"
+        );
+        assert_eq!(
+            err(&[("files.stage", &["c"])]),
+            r#"key "c" is bound to both "files.stage" and "files.commit""#
+        );
+        assert_eq!(
+            err(&[("files.stage", &["x", "x"])]),
+            r#"key "x" is bound to both "files.stage" and "files.stage""#
+        );
+        assert_eq!(
+            err(&[("global.quit", &[])]),
+            r#""global.quit" needs at least one key"#
+        );
+        // The same key in different scopes is fine: the nearer one wins.
+        assert!(build(&[("files.stage", &["q"])], Trust::Global).is_ok());
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_touch_locked_bindings() {
+        for id in REPO_LOCKED {
+            assert!(
+                registry().iter().any(|b| b.id == *id),
+                "{id} is not a binding"
+            );
+            let moved = build(&[(id, &["F"])], Trust::Repo).unwrap_err();
+            assert_eq!(
+                moved,
+                format!("\"{id}\" can only be changed in the global config file")
+            );
+            assert!(build(&[(id, &[])], Trust::Repo).is_err(), "{id}");
+            if *id != "global.quit" {
+                assert!(build(&[(id, &["F"])], Trust::Global).is_ok(), "{id}");
+                assert!(build(&[(id, &[])], Trust::Global).is_ok(), "{id}");
+            }
+        }
+        assert!(build(&[("global.quit", &["Q"])], Trust::Global).is_ok());
+        assert!(build(&[("files.stage", &["x"])], Trust::Repo).is_ok());
+    }
+
+    #[test]
+    fn every_binding_that_quits_starts_a_program_destroys_work_or_answers_is_locked() {
+        use AppIntent::*;
+        for b in registry() {
+            let risky = matches!(
+                b.intent,
+                Quit | InterruptCommit
+                    | OpenInEditor
+                    | EditHunk
+                    | EditCommitExternally
+                    | InitSubmodule
+                    | UpdateSubmodule
+                    | Discard
+                    | DiscardCommit
+                    | ConfirmYes
+                    | ConfirmNo
+                    | InitRepo
+                    | RecentSelect
+            );
+            assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
+        }
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_turn_a_navigation_key_into_a_confirmed_discard() {
+        let attack: &[(&str, &[&str])] = &[
+            ("files.next", &["down"]),
+            ("files.discard", &["j"]),
+            ("discard_confirm.yes", &["j", "y"]),
+        ];
+        assert_eq!(
+            build(attack, Trust::Repo).unwrap_err(),
+            r#""discard_confirm.yes" can only be changed in the global config file"#
+        );
+        assert!(build(&attack[..2], Trust::Repo).is_err());
+        assert!(build(attack, Trust::Global).is_ok());
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_hide_a_locked_key_behind_a_nearer_one() {
+        assert_eq!(
+            build(&[("files.stage", &["q"])], Trust::Repo).unwrap_err(),
+            r#""files.stage": key "q" would hide "global.quit""#
+        );
+        // Keys a binding already had are not new, so the defaults pass.
+        assert!(build(&[("diff.back", &["esc", "h", "left"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -2696,7 +3380,13 @@ mod tests {
         // `i` only where the list offers it.
         let state = AppState::new(Context::Workspace);
         assert!(matches!(
-            resolve(registry(), KeyScope::Recent, &state, plain('i')),
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Recent,
+                &state,
+                plain('i')
+            ),
             Resolution::Disabled("Already in a repository")
         ));
     }

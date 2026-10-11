@@ -584,13 +584,13 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
                 Style::new().fg(Color::DarkGray),
             ));
         }
-        let hints = available(registry(), focus, state)
+        let hints = available(registry(), &state.keymap, focus, state)
             .into_iter()
             .filter(|(binding, _)| binding.bar);
         for (i, (binding, disabled)) in hints.enumerate() {
             let first = i == 0 && note.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
-            let key = binding.keys.first().map(KeyPattern::label);
+            let key = state.keymap.keys(binding).first().map(KeyPattern::label);
             let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
             spans.push(Span::styled(hint, dimmed_if(disabled.is_some())));
         }
@@ -610,10 +610,15 @@ fn dimmed_if(disabled: bool) -> Style {
 /// Rows that do not fit are clipped.
 fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     let focus = state.panel_focus();
-    let entries: Vec<(String, &str, bool)> = available(registry(), focus, state)
+    let entries: Vec<(String, &str, bool)> = available(registry(), &state.keymap, focus, state)
         .into_iter()
         .map(|(binding, disabled)| {
-            let keys: Vec<String> = binding.keys.iter().map(KeyPattern::label).collect();
+            let keys: Vec<String> = state
+                .keymap
+                .keys(binding)
+                .iter()
+                .map(KeyPattern::label)
+                .collect();
             (keys.join("/"), binding.description, disabled.is_some())
         })
         .collect();
@@ -1537,6 +1542,80 @@ mod tests {
         assert!(row("Select the next file").contains("j/↓ "), "{rows:#?}");
         // Help's own close key is in the bar, not in the panel's list.
         assert!(!contains(&rows, "Close this menu"), "{rows:#?}");
+    }
+
+    /// `state` with one global `[keys]` table applied.
+    fn remapped(mut state: AppState, entries: &[(&str, &[&str])]) -> AppState {
+        state.update(crate::intent::AppIntent::ConfigLoaded {
+            keymap: crate::keymap::remap(entries),
+            errors: vec![],
+        });
+        state
+    }
+
+    #[test]
+    fn help_and_the_bar_show_the_remapped_keys() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = remapped(state, &[("files.stage", &["x"])]);
+        let rows = draw(&state, 80, 30);
+        assert!(rows[29].starts_with(" x stage  a all"), "{rows:#?}");
+
+        state.help_open = true;
+        let rows = draw(&state, 80, 30);
+        let stage = rows
+            .iter()
+            .find(|row| row.contains("Stage the selected file"))
+            .unwrap_or_else(|| panic!("no stage row in {rows:#?}"));
+        assert!(stage.contains(" x  "), "{stage:?}");
+        assert!(!stage.contains("space"), "{stage:?}");
+    }
+
+    #[test]
+    fn a_disabled_binding_leaves_help_and_the_bar() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = remapped(state, &[("files.discard", &[])]);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            rows[29].starts_with(" space stage  a all  c commit  m menu  r refresh"),
+            "{rows:#?}"
+        );
+
+        state.help_open = true;
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Stage the selected file"), "{rows:#?}");
+        assert!(!contains(&rows, "Discard the selected file"), "{rows:#?}");
+    }
+
+    #[test]
+    fn remapped_focus_keys_show_in_help_and_work() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = remapped(
+            state,
+            &[
+                ("workspace.zoom", &["Z"]),
+                ("workspace.focus_status", &["s"]),
+            ],
+        );
+        state.help_open = true;
+        let rows = draw(&state, 100, 50);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in {rows:#?}"))
+                .clone()
+        };
+        assert!(row("Zoom the focused panel").contains(" Z "), "{rows:#?}");
+        assert!(row("Focus the Status panel").contains(" s "), "{rows:#?}");
+
+        state.help_open = false;
+        state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
+            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        assert_eq!(state.focus, Focus::Status);
     }
 
     #[test]
