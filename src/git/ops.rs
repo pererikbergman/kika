@@ -6,6 +6,7 @@ use std::path::Path;
 use super::branches::BranchName;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
+use super::repo_state::Operation;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
 
@@ -70,6 +71,24 @@ pub enum GitOp {
     /// Switch to this local branch. Git refuses when it would overwrite
     /// changes in the worktree, so no work is lost.
     Checkout(BranchName),
+    /// Merge the branch into the current one, as `strategy` says.
+    Merge {
+        branch: BranchName,
+        strategy: MergeStrategy,
+    },
+    /// Replay the current branch's own commits on top of `onto`.
+    Rebase {
+        onto: BranchName,
+    },
+    /// Go on with the operation git stopped, once its conflicts are
+    /// resolved and staged.
+    Continue(Operation),
+    /// Drop the commit the operation stopped on and go on. Never built for
+    /// a merge, which has nothing to skip.
+    Skip(Operation),
+    /// Stop the operation and put `HEAD`, the index and the worktree back
+    /// where it started.
+    Abort(Operation),
     /// Make branch `name` at `from` and switch to it, the usual next step.
     CreateBranch {
         name: String,
@@ -85,6 +104,18 @@ pub enum GitOp {
         name: BranchName,
         force: bool,
     },
+}
+
+/// How a merge records the other branch's commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// Only move the branch forward; refused when a merge commit is needed.
+    FastForwardOnly,
+    /// Always make a merge commit, even when a fast-forward would do.
+    NoFastForward,
+    /// Stage the combined changes for one ordinary commit; no merge is
+    /// recorded.
+    Squash,
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -148,7 +179,8 @@ impl GitOp {
 /// are read literally, never as globs or pathspec magic. A commit adds no
 /// env at all: its hooks inherit it, and must see what they would see
 /// outside Kika. Git runs hooks with stdin closed, so the message on stdin
-/// never reaches them.
+/// never reaches them. Merges, rebases and their continue, skip and abort
+/// add none for the same reason.
 pub fn op_command(op: &GitOp) -> GitCommand {
     let with_paths = |cmd: GitCommand, paths: &[RepoPath]| {
         paths
@@ -228,6 +260,32 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(if *force { "-D" } else { "-d" })
             .arg("--")
             .arg(name.as_os_string()),
+        // These take no paths and may run hooks, which must see the env they
+        // would see outside Kika, as a commit's do. The branch is a full
+        // ref, so a name like an option, or one a tag shadows, stays this
+        // branch.
+        GitOp::Merge { branch, strategy } => {
+            let flag = match strategy {
+                MergeStrategy::FastForwardOnly => "--ff-only",
+                MergeStrategy::NoFastForward => "--no-ff",
+                MergeStrategy::Squash => "--squash",
+            };
+            return GitCommand::new("merge").arg(flag).arg(branch.full_ref());
+        }
+        GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
+        GitOp::Continue(operation) => {
+            return GitCommand::new(operation.subcommand()).arg("--continue");
+        }
+        // Git rejects `merge --skip` without touching anything; no key
+        // builds it. `cherry-pick --skip` needs git 2.23, and an older one
+        // rejects it the same way.
+        GitOp::Skip(operation) => {
+            debug_assert!(operation.can_skip(), "{operation:?} cannot be skipped");
+            return GitCommand::new(operation.subcommand()).arg("--skip");
+        }
+        GitOp::Abort(operation) => {
+            return GitCommand::new(operation.subcommand()).arg("--abort");
+        }
         GitOp::Commit {
             message,
             amend,
@@ -262,8 +320,9 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
 }
 
 /// Run `op`. Failures carry git's message, made safe to draw since it can
-/// quote repo-controlled paths. A commit's failure also carries stdout:
-/// hooks print to stderr, but git says "nothing to commit" on stdout.
+/// quote repo-controlled paths. A commit's or a merge's failure also
+/// carries stdout: hooks print to stderr, but git says "nothing to commit"
+/// and names each conflict on stdout.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
 }
@@ -290,7 +349,7 @@ fn run_op_with(
         return Ok(());
     }
     let message = match op {
-        GitOp::Commit { .. } => [&output.stderr, &output.stdout]
+        GitOp::Commit { .. } | GitOp::Merge { .. } => [&output.stderr, &output.stdout]
             .map(|bytes| terminal_safe(bytes))
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -472,6 +531,110 @@ mod tests {
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
             runner.assert_done();
         }
+    }
+
+    fn argv(cmd: &GitCommand) -> Vec<String> {
+        cmd.args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn merge_and_rebase_name_the_branch_by_its_full_ref_and_set_no_env() {
+        let merge = |strategy| GitOp::Merge {
+            branch: "feature".into(),
+            strategy,
+        };
+        let cases: [(GitOp, &[&str]); 5] = [
+            (
+                merge(MergeStrategy::FastForwardOnly),
+                &["merge", "--ff-only", "refs/heads/feature"],
+            ),
+            (
+                merge(MergeStrategy::NoFastForward),
+                &["merge", "--no-ff", "refs/heads/feature"],
+            ),
+            (
+                merge(MergeStrategy::Squash),
+                &["merge", "--squash", "refs/heads/feature"],
+            ),
+            // A name like an option stays a ref.
+            (
+                GitOp::Merge {
+                    branch: "-x".into(),
+                    strategy: MergeStrategy::NoFastForward,
+                },
+                &["merge", "--no-ff", "refs/heads/-x"],
+            ),
+            (
+                GitOp::Rebase {
+                    onto: "main".into(),
+                },
+                &["rebase", "refs/heads/main"],
+            ),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+            assert_eq!(cmd.input(), None, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn continue_skip_and_abort_run_the_operations_own_subcommand_and_set_no_env() {
+        use Operation::*;
+        let cases: [(GitOp, &[&str]); 8] = [
+            (GitOp::Continue(Merge), &["merge", "--continue"]),
+            (GitOp::Continue(Rebase), &["rebase", "--continue"]),
+            (GitOp::Continue(CherryPick), &["cherry-pick", "--continue"]),
+            (GitOp::Skip(Rebase), &["rebase", "--skip"]),
+            (GitOp::Skip(CherryPick), &["cherry-pick", "--skip"]),
+            (GitOp::Abort(Merge), &["merge", "--abort"]),
+            (GitOp::Abort(Rebase), &["rebase", "--abort"]),
+            (GitOp::Abort(CherryPick), &["cherry-pick", "--abort"]),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+        }
+    }
+
+    #[test]
+    fn a_failed_merge_shows_the_conflicts_git_printed_on_stdout() {
+        let op = GitOp::Merge {
+            branch: "feature".into(),
+            strategy: MergeStrategy::Squash,
+        };
+        let output = GitOutput {
+            success: false,
+            stdout: b"CONFLICT (content): Merge conflict in a.txt\n".to_vec(),
+            stderr: b"Squash commit -- not updating HEAD\n".to_vec(),
+        };
+        let runner = FakeRunner::new().expect(&["merge", "--squash", "refs/heads/feature"], output);
+        assert_eq!(
+            run_op(&runner, &op),
+            Err("Squash commit -- not updating HEAD\n\
+                 CONFLICT (content): Merge conflict in a.txt"
+                .into())
+        );
+        runner.assert_done();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_and_rebase_put_the_raw_bytes_of_a_name_in_argv() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = crate::git::branches::BranchName::from_bytes(b"x\xff");
+        let merge = op_command(&GitOp::Merge {
+            branch: raw.clone(),
+            strategy: MergeStrategy::Squash,
+        });
+        assert_eq!(merge.args()[2].as_bytes(), b"refs/heads/x\xff");
+        let rebase = op_command(&GitOp::Rebase { onto: raw });
+        assert_eq!(rebase.args()[1].as_bytes(), b"refs/heads/x\xff");
     }
 
     #[cfg(unix)]

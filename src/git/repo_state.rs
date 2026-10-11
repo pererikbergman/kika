@@ -15,6 +15,34 @@ pub enum Operation {
     Bisect,
 }
 
+impl Operation {
+    /// The git subcommand that started it, and that continues, skips or
+    /// aborts it.
+    pub fn subcommand(self) -> &'static str {
+        match self {
+            Operation::Rebase => "rebase",
+            Operation::Merge => "merge",
+            Operation::CherryPick => "cherry-pick",
+            Operation::Bisect => "bisect",
+        }
+    }
+
+    /// Whether git can drop the commit it stopped on and go on. A merge
+    /// has only the one commit to make, so there is nothing to skip.
+    pub fn can_skip(self) -> bool {
+        !matches!(self, Operation::Merge)
+    }
+}
+
+/// The operation continue, skip and abort act on: the first of a rebase,
+/// a merge and a cherry-pick in `ops`. A bisect is never one; it has its
+/// own controls.
+pub fn resumable(ops: &[Operation]) -> Option<Operation> {
+    [Operation::Rebase, Operation::Merge, Operation::CherryPick]
+        .into_iter()
+        .find(|op| ops.contains(op))
+}
+
 /// Ask git where its dir is. It is not always `.git/`: linked worktrees and
 /// `GIT_DIR` put it elsewhere.
 pub fn git_dir_command() -> GitCommand {
@@ -49,6 +77,25 @@ pub fn in_progress(git_dir: &Path) -> Vec<Operation> {
 mod tests {
     use super::*;
     use crate::git::fake::TempDir;
+
+    #[test]
+    fn resumable_is_the_first_of_rebase_merge_and_cherry_pick_never_bisect() {
+        use Operation::*;
+        assert_eq!(resumable(&[]), None);
+        assert_eq!(resumable(&[Bisect]), None);
+        assert_eq!(resumable(&[Merge, Bisect]), Some(Merge));
+        assert_eq!(resumable(&[CherryPick]), Some(CherryPick));
+        assert_eq!(resumable(&[Merge, CherryPick]), Some(Merge));
+        // Ordered by kind, not by place in the list.
+        assert_eq!(resumable(&[CherryPick, Rebase]), Some(Rebase));
+    }
+
+    #[test]
+    fn only_a_merge_cannot_be_skipped() {
+        assert!(!Operation::Merge.can_skip());
+        assert!(Operation::Rebase.can_skip());
+        assert!(Operation::CherryPick.can_skip());
+    }
 
     #[test]
     fn git_dir_command_is_argv_only_in_the_c_locale() {
