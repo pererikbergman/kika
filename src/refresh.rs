@@ -17,6 +17,8 @@ pub enum Scope {
     Diff,
     /// The Submodules popup's list.
     Submodules,
+    /// The Commits panel's log and markers.
+    Commits,
 }
 
 /// How the file selection survives a refresh.
@@ -49,7 +51,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::DeleteUntracked(_)
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
-        GitOp::Commit { .. } => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
+        GitOp::Commit { .. } => (
+            &[Scope::Files, Scope::Branch, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
         // The parent lists a submodule whose checkout moved as modified.
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
@@ -117,7 +122,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_also_reloads_the_branch() {
+    fn a_commit_also_reloads_the_branch_and_the_commits() {
         let op = GitOp::Commit {
             message: Some("subj\n".into()),
             stage_all: true,
@@ -127,7 +132,7 @@ mod tests {
         assert_eq!(
             plan(&op),
             RefreshPlan {
-                scopes: set(&[Scope::Files, Scope::Branch, Scope::Diff]),
+                scopes: set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Commits]),
                 selection: Selection::KeepPath,
             }
         );

@@ -1,5 +1,6 @@
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::{CommitEditor, Field};
+use crate::commits_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
@@ -55,7 +56,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         match side {
             SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
             SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
-            SidePanel::Branches | SidePanel::Commits | SidePanel::Stash => {
+            SidePanel::Commits => {
+                commits_view::render_commits_panel(state, &look, expanded, frame, area)
+            }
+            SidePanel::Branches | SidePanel::Stash => {
                 render_placeholder(side, &look, expanded, frame, area)
             }
         }
@@ -104,7 +108,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
 /// How a panel's frame is drawn this time: whether it has the keys, the
 /// screen mode its title names, and whether it has room for more than a
 /// title row.
-struct PanelLook {
+pub(crate) struct PanelLook {
     number: u8,
     focused: bool,
     /// ` · half` or ` · full` on the focused panel, else empty.
@@ -136,7 +140,7 @@ impl PanelLook {
 
     /// ` [n] <text><mode> `, fitted to the border: the padding goes
     /// first, then `text` loses its end to `…`. The key and the mode stay.
-    fn title(&self, text: &str) -> String {
+    pub(crate) fn title(&self, text: &str) -> String {
         let key = format!("[{}]", self.number);
         let full = format!(" {key} {text}{} ", self.mode);
         if width_of(&full) <= self.title_width {
@@ -172,7 +176,7 @@ impl PanelLook {
 
     /// The panel's frame with `title`. A panel too short for both borders
     /// keeps only its top one, so the title still shows.
-    fn block(&self, title: String) -> Block<'static> {
+    pub(crate) fn block(&self, title: String) -> Block<'static> {
         let block = panel_block(title, self.focused);
         if self.top_only {
             block.borders(Borders::TOP)
@@ -325,7 +329,7 @@ fn fit(name: &str, suffix: &str, width: usize) -> String {
 }
 
 /// Fit `text` into `max` columns by replacing its end with `…`.
-fn elide_right(text: &str, max: usize) -> String {
+pub(crate) fn elide_right(text: &str, max: usize) -> String {
     if width_of(text) <= max {
         return text.to_string();
     }
@@ -980,7 +984,7 @@ fn file_lines(files: &[FileEntry], selected: Option<usize>, area: Rect) -> Vec<L
 }
 
 /// Highlight a whole row, not just its text, by padding it to `width`.
-fn reversed(mut line: Line<'_>, width: usize) -> Line<'_> {
+pub(crate) fn reversed(mut line: Line<'_>, width: usize) -> Line<'_> {
     let pad = width.saturating_sub(line.width());
     line.spans.push(Span::raw(" ".repeat(pad)));
     line.style(Style::new().add_modifier(Modifier::REVERSED))
@@ -1800,7 +1804,7 @@ mod tests {
     fn an_expanded_placeholder_says_nothing_is_here_yet() {
         let mut state = loaded(vec![]);
         assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        for side in [SidePanel::Branches, SidePanel::Commits, SidePanel::Stash] {
+        for side in [SidePanel::Branches, SidePanel::Stash] {
             state.focus = Focus::side(side);
             state.expanded = side;
             let buffer = draw_buffer(&state, 80, 24);
