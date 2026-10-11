@@ -5,12 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crossterm::event;
+use crossterm::event::{self, DisableFocusChange, EnableFocusChange};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute};
 use ratatui::DefaultTerminal;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::time::MissedTickBehavior;
 
 use crate::effect::{Effect, Runtime};
 use crate::git::GitRunner;
@@ -18,6 +19,7 @@ use crate::handoff::{self, HandOff};
 use crate::intent::AppIntent;
 use crate::model::AppState;
 use crate::view;
+use crate::watch::{DEFAULT_WATCH, WatchConfig, WatchEvent};
 
 /// The main loop: render, wait for the next intent, update, run its effects.
 /// The loop only ever awaits the channel; effects report back as intents.
@@ -31,6 +33,7 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone());
     let input = Arc::new(InputGate::default());
+    spawn_watch_timers(tx.clone(), &DEFAULT_WATCH);
     spawn_input_listener(tx, Arc::clone(&input));
 
     let size = terminal.size()?;
@@ -115,7 +118,13 @@ impl Suspended {
     fn enter() -> io::Result<Self> {
         let guard = Suspended;
         terminal::disable_raw_mode()?;
-        execute!(io::stdout(), LeaveAlternateScreen, cursor::Show)?;
+        // The other process would read focus reports as typed text.
+        execute!(
+            io::stdout(),
+            DisableFocusChange,
+            LeaveAlternateScreen,
+            cursor::Show
+        )?;
         Ok(guard)
     }
 }
@@ -123,7 +132,12 @@ impl Suspended {
 impl Drop for Suspended {
     fn drop(&mut self) {
         // Nothing to do with an error here: the next draw shows what is left.
-        let _ = execute!(io::stdout(), EnterAlternateScreen, cursor::Hide);
+        let _ = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            cursor::Hide,
+            EnableFocusChange
+        );
         let _ = terminal::enable_raw_mode();
     }
 }
@@ -183,6 +197,37 @@ struct Paused<'a> {
 impl Drop for Paused<'_> {
     fn drop(&mut self) {
         self.gate.wanted.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Send a `Watch` intent per interval in `config`, one task each, until
+/// the loop goes away. The first tick is skipped: startup loads already.
+/// Ticks missed while the loop was busy are dropped, not caught up.
+pub fn spawn_watch_timers(tx: UnboundedSender<AppIntent>, config: &WatchConfig) {
+    let mut timers = vec![
+        (config.refs, WatchEvent::PollRefs),
+        (config.files, WatchEvent::PollFiles),
+    ];
+    if let Some(fetch) = config.fetch {
+        timers.push((fetch, WatchEvent::Fetch));
+    }
+    for (period, event) in timers {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(period);
+            ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            ticks.tick().await;
+            loop {
+                tokio::select! {
+                    _ = tx.closed() => break,
+                    _ = ticks.tick() => {
+                        if tx.send(AppIntent::Watch(event)).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -250,6 +295,73 @@ mod tests {
         );
         drop(runtime);
         assert_eq!(rx.recv().await, None);
+    }
+
+    /// The watch intents that arrive within `window` of virtual time.
+    async fn watch_intents(config: WatchConfig, window: Duration) -> Vec<WatchEvent> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_watch_timers(tx, &config);
+        let mut events = Vec::new();
+        let _ = tokio::time::timeout(window, async {
+            while let Some(intent) = rx.recv().await {
+                match intent {
+                    AppIntent::Watch(event) => events.push(event),
+                    other => panic!("expected only watch intents, got {other:?}"),
+                }
+            }
+        })
+        .await;
+        events
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_timers_send_each_event_on_its_interval_after_skipping_the_first_tick() {
+        let config = WatchConfig {
+            refs: Duration::from_millis(10),
+            files: Duration::from_millis(25),
+            fetch: Some(Duration::from_millis(40)),
+        };
+
+        assert_eq!(watch_intents(config, Duration::from_millis(9)).await, []);
+
+        let events = watch_intents(config, Duration::from_millis(45)).await;
+        let count = |e| events.iter().filter(|&&x| x == e).count();
+        assert_eq!(count(WatchEvent::PollRefs), 4);
+        assert_eq!(count(WatchEvent::PollFiles), 1);
+        assert_eq!(count(WatchEvent::Fetch), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn without_a_fetch_interval_no_fetch_is_sent() {
+        let config = WatchConfig {
+            refs: Duration::from_millis(10),
+            files: Duration::from_millis(10),
+            fetch: None,
+        };
+        let events = watch_intents(config, Duration::from_secs(5)).await;
+        assert!(events.contains(&WatchEvent::PollRefs));
+        assert!(events.contains(&WatchEvent::PollFiles));
+        assert!(!events.contains(&WatchEvent::Fetch));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_timers_stop_when_the_loop_goes_away() {
+        let config = WatchConfig {
+            refs: Duration::from_millis(10),
+            files: Duration::from_millis(10),
+            fetch: Some(Duration::from_secs(300)),
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        spawn_watch_timers(tx.clone(), &config);
+        drop(rx);
+        // Every timer task held a clone; once they have all ended, only ours is left.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.strong_count() > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every timer task ends");
     }
 
     #[test]
