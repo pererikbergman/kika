@@ -313,7 +313,10 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{FakeRunner, fail};
+    // Only the editor tests use it, and they need `sh`.
+    #[cfg(unix)]
+    use crate::git::fake::ok;
 
     fn argv(editor: &str, line: Option<u32>) -> Vec<String> {
         editor_argv(editor, Path::new("/r/a b.txt"), line)

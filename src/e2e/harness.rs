@@ -110,6 +110,8 @@ impl Harness {
     }
 
     /// Wait until the app is idle.
+    // Only `#[cfg(unix)]` tests call it so far.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub async fn settle(&mut self) {
         self.wait_idle().await;
     }
