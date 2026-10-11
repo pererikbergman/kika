@@ -243,7 +243,7 @@ pub fn validate_remote_name(name: &str) -> Result<(), &'static str> {
 }
 
 /// Why `url` cannot be a new remote's URL, if it cannot. Git would read
-/// one starting with `-` as an option, and the `ext::` and `fd::`
+/// one starting with `-` as an option, and the `ext` and `fd`
 /// transports run a command or use a file descriptor on every later
 /// fetch, so Kika refuses them whatever `protocol.allow` says.
 pub fn validate_remote_url(url: &str) -> Result<(), &'static str> {
@@ -256,9 +256,13 @@ pub fn validate_remote_url(url: &str) -> Result<(), &'static str> {
     if url.chars().any(char::is_control) {
         return Err("A remote URL cannot contain control characters");
     }
-    let transport = url.split_once("::").map(|(t, _)| t.to_ascii_lowercase());
-    if matches!(transport.as_deref(), Some("ext" | "fd")) {
-        return Err("Kika does not add ext:: or fd:: remotes; add it with git directly");
+    // Both `ext::<command>` and `ext://...` reach the ext helper: git runs
+    // `git remote-<scheme>` for a scheme it does not know. So the scheme
+    // is everything before the first `:`, which leaves scp-like
+    // `user@host:path` and `C:\path` alone.
+    let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+    if matches!(scheme.as_deref(), Some("ext" | "fd")) {
+        return Err("Kika does not add ext or fd transport remotes; add it with git directly");
     }
     Ok(())
 }
@@ -425,6 +429,10 @@ mod tests {
             "Ext::x",
             "fd::3",
             "FD::3,4",
+            "ext://sh -c x",
+            "EXT://x",
+            "fd://3",
+            "ext:x",
             "-oProxyCommand=x",
             "",
             "https://h/\x1b[2J",
@@ -443,6 +451,10 @@ mod tests {
             "../kika",
             "file:///srv/kika",
             r"C:\repos\kika",
+            "c:/repos/kika",
+            "extra.host:repo.git",
+            "ext.example.com:me/kika.git",
+            "https://ext.example.com/fd",
         ] {
             assert_eq!(validate_remote_url(good), Ok(()), "{good:?}");
         }

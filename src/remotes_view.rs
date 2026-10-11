@@ -269,6 +269,67 @@ mod tests {
     }
 
     #[test]
+    fn wide_names_are_elided_to_the_panel_and_the_selection_fills_its_row() {
+        let wide = "山田太郎".repeat(5);
+        let mut state = focused(vec![remote(&wide, Some("/srv/r"), &[&wide, "main"])]);
+        state.branches.remotes.move_by(1);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = buffer_rows(buffer);
+        let y = rows
+            .iter()
+            .position(|r| r.contains("┃  山田"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(rows[y].contains('…'), "{rows:#?}");
+        assert!(
+            rows[y - 1].contains("┃山田") && rows[y - 1].contains('…'),
+            "{rows:#?}"
+        );
+        assert_eq!(crate::view::width_of(&rows[y]), 80, "{rows:#?}");
+        // The whole inside of the row is reversed, up to the border. The
+        // cell a wide glyph spills into is drawn with the glyph, so it is
+        // skipped.
+        let y = y as u16;
+        let mut x = 1;
+        while buffer[(x, y)].symbol() != "┃" {
+            let style = buffer[(x, y)].style();
+            assert!(
+                style.add_modifier.contains(Modifier::REVERSED),
+                "column {x} of {:?}",
+                rows[usize::from(y)]
+            );
+            x += crate::view::width_of(buffer[(x, y)].symbol()).max(1) as u16;
+        }
+    }
+
+    #[test]
+    fn the_remove_question_is_shown_whole_at_80_by_24() {
+        use crate::git::ops::GitOp;
+        use crate::popup::{Popup, RemoveRemoteConfirm};
+        let mut state = focused(vec![remote("origin", Some("/srv/r"), &["main"])]);
+        state.popups.push(Popup::RemoveRemote(RemoveRemoteConfirm {
+            name: "origin".into(),
+            op: GitOp::RemoveRemote("origin".into()),
+        }));
+        let rows = draw(&state, 80, 24);
+        let text: String = rows
+            .iter()
+            .map(|r| r.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for part in [
+            "Remove remote",
+            "origin?",
+            "remote-tracking",
+            "lose their",
+            "upstream. (y/n)",
+        ] {
+            assert!(text.contains(part), "{part:?} in {rows:#?}");
+        }
+    }
+
+    #[test]
     fn a_long_url_loses_its_end_and_tiny_terminals_do_not_panic() {
         let long = format!("https://h/{}", "very-long-path/".repeat(10));
         let state = focused(vec![remote("origin", Some(&long), &["main"])]);

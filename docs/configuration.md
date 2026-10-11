@@ -485,9 +485,9 @@ branches below it.
 | `remotes.switch_tab` | `[`, `]` | Show the local branches | |
 
 None of these reaches the network. A remote you add shows no branches until
-you fetch with `f`. Kika refuses a remote URL that uses the `ext::` or `fd::`
-transport, since those run a command or use a file descriptor on every
-fetch; add such a remote with git directly. A remote named like an option
+you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
+transport (`ext::…`, `ext://…`, `fd::…`, `fd://…`), since those run a command
+or use a file descriptor on every fetch; add such a remote with git directly. A remote named like an option
 (starting with `-`), or refs left under a name no remote has, cannot be
 renamed or removed from Kika.
 

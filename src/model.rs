@@ -10769,7 +10769,16 @@ mod tests {
             assert!(state.notice.is_some(), "{bad:?}");
             assert_eq!(state.popups, [], "{bad:?}");
         }
-        for bad in ["ext::sh -c x", "EXT::x", "fd::3", "-oProxyCommand=x", "  "] {
+        for bad in [
+            "ext::sh -c x",
+            "EXT::x",
+            "fd::3",
+            "ext://sh -c x",
+            "EXT://x",
+            "fd://3",
+            "-oProxyCommand=x",
+            "  ",
+        ] {
             press_char(&mut state, 'a');
             type_text(&mut state, "fork2\n");
             assert_eq!(
