@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::ansi;
 use crate::config::{self, ConfigPaths};
 use crate::diff_stream::DiffStreamer;
+use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
@@ -108,6 +110,17 @@ pub enum Effect {
         tag: Tag,
         oid: String,
     },
+    /// Find the configured diff renderers: the global `[diff] pager`, then
+    /// git's global pagers. Answered by one `RenderersFound`.
+    FindRenderers,
+    /// Run `renderer` on the diff for `request` at `cols` columns; always
+    /// answered by one `DiffRendered`.
+    RenderDiff {
+        tag: Tag,
+        request: DiffRequest,
+        renderer: ExternalRenderer,
+        cols: u16,
+    },
     /// Hand the terminal to another process. Run by the loop, which owns
     /// the terminal, never by [`Runtime`].
     HandOff(HandOff),
@@ -120,7 +133,7 @@ pub enum Effect {
         tag: Tag,
     },
     /// Read the global config file and that of the repository whose top
-    /// level is `repo`; answered by one `ConfigLoaded`.
+    /// level is `repo`; answered by one `ConfigLoaded` for the same `repo`.
     LoadConfig {
         repo: Option<PathBuf>,
     },
@@ -141,6 +154,8 @@ pub struct Runtime {
     /// The recent-repositories file. `None` keeps the list empty and
     /// unwritten, so only `main` touches the user's real one.
     recent_store: Option<PathBuf>,
+    /// The global config's `[diff] pager`, read once at startup.
+    diff_pager: Option<String>,
 }
 
 impl Runtime {
@@ -151,7 +166,13 @@ impl Runtime {
             tx,
             global_config: None,
             recent_store: None,
+            diff_pager: None,
         }
+    }
+
+    /// The renderer the global config names, offered first by `FindRenderers`.
+    pub fn with_diff_pager(self, diff_pager: Option<String>) -> Self {
+        Self { diff_pager, ..self }
     }
 
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
@@ -268,6 +289,39 @@ impl Runtime {
                     let _ = tx.send(AppIntent::CommitLoaded { tag, result });
                 });
             }
+            Effect::FindRenderers => {
+                let pager = self.diff_pager.clone();
+                tokio::spawn(async move {
+                    // A panic finds nothing; the built-in view still works.
+                    let found =
+                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager))
+                            .await
+                            .unwrap_or_default();
+                    let _ = tx.send(AppIntent::RenderersFound(found));
+                });
+            }
+            Effect::RenderDiff {
+                tag,
+                request,
+                renderer,
+                cols,
+            } => {
+                // Where git runs now, inside an entered submodule too.
+                let workdir = self.runner.workdir();
+                let label = renderer.label.clone();
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
+                        run_renderer(&renderer, &workdir, &diff, cols).map(|out| ansi::parse(&out))
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("{label} crashed: {e}").as_bytes()))
+                    });
+                    let _ = tx.send(AppIntent::DiffRendered { tag, result });
+                });
+            }
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
             Effect::DiffDemand { seq, want } => self.diff.demand(seq, want),
             Effect::CancelDiff => self.diff.cancel(),
@@ -326,6 +380,8 @@ impl Runtime {
                         tokio::task::spawn_blocking(move || config::load(&paths)).await
                     {
                         let _ = tx.send(AppIntent::ConfigLoaded {
+                            // Echoed so the reducer can drop a late result.
+                            repo,
                             keymap: loaded.keymap,
                             errors: loaded.errors,
                         });
@@ -390,9 +446,14 @@ mod tests {
         let commit = registry().iter().find(|b| b.id == "files.commit").unwrap();
         let mut load = async |text: &str, repo: Option<PathBuf>| -> Vec<KeyPattern> {
             std::fs::write(&global, text).unwrap();
-            runtime.spawn(Effect::LoadConfig { repo });
+            runtime.spawn(Effect::LoadConfig { repo: repo.clone() });
             match rx.recv().await {
-                Some(AppIntent::ConfigLoaded { keymap, errors }) => {
+                Some(AppIntent::ConfigLoaded {
+                    repo: echoed,
+                    keymap,
+                    errors,
+                }) => {
+                    assert_eq!(echoed, repo, "answers for the repository it read");
                     assert_eq!(errors, []);
                     [keymap.keys(stage), keymap.keys(commit)].concat()
                 }
@@ -1227,6 +1288,75 @@ mod tests {
                 assert!(chunk.done);
             }
             other => panic!("expected a diff chunk, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn render_diff_feeds_the_plain_diff_to_the_renderer_and_parses_it() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"],
+            ok(b"\x1b[31m-a\x1b[0m\n+b\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 8,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RenderDiff {
+            tag,
+            request: DiffRequest {
+                path: "a.rs".into(),
+                orig_path: None,
+                side: DiffSide::Worktree,
+                options: Default::default(),
+            },
+            renderer: ExternalRenderer {
+                label: "cat".into(),
+                argv: vec!["cat".into()],
+            },
+            cols: 40,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::DiffRendered {
+                tag: got,
+                result: Ok(rows),
+            }) => {
+                assert_eq!(got, tag);
+                let texts: Vec<String> = rows.iter().map(|r| r.text()).collect();
+                assert_eq!(texts, ["-a", "+b"]);
+            }
+            other => panic!("expected rendered rows, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn find_renderers_offers_the_configured_pager_then_the_global_git_ones() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["config", "--global", "--get", "pager.diff"],
+                    ok(b"delta\n"),
+                )
+                .expect(&["config", "--global", "--get", "core.pager"], ok(b"")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx).with_diff_pager(Some("riff".into()));
+
+        runtime.spawn(Effect::FindRenderers);
+
+        match rx.recv().await {
+            Some(AppIntent::RenderersFound(found)) => {
+                let labels: Vec<&str> = found.iter().map(|r| r.label.as_str()).collect();
+                assert_eq!(labels, ["riff", "delta"]);
+            }
+            other => panic!("expected renderers, got {other:?}"),
         }
         runner.assert_done();
     }

@@ -138,14 +138,24 @@ pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
 /// Load and parse the file's whole diff for patch building. Errors are
 /// made safe to draw, since git's message can quote repo-controlled paths.
 pub fn load_patch(runner: &dyn GitRunner, request: &DiffRequest) -> Result<FilePatch, String> {
+    let stdout = run_diff(runner, &patch_diff_command(request), request.side)?;
+    patch::parse(&stdout).map_err(|e| e.to_string())
+}
+
+/// Run a whole `git diff` of `side` and return its output. Errors are
+/// made safe to draw, since git's message can quote repo-controlled paths.
+pub fn run_diff(
+    runner: &dyn GitRunner,
+    cmd: &GitCommand,
+    side: DiffSide,
+) -> Result<Vec<u8>, String> {
     let output = runner
-        .run(&patch_diff_command(request))
+        .run(cmd)
         .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
     // `--no-index` exits 1 when the files differ, which is the point. The
     // runner reports no exit code; a real failure says why on stderr.
-    let differs = request.side == DiffSide::Untracked
-        && output.stderr.is_empty()
-        && !output.stdout.is_empty();
+    let differs =
+        side == DiffSide::Untracked && output.stderr.is_empty() && !output.stdout.is_empty();
     if !output.success && !differs {
         let message = terminal_safe(&output.stderr);
         return Err(if message.is_empty() {
@@ -154,7 +164,7 @@ pub fn load_patch(runner: &dyn GitRunner, request: &DiffRequest) -> Result<FileP
             message
         });
     }
-    patch::parse(&output.stdout).map_err(|e| e.to_string())
+    Ok(output.stdout)
 }
 
 /// What a diff line is, which decides its colour.
