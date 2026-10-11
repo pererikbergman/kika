@@ -112,6 +112,8 @@ pub enum ConfirmKind {
     /// Abort this operation in progress. It names the operation found when
     /// asked, so the answer aborts what the question said.
     Abort(Operation),
+    /// Every block of the conflict view's file is picked: stage it?
+    StageResolved,
 }
 
 impl ConfirmKind {
@@ -122,6 +124,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
             ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
+            ConfirmKind::StageResolved => "Stage resolved file",
         }
     }
 
@@ -142,6 +145,9 @@ impl ConfirmKind {
             }
             // Never asked: a bisect is not resumable.
             ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
+            ConfirmKind::StageResolved => {
+                "Every conflict in this file is resolved. Stage it? (y/n)"
+            }
         }
     }
 
@@ -149,12 +155,13 @@ impl ConfirmKind {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
+            ConfirmKind::StageResolved => AppIntent::StageResolved,
         }
     }
 
     pub fn no(self) -> Option<AppIntent> {
         match self {
-            ConfirmKind::Quit | ConfirmKind::Abort(_) => None,
+            ConfirmKind::Quit | ConfirmKind::Abort(_) | ConfirmKind::StageResolved => None,
         }
     }
 }
