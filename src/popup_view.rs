@@ -96,6 +96,9 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::CommandLog(view) => {
+                crate::command_log_view::render(&state.command_log, view, top, frame, area)
+            }
         }
     }
 }
@@ -850,9 +853,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 8,
+            cursor: menu::items(MenuId::Actions).len() - 1,
         }];
-        // Six rows: the bar leaves five, so three of the nine items show.
+        // Six rows: the bar leaves five, so three of the items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
@@ -867,7 +870,8 @@ mod tests {
                 cursor,
             }]
         };
-        // Three of the nine items show at a time.
+        // Three of the items show at a time.
+        let last = menu::items(MenuId::Actions).len() - 1;
         state.popups = menu(0);
         let (_, rows) = draw(&state, 30, 6);
         let (_, top) = find(&rows, " Actions ");
@@ -879,7 +883,7 @@ mod tests {
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
 
-        state.popups = menu(8);
+        state.popups = menu(last);
         let (_, rows) = draw(&state, 30, 6);
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(!rows[usize::from(top) + 4].contains('▼'), "{rows:#?}");

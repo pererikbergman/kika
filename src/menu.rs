@@ -87,6 +87,11 @@ static ACTIONS: &[MenuItem] = &[
         disabled: crate::worktree_list::worktrees_disabled,
     },
     MenuItem {
+        label: "Command log…",
+        intent: AppIntent::OpenCommandLog,
+        disabled: never,
+    },
+    MenuItem {
         label: "Recent repositories…",
         intent: AppIntent::OpenRecent,
         disabled: never,

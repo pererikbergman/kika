@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::command_log::{CommandLog, CommandLogView};
 use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
@@ -30,6 +31,7 @@ use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::rebase_plan::{self, Edit};
+use crate::git::recording::CommandEvent;
 use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
@@ -271,6 +273,8 @@ pub struct AppState {
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
+    /// Every git command run this session, recorded whether shown or not.
+    pub command_log: CommandLog,
     /// The commits a paste cherry-picks. Kept across checkouts, so they
     /// can be copied on one branch and pasted on another.
     pub copied: CopiedCommits,
@@ -326,6 +330,7 @@ impl AppState {
             branches: BranchesPanel::default(),
             remote: None,
             commits: CommitsPanel::default(),
+            command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
             notice_text: None,
         }
@@ -716,6 +721,12 @@ impl AppState {
             AppIntent::WorktreeRemoved { tag, result } => {
                 return self.worktree_removed(tag, result);
             }
+            AppIntent::CommandLogged(event) => self.command_logged(event),
+            AppIntent::OpenCommandLog => self.open_command_log(),
+            AppIntent::CommandLogNext => self.move_command_log(1),
+            AppIntent::CommandLogPrev => self.move_command_log(-1),
+            AppIntent::CommandLogPageDown => self.move_command_log(self.command_log_page()),
+            AppIntent::CommandLogPageUp => self.move_command_log(-self.command_log_page()),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -1023,6 +1034,7 @@ impl AppState {
             Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
             Some(Popup::Travel(_)) => return KeyScope::Travel,
+            Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -4453,6 +4465,41 @@ impl AppState {
     }
 }
 
+/// The Command log: recording every git command, and its popup.
+impl AppState {
+    /// Record a runner's event, keeping an open log's cursor on its entry
+    /// or on the newest one.
+    fn command_logged(&mut self, event: CommandEvent) {
+        let evicted = self.command_log.apply(event);
+        let len = self.command_log.len();
+        for popup in &mut self.popups {
+            if let Popup::CommandLog(view) = popup {
+                view.logged(len, evicted);
+            }
+        }
+    }
+
+    fn open_command_log(&mut self) {
+        let view = CommandLogView::open(self.command_log.len());
+        self.popups.push(Popup::CommandLog(view));
+    }
+
+    fn move_command_log(&mut self, delta: isize) {
+        let len = self.command_log.len();
+        if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
+            view.move_by(delta, len);
+        }
+    }
+
+    /// Rows a page moves: the log fills the screen above the bottom bar,
+    /// inside its border.
+    fn command_log_page(&self) -> isize {
+        isize::try_from(self.size.1.saturating_sub(3))
+            .unwrap_or(isize::MAX)
+            .max(1)
+    }
+}
+
 /// The conflict view: loading a conflicted file, picking a side of each
 /// block, writing the file after each pick, and staging it at the end.
 impl AppState {
@@ -6595,12 +6642,13 @@ mod tests {
         state.update(AppIntent::OpenMenu(MenuId::Actions));
         press(&mut state, KeyCode::Char('k'));
         assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
-        for _ in 0..10 {
+        let last = menu::items(MenuId::Actions).len() - 1;
+        for _ in 0..last + 2 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.popups, [menu(MenuId::Actions, 8)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last)]);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.popups, [menu(MenuId::Actions, 7)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last - 1)]);
         // The file selection did not move.
         assert_eq!(state.selected, Some(0));
     }
@@ -6662,7 +6710,8 @@ mod tests {
     fn the_quit_item_asks_first_and_y_quits() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..8 {
+        // Quit is the last item.
+        for _ in 1..menu::items(MenuId::Actions).len() {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
@@ -8972,7 +9021,11 @@ mod tests {
     fn the_actions_menu_opens_the_recent_list() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..7 {
+        let recent = menu::items(MenuId::Actions)
+            .iter()
+            .position(|item| item.intent == AppIntent::OpenRecent)
+            .unwrap();
+        for _ in 0..recent {
             state.update(AppIntent::MenuNext);
         }
         assert!(matches!(
@@ -13238,6 +13291,181 @@ mod tests {
         assert!(!format!("{intent:?}").contains("hunter2"));
         assert!(!format!("{effect:?}").contains("hunter2"));
         let _ = tag;
+    }
+
+    #[test]
+    fn a_credential_answer_never_reaches_the_command_log() {
+        use crate::git::command_line::display_line;
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+        use crate::git::remote::{AskpassEnv, remote_command};
+
+        let (mut state, _) = typing_password("hunter2");
+        let askpass = AskpassEnv {
+            program: "/usr/bin/kika".into(),
+            socket: "/tmp/kika-askpass-1/socket".into(),
+            git_askpass: true,
+        };
+        let line = display_line(&remote_command(&PUSH, Some(&askpass)));
+        state.update(AppIntent::CommandLogged(CommandEvent::Started {
+            id: 0,
+            line,
+            attached: false,
+        }));
+        state.update(AppIntent::CredentialAnswered(Some(Secret::new("hunter2"))));
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 0,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::from_millis(5),
+        }));
+
+        let entries = state.command_log.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].line, "git push");
+        for entry in entries {
+            for hidden in ["hunter2", "kika-askpass", "/usr/bin/kika", "KIKA_"] {
+                assert!(!entry.line.contains(hidden), "{hidden} in {entry:?}");
+            }
+        }
+        assert!(!format!("{:?}", state.command_log).contains("hunter2"));
+    }
+
+    fn log_started(state: &mut AppState, id: u64) {
+        state.update(AppIntent::CommandLogged(
+            crate::git::recording::CommandEvent::Started {
+                id,
+                line: format!("git cmd{id}"),
+                attached: false,
+            },
+        ));
+    }
+
+    fn command_log_view(state: &AppState) -> CommandLogView {
+        match state.popups.last() {
+            Some(Popup::CommandLog(view)) => *view,
+            other => panic!("expected the command log on top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_command_log_records_in_order_and_stays_bounded() {
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+
+        let mut state = AppState::new(Context::Workspace);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        let effects = state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Failed(None),
+            elapsed: std::time::Duration::from_millis(3),
+        }));
+        assert_eq!(effects, []);
+        let lines: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| &e.line)
+            .collect();
+        assert_eq!(lines, ["git cmd0", "git cmd1", "git cmd2"]);
+        let outcomes: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| e.outcome.clone())
+            .collect();
+        assert_eq!(outcomes, [None, Some(CommandOutcome::Failed(None)), None]);
+
+        let total = CommandLog::CAP as u64 + 10;
+        for id in 3..total {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.command_log.len(), CommandLog::CAP);
+        assert_eq!(state.command_log.entries()[0].id, 10);
+        let before = state.command_log.clone();
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::ZERO,
+        }));
+        assert_eq!(state.command_log, before);
+    }
+
+    #[test]
+    fn the_command_log_popup_follows_new_commands_until_moved_up() {
+        let mut state = AppState::new(Context::Workspace);
+        state.size = (80, 13);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.update(AppIntent::OpenCommandLog), []);
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: true
+            }
+        );
+
+        log_started(&mut state, 3);
+        assert_eq!(command_log_view(&state).cursor, 3);
+
+        state.update(AppIntent::CommandLogPrev);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: false
+            }
+        );
+        log_started(&mut state, 4);
+        assert_eq!(command_log_view(&state).cursor, 2);
+
+        state.update(AppIntent::CommandLogNext);
+        state.update(AppIntent::CommandLogNext);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 4,
+                follow: true
+            }
+        );
+
+        // A page is the rows inside the popup: 13 - bar - border = 10.
+        for id in 5..30 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::CommandLogPageUp);
+        assert_eq!(command_log_view(&state).cursor, 19);
+        state.update(AppIntent::CommandLogPageDown);
+        assert_eq!(command_log_view(&state).cursor, 29);
+
+        state.update(AppIntent::PopPopup);
+        assert_eq!(state.popups, []);
+        // Recording carries on while closed.
+        log_started(&mut state, 30);
+        assert_eq!(state.command_log.len(), 31);
+    }
+
+    #[test]
+    fn at_and_the_menu_open_the_command_log() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('@'),
+            KeyModifiers::SHIFT,
+        )));
+        assert!(matches!(state.popups.as_slice(), [Popup::CommandLog(_)]));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+
+        let items = menu::items(menu::MenuId::Actions);
+        let at = items
+            .iter()
+            .position(|item| item.label == "Command log…")
+            .expect("the Actions menu has the command log");
+        assert_eq!(items[at - 1].label, "Worktrees…");
+        assert_eq!(items[at].intent, AppIntent::OpenCommandLog);
+        assert_eq!((items[at].disabled)(&state), None);
     }
 
     #[test]
