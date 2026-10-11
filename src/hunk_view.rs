@@ -183,6 +183,12 @@ impl HunkView {
             .collect()
     }
 
+    /// The picked lines in line mode; `None` in hunk mode, where the
+    /// whole hunk is what the cursor marks.
+    pub fn picked(&self) -> Option<Vec<usize>> {
+        self.lines.map(|_| self.selected_range())
+    }
+
     /// The ids of the changed lines in the selected range; context between
     /// them is skipped. Empty outside line mode.
     pub fn selected_lines(&self) -> BTreeSet<LineId> {

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::{EntryKind, Head};
@@ -331,7 +332,7 @@ pub enum Trust {
 }
 
 /// Bindings a repository file may not change: they quit, start other
-/// programs, reach the network, destroy work, answer a question, create a
+/// programs (an editor, a diff renderer), reach the network, destroy work, answer a question, create a
 /// repository or switch to another one. Moving
 /// one onto an innocent key, taking quit away, or letting the key that
 /// asks also answer, would let a cloned repository trap or trick the user.
@@ -348,6 +349,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "diff.open",
     "lines.open",
     "diff.edit_hunk",
+    "diff.renderer",
     "commit_editor.edit_externally",
     "submodules.init",
     "submodules.update",
@@ -565,6 +567,11 @@ fn least_context(state: &AppState) -> Option<&'static str> {
     blame_open(state).or_else(|| {
         (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
     })
+}
+
+/// With no renderer configured there is nothing to cycle.
+fn renderer_disabled(state: &AppState) -> Option<&'static str> {
+    state.renderers.is_empty().then_some(NO_RENDERER)
 }
 
 /// Why `b` cannot blame the selected file. An untracked or deleted file
@@ -1130,6 +1137,16 @@ static REGISTRY: &[Binding] = &[
         // Left out of the bar until the layout review (#10).
         bar: false,
         disabled: edit_hunk_disabled,
+    },
+    Binding {
+        id: "diff.renderer",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::CycleRenderer,
+        description: "Cycle diff renderer",
+        label: "renderer",
+        bar: false,
+        disabled: renderer_disabled,
     },
     Binding {
         id: "diff.back",
@@ -3118,6 +3135,7 @@ mod tests {
                 b.intent,
                 Quit | OpenInEditor
                     | EditHunk
+                    | CycleRenderer
                     | EditCommitExternally
                     | InitSubmodule
                     | UpdateSubmodule

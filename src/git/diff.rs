@@ -138,14 +138,24 @@ pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
 /// Load and parse the file's whole diff for patch building. Errors are
 /// made safe to draw, since git's message can quote repo-controlled paths.
 pub fn load_patch(runner: &dyn GitRunner, request: &DiffRequest) -> Result<FilePatch, String> {
+    let stdout = run_diff(runner, &patch_diff_command(request), request.side)?;
+    patch::parse(&stdout).map_err(|e| e.to_string())
+}
+
+/// Run a whole `git diff` of `side` and return its output. Errors are
+/// made safe to draw, since git's message can quote repo-controlled paths.
+pub fn run_diff(
+    runner: &dyn GitRunner,
+    cmd: &GitCommand,
+    side: DiffSide,
+) -> Result<Vec<u8>, String> {
     let output = runner
-        .run(&patch_diff_command(request))
+        .run(cmd)
         .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
     // `--no-index` exits 1 when the files differ, which is the point. The
     // runner reports no exit code; a real failure says why on stderr.
-    let differs = request.side == DiffSide::Untracked
-        && output.stderr.is_empty()
-        && !output.stdout.is_empty();
+    let differs =
+        side == DiffSide::Untracked && output.stderr.is_empty() && !output.stdout.is_empty();
     if !output.success && !differs {
         let message = terminal_safe(&output.stderr);
         return Err(if message.is_empty() {
@@ -154,7 +164,7 @@ pub fn load_patch(runner: &dyn GitRunner, request: &DiffRequest) -> Result<FileP
             message
         });
     }
-    patch::parse(&output.stdout).map_err(|e| e.to_string())
+    Ok(output.stdout)
 }
 
 /// What a diff line is, which decides its colour.
@@ -223,16 +233,47 @@ impl Classifier {
 
 /// Decode lossily and make the text safe to draw: tabs become spaces and any
 /// other control character becomes `U+FFFD`, so file bytes never drive the terminal.
+/// Bidi controls and zero-width characters reorder or hide text, so a hostile
+/// name could pass for another; they become a visible `<U+XXXX>` escape rather
+/// than being dropped, so names that differ only by them still look different.
 pub fn sanitize(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     for c in String::from_utf8_lossy(raw).chars() {
         match c {
             '\t' => text.push_str("    "),
+            c if is_invisible_or_bidi(c) => text.push_str(&format!("<U+{:04X}>", u32::from(c))),
             c if c.is_control() => text.push('\u{FFFD}'),
             c => text.push(c),
         }
     }
     text
+}
+
+/// Format characters (not `is_control`) that reorder text or draw nothing:
+/// Unicode's Default_Ignorable_Code_Point set plus the interlinear annotation
+/// characters. U+FE0E and U+FE0F are left alone because emoji such as "❤️"
+/// need them; a name differing only by one of those is a narrow, accepted gap.
+fn is_invisible_or_bidi(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{061C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0D}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 /// git's message, line by line through the same sanitiser as diff lines,
@@ -752,5 +793,84 @@ mod tests {
     fn invalid_utf8_is_decoded_lossily() {
         let mut c = Classifier::new();
         assert_eq!(c.classify(b"a\xffb\n").text, "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn bidi_and_invisible_characters_become_visible_escapes() {
+        let classes: [(&str, &[char]); 17] = [
+            (
+                "embedding/override",
+                &['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'],
+            ),
+            ("isolate", &['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
+            ("mark", &['\u{200E}', '\u{200F}', '\u{061C}']),
+            ("zero-width", &['\u{200B}', '\u{200C}', '\u{200D}']),
+            ("word joiner", &['\u{2060}']),
+            ("byte order mark", &['\u{FEFF}']),
+            ("soft hyphen", &['\u{00AD}']),
+            ("combining grapheme joiner", &['\u{034F}']),
+            (
+                "hangul filler",
+                &['\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'],
+            ),
+            ("khmer vowel inherent", &['\u{17B4}', '\u{17B5}']),
+            (
+                "mongolian format",
+                &['\u{180B}', '\u{180C}', '\u{180D}', '\u{180E}', '\u{180F}'],
+            ),
+            (
+                "invisible operator and deprecated format",
+                &['\u{2061}', '\u{2064}', '\u{2065}', '\u{206A}', '\u{206F}'],
+            ),
+            ("variation selector", &['\u{FE00}', '\u{FE0D}']),
+            (
+                "unassigned and interlinear annotation",
+                &['\u{FFF0}', '\u{FFF8}', '\u{FFF9}', '\u{FFFA}', '\u{FFFB}'],
+            ),
+            ("shorthand format", &['\u{1BCA0}', '\u{1BCA3}']),
+            ("musical format", &['\u{1D173}', '\u{1D17A}']),
+            (
+                "tag",
+                &[
+                    '\u{E0000}',
+                    '\u{E0001}',
+                    '\u{E0041}',
+                    '\u{E007F}',
+                    '\u{E0FFF}',
+                ],
+            ),
+        ];
+        for (class, chars) in classes {
+            for &c in chars {
+                let raw = format!("a{c}b");
+                let expected = format!("a<U+{:04X}>b", c as u32);
+                assert_eq!(sanitize(raw.as_bytes()), expected, "{class} {c:?}");
+            }
+        }
+        assert_eq!(sanitize("a\u{202E}b".as_bytes()), "a<U+202E>b");
+        assert_eq!(sanitize("\u{061C}".as_bytes()), "<U+061C>");
+    }
+
+    #[test]
+    fn ordinary_text_is_unchanged() {
+        // U+FE0E/U+FE0F are kept so emoji presentation still works.
+        for text in [
+            "src/café.rs",
+            "日本語",
+            "🙂",
+            "plain ascii",
+            "❤\u{FE0F}",
+            "\u{263A}\u{FE0E}",
+        ] {
+            assert_eq!(sanitize(text.as_bytes()), text);
+        }
+    }
+
+    #[test]
+    fn git_error_text_shows_bidi_escapes() {
+        assert_eq!(
+            terminal_safe("fatal: bad \u{2066}path\u{2069}\n".as_bytes()),
+            "fatal: bad <U+2066>path<U+2069>"
+        );
     }
 }

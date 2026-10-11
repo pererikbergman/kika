@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
+use crate::external_diff::ExternalRenderer;
 use crate::git::repo_root::find_toplevel;
 use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
@@ -36,6 +37,9 @@ pub struct Harness {
     runtime: Runtime,
     runner: Arc<CliRunner>,
     terminal: Terminal<TestBackend>,
+    /// Boot's renderer discovery has reported. It is not a user effect,
+    /// so `busy` does not cover it.
+    renderers_found: bool,
 }
 
 impl Harness {
@@ -67,6 +71,7 @@ impl Harness {
             runtime,
             runner,
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
+            renderers_found: false,
         };
         app::boot(&mut harness.state, &harness.runtime, width, height);
         harness.wait_idle().await;
@@ -92,6 +97,12 @@ impl Harness {
         }
     }
 
+    /// Offer `renderers` instead of the ones the host has configured.
+    pub async fn use_renderers(&mut self, renderers: Vec<ExternalRenderer>) {
+        self.dispatch(AppIntent::RenderersFound(renderers));
+        self.wait_idle().await;
+    }
+
     /// Dispatch one intent, such as a timer tick, then wait for idle.
     pub async fn intent(&mut self, intent: AppIntent) {
         self.dispatch(intent);
@@ -101,6 +112,9 @@ impl Harness {
     /// Apply `intent` as the loop does, running any hand-off it asks for
     /// to the end before going on.
     fn dispatch(&mut self, intent: AppIntent) {
+        if matches!(intent, AppIntent::RenderersFound(_)) {
+            self.renderers_found = true;
+        }
         let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
         while let Some(job) = jobs.pop_front() {
             let workdir = self.runner.workdir();
@@ -185,7 +199,7 @@ impl Harness {
             while let Ok(intent) = self.rx.try_recv() {
                 self.dispatch(intent);
             }
-            if is_idle(&self.state) {
+            if is_idle(&self.state) && self.renderers_found {
                 return;
             }
             match tokio::time::timeout(HANG_TIMEOUT, self.rx.recv()).await {
