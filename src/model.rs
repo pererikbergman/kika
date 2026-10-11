@@ -2708,7 +2708,10 @@ mod tests {
         let mut state = focused(vec![untracked("n.txt")], new_file);
         press(&mut state, KeyCode::Char('v'));
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-        assert_eq!(state.notice, Some("New file: stage it whole"));
+        assert_eq!(
+            state.notice,
+            Some("New file: press Esc, then Space for the whole file")
+        );
         assert_eq!(state.op_seq, None);
         assert_eq!(state.busy, 0);
     }

@@ -661,9 +661,14 @@ fn render_diff_pane(diff: &DiffPane, frame: &mut Frame, area: Rect) {
 /// marked by a reversed `@@` row and a `▌` gutter, so it reads without colour.
 /// In line mode the picked lines are marked that way instead.
 fn render_hunk_view(view: &HunkView, frame: &mut Frame, area: Rect) {
-    let title = match view.side {
-        DiffSide::Index => " Staged ",
-        DiffSide::Worktree | DiffSide::Untracked => " Unstaged ",
+    let side = match view.side {
+        DiffSide::Index => "Staged",
+        DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
+    };
+    // The mode is in words too, for when the bar is cut off.
+    let title = match view.lines {
+        Some(_) => format!(" {side} · lines "),
+        None => format!(" {side} "),
     };
     let block = Block::bordered()
         .title(title)
@@ -1964,6 +1969,7 @@ mod tests {
 
         let rows = draw(&hunks(DiffSide::Index, TWO_HUNKS), 100, 20);
         assert!(contains(&rows, " Staged "), "{rows:#?}");
+        assert!(!contains(&rows, "· lines"), "{rows:#?}");
         let rows = draw(&hunks(DiffSide::Untracked, TWO_HUNKS), 100, 20);
         assert!(contains(&rows, " Unstaged "), "{rows:#?}");
     }
@@ -2020,6 +2026,7 @@ mod tests {
         assert!(contains(&rows, "▌+new one"), "{rows:#?}");
         assert!(contains(&rows, "  same"), "{rows:#?}");
         assert!(contains(&rows, " @@ -1,2 +1,2 @@"), "{rows:#?}");
+        assert!(contains(&rows, " Unstaged · lines "), "{rows:#?}");
 
         // A one-line range marks only that line.
         if let Focus::Diff(view) = &mut state.focus {

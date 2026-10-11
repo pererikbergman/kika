@@ -154,8 +154,10 @@ impl PatchError {
             PatchError::NoNewlineSplit => {
                 "The last line has no newline: select it with the line it replaces"
             }
-            PatchError::PartialNewFile => "New file: stage it whole",
-            PatchError::PartialDeletedFile => "Deleted file: stage it whole",
+            PatchError::PartialNewFile => "New file: press Esc, then Space for the whole file",
+            PatchError::PartialDeletedFile => {
+                "Deleted file: press Esc, then Space for the whole file"
+            }
         }
     }
 }
@@ -197,12 +199,21 @@ pub fn parse(bytes: &[u8]) -> Result<FilePatch, PatchError> {
             hunks: Vec::new(),
         });
     }
-    let mut hunks = Vec::new();
+    let mut hunks: Vec<Hunk> = Vec::new();
     while let Some(line) = lines.next() {
         if line.starts_with(b"diff ") {
             return Err(PatchError::MultipleFiles);
         }
         let mut hunk = parse_hunk_header(line)?;
+        // A line id names one line of the file, so hunks must be in order
+        // and never overlap.
+        if let Some(prev) = hunks.last()
+            && (first_line(hunk.old_start, hunk.old_len) < end_line(prev.old_start, prev.old_len)
+                || first_line(hunk.new_start, hunk.new_len)
+                    < end_line(prev.new_start, prev.new_len))
+        {
+            return Err(PatchError::Malformed);
+        }
         let (mut old, mut new) = (hunk.old_len, hunk.new_len);
         while old > 0 || new > 0 {
             let line = lines.next().ok_or(PatchError::Malformed)?;
@@ -313,6 +324,12 @@ fn parse_hunk_header(line: &[u8]) -> Result<Hunk, PatchError> {
     }
     let (old_start, old_len) = parse_range(old)?;
     let (new_start, new_len) = parse_range(new)?;
+    // Every line, and the position after the last, must have a `u32` number.
+    if end_line(old_start, old_len) > i64::from(u32::MAX)
+        || end_line(new_start, new_len) > i64::from(u32::MAX)
+    {
+        return Err(PatchError::Malformed);
+    }
     let heading = after.strip_suffix(b"\n").unwrap_or(after).to_vec();
     Ok(Hunk {
         old_start,
@@ -346,9 +363,12 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 impl Hunk {
     /// The id of each line, `None` for context. Numbers count from the
     /// `@@` starts; a side of length 0 starts after its "line before".
+    /// Counting is wide, so a hunk built by hand past `u32::MAX` gives no id
+    /// rather than a wrapped one (`parse` refuses such headers).
     pub fn line_ids(&self) -> Vec<Option<LineId>> {
         let mut old = first_line(self.old_start, self.old_len);
         let mut new = first_line(self.new_start, self.new_len);
+        let id = |n: i64, make: fn(u32) -> LineId| u32::try_from(n).ok().map(make);
         self.lines
             .iter()
             .map(|line| match line.kind {
@@ -359,11 +379,11 @@ impl Hunk {
                 }
                 PatchLineKind::Removed => {
                     old += 1;
-                    Some(LineId::removed(old - 1))
+                    id(old - 1, LineId::removed)
                 }
                 PatchLineKind::Added => {
                     new += 1;
-                    Some(LineId::added(new - 1))
+                    id(new - 1, LineId::added)
                 }
             })
             .collect()
@@ -372,8 +392,13 @@ impl Hunk {
 
 /// Where a side's first line is. Git writes a side of length 0 with the
 /// line before it as the start.
-fn first_line(start: u32, len: u32) -> u32 {
-    if len == 0 { start + 1 } else { start }
+fn first_line(start: u32, len: u32) -> i64 {
+    i64::from(start) + i64::from(len == 0)
+}
+
+/// The position just after a side's last line.
+fn end_line(start: u32, len: u32) -> i64 {
+    first_line(start, len) + i64::from(len)
 }
 
 /// Every changed line of the file.
@@ -445,8 +470,8 @@ pub fn build(
             return Err(PatchError::NoContext);
         }
         check_no_newline(&lines)?;
-        let mut old_pos = i64::from(first_line(hunk.old_start, hunk.old_len));
-        let mut new_pos = i64::from(first_line(hunk.new_start, hunk.new_len));
+        let mut old_pos = first_line(hunk.old_start, hunk.old_len);
+        let mut new_pos = first_line(hunk.new_start, hunk.new_len);
         match direction {
             Direction::Stage => new_pos -= shift,
             Direction::Unstage => old_pos += shift,
@@ -1331,5 +1356,83 @@ mod tests {
             &patch,
             &PatchSelection::Lines(BTreeSet::new())
         ));
+    }
+
+    #[test]
+    fn hunk_headers_whose_lines_would_overflow_are_refused() {
+        let head = "diff --git a/x b/x\n--- a/x\n+++ b/x\n";
+        for body in [
+            "@@ -4294967295,2 +4294967295,2 @@\n a\n-b\n+c\n",
+            "@@ -4294967295 +4294967295 @@\n-a\n+b\n",
+            "@@ -4294967295,0 +1 @@\n+a\n",
+            "@@ -1 +4294967295,0 @@\n-a\n",
+        ] {
+            let diff = format!("{head}{body}");
+            assert_eq!(
+                parse(diff.as_bytes()),
+                Err(PatchError::Malformed),
+                "{body:?}"
+            );
+        }
+        // The largest start that still fits parses.
+        let fits = format!("{head}@@ -4294967294 +4294967294 @@\n-a\n+b\n");
+        assert!(parse(fits.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn a_hand_built_hunk_at_the_top_of_the_range_numbers_without_panicking() {
+        let hunk = Hunk {
+            old_start: u32::MAX,
+            old_len: 2,
+            new_start: u32::MAX,
+            new_len: 2,
+            heading: Vec::new(),
+            lines: vec![
+                line(Removed, b"a\n", false),
+                line(Removed, b"b\n", false),
+                line(Added, b"c\n", false),
+                line(Added, b"d\n", false),
+            ],
+        };
+        // Only lines with a number that fits get an id.
+        assert_eq!(
+            hunk.line_ids(),
+            [
+                Some(LineId::removed(u32::MAX)),
+                None,
+                Some(LineId::added(u32::MAX)),
+                None
+            ]
+        );
+        let patch = FilePatch {
+            header: Vec::new(),
+            kind: FileKind::Modified,
+            hunks: vec![hunk],
+        };
+        let selection = PatchSelection::Lines([LineId::removed(u32::MAX)].into());
+        assert!(build(&patch, &selection, Direction::Stage).is_ok());
+    }
+
+    #[test]
+    fn hunks_that_overlap_or_go_backwards_are_refused() {
+        let head = "diff --git a/x b/x\n--- a/x\n+++ b/x\n";
+        for body in [
+            // Out of order.
+            "@@ -10 +10 @@\n-a\n+b\n@@ -1 +1 @@\n-c\n+d\n",
+            // Overlapping on both sides.
+            "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n@@ -3 +3 @@\n-c\n+C\n",
+            // Overlapping on the new side only.
+            "@@ -1,2 +1,4 @@\n a\n+x\n+y\n b\n@@ -5 +3 @@\n-e\n+E\n",
+        ] {
+            let diff = format!("{head}{body}");
+            assert_eq!(
+                parse(diff.as_bytes()),
+                Err(PatchError::Malformed),
+                "{body:?}"
+            );
+        }
+        // Hunks that only touch are fine, as are empty sides between them.
+        let touching = format!("{head}@@ -1 +1 @@\n-a\n+b\n@@ -2 +2 @@\n-c\n+d\n");
+        assert_eq!(parse(touching.as_bytes()).unwrap().hunks.len(), 2);
     }
 }
