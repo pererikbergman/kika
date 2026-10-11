@@ -1,5 +1,6 @@
+use super::patch::{self, FilePatch};
 use super::path::RepoPath;
-use super::runner::GitCommand;
+use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
 
 /// Which of a file's changes to show.
@@ -68,6 +69,51 @@ pub fn diff_command(request: &DiffRequest) -> GitCommand {
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
+}
+
+/// The whole `git diff` of one file in the plain form the patch engine
+/// parses: no colour, external drivers or textconv, renames off so one path
+/// gives one file, and fixed `a/` `b/` prefixes whatever the user's config.
+pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
+    let mut cmd = GitCommand::new("diff")
+        .arg("--no-color")
+        .arg("--no-ext-diff")
+        .arg("--no-textconv")
+        .arg("--no-renames")
+        .arg("-U3")
+        .arg("--src-prefix=a/")
+        .arg("--dst-prefix=b/");
+    cmd = match request.side {
+        DiffSide::Worktree => cmd.arg("--"),
+        DiffSide::Index => cmd.arg("--cached").arg("--"),
+        DiffSide::Untracked => cmd.arg("--no-index").arg("--").arg("/dev/null"),
+    };
+    cmd.arg(request.path.as_os_str())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+}
+
+/// Load and parse the file's whole diff for patch building. Errors are
+/// made safe to draw, since git's message can quote repo-controlled paths.
+pub fn load_patch(runner: &dyn GitRunner, request: &DiffRequest) -> Result<FilePatch, String> {
+    let output = runner
+        .run(&patch_diff_command(request))
+        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    // `--no-index` exits 1 when the files differ, which is the point. The
+    // runner reports no exit code; a real failure says why on stderr.
+    let differs = request.side == DiffSide::Untracked
+        && output.stderr.is_empty()
+        && !output.stdout.is_empty();
+    if !output.success && !differs {
+        let message = terminal_safe(&output.stderr);
+        return Err(if message.is_empty() {
+            "git diff failed".into()
+        } else {
+            message
+        });
+    }
+    patch::parse(&output.stdout).map_err(|e| e.to_string())
 }
 
 /// What a diff line is, which decides its colour.
@@ -393,6 +439,123 @@ mod tests {
         let text = diff_of_raw(DiffSide::Index);
         assert!(text.contains("-raw old"), "{text}");
         assert!(!text.contains("look-alike"), "{text}");
+    }
+
+    const PATCH_FLAGS: [&str; 8] = [
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "-U3",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+    ];
+
+    #[test]
+    fn patch_diff_command_for_each_side() {
+        let cases: [(DiffSide, &[&str]); 3] = [
+            (DiffSide::Worktree, &["--", "new name.rs"]),
+            (DiffSide::Index, &["--cached", "--", "new name.rs"]),
+            (
+                DiffSide::Untracked,
+                &["--no-index", "--", "/dev/null", "new name.rs"],
+            ),
+        ];
+        for (side, tail) in cases {
+            // The original path never matters: renames are off.
+            let cmd = patch_diff_command(&request(side, Some("old.rs")));
+            assert_eq!(argv(&cmd), [&PATCH_FLAGS[..], tail].concat(), "{side:?}");
+            assert_eq!(
+                env(&cmd),
+                [
+                    ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                    ("LC_ALL".into(), "C".into()),
+                    ("GIT_LITERAL_PATHSPECS".into(), "1".into())
+                ],
+                "{side:?}"
+            );
+        }
+    }
+
+    fn patch_argv(tail: &[&'static str]) -> Vec<&'static str> {
+        [&PATCH_FLAGS[..], tail].concat()
+    }
+
+    const ONE_HUNK: &[u8] = b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
+
+    #[test]
+    fn load_patch_parses_the_output() {
+        use crate::git::fake::{FakeRunner, ok};
+        let runner = FakeRunner::new().expect(&patch_argv(&["--", "x"]), ok(ONE_HUNK));
+        let patch = load_patch(&runner, &request_for("x", DiffSide::Worktree)).unwrap();
+        assert_eq!(patch.hunks.len(), 1);
+        runner.assert_done();
+    }
+
+    fn request_for(path: &str, side: DiffSide) -> DiffRequest {
+        DiffRequest {
+            path: path.into(),
+            orig_path: None,
+            side,
+        }
+    }
+
+    #[test]
+    fn load_patch_takes_exit_1_from_no_index_as_a_diff() {
+        use crate::git::fake::FakeRunner;
+        use crate::git::runner::GitOutput;
+        let differs = GitOutput {
+            success: false,
+            stdout: ONE_HUNK.to_vec(),
+            stderr: Vec::new(),
+        };
+        let runner = FakeRunner::new().expect(
+            &patch_argv(&["--no-index", "--", "/dev/null", "x"]),
+            differs.clone(),
+        );
+        let patch = load_patch(&runner, &request_for("x", DiffSide::Untracked)).unwrap();
+        assert_eq!(patch.hunks.len(), 1);
+
+        // Anywhere else a failure is a failure.
+        let runner = FakeRunner::new().expect(&patch_argv(&["--", "x"]), differs);
+        assert_eq!(
+            load_patch(&runner, &request_for("x", DiffSide::Worktree)),
+            Err("git diff failed".into())
+        );
+    }
+
+    #[test]
+    fn load_patch_errors_are_terminal_safe() {
+        use crate::git::fake::{FakeRunner, fail, ok};
+        let runner = FakeRunner::new().expect(
+            &patch_argv(&["--cached", "--", "x"]),
+            fail("fatal: bad \x1b[2J path\n"),
+        );
+        assert_eq!(
+            load_patch(&runner, &request_for("x", DiffSide::Index)),
+            Err("fatal: bad \u{FFFD}[2J path".into())
+        );
+        let two_files = [ONE_HUNK, ONE_HUNK].concat();
+        let runner = FakeRunner::new().expect(&patch_argv(&["--", "x"]), ok(&two_files));
+        assert_eq!(
+            load_patch(&runner, &request_for("x", DiffSide::Worktree)),
+            Err("The diff holds more than one file".into())
+        );
+    }
+
+    #[test]
+    fn load_patch_of_a_new_file_in_real_git() {
+        use crate::git::fake::{TempDir, git};
+        let tmp = TempDir::new("load-patch");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("new.txt"), "a\nb\n").unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let patch = load_patch(&runner, &request_for("new.txt", DiffSide::Untracked)).unwrap();
+        assert_eq!(patch.kind, crate::git::patch::FileKind::Added);
+        assert_eq!(patch.hunks.len(), 1);
+        assert_eq!(patch.hunks[0].new_len, 2);
     }
 
     fn kinds(lines: &[&str]) -> Vec<LineKind> {

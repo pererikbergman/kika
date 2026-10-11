@@ -1,0 +1,10 @@
+diff --git a/eol_both.txt b/eol_both.txt
+index 4e1f202..08a4c5e 100644
+--- a/eol_both.txt
++++ b/eol_both.txt
+@@ -1,2 +1,2 @@
+ keep
+-old
+\ No newline at end of file
++new
+\ No newline at end of file

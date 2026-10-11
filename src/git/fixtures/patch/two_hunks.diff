@@ -1,0 +1,19 @@
+diff --git a/two.txt b/two.txt
+old mode 100644
+new mode 100755
+index c4352f8..85bc356
+--- a/two.txt
++++ b/two.txt
+@@ -1,4 +1,5 @@
+-line 1
++line 1a
++line 1b
+ line 2
+ line 3
+ line 4
+@@ -17,4 +18,4 @@ line 16
+ line 17
+ line 18
+ line 19
+-line 20
++line twenty
