@@ -97,12 +97,16 @@ pub enum Effect {
         root: PathBuf,
         nested: Vec<RepoPath>,
     },
-    /// Read the recent-repositories list; answered by `RecentLoaded`.
-    LoadRecent,
+    /// Read the recent-repositories list; answered by `RecentLoaded`
+    /// with the same `seq`.
+    LoadRecent {
+        seq: u64,
+    },
     /// Put `path` first in the recent list; answered by `RecentLoaded`
-    /// with the new list.
+    /// with the new list and the same `seq`.
     RecordRecent {
         path: PathBuf,
+        seq: u64,
     },
     /// Make the runner's directory a repository; always answered by one
     /// `RepoInitialised`.
@@ -264,8 +268,8 @@ impl Runtime {
                     .fold(root, |dir, path| dir.join(path.as_os_str()));
                 self.runner.set_workdir(dir);
             }
-            Effect::LoadRecent => self.recent(None),
-            Effect::RecordRecent { path } => self.recent(Some(path)),
+            Effect::LoadRecent { seq } => self.recent(seq, None),
+            Effect::RecordRecent { path, seq } => self.recent(seq, Some(path)),
             Effect::InitRepo { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
@@ -474,7 +478,7 @@ impl Runtime {
 
     /// Load the recent list, recording `repo` first when given, and report
     /// it. A list that cannot be written is still shown as it was read.
-    fn recent(&self, repo: Option<PathBuf>) {
+    fn recent(&self, seq: u64, repo: Option<PathBuf>) {
         let store = self.recent_store.clone();
         let tx = self.tx.clone();
         tokio::spawn(async move {
@@ -491,7 +495,7 @@ impl Runtime {
             })
             .await
             .unwrap_or_default();
-            let _ = tx.send(AppIntent::RecentLoaded(list));
+            let _ = tx.send(AppIntent::RecentLoaded { seq, list });
         });
     }
 }
@@ -1243,10 +1247,12 @@ mod tests {
 
         runtime.spawn(Effect::RecordRecent {
             path: std::env::temp_dir(),
+            seq: 1,
         });
-        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![])));
-        runtime.spawn(Effect::LoadRecent);
-        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![])));
+        let empty = |seq| Some(AppIntent::RecentLoaded { seq, list: vec![] });
+        assert_eq!(rx.recv().await, empty(1));
+        runtime.spawn(Effect::LoadRecent { seq: 2 });
+        assert_eq!(rx.recv().await, empty(2));
     }
 
     #[tokio::test]
@@ -1260,14 +1266,26 @@ mod tests {
             Runtime::new(Arc::new(FakeRunner::new()), tx).with_recent_store(Some(store.clone()));
         let repo = tmp.path().to_path_buf();
 
-        runtime.spawn(Effect::RecordRecent { path: repo.clone() });
+        runtime.spawn(Effect::RecordRecent {
+            path: repo.clone(),
+            seq: 1,
+        });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RecentLoaded(vec![repo.clone()]))
+            Some(AppIntent::RecentLoaded {
+                seq: 1,
+                list: vec![repo.clone()]
+            })
         );
         assert!(store.is_file());
-        runtime.spawn(Effect::LoadRecent);
-        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![repo])));
+        runtime.spawn(Effect::LoadRecent { seq: 2 });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::RecentLoaded {
+                seq: 2,
+                list: vec![repo]
+            })
+        );
     }
 
     #[tokio::test]

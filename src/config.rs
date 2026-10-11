@@ -326,6 +326,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "uses Unix paths such as /home/me, which are not absolute on Windows"
+    )]
     fn the_global_file_sits_in_the_xdg_config_dir_and_the_repo_file_at_the_root() {
         let env = |pairs: &'static [(&str, &str)]| {
             move |name: &str| {

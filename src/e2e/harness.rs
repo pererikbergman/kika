@@ -99,6 +99,8 @@ impl Harness {
     }
 
     /// Offer `renderers` instead of the ones the host has configured.
+    // Only `#[cfg(unix)]` tests call it so far.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub async fn use_renderers(&mut self, renderers: Vec<ExternalRenderer>) {
         self.dispatch(AppIntent::RenderersFound(renderers));
         self.wait_idle().await;
@@ -228,7 +230,8 @@ impl Harness {
 }
 
 /// Whether nothing more will change without input: no status load or Git
-/// operation in flight, no background load pending, and the diff settled.
+/// operation in flight, no background or recent-list load pending, and the
+/// diff settled.
 /// Diff streams and background loads stay out of `busy`, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
@@ -237,7 +240,11 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
     // demands more, so nothing arrives on its own.
     let diff_settled =
         diff.seq.is_none() || (!diff.pending && (diff.done || diff.lines.len() >= diff.requested));
-    state.busy == 0 && state.op_seq.is_none() && !state.watch.is_pending() && diff_settled
+    state.busy == 0
+        && state.op_seq.is_none()
+        && !state.watch.is_pending()
+        && !state.recent_pending()
+        && diff_settled
 }
 
 #[cfg(test)]
@@ -275,6 +282,17 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.op_seq = Some(3);
         assert!(!is_idle(&state));
+    }
+
+    #[test]
+    fn a_recent_list_still_on_its_way_is_not_idle() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::OpenRecent);
+        assert!(!is_idle(&state));
+
+        let seq = state.recent_seq;
+        state.update(AppIntent::RecentLoaded { seq, list: vec![] });
+        assert!(is_idle(&state));
     }
 
     #[test]
