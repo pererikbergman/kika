@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::ansi;
 use crate::captured_command::run_captured;
 use crate::config::{self, ConfigPaths};
-use crate::custom_command::OutputMode;
+use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
@@ -18,6 +18,7 @@ use crate::git::fetch::run_fetch;
 use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
+use crate::git::prompts::read_prompt_facts;
 use crate::git::refs::read_refs;
 use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
@@ -76,6 +77,12 @@ pub enum Effect {
     },
     /// Run a Git operation; always answered by one `OpFinished`.
     RunOp {
+        tag: Tag,
+        op: GitOp,
+    },
+    /// Read what decides whether the commit `op` needs the terminal;
+    /// always answered by one `CommitProbed`.
+    ProbeCommit {
         tag: Tag,
         op: GitOp,
     },
@@ -148,6 +155,9 @@ pub enum Effect {
         argv: Vec<OsString>,
         output: OutputMode,
     },
+    /// Stop the command `RunCommand` started, which then answers with
+    /// `CommandFailure::Cancelled`. Does nothing once it has finished.
+    CancelCommand,
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -167,6 +177,8 @@ pub struct Runtime {
     recent_store: Option<PathBuf>,
     /// The global config's `[diff] pager`, read once at startup.
     diff_pager: Option<String>,
+    /// Stops the last captured command; aborting a finished one is a no-op.
+    command: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl Runtime {
@@ -178,6 +190,7 @@ impl Runtime {
             global_config: None,
             recent_store: None,
             diff_pager: None,
+            command: Mutex::new(None),
         }
     }
 
@@ -359,6 +372,17 @@ impl Runtime {
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
+            Effect::ProbeCommit { tag, op } => {
+                tokio::spawn(async move {
+                    // Errors and panics both report `None`, which hands over.
+                    let facts =
+                        tokio::task::spawn_blocking(move || read_prompt_facts(runner.as_ref()))
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
+                    let _ = tx.send(AppIntent::CommitProbed { tag, op, facts });
+                });
+            }
             Effect::SnapshotRefs { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the watch would never poll again.
@@ -406,15 +430,20 @@ impl Runtime {
             } => {
                 // Taken now: a `SetRepo` after this must not move the command.
                 let workdir = self.runner.workdir();
+                let task = tokio::spawn(run_captured(argv, workdir));
+                *self.command.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
                 tokio::spawn(async move {
-                    // A panic still reports back, or `command_running` would stay set.
-                    let result = tokio::spawn(run_captured(argv, workdir))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
+                    // A panic or a cancel still reports back, or
+                    // `command_running` would stay set.
+                    let result = task.await.unwrap_or_else(|e| {
+                        Err(if e.is_cancelled() {
+                            CommandFailure::Cancelled
+                        } else {
+                            CommandFailure::Launch(terminal_safe(
                                 format!("The command crashed: {e}").as_bytes(),
                             ))
-                        });
+                        })
+                    });
                     let result = match output {
                         OutputMode::Popup => result,
                         OutputMode::Terminal | OutputMode::None => result.map(|_| String::new()),
@@ -425,6 +454,17 @@ impl Runtime {
                         result,
                     });
                 });
+            }
+            Effect::CancelCommand => {
+                // Dropping the aborted future kills the program.
+                if let Some(task) = self
+                    .command
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    task.abort();
+                }
             }
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
@@ -465,7 +505,7 @@ mod tests {
     use super::*;
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
-    use crate::git::fake::{FakeChild, FakeRunner, ok};
+    use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
@@ -647,6 +687,111 @@ mod tests {
                 assert!(message.starts_with("git crashed: "), "{message}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
+        }
+    }
+
+    fn commit_op() -> GitOp {
+        GitOp::Commit {
+            message: Some("m\n".into()),
+            stage_all: false,
+            amend: false,
+            no_verify: false,
+        }
+    }
+
+    /// A commit run as an effect stays detached: the fake has no attached
+    /// run expected, so it would panic on one.
+    #[tokio::test]
+    async fn a_commit_run_as_an_effect_never_takes_the_terminal() {
+        let runner = Arc::new(FakeRunner::new().expect(&["commit", "-F", "-"], ok(b"")));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RunOp {
+            tag,
+            op: commit_op(),
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::OpFinished {
+                tag,
+                op: commit_op(),
+                result: Ok(()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn probe_commit_reports_the_facts_with_the_same_tag_and_op() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["config", "--type=bool", "--get", "commit.gpgsign"],
+                    ok(b"true\n"),
+                )
+                .expect(&["rev-parse", "--git-path", "hooks"], ok(b"/nowhere\n")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: true,
+        };
+
+        runtime.spawn(Effect::ProbeCommit {
+            tag,
+            op: commit_op(),
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitProbed {
+                tag,
+                op: commit_op(),
+                facts: Some(crate::git::prompts::PromptFacts {
+                    signs: true,
+                    hooks: vec![],
+                }),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_panicking_probe_reports_no_facts() {
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        let failing = FakeRunner::new().expect(
+            &["config", "--type=bool", "--get", "commit.gpgsign"],
+            fail("fatal: bad config\n"),
+        );
+        // No expectations at all: the fake panics on the first read.
+        for runner in [failing, FakeRunner::new()] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let runtime = Runtime::new(Arc::new(runner), tx);
+            runtime.spawn(Effect::ProbeCommit {
+                tag,
+                op: commit_op(),
+            });
+            assert_eq!(
+                rx.recv().await,
+                Some(AppIntent::CommitProbed {
+                    tag,
+                    op: commit_op(),
+                    facts: None,
+                })
+            );
         }
     }
 
@@ -1348,7 +1493,7 @@ mod tests {
             Some(AppIntent::CommandFinished {
                 title,
                 output: OutputMode::Popup,
-                result: Err(e),
+                result: Err(CommandFailure::Exited(e)),
             }) => {
                 assert_eq!(title, "Try");
                 assert!(e.contains('3') && e.contains("hi"), "{e}");
@@ -1380,11 +1525,45 @@ mod tests {
         // A program that cannot start still answers, once.
         runtime.spawn(run(&["kika-no-such-program"], OutputMode::None));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished { result: Err(e), .. }) => {
+            Some(AppIntent::CommandFinished {
+                result: Err(CommandFailure::Launch(e)),
+                ..
+            }) => {
                 assert!(e.starts_with("Could not start"), "{e}")
             }
             other => panic!("expected a start failure, got {other:?}"),
         }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_stops_a_hung_command_which_answers_once() {
+        let tmp = crate::git::fake::TempDir::new("effect-cancel");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runner = Arc::new(crate::git::CliRunner::new(tmp.path()));
+        let runtime = Runtime::new(runner, tx);
+        let started = std::time::Instant::now();
+
+        runtime.spawn(Effect::RunCommand {
+            title: "Hang".into(),
+            argv: ["sh", "-c", "sleep 30"].map(OsString::from).to_vec(),
+            output: OutputMode::Popup,
+        });
+        runtime.spawn(Effect::CancelCommand);
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommandFinished {
+                title: "Hang".into(),
+                output: OutputMode::Popup,
+                result: Err(CommandFailure::Cancelled),
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // A second cancel finds nothing to stop and sends nothing.
+        runtime.spawn(Effect::CancelCommand);
+        tokio::task::yield_now().await;
         assert!(rx.try_recv().is_err());
     }
 

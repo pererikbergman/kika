@@ -4,17 +4,19 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
 use crate::config::ConfigError;
-use crate::custom_command::OutputMode;
+use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
+use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::keymap::{KeyPress, Keymap};
+use crate::layout::Panel;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::watch::WatchEvent;
@@ -27,6 +29,8 @@ pub enum AppIntent {
     Quit,
     OpenHelp,
     CloseHelp,
+    /// Scroll the help list, which can be taller than the screen.
+    ScrollHelp(Scroll),
     Resize {
         width: u16,
         height: u16,
@@ -53,8 +57,16 @@ pub enum AppIntent {
     },
     /// Give the Diff pane focus, to work on the selected file's hunks.
     FocusDiff,
-    /// Back to the Files panel.
-    FocusFiles,
+    /// Back to the side panel last focused, which stayed expanded.
+    FocusLeft,
+    /// Give a panel focus: a side panel expands; the diff works on hunks.
+    FocusPanel(Panel),
+    /// Focus the next panel in screen order, or the previous with `back`.
+    CycleFocus {
+        back: bool,
+    },
+    /// Zoom the focused panel: normal, half, full, normal again.
+    CycleScreenMode,
     /// Move the hunk cursor down or up.
     NextHunk,
     PrevHunk,
@@ -105,6 +117,9 @@ pub enum AppIntent {
     ResumeCommit,
     /// Commit with the typed message.
     SubmitCommit,
+    /// Ctrl+C in the commit popup: cancel while typing (asking before a
+    /// typed message is lost), quit while git runs.
+    InterruptCommit,
     /// Move the cursor between the subject and the body.
     ToggleCommitField,
     /// Close the commit error and go back to the kept message.
@@ -124,6 +139,13 @@ pub enum AppIntent {
     /// to commit, `None` if the user emptied it.
     CommitMessageEdited {
         result: Result<Option<String>, String>,
+    },
+    /// The config and hooks a commit depends on were read; `facts` is
+    /// `None` when they could not be. Decides where the commit runs.
+    CommitProbed {
+        tag: Tag,
+        op: GitOp,
+        facts: Option<PromptFacts>,
     },
     /// A Git operation finished, successfully or not.
     OpFinished {
@@ -250,13 +272,15 @@ pub enum AppIntent {
     /// The answer to a custom command's current prompt.
     CommandPromptAnswered(String),
     /// A custom command finished. `Ok` holds the captured output, empty
-    /// unless `output` is `Popup`; `Err` why it could not start, or its
-    /// exit status followed by its output. Both are terminal-safe.
+    /// unless `output` is `Popup`; `Err` says how it failed. Text is
+    /// terminal-safe.
     CommandFinished {
         title: String,
         output: OutputMode,
-        result: Result<String, String>,
+        result: Result<String, CommandFailure>,
     },
+    /// Stop the captured command that is running, if one is.
+    CancelCommand,
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

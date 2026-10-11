@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::CommitEditor;
 use crate::config::ConfigError;
-use crate::custom_command::{CustomCommand, OutputMode, Target};
+use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
@@ -17,20 +17,21 @@ use crate::git::diff::{
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
+use crate::git::prompts::{PromptFacts, needs_terminal};
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
-use crate::intent::AppIntent;
+use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
+use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
-use crate::view;
 use crate::watch::{WatchEvent, WatchState};
 
 /// What Kika is looking at.
@@ -105,11 +106,46 @@ pub struct PendingCommand {
 /// Which panel has the keys in the workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
+    Status,
     Files,
+    Branches,
+    Commits,
+    Stash,
     /// The Diff pane, working on the selected file's hunks.
     Diff(HunkView),
     /// A blame of the selected file, in the Diff pane's place.
     Blame(BlameView),
+}
+
+impl Focus {
+    /// The focus of a side panel. Only Files has state of its own.
+    pub fn side(panel: SidePanel) -> Self {
+        match panel {
+            SidePanel::Status => Focus::Status,
+            SidePanel::Files => Focus::Files,
+            SidePanel::Branches => Focus::Branches,
+            SidePanel::Commits => Focus::Commits,
+            SidePanel::Stash => Focus::Stash,
+        }
+    }
+
+    /// Where it is drawn. The blame takes the diff's place.
+    pub fn panel(&self) -> Panel {
+        match self {
+            Focus::Status => Panel::Side(SidePanel::Status),
+            Focus::Files => Panel::Side(SidePanel::Files),
+            Focus::Branches => Panel::Side(SidePanel::Branches),
+            Focus::Commits => Panel::Side(SidePanel::Commits),
+            Focus::Stash => Panel::Side(SidePanel::Stash),
+            Focus::Diff(_) | Focus::Blame(_) => Panel::Diff,
+        }
+    }
+
+    /// Whether a side panel has the keys, so the diff pane shows the
+    /// selected file's diff.
+    pub fn is_side(&self) -> bool {
+        matches!(self.panel(), Panel::Side(_))
+    }
 }
 
 /// The single source of truth for the UI.
@@ -137,14 +173,24 @@ pub struct AppState {
     pub selected: Option<usize>,
     pub diff: DiffPane,
     pub focus: Focus,
+    /// The side panel last focused. It stays expanded while the diff has
+    /// focus, and is where focus goes back to.
+    pub expanded: SidePanel,
+    /// How much of the screen the focused panel takes; kept across focus
+    /// changes.
+    pub screen_mode: ScreenMode,
     /// Sequence of the Git operation in flight. Operations run one at a
     /// time so two quick presses never race for `index.lock`.
     pub op_seq: Option<u64>,
+    /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
+    pub commit_on_terminal: bool,
     /// The last operation's failure, or why one was refused.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
     pub help_open: bool,
+    /// The first help row shown, for a list taller than the screen.
+    pub help_scroll: usize,
     pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
     pub notice: Option<&'static str>,
@@ -203,10 +249,14 @@ impl AppState {
             selected: None,
             diff: DiffPane::default(),
             focus: Focus::Files,
+            expanded: SidePanel::Files,
+            screen_mode: ScreenMode::Normal,
             op_seq: None,
+            commit_on_terminal: false,
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
+            help_scroll: 0,
             commit: CommitFlow::Closed,
             notice: None,
             popups: Vec::new(),
@@ -268,7 +318,11 @@ impl AppState {
                     return vec![Effect::InterruptGit];
                 }
             }
-            AppIntent::OpenHelp => self.help_open = true,
+            AppIntent::OpenHelp => {
+                self.help_open = true;
+                self.help_scroll = 0;
+            }
+            AppIntent::ScrollHelp(by) => self.scroll_help(by),
             AppIntent::CloseHelp => self.help_open = false,
             AppIntent::Resize { width, height } => {
                 let cols = self.pane_cols();
@@ -305,9 +359,26 @@ impl AppState {
                 }
             }
             AppIntent::FocusDiff => return self.focus_diff(),
-            AppIntent::FocusFiles => {
-                self.focus = Focus::Files;
-                return self.render_if_stale();
+            AppIntent::FocusLeft => {
+                let cols = self.pane_cols();
+                self.focus = Focus::side(self.expanded);
+                let effects = self.render_if_stale();
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::FocusPanel(panel) => {
+                let cols = self.pane_cols();
+                let effects = self.focus_panel(panel);
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::CycleFocus { back } => {
+                let cols = self.pane_cols();
+                let effects = self.cycle_focus(back);
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::CycleScreenMode => {
+                let cols = self.pane_cols();
+                self.screen_mode = self.screen_mode.next();
+                return self.rerender_if_resized(cols, vec![]);
             }
             AppIntent::NextHunk => {
                 let rows = self.pane_rows();
@@ -397,6 +468,13 @@ impl AppState {
                 };
             }
             AppIntent::SubmitCommit => return self.submit_commit(),
+            AppIntent::InterruptCommit => {
+                let intent = match self.commit {
+                    CommitFlow::Running(_) => AppIntent::Quit,
+                    _ => AppIntent::CancelCommit,
+                };
+                return self.update(intent);
+            }
             AppIntent::ToggleCommitField => {
                 if let CommitFlow::Editing(editor) = &mut self.commit {
                     editor.toggle_field();
@@ -424,6 +502,9 @@ impl AppState {
                     CommitFlow::Failed { editor, .. } => CommitFlow::Editing(editor),
                     other => other,
                 };
+            }
+            AppIntent::CommitProbed { tag, op, facts } => {
+                return self.commit_probed(tag, op, facts);
             }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
             AppIntent::OpenMenu(id) => {
@@ -470,6 +551,12 @@ impl AppState {
                 output,
                 result,
             } => return self.command_finished(&title, output, result),
+            AppIntent::CancelCommand => {
+                // The flag stays set until the command answers.
+                if self.command_running {
+                    return vec![Effect::CancelCommand];
+                }
+            }
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
@@ -520,7 +607,7 @@ impl AppState {
             }
             AppIntent::CloseBlame => {
                 if matches!(self.focus, Focus::Blame(_)) {
-                    self.focus = Focus::Files;
+                    self.focus = Focus::side(self.expanded);
                     return self.render_if_stale();
                 }
             }
@@ -585,11 +672,36 @@ impl AppState {
         }
     }
 
-    /// The panel keys go to. Derived from the context until panels can
-    /// take focus themselves.
+    /// Move the help list by a line or a page, never past its last screenful.
+    /// The popup's inside is as tall as the diff pane's.
+    fn scroll_help(&mut self, by: Scroll) {
+        let rows = self.pane_rows();
+        let focus = self.panel_focus();
+        // As help lists them: the built-in keys, then a rule and the
+        // user's commands, if there are any.
+        let commands = keymap::available_commands(&self.keymap, focus).len();
+        let rule = usize::from(commands > 0);
+        let total = keymap::available(keymap::registry(), &self.keymap, focus, self).len()
+            + rule
+            + commands;
+        let scroll = match by {
+            Scroll::LineDown => self.help_scroll.saturating_add(1),
+            Scroll::LineUp => self.help_scroll.saturating_sub(1),
+            Scroll::PageDown => self.help_scroll.saturating_add(rows),
+            Scroll::PageUp => self.help_scroll.saturating_sub(rows),
+        };
+        self.help_scroll = scroll.min(total.saturating_sub(rows));
+    }
+
+    /// The panel keys go to. Panels with no keys of their own yet use the
+    /// workspace's.
     pub fn panel_focus(&self) -> KeyScope {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
+            (
+                Context::Workspace,
+                Focus::Status | Focus::Branches | Focus::Commits | Focus::Stash,
+            ) => KeyScope::Workspace,
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -633,16 +745,31 @@ impl AppState {
         usize::from(self.size.1).saturating_sub(3).max(1)
     }
 
-    /// Columns a renderer may fill: the Diff pane as the view lays it out,
-    /// minus its borders and the cursor gutter.
+    /// Columns a renderer may fill: the Diff pane as the view lays it out
+    /// for this focus and screen mode, minus its borders and the cursor
+    /// gutter. Where the mode hides the diff, its width in Normal.
     pub fn pane_cols(&self) -> u16 {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
-        let [main, _] = view::screen_layout(screen);
-        view::workspace_layout(main)
-            .diff
-            .width
-            .saturating_sub(3)
-            .max(1)
+        let [main, _] = layout::screen_layout(screen);
+        let panel = self.focus.panel();
+        let diff = layout::workspace_layout(main, panel, self.expanded, self.screen_mode)
+            .rect(Panel::Diff)
+            .or_else(|| {
+                layout::workspace_layout(main, panel, self.expanded, ScreenMode::Normal)
+                    .rect(Panel::Diff)
+            })
+            .unwrap_or(main);
+        diff.width.saturating_sub(3).max(1)
+    }
+
+    /// Render again when a focus or mode change gave the diff another
+    /// width than `cols`, so a renderer's columns match the pane.
+    fn rerender_if_resized(&mut self, cols: u16, mut effects: Vec<Effect>) -> Vec<Effect> {
+        let pending = self.rendered.as_ref().is_some_and(|r| r.seq.is_some());
+        if self.pane_cols() != cols && self.active_renderer().is_some() && !pending {
+            effects.extend(self.render_shown());
+        }
+        effects
     }
 
     /// The renderer the Diff pane uses, if not the built-in view.
@@ -655,7 +782,7 @@ impl AppState {
     /// off, as its patch has them), nothing behind a blame.
     fn shown_request(&self) -> Option<DiffRequest> {
         match &self.focus {
-            Focus::Files => self
+            Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
                 .selected
                 .and_then(|i| self.files.get(i))
                 .map(|entry| DiffRequest::for_entry(entry, self.diff_options)),
@@ -874,8 +1001,8 @@ impl AppState {
                 return Ok(op.map(|op| confirm(DiscardWhat::File, &entry.path, op)));
             }
             Focus::Diff(view) => view,
-            // Not bound in the blame; nothing to discard from there.
-            Focus::Blame(_) => return Ok(None),
+            // Bound only in Files and the diff; nothing to discard elsewhere.
+            _ => return Ok(None),
         };
         if self.diff_options.ignore_whitespace {
             return Err(keymap::WHITESPACE_HIDDEN);
@@ -925,8 +1052,8 @@ impl AppState {
         let (path, line) = match &self.focus {
             Focus::Files => (entry.path.clone(), None),
             Focus::Diff(view) => (view.path.clone(), view.editor_line()),
-            // Not bound in the blame; nothing to open from there.
-            Focus::Blame(_) => return vec![],
+            // Bound only in Files and the diff; nothing to open elsewhere.
+            _ => return vec![],
         };
         vec![Effect::HandOff(HandOff::OpenFile { path, line })]
     }
@@ -1069,6 +1196,8 @@ impl AppState {
     /// in the Diff pane its line, in the blame the cursor's line and commit.
     fn command_target(&self) -> Option<Target> {
         match &self.focus {
+            // Commands bind only in Files, the diff and the blame.
+            Focus::Status | Focus::Branches | Focus::Commits | Focus::Stash => None,
             Focus::Files => {
                 let entry = self.selected.and_then(|i| self.files.get(i))?;
                 Some(Target {
@@ -1148,23 +1277,30 @@ impl AppState {
     }
 
     /// Show what the command printed or why it failed, then reload: it
-    /// may have changed the repository.
+    /// may have changed the repository. Only a command that could not run
+    /// points at the config file.
     fn command_finished(
         &mut self,
         title: &str,
         output: OutputMode,
-        result: Result<String, String>,
+        result: Result<String, CommandFailure>,
     ) -> Vec<Effect> {
         if output != OutputMode::Terminal && self.command_running {
             self.command_running = false;
             self.busy = self.busy.saturating_sub(1);
         }
         match result {
-            Err(message) => self.push_error(ErrorPopup::new(
+            Err(CommandFailure::Launch(message)) => self.push_error(ErrorPopup::new(
                 format!("{title} failed"),
                 &message,
                 "Check the command in your config file, then try again.",
             )),
+            Err(CommandFailure::Exited(message)) => self.push_error(ErrorPopup::new(
+                format!("{title} failed"),
+                &message,
+                "Press Esc to close",
+            )),
+            Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled"),
             Ok(text) if output == OutputMode::Popup => {
                 let text = if text.is_empty() {
                     "(no output)"
@@ -1272,6 +1408,38 @@ impl AppState {
         }
     }
 
+    /// Focus `panel`. A side panel expands, and closes a blame on the way.
+    /// The diff keeps its hunk view when it already has focus.
+    fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        match panel {
+            Panel::Side(side) => {
+                self.focus = Focus::side(side);
+                self.expanded = side;
+                // Leaving the diff or a blame, the pane shows the selected file.
+                self.render_if_stale()
+            }
+            Panel::Diff if self.focus.is_side() => self.focus_diff(),
+            Panel::Diff => vec![],
+        }
+    }
+
+    /// Focus the next panel in screen order, the diff after the side
+    /// panels. The diff is skipped with no file to show.
+    fn cycle_focus(&mut self, back: bool) -> Vec<Effect> {
+        let mut order: Vec<Panel> = SidePanel::ALL.into_iter().map(Panel::Side).collect();
+        if self.selected.and_then(|i| self.files.get(i)).is_some() {
+            order.push(Panel::Diff);
+        }
+        let here = self.focus.panel();
+        let at = order.iter().position(|&p| p == here).unwrap_or(0);
+        let step = if back { order.len() - 1 } else { 1 };
+        let next = order[(at + step) % order.len()];
+        self.focus_panel(next)
+    }
+
     /// Focus the Diff pane on the selected file, on the side its diff shows.
     fn focus_diff(&mut self) -> Vec<Effect> {
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
@@ -1348,7 +1516,7 @@ impl AppState {
     fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
         match &self.focus {
             Focus::Diff(view) => self.toggle_selection_stage(PatchSelection::Hunk(view.hunk)),
-            Focus::Files | Focus::Blame(_) => vec![],
+            _ => vec![],
         }
     }
 
@@ -1357,7 +1525,7 @@ impl AppState {
             Focus::Diff(view) => {
                 self.toggle_selection_stage(PatchSelection::Lines(view.selected_lines()))
             }
-            Focus::Files | Focus::Blame(_) => vec![],
+            _ => vec![],
         }
     }
 
@@ -1428,7 +1596,10 @@ impl AppState {
             self.selected = None;
             self.diff = DiffPane::default();
             self.rendered = None;
-            self.focus = Focus::Files;
+            // Nothing is left for the diff or a blame to show.
+            if !self.focus.is_side() {
+                self.focus = Focus::side(self.expanded);
+            }
             return vec![Effect::CancelDiff];
         }
         let index = old_path
@@ -1543,6 +1714,16 @@ impl AppState {
     /// Run the operation a stage key chose. Only one runs at a time, and
     /// only on the local workspace.
     fn start_op(&mut self, op: Result<Option<GitOp>, String>) -> Vec<Effect> {
+        self.start_op_as(op, |tag, op| Effect::RunOp { tag, op })
+    }
+
+    /// [`Self::start_op`], with `effect` saying what work starts it: a
+    /// commit is probed first, everything else runs at once.
+    fn start_op_as(
+        &mut self,
+        op: Result<Option<GitOp>, String>,
+        effect: fn(Tag, GitOp) -> Effect,
+    ) -> Vec<Effect> {
         if self.context != Context::Workspace || self.op_seq.is_some() {
             return vec![];
         }
@@ -1563,7 +1744,7 @@ impl AppState {
             seq,
             user: true,
         };
-        vec![Effect::RunOp { tag, op }]
+        vec![effect(tag, op)]
     }
 
     /// Open the commit popup: straight to the editor when something is
@@ -1645,11 +1826,35 @@ impl AppState {
             amend: editor.amend.is_some(),
             no_verify: editor.no_verify,
         };
-        let effects = self.start_op(Ok(Some(op)));
+        // Whether it needs the terminal is read first; see `commit_probed`.
+        let effects = self.start_op_as(Ok(Some(op)), |tag, op| Effect::ProbeCommit { tag, op });
         if !effects.is_empty() {
             self.commit = CommitFlow::Running(editor);
         }
         effects
+    }
+
+    /// Run the probed commit on the terminal when it may ask something,
+    /// else detached. `busy` and `op_seq` stay as they are until
+    /// `OpFinished`; a probe for another repository or op ends the commit
+    /// here, giving the message back.
+    fn commit_probed(&mut self, tag: Tag, op: GitOp, facts: Option<PromptFacts>) -> Vec<Effect> {
+        if tag.generation != self.generation || self.op_seq != Some(tag.seq) {
+            if tag.user {
+                self.busy = self.busy.saturating_sub(1);
+            }
+            if self.op_seq == Some(tag.seq) {
+                self.op_seq = None;
+            }
+            self.end_commit(None);
+            return vec![];
+        }
+        if needs_terminal(&op, facts.as_ref()) {
+            self.commit_on_terminal = true;
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        } else {
+            vec![Effect::RunOp { tag, op }]
+        }
     }
 
     /// Back from writing the message in the editor: commit it as written,
@@ -1745,6 +1950,7 @@ impl AppState {
     /// Leave `Running`: closed on success, `Failed` with the output on
     /// failure, back to `Editing` when there is no result to show.
     fn end_commit(&mut self, result: Option<Result<(), String>>) {
+        self.commit_on_terminal = false;
         let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
         let CommitFlow::Running(editor) = commit else {
             self.commit = commit;
@@ -2103,7 +2309,10 @@ impl AppState {
         self.generation += 1;
         self.popups.clear();
         self.pending_command = None;
-        self.focus = Focus::Files;
+        // The side panel stays; the diff or blame belonged to the old repository.
+        if !self.focus.is_side() {
+            self.focus = Focus::side(self.expanded);
+        }
         self.files.clear();
         self.branch = None;
         self.selected = None;
@@ -3046,6 +3255,14 @@ mod tests {
         }
     }
 
+    /// The commit a submit asked to probe before running it.
+    fn probe_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [Effect::ProbeCommit { tag, op }] => (*tag, op.clone()),
+            other => panic!("expected one ProbeCommit, got {other:?}"),
+        }
+    }
+
     fn select_path(state: &mut AppState, path: &str) {
         while state.files[state.selected.unwrap()].path != path.into() {
             state.update(AppIntent::SelectNext);
@@ -3291,7 +3508,7 @@ mod tests {
         let busy = state.busy;
         type_text(&mut state, "subj\nline 1\nline 2");
 
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
 
         assert_eq!(
             op,
@@ -3329,7 +3546,7 @@ mod tests {
         press(&mut state, KeyCode::Char('y'));
         assert!(editor(&state).stage_all);
         type_text(&mut state, "all");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3434,10 +3651,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_from_the_editor() {
+    fn ctrl_c_in_the_editor_asks_before_discarding_a_typed_message() {
         let mut state = editing();
         type_text(&mut state, "abc");
         assert_eq!(ctrl(&mut state, 'c'), vec![]);
+        assert!(!state.should_quit);
+        assert!(matches!(state.commit, CommitFlow::ConfirmDiscard(_)));
+
+        // Nothing typed: nothing to lose, so it just closes.
+        let mut state = editing();
+        ctrl(&mut state, 'c');
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn interrupt_commit_cancels_while_editing_and_quits_while_running() {
+        let mut state = editing();
+        type_text(&mut state, "abc");
+        assert_eq!(state.update(AppIntent::InterruptCommit), vec![]);
+        assert!(matches!(state.commit, CommitFlow::ConfirmDiscard(_)));
+        assert!(!state.should_quit);
+
+        let (mut state, _, _) = submitted();
+        assert_eq!(
+            state.update(AppIntent::InterruptCommit),
+            vec![Effect::InterruptGit]
+        );
         assert!(state.should_quit);
     }
 
@@ -3462,7 +3702,7 @@ mod tests {
     fn submitted() -> (AppState, Tag, GitOp) {
         let mut state = editing();
         type_text(&mut state, "subj\nbody");
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
         (state, tag, op)
     }
 
@@ -3538,6 +3778,128 @@ mod tests {
         assert_eq!(editor(&state).subject, "subj");
     }
 
+    fn probed(tag: Tag, op: &GitOp, facts: Option<PromptFacts>) -> AppIntent {
+        AppIntent::CommitProbed {
+            tag,
+            op: op.clone(),
+            facts,
+        }
+    }
+
+    fn signing() -> Option<PromptFacts> {
+        Some(PromptFacts {
+            signs: true,
+            hooks: vec![],
+        })
+    }
+
+    /// Commits as each way of submitting makes them: typed, amended with
+    /// HEAD's message, with hooks skipped, and from the editor.
+    fn submissions() -> Vec<(AppState, Tag, GitOp)> {
+        let mut amend = amending();
+        let (tag, op) = probe_of(&ctrl(&mut amend, 's'));
+        let amended = (amend, tag, op);
+
+        let mut skip = editing();
+        ctrl(&mut skip, 'n');
+        type_text(&mut skip, "subj");
+        let (tag, op) = probe_of(&ctrl(&mut skip, 's'));
+        let skipped = (skip, tag, op);
+
+        let mut edited = editing();
+        let effects = edited.update(AppIntent::CommitMessageEdited {
+            result: Ok(Some("x\n".into())),
+        });
+        let (tag, op) = probe_of(&effects);
+        let from_editor = (edited, tag, op);
+
+        vec![submitted(), amended, skipped, from_editor]
+    }
+
+    #[test]
+    fn a_submitted_commit_is_probed_once_and_counts_as_running() {
+        for (state, tag, op) in submissions() {
+            assert!(matches!(op, GitOp::Commit { .. }), "{op:?}");
+            assert!(tag.user);
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn a_commit_that_signs_is_handed_the_terminal() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(
+                effects,
+                vec![Effect::HandOff(HandOff::Commit {
+                    tag,
+                    op: op.clone()
+                })]
+            );
+            assert_eq!(state.busy, busy, "OpFinished still settles busy");
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn only_a_handed_over_commit_is_marked_as_on_the_terminal_until_it_ends() {
+        let (mut state, tag, op) = submitted();
+        assert!(!state.commit_on_terminal);
+        state.update(probed(tag, &op, signing()));
+        assert!(state.commit_on_terminal);
+        state.update(finished(tag, op, Err("no".into())));
+        assert!(!state.commit_on_terminal);
+
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, Some(PromptFacts::default())));
+        assert!(!state.commit_on_terminal);
+    }
+
+    #[test]
+    fn a_commit_with_no_signing_and_no_hooks_runs_detached() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, Some(PromptFacts::default())));
+            assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
+            assert_eq!(state.busy, busy);
+            assert_eq!(state.op_seq, Some(tag.seq));
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_hands_the_terminal_over() {
+        let (mut state, tag, op) = submitted();
+        assert_eq!(
+            state.update(probed(tag, &op, None)),
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        );
+    }
+
+    #[test]
+    fn a_handed_over_commit_ends_like_a_detached_one() {
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, signing()));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.op_seq, None);
+        assert!(!effects.is_empty(), "the status is reloaded");
+    }
+
+    #[test]
+    fn a_stale_probe_gives_the_message_back_and_frees_the_slot() {
+        for (mut state, tag, op) in submissions() {
+            state.generation += 1;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.busy, 0);
+            assert_eq!(state.op_seq, None);
+            editor(&state);
+        }
+    }
+
     fn head_load(effects: &[Effect]) -> Tag {
         match effects {
             [Effect::LoadHeadMessage { tag }] => *tag,
@@ -3587,7 +3949,7 @@ mod tests {
     #[test]
     fn an_untouched_amend_keeps_heads_message() {
         let mut state = amending();
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3604,7 +3966,7 @@ mod tests {
     fn an_edited_amend_commits_the_new_message() {
         let mut state = amending();
         type_text(&mut state, "!");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3709,7 +4071,7 @@ mod tests {
         assert!(!editor(&state).no_verify);
         ctrl(&mut state, 'n');
         type_text(&mut state, "subj");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert!(
             matches!(
                 op,
@@ -3756,7 +4118,7 @@ mod tests {
         let effects = state.update(AppIntent::CommitMessageEdited {
             result: Ok(Some("x\n\ny\n".into())),
         });
-        let (tag, op) = op_of(&effects);
+        let (tag, op) = probe_of(&effects);
         assert_eq!(
             op,
             GitOp::Commit {
@@ -5292,7 +5654,7 @@ mod tests {
         );
         let (_, request) = patch_load(&state.update(AppIntent::FocusDiff));
         assert_eq!(request.options, changed);
-        state.update(AppIntent::FocusFiles);
+        state.update(AppIntent::FocusLeft);
         assert_eq!(
             diff_request(&state.update(AppIntent::SelectPrev)).options,
             changed
@@ -5332,6 +5694,182 @@ mod tests {
             }
             other => panic!("expected one LoadBlame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn help_scrolls_within_its_list_and_opens_at_the_top() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('?'));
+        let total = keymap::available(
+            keymap::registry(),
+            &state.keymap,
+            state.panel_focus(),
+            &state,
+        )
+        .len();
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.help_scroll, 1);
+        press(&mut state, KeyCode::Char('k'));
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.help_scroll, 0);
+        for _ in 0..10 {
+            press(&mut state, KeyCode::PageDown);
+        }
+        assert_eq!(state.help_scroll, total - state.pane_rows());
+        press(&mut state, KeyCode::Esc);
+        press(&mut state, KeyCode::Char('?'));
+        assert_eq!(state.help_scroll, 0);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn digits_focus_and_expand_the_side_panels() {
+        let (mut state, _) = with_files(three_files(), 24);
+        for (key, focus, side) in [
+            ('1', Focus::Status, SidePanel::Status),
+            ('3', Focus::Branches, SidePanel::Branches),
+            ('4', Focus::Commits, SidePanel::Commits),
+            ('5', Focus::Stash, SidePanel::Stash),
+            ('2', Focus::Files, SidePanel::Files),
+        ] {
+            assert_eq!(press(&mut state, KeyCode::Char(key)), vec![], "{key}");
+            assert_eq!(state.focus, focus, "{key}");
+            assert_eq!(state.expanded, side, "{key}");
+        }
+        // The new side panels have no keys of their own yet.
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Commits,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Workspace);
+    }
+
+    #[test]
+    fn zero_l_and_right_focus_the_diff_and_h_left_and_esc_go_back_to_the_last_side_panel() {
+        for right in [KeyCode::Char('0'), KeyCode::Char('l'), KeyCode::Right] {
+            for left in [KeyCode::Char('h'), KeyCode::Left, KeyCode::Esc] {
+                let (mut state, _) = with_files(three_files(), 24);
+                press(&mut state, KeyCode::Char('1'));
+                patch_load(&press(&mut state, right));
+                assert!(matches!(state.focus, Focus::Diff(_)), "{right:?}");
+                // The side panel stays expanded behind the diff.
+                assert_eq!(state.expanded, SidePanel::Status);
+                assert_eq!(press(&mut state, left), vec![], "{left:?}");
+                assert_eq!(state.focus, Focus::Status, "{right:?} {left:?}");
+                assert!(!state.should_quit);
+            }
+        }
+    }
+
+    #[test]
+    fn the_diff_cannot_take_focus_without_a_selected_file() {
+        let (mut state, _) = with_files(vec![], 24);
+        assert_eq!(press(&mut state, KeyCode::Char('l')), vec![]);
+        assert_eq!(state.focus, Focus::Files);
+        assert_eq!(state.notice, Some("No file selected"));
+    }
+
+    #[test]
+    fn tab_cycles_the_panels_in_screen_order_and_shift_tab_goes_back() {
+        use crate::layout::Panel::{Diff, Side};
+        use crate::layout::SidePanel::*;
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('1'));
+        let mut seen = vec![];
+        for _ in 0..7 {
+            press(&mut state, KeyCode::Tab);
+            seen.push(state.focus.panel());
+        }
+        assert_eq!(
+            seen,
+            [
+                Side(Files),
+                Side(Branches),
+                Side(Commits),
+                Side(Stash),
+                Diff,
+                Side(Status),
+                Side(Files)
+            ]
+        );
+        let mut seen = vec![];
+        for _ in 0..3 {
+            state.update(AppIntent::Key(KeyPress::new(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+            )));
+            seen.push(state.focus.panel());
+        }
+        assert_eq!(seen, [Side(Status), Diff, Side(Stash)]);
+    }
+
+    #[test]
+    fn tab_skips_the_diff_with_no_file_selected() {
+        let (mut state, _) = with_files(vec![], 24);
+        press(&mut state, KeyCode::Char('5'));
+        press(&mut state, KeyCode::Tab);
+        assert_eq!(state.focus, Focus::Status);
+        state.update(AppIntent::CycleFocus { back: true });
+        assert_eq!(state.focus, Focus::Stash);
+    }
+
+    #[test]
+    fn focusing_the_diff_again_keeps_the_hunk_view() {
+        for key in [KeyCode::Char('0'), KeyCode::Char('l'), KeyCode::Right] {
+            let mut state = focused(three_files(), TWO_HUNKS);
+            press(&mut state, KeyCode::Char('j'));
+            press(&mut state, KeyCode::Char('t'));
+            let before = view(&state).clone();
+            assert_eq!(press(&mut state, key), vec![], "{key:?}");
+            assert_eq!(view(&state), &before, "{key:?}");
+
+            // In line mode too.
+            let mut state = focused(three_files(), TWO_HUNKS);
+            press(&mut state, KeyCode::Char('v'));
+            press(&mut state, KeyCode::Char('j'));
+            let before = view(&state).clone();
+            assert!(before.lines.is_some());
+            assert_eq!(press(&mut state, key), vec![], "{key:?}");
+            assert_eq!(view(&state), &before, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_digit_closes_an_open_blame_and_focuses_that_panel() {
+        let mut state = blamed(5, 24);
+        press(&mut state, KeyCode::Char('3'));
+        assert_eq!(state.focus, Focus::Branches);
+        assert_eq!(state.expanded, SidePanel::Branches);
+
+        // Back from a blame goes where it was opened from.
+        let mut state = blamed(5, 24);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Focus::Files);
+    }
+
+    #[test]
+    fn z_cycles_the_screen_mode_and_it_survives_focus_changes() {
+        let (mut state, _) = with_files(three_files(), 24);
+        assert_eq!(state.screen_mode, ScreenMode::Normal);
+        press(&mut state, KeyCode::Char('z'));
+        assert_eq!(state.screen_mode, ScreenMode::Half);
+        press(&mut state, KeyCode::Char('1'));
+        patch_load(&press(&mut state, KeyCode::Char('l')));
+        assert_eq!(state.screen_mode, ScreenMode::Half);
+        press(&mut state, KeyCode::Char('z'));
+        assert_eq!(state.screen_mode, ScreenMode::Full);
+        press(&mut state, KeyCode::Char('h'));
+        assert_eq!(state.screen_mode, ScreenMode::Full);
+        press(&mut state, KeyCode::Char('z'));
+        assert_eq!(state.screen_mode, ScreenMode::Normal);
+    }
+
+    #[test]
+    fn a_clean_tree_leaves_a_side_panel_focused() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('4'));
+        let tag = refresh_tag(&mut state);
+        state.update(loaded(tag, &[]));
+        assert_eq!(state.focus, Focus::Commits);
     }
 
     /// A blame of `n` lines, all by commit `OID` but the uncommitted last.
@@ -6913,8 +7451,8 @@ mod tests {
         let (tag, request, cols) = render_of(&state.update(AppIntent::CycleRenderer));
         assert_eq!(state.renderer, Some(0));
         assert_eq!(cols, state.pane_cols());
-        // 80 columns: the Diff pane is 56 wide, less borders and gutter.
-        assert_eq!(cols, 53);
+        // 80 columns: the Diff pane is 53 wide, less borders and gutter.
+        assert_eq!(cols, 50);
         assert!(tag.user);
         assert_eq!(state.busy, busy + 1);
         assert_eq!(
@@ -6934,7 +7472,7 @@ mod tests {
         });
         let (_, _, cols) = render_of(&effects);
         assert_eq!(cols, state.pane_cols());
-        assert_eq!(cols, 81);
+        assert_eq!(cols, 77);
         let effects = state.update(AppIntent::Resize {
             width: 120,
             height: 40,
@@ -6944,6 +7482,39 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::RenderDiff { .. }))
         );
+    }
+
+    #[test]
+    fn zooming_renders_again_at_the_diffs_new_width() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        let (tag, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        state.update(rendered(tag, "row\n"));
+        // Focus the diff, then zoom it: half, then full.
+        // The diff's own view renders on focus; answer it.
+        let (tag, _, _) = render_of(&press(&mut state, KeyCode::Char('l')));
+        state.update(rendered(tag, "row\n"));
+        let mut widths = vec![state.pane_cols()];
+        for _ in 0..2 {
+            let (tag, _, cols) = render_of(&press(&mut state, KeyCode::Char('z')));
+            assert_eq!(cols, state.pane_cols());
+            widths.push(cols);
+            state.update(rendered(tag, "row\n"));
+        }
+        // 80 columns: 2/3, then 3/4, then all of it, less borders and gutter.
+        assert_eq!(widths, [50, 57, 77]);
+    }
+
+    #[test]
+    fn r_works_in_the_diff_reached_from_any_side_panel() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        press(&mut state, KeyCode::Char('1'));
+        press(&mut state, KeyCode::Char('l'));
+        assert!(matches!(state.focus, Focus::Diff(_)));
+        render_of(&state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+        ))));
+        assert_eq!(state.renderer, Some(0));
     }
 
     #[test]
@@ -7113,7 +7684,7 @@ mod tests {
 
     // --- Custom commands ---
 
-    use crate::custom_command::{CommandTable, Panel, test_table};
+    use crate::custom_command::{CommandFailure, CommandTable, Panel, test_table};
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
@@ -7363,12 +7934,16 @@ mod tests {
         assert!(state.popups.is_empty());
     }
 
-    fn command_finished(output: OutputMode, result: Result<&str, &str>) -> AppIntent {
+    fn command_finished(output: OutputMode, result: Result<&str, CommandFailure>) -> AppIntent {
         AppIntent::CommandFinished {
             title: "Show it".into(),
             output,
-            result: result.map(String::from).map_err(String::from),
+            result: result.map(String::from),
         }
+    }
+
+    fn exited(text: &str) -> CommandFailure {
+        CommandFailure::Exited(text.into())
     }
 
     fn is_status_load(effects: &[Effect]) -> bool {
@@ -7409,23 +7984,89 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_command_says_so_and_still_reloads() {
+    fn a_command_that_exited_non_zero_says_so_and_still_reloads() {
         let mut state = hostile_file();
         for output in [OutputMode::None, OutputMode::Popup, OutputMode::Terminal] {
             state.popups.clear();
             let effects = state.update(command_finished(
                 output,
-                Err("exited with exit status: 3\nno"),
+                Err(exited("exited with exit status: 3\nno")),
             ));
             assert!(is_status_load(&effects), "{effects:?}");
             match state.popups.as_slice() {
                 [Popup::Error(popup)] => {
                     assert_eq!(popup.title, "Show it failed");
                     assert_eq!(popup.message, "exited with exit status: 3\nno");
+                    // It ran as configured: the config is not to blame.
+                    assert_eq!(popup.next, "Press Esc to close");
                 }
                 other => panic!("expected the failure popup, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_command_that_could_not_launch_points_at_the_config() {
+        let mut state = hostile_file();
+        let effects = state.update(command_finished(
+            OutputMode::None,
+            Err(CommandFailure::Launch(
+                "Could not start nope: not found".into(),
+            )),
+        ));
+        assert!(is_status_load(&effects), "{effects:?}");
+        match state.popups.as_slice() {
+            [Popup::Error(popup)] => {
+                assert_eq!(popup.title, "Show it failed");
+                assert_eq!(popup.message, "Could not start nope: not found");
+                assert_eq!(
+                    popup.next,
+                    "Check the command in your config file, then try again."
+                );
+            }
+            other => panic!("expected the failure popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cancel_key_stops_only_a_running_command() {
+        let mut state = hostile_file();
+        assert_eq!(state.update(AppIntent::CancelCommand), []);
+
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        assert_eq!(
+            state.update(AppIntent::CancelCommand),
+            [Effect::CancelCommand]
+        );
+        // Still running until the command answers.
+        assert!(state.command_running);
+    }
+
+    #[test]
+    fn a_cancelled_command_says_so_without_a_popup_and_reloads() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        let busy = state.busy;
+
+        let effects = state.update(command_finished(
+            OutputMode::Popup,
+            Err(CommandFailure::Cancelled),
+        ));
+
+        assert!(is_status_load(&effects), "{effects:?}");
+        assert!(!state.command_running);
+        // One down for the command, one up for the reload.
+        assert_eq!(state.busy, busy);
+        assert!(state.popups.is_empty(), "{:?}", state.popups);
+        assert_eq!(state.notice, Some("Command cancelled"));
     }
 
     #[test]

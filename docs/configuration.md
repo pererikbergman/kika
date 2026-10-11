@@ -67,8 +67,8 @@ Key names:
 
 - one printable character, such as `a`, `A`, `?` or `+`. Letters are
   case-sensitive: `J` is Shift+J;
-- or one of `space`, `esc`, `enter`, `tab`, `bksp`, `up`, `down`, `left`,
-  `right`, `pgup`, `pgdn`, `home`, `end`;
+- or one of `space`, `esc`, `enter`, `tab`, `shift-tab`, `bksp`, `up`, `down`,
+  `left`, `right`, `pgup`, `pgdn`, `home`, `end`;
 - either with an optional `ctrl-` prefix, written in lower case: `ctrl-s`.
 
 Key changes are picked up when Kika regains focus and when you switch
@@ -225,16 +225,40 @@ command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
 
 The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 
+In csh and tcsh the words after the script start at `$1`, so the name after
+the script becomes `$1` and the first value is `$2`:
+
+```toml
+[[commands]]
+context = "files"
+keys = ["ctrl-l"]
+description = "Page the file's history"
+command = ["tcsh", "-c", "git log --follow -- $2:q | less", "tcsh", "{path}"]
+```
+
+The name is still required, and it must not start with `-`: csh and tcsh keep
+reading options after the script until the first word that is not one, so a
+value in that slot could turn into an option such as `-c`. Kika rejects a
+placeholder there, as it does for every shell. Read the values as `$2:q`,
+`$3:q` and so on, not as `"$2"`, which fails with `Unmatched '"'.` on a value
+that contains a newline. `$2:q` passes the value as one word, with no glob,
+`$` or backtick expansion; an empty prompt answer becomes no word at all. In
+csh and tcsh `-c` takes the very next argument as the script, so put any
+other options before it: `["csh", "-f", "-c", "…", "csh", "{path}"]`.
+
 **Never put a placeholder inside the script text.** The shell would read a
 file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
 `bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
 `pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
-such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
-placeholder in the script, in any argument before it, or in the `$0` slot
-right after it.
+such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`, with or without
+`.exe` and with any trailing dots or spaces, which Windows drops when it starts
+a program: `bash.`, `bash.exe.` and `bash ` all count), Kika rejects a
+placeholder in the script, in any argument before it, or in the slot right
+after it (`$0`, or `$1` in csh and tcsh).
 The check is cautious: it assumes the last option before the first
-placeholder takes a value, so write the script, then a name for `$0`, then
-the values. Options work in either order around `-c`:
+placeholder takes a value, so write the script, then a name for that slot,
+then the values. In the POSIX-style shells, options work in either order
+around `-c`:
 
 - `["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`
 - `["bash", "-c", "-o", "pipefail", "… \"$1\" …", "bash", "{path}"]`
@@ -242,13 +266,52 @@ the values. Options work in either order around `-c`:
 `["bash", "-o", "pipefail", "{path}"]` is rejected too: it would run the
 selected file as a script.
 
-That check looks only at the program name in `command[0]`. It does not see a
-shell started through another program, such as `env sh -c`, `busybox sh -c`,
-`xargs sh -c`, `exec`, `nice` or `timeout`, or `cmd /c` and `pwsh -c` on
-Windows, and it cannot check other interpreters either. For all of those,
-and for `python -c`, `perl -e`, `node -e` and the like, the rule is yours to
-keep: pass values as arguments after the code, and read them from there
-(`"$1"`, `sys.argv`, `@ARGV`, `process.argv`).
+The same check applies to a shell started through one of these launchers in
+`command[0]`: `env`, `busybox`, `toybox`, `nice`, `nohup`, `timeout`, `xargs`,
+`exec`, `command`, `stdbuf`, `setsid`, `ionice`, `chrt`, `taskset`, `time`,
+`sudo`, `doas`, `caffeinate` and `arch` (named the same ways as a shell: any
+path, any case, with or without `.exe`, with trailing dots or spaces). Kika does
+not read the launcher's options. It takes the first shell name among the
+launcher's arguments as the shell, rejects any placeholder before it, and
+checks the rest as if that shell were `command[0]`. If that shell name may be
+an option's value or an assignment, because the argument before it starts with
+`-` or `+` (other than `--`) or because it contains `=` (`-u SH`,
+`SHELL=/bin/bash`), Kika also checks the next shell name the same way, and so
+on. So `["env", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` is accepted, and
+`["env", "bash", "-c", "x {path}"]` and `["env", "-u", "SH", "bash", "{path}"]`
+are not.
+
+This can refuse a safe command:
+
+- In `["timeout", "5", "grep", "sh", "{path}"]` the pattern `sh` is taken as
+  the shell, so `{path}` is rejected.
+- In `["env", "-i", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` the first `sh`
+  might be the value of `-i`, so the second `sh` is checked as a shell too.
+  Put `--` before the shell, where the launcher accepts it:
+  `["env", "-i", "--", "sh", …]`.
+
+Otherwise, call the launcher from a shell and pass the value as `"$1"`:
+`["sh", "-c", "timeout 5 grep sh -- \"$1\"", "sh", "{path}"]`.
+
+`env -S` (or `--split-string`) splits one argument into several. When any word
+of it names a shell, or holds a `$` variable that could, Kika cannot tell where
+the script ends, so it rejects every placeholder in that command. A placeholder
+inside the `-S` string itself is rejected too, since env would split the value
+into a program and its arguments.
+
+**Not checked.** The guard cannot see a shell or interpreter started any other
+way, so for these the rule is yours to keep:
+
+- a launcher that is not on the list above, for example `ssh`, `su -c`,
+  `find -exec`, `watch`, `flock` or `systemd-run`;
+- `sudo -s`, `sudo -i` and `doas -s`, which start a shell without naming one;
+- a placeholder that becomes the launcher's program, as in
+  `["env", "{prompt1}", …]`;
+- `cmd /c`, `pwsh -c` and `powershell` on Windows;
+- interpreters such as `python -c`, `perl -e` and `node -e`.
+
+Pass values as arguments after the code, and read them from there (`"$1"`,
+`sys.argv`, `@ARGV`, `process.argv`).
 
 ### Keys
 
@@ -261,6 +324,8 @@ keep: pass values as arguments after the code, and read them from there
 - A repository's `.kika.toml` cannot move a binding onto a command's key.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
+- A `"popup"` or `"none"` command that is still running can be stopped with
+  `ctrl-x` (`workspace.cancel_command`).
 
 ## Global-only settings and trust
 
@@ -303,7 +368,7 @@ means a repository's `.kika.toml` cannot change it.
 | `global.help` | `?` | Show the keys for this panel | |
 | `global.quit` | `q`, `esc`, `ctrl-c` | Quit Kika | locked |
 
-### Workspace (file list, diff and blame)
+### Workspace (every panel: Status, Files, Branches, Commits, Stash, diff and blame)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -317,6 +382,16 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
+| `workspace.focus_status` | `1` | Focus the Status panel | |
+| `workspace.focus_files` | `2` | Focus the Files panel | |
+| `workspace.focus_branches` | `3` | Focus the Branches panel | |
+| `workspace.focus_commits` | `4` | Focus the Commits panel | |
+| `workspace.focus_stash` | `5` | Focus the Stash panel | |
+| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks | |
+| `workspace.next_panel` | `tab` | Focus the next panel | |
+| `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
+| `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
+| `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
 
 ### File list
 
@@ -427,6 +502,10 @@ means a repository's `.kika.toml` cannot change it.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `help.close` | `?`, `esc` | Close this menu | |
+| `help.down` | `j`, `down` | Scroll the list down | |
+| `help.up` | `k`, `up` | Scroll the list up | |
+| `help.page_down` | `pgdn` | Scroll the list down a page | |
+| `help.page_up` | `pgup` | Scroll the list up a page | |
 
 ### Menus
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::runner::{GitChild, GitCommand, GitOutput, GitRunner};
+use super::runner::{AttachedExit, GitChild, GitCommand, GitOutput, GitRunner};
 
 /// Waits between attempts: short, since a lock is usually held briefly.
 pub const LOCK_BACKOFF: [Duration; 4] = [
@@ -69,6 +69,11 @@ impl GitRunner for RetryRunner {
 
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild> {
         self.inner.spawn(cmd)
+    }
+
+    // Never retried: the user already answered its prompts once.
+    fn run_attached(&self, cmd: &GitCommand) -> io::Result<AttachedExit> {
+        self.inner.run_attached(cmd)
     }
 
     // The trait's defaults would hide the inner runner's directory, so
@@ -189,12 +194,21 @@ mod tests {
     }
 
     #[test]
-    fn spawn_and_interrupt_go_straight_through() {
-        let fake = Arc::new(FakeRunner::new().expect_spawn(&["diff"], FakeChild::lines(0)));
+    fn spawn_attached_runs_and_interrupt_go_straight_through() {
+        let fake = Arc::new(
+            FakeRunner::new()
+                .expect_spawn(&["diff"], FakeChild::lines(0))
+                .expect_attached(&["commit", "--no-edit"], false),
+        );
         let (runner, slept) = retrying(Arc::clone(&fake));
 
         runner.spawn(&GitCommand::new("diff")).unwrap();
+        let exit = runner
+            .run_attached(&GitCommand::new("commit").arg("--no-edit"))
+            .unwrap();
         runner.interrupt();
+
+        assert!(!exit.success);
 
         fake.assert_done();
         assert_eq!(fake.interrupts(), 1);

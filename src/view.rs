@@ -8,7 +8,8 @@ use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
-use crate::keymap::{KeyPattern, available, available_commands, registry};
+use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
+use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use crate::rendered_view::RenderedDiff;
@@ -16,57 +17,16 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+
+pub(crate) use crate::layout::screen_layout;
 
 /// Draw the state. Reads the model only; never mutates it.
 pub fn render(state: &AppState, frame: &mut Frame) {
     let [main, status] = screen_layout(frame.area());
 
     match state.context {
-        Context::Workspace => {
-            let areas = workspace_layout(main);
-            render_status_panel(state, frame, areas.status);
-            render_files_panel(state, frame, areas.files);
-            let label = state.active_renderer().map(|r| r.label.as_str());
-            // R steps to the next renderer before it gets back to built-in.
-            let last = state
-                .renderer
-                .is_some_and(|i| i + 1 >= state.renderers.len());
-            // R is a Diff pane key.
-            let hint = match (matches!(state.focus, Focus::Files), last) {
-                (false, true) => "Press R for the built-in diff",
-                (false, false) => "Press R for the next renderer",
-                (true, true) => "Press enter, then R, for the built-in diff",
-                (true, false) => "Press enter, then R, for the next renderer",
-            };
-            match (&state.focus, state.rendered_shown(), label) {
-                (Focus::Files, Some(rendered), Some(label)) => {
-                    let title = format!(" Diff{} · {label} ", options_note(state.diff_options));
-                    let block = Block::bordered().title(title);
-                    render_rendered(rendered, block, None, hint, frame, areas.diff);
-                }
-                (Focus::Files, ..) => {
-                    render_diff_pane(&state.diff, state.diff_options, frame, areas.diff)
-                }
-                (Focus::Diff(view), Some(rendered), Some(label)) => {
-                    let title = format!(" {} · {label} ", hunk_title(view, state.diff_options));
-                    let block = focused_block(title);
-                    render_rendered(rendered, block, Some(view), hint, frame, areas.diff);
-                }
-                (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
-                    // Short, so it fits the pane's title at 80 columns.
-                    let suffix = format!("{label} (unmapped)");
-                    render_hunk_view(view, state.diff_options, &suffix, frame, areas.diff)
-                }
-                (Focus::Diff(view), ..) => {
-                    render_hunk_view(view, state.diff_options, "", frame, areas.diff)
-                }
-                (Focus::Blame(view), ..) => match &view.commit {
-                    Some(commit) => render_commit_view(commit, frame, areas.diff),
-                    None => render_blame(view, frame, areas.diff),
-                },
-            }
-        }
+        Context::Workspace => render_workspace(state, frame, main),
         Context::Review { number } => {
             frame.render_widget(
                 Paragraph::new("").block(Block::bordered().title(format!(" Review #{number} "))),
@@ -77,78 +37,234 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.help_open {
         render_help(state, frame, main);
     }
-    render_commit(&state.commit, frame, main);
+    render_commit(&state.commit, state.commit_on_terminal, frame, main);
     popup_view::render_popups(state, frame, main);
-    frame.render_widget(status_bar(state), status);
+    frame.render_widget(status_bar(state, status.width), status);
 }
 
-/// The screen split into the panels above and the one-row bar below.
-pub(crate) fn screen_layout(area: Rect) -> [Rect; 2] {
-    Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area)
-}
-
-/// Where the workspace panels go. Shared with the e2e harness, so it reads
-/// the Files panel where it is drawn.
-pub(crate) struct WorkspaceLayout {
-    pub status: Rect,
-    pub files: Rect,
-    pub diff: Rect,
-}
-
-/// Height of the Status panel: three rows of text inside the border.
-const STATUS_PANEL_HEIGHT: u16 = 5;
-
-/// Rows the Files panel keeps before the Status panel gets any: its
-/// borders and three files. Files is where the user works; Status only informs.
-const FILES_MIN_HEIGHT: u16 = 5;
-
-/// A left column of the Status panel over the Files panel, and the Diff
-/// pane on the right. On a short screen the Status panel shrinks first,
-/// and goes when it cannot show even one row.
-pub(crate) fn workspace_layout(main: Rect) -> WorkspaceLayout {
-    let [left, diff] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(main);
-    let room = left.height.saturating_sub(FILES_MIN_HEIGHT);
-    let status_height = match STATUS_PANEL_HEIGHT.min(room) {
-        // Two borders and a row of text, or nothing.
-        h if h < 3 => 0,
-        h => h,
-    };
-    let [status, files] =
-        Layout::vertical([Constraint::Length(status_height), Constraint::Fill(1)]).areas(left);
-    WorkspaceLayout {
-        status,
-        files,
-        diff,
+/// Every panel the layout has room for: the left column, then the diff
+/// pane showing what the focus asks for.
+fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
+    let layout = workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode);
+    for side in SidePanel::ALL {
+        let Some(area) = layout.rect(Panel::Side(side)) else {
+            continue;
+        };
+        let look = PanelLook::of(state, Panel::Side(side), area);
+        let expanded = side == state.expanded;
+        match side {
+            SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
+            SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
+            SidePanel::Branches | SidePanel::Commits | SidePanel::Stash => {
+                render_placeholder(side, &look, expanded, frame, area)
+            }
+        }
     }
+    let Some(area) = layout.rect(Panel::Diff) else {
+        return;
+    };
+    let look = PanelLook::of(state, Panel::Diff, area);
+    let options = state.diff_options;
+    let label = state.active_renderer().map(|r| r.label.as_str());
+    // R steps to the next renderer before it gets back to built-in.
+    let last = state
+        .renderer
+        .is_some_and(|i| i + 1 >= state.renderers.len());
+    // R is a Diff pane key; `l` reaches the diff from every side panel.
+    let hint = match (state.focus.is_side(), last) {
+        (false, true) => "Press R for the built-in diff",
+        (false, false) => "Press R for the next renderer",
+        (true, true) => "Press l, then R, for the built-in diff",
+        (true, false) => "Press l, then R, for the next renderer",
+    };
+    match (&state.focus, state.rendered_shown(), label) {
+        (Focus::Diff(view), Some(rendered), Some(label)) => {
+            let block = look.block(hunk_title(view, options, label, &look));
+            render_rendered(rendered, block, Some(view), hint, frame, area);
+        }
+        (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
+            // Short, so it fits the pane's title at 80 columns.
+            let suffix = format!("{label} (unmapped)");
+            render_hunk_view(view, options, &suffix, &look, frame, area)
+        }
+        (Focus::Diff(view), ..) => render_hunk_view(view, options, "", &look, frame, area),
+        (Focus::Blame(view), ..) => match &view.commit {
+            Some(commit) => render_commit_view(commit, &look, frame, area),
+            None => render_blame(view, &look, frame, area),
+        },
+        (_, Some(rendered), Some(label)) => {
+            let tail = format!("{} · {label}", options_note(options));
+            let block = look.block(look.path_title("Diff", rendered.path.display(), &tail));
+            render_rendered(rendered, block, None, hint, frame, area);
+        }
+        _ => render_diff_pane(&state.diff, options, &look, frame, area),
+    }
+}
+
+/// How a panel's frame is drawn this time: whether it has the keys, the
+/// screen mode its title names, and whether it has room for more than a
+/// title row.
+struct PanelLook {
+    number: u8,
+    focused: bool,
+    /// ` · half` or ` · full` on the focused panel, else empty.
+    mode: String,
+    /// Columns of title between the corners.
+    title_width: usize,
+    /// Only the top border: no room for a bottom one.
+    top_only: bool,
+    /// One row: the title is all there is, so it carries the summary.
+    title_only: bool,
+}
+
+impl PanelLook {
+    fn of(state: &AppState, panel: Panel, area: Rect) -> Self {
+        let focused = state.focus.panel() == panel;
+        let mode = match state.screen_mode.note() {
+            Some(note) if focused => format!(" · {note}"),
+            _ => String::new(),
+        };
+        Self {
+            number: panel.number(),
+            focused,
+            mode,
+            title_width: usize::from(area.width.saturating_sub(2)),
+            top_only: area.height < 3,
+            title_only: area.height < 2,
+        }
+    }
+
+    /// ` [n] <text><mode> `, fitted to the border: the padding goes
+    /// first, then `text` loses its end to `…`. The key and the mode stay.
+    fn title(&self, text: &str) -> String {
+        let key = format!("[{}]", self.number);
+        let full = format!(" {key} {text}{} ", self.mode);
+        if width_of(&full) <= self.title_width {
+            return full;
+        }
+        let bare = format!("{key} {text}{}", self.mode);
+        if width_of(&bare) <= self.title_width {
+            return bare;
+        }
+        let room = self
+            .title_width
+            .saturating_sub(width_of(&key) + 1 + width_of(&self.mode));
+        if room == 0 {
+            return elide_right(&key, self.title_width);
+        }
+        format!("{key} {}{}", elide_right(text, room), self.mode)
+    }
+
+    /// ` [n] <head> <path><tail><mode> `, the path losing its start so
+    /// the rest of the title fits.
+    fn path_title(&self, head: &str, path: &str, tail: &str) -> String {
+        let padded = width_of(&format!(" [{}] {head} {tail}{} ", self.number, self.mode));
+        // With no room for even `…` beside the padding, `title` drops the
+        // padding; give the path that room.
+        let fixed = if padded < self.title_width {
+            padded
+        } else {
+            padded.saturating_sub(2)
+        };
+        let room = self.title_width.saturating_sub(fixed).max(1);
+        self.title(&format!("{head} {}{tail}", elide_left(path, room)))
+    }
+
+    /// The panel's frame with `title`. A panel too short for both borders
+    /// keeps only its top one, so the title still shows.
+    fn block(&self, title: String) -> Block<'static> {
+        let block = panel_block(title, self.focused);
+        if self.top_only {
+            block.borders(Borders::TOP)
+        } else {
+            block
+        }
+    }
+}
+
+/// A panel's frame: focused, a thick coloured border and a bold title, so
+/// the panel with the keys stands out without colour too; else a thin dim
+/// border.
+fn panel_block(title: String, focused: bool) -> Block<'static> {
+    let block = Block::bordered().title(title);
+    if focused {
+        block
+            .border_type(BorderType::Thick)
+            .title_style(Style::new().add_modifier(Modifier::BOLD))
+            .border_style(Style::new().fg(FOCUSED))
+    } else {
+        block.border_style(Style::new().fg(Color::DarkGray))
+    }
+}
+
+/// A side panel with nothing to show yet. Expanded, it says so.
+fn render_placeholder(
+    side: SidePanel,
+    look: &PanelLook,
+    expanded: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let text = if expanded {
+        Line::styled("Nothing here yet", Style::new().fg(Color::DarkGray))
+    } else {
+        Line::raw("")
+    };
+    frame.render_widget(
+        Paragraph::new(text).block(look.block(look.title(side.title()))),
+        area,
+    );
 }
 
 /// Where the user is: the branch, its upstream, and any operation in
 /// progress. Names too wide for the panel lose their start to `…`, so the
 /// counts and markers after them stay visible. Blank when no load has
 /// succeeded yet, since the Files panel shows why; dimmed when the last
-/// refresh failed, since it may be out of date.
-fn render_status_panel(state: &AppState, frame: &mut Frame, area: Rect) {
+/// refresh failed, since it may be out of date. Collapsed, one row shows
+/// the branch and any operation in progress; with only a title row, the
+/// title does.
+fn render_status_panel(
+    state: &AppState,
+    look: &PanelLook,
+    expanded: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     if area.is_empty() {
         return;
     }
     let stale = state.status_error.is_some() && state.branch.is_some();
+    let stale_note = if stale { " (stale)" } else { "" };
     // Inside a submodule, say which one: the paths from the launch
     // repository. A long one loses its start, so the innermost name shows.
     let location: Vec<&str> = state.repo_stack.iter().map(|p| p.path.display()).collect();
-    let location = if location.is_empty() {
-        String::new()
+    let operations: Vec<&str> = state
+        .branch
+        .iter()
+        .flat_map(|b| b.in_progress.iter().map(|&op| doing(op)))
+        .collect();
+    let operations = operations.join(", ");
+    let title = if let (true, Some(branch)) = (look.title_only, &state.branch) {
+        let ops = if operations.is_empty() {
+            String::new()
+        } else {
+            format!(" · {operations}")
+        };
+        look.path_title(
+            "Status ·",
+            &head_name(&branch.head),
+            &format!("{ops}{stale_note}"),
+        )
+    } else if location.is_empty() {
+        look.title(&format!("Status{stale_note}"))
     } else {
-        let fixed = width_of(" Status ·  ") + if stale { width_of("(stale) ") } else { 0 };
-        let room = usize::from(area.width.saturating_sub(2)).saturating_sub(fixed);
-        format!(" · {}", elide_left(&location.join("/"), room.max(1)))
+        look.path_title("Status ·", &location.join("/"), stale_note)
     };
+    let block = look.block(title);
     let block = if stale {
-        Block::bordered()
-            .title(format!(" Status{location} (stale) "))
-            .style(Style::new().fg(Color::DarkGray))
+        block.style(Style::new().fg(Color::DarkGray))
     } else {
-        Block::bordered().title(format!(" Status{location} "))
+        block
     };
     let width = usize::from(block.inner(area).width);
     let Some(branch) = &state.branch else {
@@ -156,26 +272,49 @@ fn render_status_panel(state: &AppState, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
-    let head = match &branch.head {
-        Head::Branch(name) => fit(name, "", width),
-        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
-        Head::Unborn(name) => fit(name, " (no commits)", width),
-    };
+    let marker = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    if !expanded {
+        // One row: the branch, and what the repository is in the middle of.
+        let ops = if operations.is_empty() {
+            String::new()
+        } else {
+            format!(" {operations}")
+        };
+        let ops = elide_right(&ops, width.saturating_sub(2));
+        let head = head_line(&branch.head, width.saturating_sub(width_of(&ops)));
+        let line = Line::from(vec![Span::raw(head), Span::styled(ops, marker)]);
+        frame.render_widget(Paragraph::new(line).block(block), area);
+        return;
+    }
+    let head = head_line(&branch.head, width);
     let upstream = match (&branch.upstream, branch.ahead_behind) {
         (None, _) => fit("no upstream", "", width),
         (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
         (Some(name), None) => fit(name, " (gone)", width),
     };
-    let operations: Vec<&str> = branch.in_progress.iter().map(|&op| doing(op)).collect();
     let lines = vec![
         Line::raw(head),
         Line::raw(upstream),
-        Line::styled(
-            elide_right(&operations.join(", "), width),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
+        Line::styled(elide_right(&operations, width), marker),
     ];
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The branch row, fitted to `width` columns.
+fn head_line(head: &Head, width: usize) -> String {
+    match head {
+        Head::Branch(name) => fit(name, "", width),
+        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
+        Head::Unborn(name) => fit(name, " (no commits)", width),
+    }
+}
+
+/// The branch in a few words, for a title.
+fn head_name(head: &Head) -> String {
+    match head {
+        Head::Branch(name) | Head::Unborn(name) => name.clone(),
+        Head::Detached(oid) => format!("detached {}", short_hash(oid)),
+    }
 }
 
 /// `name` then `suffix` in `width` columns. The name gives way first, so
@@ -224,14 +363,20 @@ fn doing(op: Operation) -> &'static str {
     }
 }
 
-/// The border colour of the commit box that has the cursor.
+/// The border colour of the panel or commit box that has the keys.
 const FOCUSED: Color = Color::Cyan;
 
 /// Popups wider than this are harder to read; it is a common message width.
 pub(crate) const COMMIT_WIDTH: u16 = 72;
 
-/// The commit popup for the current step, over `area`.
-fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
+/// The footer of a running commit: where Ctrl+C goes, which depends on
+/// whether git has the terminal.
+const DETACHED_FOOTER: &str = " waiting for git · ctrl-c quits Kika ";
+const ON_TERMINAL_FOOTER: &str = " git has the terminal · ctrl-c stops git ";
+
+/// The commit popup for the current step, over `area`. `on_terminal` says
+/// a running commit was handed the terminal.
+fn render_commit(commit: &CommitFlow, on_terminal: bool, frame: &mut Frame, area: Rect) {
     match commit {
         CommitFlow::Closed => {}
         CommitFlow::ConfirmStageAll => render_question(
@@ -252,8 +397,15 @@ fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
             frame,
             area,
         ),
-        CommitFlow::Editing(editor) => render_commit_editor(editor, true, frame, area),
-        CommitFlow::Running(editor) => render_commit_editor(editor, false, frame, area),
+        CommitFlow::Editing(editor) => render_commit_editor(editor, None, frame, area),
+        CommitFlow::Running(editor) => {
+            let footer = if on_terminal {
+                ON_TERMINAL_FOOTER
+            } else {
+                DETACHED_FOOTER
+            };
+            render_commit_editor(editor, Some(footer), frame, area)
+        }
         CommitFlow::Failed { output, .. } => render_commit_failed(output, frame, area),
     }
 }
@@ -281,18 +433,25 @@ pub(crate) fn render_question(title: &str, question: &str, frame: &mut Frame, ar
 }
 
 /// The message popup: a one-line Subject box over a Body box. While
-/// `editing`, the focused box is marked and holds the terminal cursor.
-/// When there is no room for both, only the focused one is drawn.
-fn render_commit_editor(editor: &CommitEditor, editing: bool, frame: &mut Frame, area: Rect) {
+/// editing, the focused box is marked and holds the terminal cursor; a
+/// `running` commit shows that footer instead. When there is no room for
+/// both boxes, only the focused one is drawn.
+fn render_commit_editor(
+    editor: &CommitEditor,
+    running: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let editing = running.is_none();
     // Two outer borders, a three-row Subject box and a Body box of ten text rows.
     let popup = centered(area, COMMIT_WIDTH, 2 + 3 + 12);
     frame.render_widget(Clear, popup);
-    let block = match (editing, editor.amend.is_some()) {
-        (true, true) => Block::bordered().title(" Amend last commit "),
-        (true, false) => Block::bordered().title(" Commit message "),
-        (false, _) => Block::bordered()
+    let block = match (running, editor.amend.is_some()) {
+        (None, true) => Block::bordered().title(" Amend last commit "),
+        (None, false) => Block::bordered().title(" Commit message "),
+        (Some(footer), _) => Block::bordered()
             .title(" Committing… ")
-            .title_bottom(" waiting for git · ctrl-c quits Kika "),
+            .title_bottom(footer),
     };
     // Skipping hooks skips the user's own checks, so it is never quiet.
     let block = if editor.no_verify {
@@ -516,14 +675,24 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
     lines
 }
 
-/// The busy indicator, then why the last key did nothing, else the last
-/// operation's error, else the key hints. The indicator goes first so a
-/// narrow bar clips the rest, not it. Hints come from the keymap, so the bar
-/// always matches what the keys do; disabled ones are dimmed.
-fn status_bar(state: &AppState) -> Line<'_> {
+/// The busy indicator and, while a command runs, the key that stops it;
+/// then why the last key did nothing, else the last operation's error, else
+/// the key hints. The indicator goes first so a narrow bar clips the rest,
+/// not it. Hints come from the keymap, so the bar always matches what the
+/// keys do; disabled ones are dimmed. An error wider than the bar's `width`
+/// columns ends in `…`.
+fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
+    let mut room = usize::from(width);
     if state.busy > 0 {
         spans.push(Span::raw(" loading… "));
+        room = room.saturating_sub(width_of(" loading… "));
+    }
+    if state.command_running
+        && let Some(cancel) = cancel_hint(state)
+    {
+        room = room.saturating_sub(width_of(&cancel) + 1);
+        spans.push(Span::raw(format!(" {cancel}")));
     }
     if let Some(notice) = state.notice {
         spans.push(Span::styled(
@@ -531,8 +700,9 @@ fn status_bar(state: &AppState) -> Line<'_> {
             Style::new().fg(Color::Yellow),
         ));
     } else if let Some(error) = &state.op_error {
+        let text = format!(" error: {}", error.lines().next().unwrap_or_default());
         spans.push(Span::styled(
-            format!(" error: {}", error.lines().next().unwrap_or_default()),
+            elide_right(&text, room),
             Style::new().fg(Color::Red),
         ));
     } else {
@@ -544,18 +714,74 @@ fn status_bar(state: &AppState) -> Line<'_> {
                 Style::new().fg(Color::DarkGray),
             ));
         }
-        let hints = available(registry(), &state.keymap, focus, state)
+        let room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
+        let hints: Vec<(String, bool, bool)> = available(registry(), &state.keymap, focus, state)
             .into_iter()
-            .filter(|(binding, _)| binding.bar);
-        for (i, (binding, disabled)) in hints.enumerate() {
+            .filter(|(binding, _)| binding.bar)
+            .map(|(binding, disabled)| {
+                let key = state.keymap.keys(binding).first().map(KeyPattern::label);
+                let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
+                (hint, disabled.is_some(), pinned(binding))
+            })
+            .collect();
+        for (i, (hint, disabled)) in fit_hints(&hints, room).into_iter().enumerate() {
             let first = i == 0 && note.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
-            let key = state.keymap.keys(binding).first().map(KeyPattern::label);
-            let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
-            spans.push(Span::styled(hint, dimmed_if(disabled.is_some())));
+            spans.push(Span::styled(hint, dimmed_if(disabled)));
         }
     }
     Line::from(spans)
+}
+
+/// The cancel key's hint, if the keymap leaves it a key. Shown only while a
+/// command runs, so it is not a `bar` binding.
+fn cancel_hint(state: &AppState) -> Option<String> {
+    let binding = registry()
+        .iter()
+        .find(|b| b.id == "workspace.cancel_command")?;
+    let key = state.keymap.keys(binding).first()?;
+    Some(format!("{} {}", key.label(), binding.label))
+}
+
+/// Help and quit: the hints that must stay in the bar, however narrow.
+fn pinned(binding: &Binding) -> bool {
+    use crate::intent::AppIntent::{CloseHelp, OpenHelp, Quit};
+    matches!(binding.intent, OpenHelp | CloseHelp | Quit)
+}
+
+/// The hints that fit in `room` columns, each whole. Pinned ones stay;
+/// others go from the end, and a `…` says some went. Each hint takes its
+/// width plus two columns before it.
+fn fit_hints(hints: &[(String, bool, bool)], room: usize) -> Vec<(String, bool)> {
+    let cost = |text: &str| width_of(text) + 2;
+    let all = |h: &(String, bool, bool)| (h.0.clone(), h.1);
+    if hints.iter().map(|h| cost(&h.0)).sum::<usize>() <= room {
+        return hints.iter().map(all).collect();
+    }
+    let mut used = cost("…")
+        + hints
+            .iter()
+            .filter(|h| h.2)
+            .map(|h| cost(&h.0))
+            .sum::<usize>();
+    let mut kept: Vec<(String, bool)> = Vec::new();
+    for hint in hints.iter().filter(|h| !h.2) {
+        if used + cost(&hint.0) > room {
+            break;
+        }
+        used += cost(&hint.0);
+        kept.push(all(hint));
+    }
+    kept.push(("…".to_string(), true));
+    kept.extend(hints.iter().filter(|h| h.2).map(all));
+    // Too narrow even for those: drop from the end, never mid-hint.
+    while used > room {
+        match kept.pop() {
+            Some((text, _)) => used -= cost(&text),
+            None => break,
+        }
+    }
+    kept
 }
 
 fn dimmed_if(disabled: bool) -> Style {
@@ -567,20 +793,23 @@ fn dimmed_if(disabled: bool) -> Style {
 }
 
 /// A popup over `area` listing every key the focused panel answers to,
-/// the user's own commands after the built-in ones. Rows that do not fit
-/// are clipped.
+/// the user's own commands after the built-in ones, below a rule. A list
+/// taller than the screen scrolls; `▲`/`▼` on the border say rows are cut,
+/// and the bottom one says which key scrolls.
 fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     let focus = state.panel_focus();
     let labels = |keys: &[KeyPattern]| {
         let labels: Vec<String> = keys.iter().map(KeyPattern::label).collect();
         labels.join("/")
     };
-    let builtin = available(registry(), &state.keymap, focus, state)
+    let builtin: Vec<_> = available(registry(), &state.keymap, focus, state)
         .into_iter()
         .map(|(binding, disabled)| {
             let keys = labels(state.keymap.keys(binding));
             (keys, binding.description.to_string(), disabled.is_some())
-        });
+        })
+        .collect();
+    let builtin_count = builtin.len();
     // The description is the user's text: one line, safe to draw.
     let commands = available_commands(&state.keymap, focus)
         .into_iter()
@@ -588,13 +817,13 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             let description = sanitize(command.description.as_bytes());
             (labels(&command.keys), description, false)
         });
-    let entries: Vec<(String, String, bool)> = builtin.chain(commands).collect();
+    let entries: Vec<(String, String, bool)> = builtin.into_iter().chain(commands).collect();
     let key_width = entries
         .iter()
         .map(|(k, _, _)| width_of(k))
         .max()
         .unwrap_or(0);
-    let lines: Vec<Line> = entries
+    let mut lines: Vec<Line> = entries
         .iter()
         .map(|(keys, description, disabled)| {
             let pad = key_width - width_of(keys);
@@ -604,23 +833,56 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             )
         })
         .collect();
-    let title = format!(" Keys: {} ", focus.title());
+    let title = format!(" Keys: {} ", help_name(state));
     let content_width = lines
         .iter()
         .map(Line::width)
         .chain([width_of(&title)])
         .max()
         .unwrap_or(0);
+    if entries.len() > builtin_count {
+        lines.insert(
+            builtin_count,
+            Line::styled("─".repeat(content_width), Style::new().fg(Color::DarkGray)),
+        );
+    }
     let popup = centered(
         area,
         u16::try_from(content_width + 2).unwrap_or(u16::MAX),
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
     );
+    let rows = usize::from(popup.height.saturating_sub(2));
+    let total = lines.len();
+    let first = state.help_scroll.min(total.saturating_sub(rows));
+    let mut block = Block::bordered().title(title);
+    if first > 0 {
+        block = block.title(Line::raw("▲").right_aligned());
+    }
+    if first + rows < total {
+        let down = registry()
+            .iter()
+            .find(|b| b.id == "help.down")
+            .map(|b| {
+                let keys: Vec<String> =
+                    state.keymap.keys(b).iter().map(KeyPattern::label).collect();
+                keys.join("/")
+            })
+            .unwrap_or_default();
+        block = block.title_bottom(Line::raw(format!(" {down} more ▼")).right_aligned());
+    }
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
-        popup,
-    );
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
+}
+
+/// What the help list is titled with: the focused panel's name, also for
+/// panels that only have the workspace's keys.
+fn help_name(state: &AppState) -> &'static str {
+    let scope = state.panel_focus();
+    match (scope, state.focus.panel()) {
+        (KeyScope::Workspace, Panel::Side(side)) => side.title(),
+        _ => scope.title(),
+    }
 }
 
 /// A `width` x `height` rectangle centred in `area`, shrunk to fit it.
@@ -635,9 +897,25 @@ pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
-/// The Files panel: an error, a placeholder until the first load, or one line per file.
-fn render_files_panel(state: &AppState, frame: &mut Frame, area: Rect) {
-    let block = Block::bordered().title(" Files ");
+/// The Files panel: an error, a placeholder until the first load, or one
+/// line per file. Collapsed, a count stands in for the list.
+fn render_files_panel(
+    state: &AppState,
+    look: &PanelLook,
+    expanded: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let count = match state.files.len() {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    };
+    let title = if look.title_only && state.files_loaded && state.status_error.is_none() {
+        look.title(&format!("Files · {count}"))
+    } else {
+        look.title("Files")
+    };
+    let block = look.block(title);
     let inner = block.inner(area);
     let panel = if let Some(error) = &state.status_error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
@@ -647,6 +925,8 @@ fn render_files_panel(state: &AppState, frame: &mut Frame, area: Rect) {
         Paragraph::new("Loading…")
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
+    } else if !expanded {
+        Paragraph::new(count)
     } else {
         Paragraph::new(file_lines(&state.files, state.selected, inner))
     };
@@ -720,10 +1000,31 @@ fn options_note(options: DiffOptions) -> String {
     note
 }
 
-/// The Diff pane: an error, a delayed "Loading…", "No diff", or the visible lines.
-fn render_diff_pane(diff: &DiffPane, options: DiffOptions, frame: &mut Frame, area: Rect) {
-    let block = Block::bordered().title(format!(" Diff{} ", options_note(options)));
-    let rows = usize::from(block.inner(area).height);
+/// The Diff pane: an error, a delayed "Loading…", "No diff", or the visible
+/// lines. The title names the file and where in it the pane is: the first
+/// line shown of the lines loaded, `+` while more are coming.
+fn render_diff_pane(
+    diff: &DiffPane,
+    options: DiffOptions,
+    look: &PanelLook,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let position = if diff.lines.is_empty() || diff.error.is_some() {
+        String::new()
+    } else {
+        let first = (diff.scroll + 1).min(diff.lines.len());
+        let more = if diff.done { "" } else { "+" };
+        format!(" · {first}/{}{more}", diff.lines.len())
+    };
+    let tail = format!("{position}{}", options_note(options));
+    let title = match &diff.path {
+        Some(path) => look.path_title("Diff", path.display(), &tail),
+        None => look.title(&format!("Diff{tail}")),
+    };
+    let block = look.block(title);
+    let inner = block.inner(area);
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = if let Some(error) = &diff.error {
         Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
     } else if diff.show_loading {
@@ -737,7 +1038,7 @@ fn render_diff_pane(diff: &DiffPane, options: DiffOptions, frame: &mut Frame, ar
         Paragraph::new(
             diff.lines[start..end]
                 .iter()
-                .map(styled_diff_line)
+                .map(|line| styled_diff_line(line, width))
                 .collect::<Vec<_>>(),
         )
     };
@@ -752,15 +1053,11 @@ fn render_hunk_view(
     view: &HunkView,
     options: DiffOptions,
     suffix: &str,
+    look: &PanelLook,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let title = hunk_title(view, options);
-    let block = focused_block(if suffix.is_empty() {
-        format!(" {title} ")
-    } else {
-        format!(" {title} · {suffix} ")
-    });
+    let block = look.block(hunk_title(view, options, suffix, look));
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = match &view.patch {
@@ -804,6 +1101,7 @@ fn render_hunk_view(
                         | RowKind::Removed
                         | RowKind::NoNewline => sanitize_body(&row.text),
                     };
+                    let text = clip(&text, 0, width.saturating_sub(1));
                     let line = Line::from(vec![
                         Span::styled(gutter, Style::new().fg(FOCUSED)),
                         Span::styled(text, style),
@@ -825,8 +1123,9 @@ fn render_hunk_view(
     frame.render_widget(pane.block(block), area);
 }
 
-/// The focused pane's title: the side, the mode and the options.
-fn hunk_title(view: &HunkView, options: DiffOptions) -> String {
+/// The focused pane's title: the side, the path, the mode, the options
+/// and `suffix` after a `·`, the path giving way to fit.
+fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
     let side = match view.side {
         DiffSide::Index => "Staged",
         DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
@@ -836,7 +1135,13 @@ fn hunk_title(view: &HunkView, options: DiffOptions) -> String {
         Some(_) => " · lines",
         None => "",
     };
-    format!("{side}{mode}{}", options_note(options))
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        format!(" · {suffix}")
+    };
+    let tail = format!("{mode}{}{suffix}", options_note(options));
+    look.path_title(side, view.path.display(), &tail)
 }
 
 /// A renderer's rows, from the scroll, behind a one-column gutter. With
@@ -937,19 +1242,11 @@ fn elide_runs(runs: &[(Style, String)], max: usize) -> Vec<Span<'_>> {
 /// Columns the author takes in a blame row; longer names are elided.
 const BLAME_AUTHOR: usize = 16;
 
-/// The focused pane's frame: a bold title and a coloured border.
-fn focused_block(title: String) -> Block<'static> {
-    Block::bordered()
-        .title(title)
-        .title_style(Style::new().add_modifier(Modifier::BOLD))
-        .border_style(Style::new().fg(FOCUSED))
-}
-
 /// The blame in the Diff pane's place: per line its commit, author, day
 /// and number, then the text. The cursor row is reversed, so it reads
 /// without colour.
-fn render_blame(view: &BlameView, frame: &mut Frame, area: Rect) {
-    let block = focused_block(format!(" Blame {} ", view.path.display()));
+fn render_blame(view: &BlameView, look: &PanelLook, frame: &mut Frame, area: Rect) {
+    let block = look.block(look.path_title("Blame", view.path.display(), ""));
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = if let Some(error) = &view.error {
@@ -974,7 +1271,7 @@ fn render_blame(view: &BlameView, frame: &mut Frame, area: Rect) {
             .skip(view.scroll)
             .take(rows)
             .map(|(i, line)| {
-                let line = Line::from(blame_row(line, number_width));
+                let line = Line::from(clip(&blame_row(line, number_width), 0, width));
                 if i == view.cursor {
                     reversed(line, width)
                 } else {
@@ -1014,9 +1311,10 @@ fn pad(text: &str, width: usize) -> String {
 
 /// A commit opened from the blame, in the same place: its message and
 /// diff, coloured as the Diff pane colours them.
-fn render_commit_view(view: &CommitView, frame: &mut Frame, area: Rect) {
-    let block = focused_block(format!(" Commit {} ", short_hash(&view.oid)));
-    let rows = usize::from(block.inner(area).height);
+fn render_commit_view(view: &CommitView, look: &PanelLook, frame: &mut Frame, area: Rect) {
+    let block = look.block(look.title(&format!("Commit {}", short_hash(&view.oid))));
+    let inner = block.inner(area);
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = if let Some(error) = &view.error {
         Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
     } else if !view.loaded {
@@ -1027,15 +1325,16 @@ fn render_commit_view(view: &CommitView, frame: &mut Frame, area: Rect) {
         Paragraph::new(
             view.lines[start..end]
                 .iter()
-                .map(styled_diff_line)
+                .map(|line| styled_diff_line(line, width))
                 .collect::<Vec<_>>(),
         )
     };
     frame.render_widget(pane.block(block), area);
 }
 
-/// Colour by kind; `---`/`+++` arrive as headers, so they are never red or green.
-fn styled_diff_line(line: &DiffLine) -> Line<'_> {
+/// Colour by kind; `---`/`+++` arrive as headers, so they are never red or
+/// green. A line wider than `width` ends in `…`, so a cut is never silent.
+fn styled_diff_line(line: &DiffLine, width: usize) -> Line<'static> {
     let style = match line.kind {
         LineKind::Added => Style::new().fg(Color::Green),
         LineKind::Removed => Style::new().fg(Color::Red),
@@ -1043,7 +1342,7 @@ fn styled_diff_line(line: &DiffLine) -> Line<'_> {
         LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
         LineKind::Context => Style::new(),
     };
-    Line::styled(line.text.as_str(), style)
+    Line::styled(clip(&line.text, 0, width), style)
 }
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`
@@ -1146,13 +1445,13 @@ mod tests {
     fn draw_files(state: &AppState, panel: u16, height: u16) -> Vec<String> {
         let width = (panel..panel * 4)
             .find(|&w| {
-                let [files, _] =
-                    Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)])
-                        .areas::<2>(Rect::new(0, 0, w, 1));
-                files.width == panel
+                let [main, _] = screen_layout(Rect::new(0, 0, w, height));
+                let layout =
+                    workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode);
+                layout.rect(Panel::Side(SidePanel::Files)).map(|r| r.width) == Some(panel)
             })
             .expect("a total width for this panel width");
-        draw(state, width, height)
+        thin(draw(state, width, height))
             .into_iter()
             .map(|row| {
                 let mut used = 0;
@@ -1160,6 +1459,26 @@ mod tests {
                     .take_while(|c| {
                         used += width_of(c.encode_utf8(&mut [0; 4])).max(1);
                         used <= usize::from(panel)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `rows` with the focused panel's thick border drawn thin, for tests
+    /// about what a panel shows rather than how it is framed.
+    fn thin(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .map(|row| {
+                row.chars()
+                    .map(|c| match c {
+                        '┃' => '│',
+                        '━' => '─',
+                        '┏' => '┌',
+                        '┓' => '┐',
+                        '┗' => '└',
+                        '┛' => '┘',
+                        c => c,
                     })
                     .collect()
             })
@@ -1215,11 +1534,18 @@ mod tests {
         state
     }
 
-    /// The three text rows inside the Status panel on an 80x24 screen.
+    /// `state` with the Status panel focused, so it is expanded.
+    fn status_focused(state: &AppState) -> AppState {
+        let mut state = state.clone();
+        state.focus = Focus::Status;
+        state.expanded = SidePanel::Status;
+        state
+    }
+
+    /// The three text rows inside the expanded Status panel on an 80x24 screen.
     fn panel_rows(state: &AppState) -> Vec<String> {
-        let rows = draw(state, 80, 24);
-        assert!(rows[0].contains(" Status "), "{rows:#?}");
-        assert!(rows[4].starts_with('└'), "{rows:#?}");
+        let rows = thin(draw(&status_focused(state), 80, 24));
+        assert!(rows[0].contains(" [1] Status "), "{rows:#?}");
         rows[1..4].to_vec()
     }
 
@@ -1267,7 +1593,7 @@ mod tests {
         main.in_progress = vec![Operation::Merge];
         let state = on(main.clone());
         assert!(panel_rows(&state)[2].starts_with("│merging "));
-        let buffer = draw_buffer(&state, 80, 24);
+        let buffer = draw_buffer(&status_focused(&state), 80, 24);
         let (x, y) = find(&buffer, "merging");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
         // Bold too, so it stands out where yellow reads poorly.
@@ -1282,7 +1608,7 @@ mod tests {
             Operation::CherryPick,
             Operation::Bisect,
         ];
-        let rows = draw(&on(main), 200, 24);
+        let rows = thin(draw(&status_focused(&on(main)), 200, 24));
         assert!(
             contains(&rows, "│rebasing, merging, cherry-picking, bisecting"),
             "{rows:#?}"
@@ -1309,7 +1635,7 @@ mod tests {
         let rows = panel_rows(&on(branch(Head::Branch(format!("{}end", "b".repeat(100))))));
         // 22 columns inside the panel: the start gives way, the end stays.
         assert!(
-            rows[0].starts_with(&format!("│…{}end││", "b".repeat(18))),
+            rows[0].starts_with(&format!("│…{}end││", "b".repeat(21))),
             "{rows:#?}"
         );
     }
@@ -1321,7 +1647,7 @@ mod tests {
         main.ahead_behind = Some((2, 1));
         let rows = panel_rows(&on(main.clone()));
         assert!(
-            rows[1].starts_with("│…ng-status-panel ↑2 ↓1││"),
+            rows[1].starts_with("│…-long-status-panel ↑2 ↓1││"),
             "{rows:#?}"
         );
 
@@ -1348,7 +1674,7 @@ mod tests {
         main.in_progress = vec![Operation::Rebase, Operation::Merge, Operation::CherryPick];
         let rows = panel_rows(&on(main));
         assert!(
-            rows[2].starts_with("│rebasing, merging, ch…││"),
+            rows[2].starts_with("│rebasing, merging, cherr…││"),
             "{rows:#?}"
         );
     }
@@ -1391,14 +1717,14 @@ mod tests {
         );
         // A narrow panel keeps the innermost name.
         let rows = draw(&state, 80, 24);
-        assert!(rows[0].contains(" Status · …er (stale) "), "{rows:#?}");
+        assert!(rows[0].contains(" [1] Status · …r (stale) "), "{rows:#?}");
     }
 
     #[test]
     fn the_launch_repository_has_a_plain_status_title() {
         let state = on(branch(Head::Branch("main".into())));
         let rows = draw(&state, 80, 24);
-        assert!(rows[0].starts_with("┌ Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
     }
 
     /// The Files panel's title row and the row below it.
@@ -1411,41 +1737,85 @@ mod tests {
     }
 
     #[test]
-    fn a_short_terminal_shrinks_the_status_panel_before_files() {
+    fn a_short_terminal_collapses_the_other_panels_to_title_rows() {
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
         state.selected = Some(0);
 
-        // 80x12: the full panel still fits above four file rows.
-        let rows = draw(&state, 80, 12);
-        assert!(rows[0].contains(" Status "), "{rows:#?}");
+        // 80x24: the others keep a border and a line each.
+        let rows = thin(draw(&state, 80, 24));
+        assert!(rows[0].starts_with("┌ [1] Status "), "{rows:#?}");
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
-        assert_eq!(title, 5, "{rows:#?}");
+        assert_eq!(title, 3, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
-        assert!(contains(&rows, "│ M f2 "), "{rows:#?}");
 
-        // 80x8: no room for both, so Files gets the column.
-        let rows = draw(&state, 80, 8);
-        assert!(!contains(&rows, " Status "), "{rows:#?}");
+        // 80x12: only their titles, on a top border.
+        // A title row carries the branch, the panel's one line.
+        let rows = thin(draw(&state, 80, 12));
+        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
         let (title, first) = files_rows(&rows);
-        assert_eq!(title, 0, "{rows:#?}");
+        assert_eq!(title, 1, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
         assert!(contains(&rows, "│ M f3 "), "{rows:#?}");
+        for (row, name) in [(8, "[3] Branches"), (9, "[4] Commits"), (10, "[5] Stash")] {
+            assert!(rows[row].starts_with(&format!(" {name} ─")), "{rows:#?}");
+        }
+
+        // 80x7: the farthest go first; Files keeps its rows.
+        let rows = thin(draw(&state, 80, 7));
+        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
+        assert!(!contains(&rows, "[3] Branches"), "{rows:#?}");
+        assert!(!contains(&rows, "[5] Stash"), "{rows:#?}");
+        let (title, first) = files_rows(&rows);
+        assert_eq!(title, 1, "{rows:#?}");
+        assert!(first.starts_with("│ M f0 "), "{rows:#?}");
     }
 
     #[test]
-    fn a_medium_terminal_keeps_branch_and_upstream_rows() {
+    fn a_collapsed_status_shows_the_branch_and_an_expanded_one_the_rest() {
         let mut main = branch(Head::Branch("main".into()));
         main.upstream = Some("origin/main".into());
         main.ahead_behind = Some((0, 3));
         let mut state = on(main);
         state.files = vec![file("a.rs")];
-        // Height 10: 9 rows over the bar; Files keeps 5, Status gets 4.
-        let rows = draw(&state, 80, 10);
+        let rows = thin(draw(&state, 80, 24));
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(!contains(&rows, "origin/main"), "{rows:#?}");
+
+        // Height 10: 9 rows over the bar; four title rows leave Status five.
+        let rows = thin(draw(&status_focused(&state), 80, 10));
         assert!(rows[1].starts_with("│main "), "{rows:#?}");
         assert!(rows[2].starts_with("│origin/main ↑0 ↓3 "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
-        assert_eq!(title, 4, "{rows:#?}");
-        assert!(first.starts_with("│ M a.rs "), "{rows:#?}");
+        assert_eq!(title, 5, "{rows:#?}");
+        assert!(first.starts_with(" [3] Branches"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_collapsed_files_panel_counts_the_files() {
+        let mut state = status_focused(&loaded(vec![file("a.rs"), file("b.rs")]));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "│2 files "), "{rows:#?}");
+        assert!(!contains(&rows, " M a.rs"), "{rows:#?}");
+        state.files.pop();
+        assert!(contains(&draw(&state, 80, 24), "│1 file "));
+        state.files.clear();
+        assert!(contains(&draw(&state, 80, 24), "│No changes "));
+    }
+
+    #[test]
+    fn an_expanded_placeholder_says_nothing_is_here_yet() {
+        let mut state = loaded(vec![]);
+        assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
+        for side in [SidePanel::Branches, SidePanel::Commits, SidePanel::Stash] {
+            state.focus = Focus::side(side);
+            state.expanded = side;
+            let buffer = draw_buffer(&state, 80, 24);
+            let (x, y) = find(&buffer, "Nothing here yet");
+            assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+            let title = format!("[{}] {}", side.number(), side.title());
+            assert!(y > find(&buffer, &title).1, "{side:?}");
+        }
     }
 
     #[test]
@@ -1526,7 +1896,7 @@ mod tests {
         state.selected = Some(0);
         state.help_open = true;
         // Tall enough for every Files key; a shorter screen clips the list.
-        let rows = draw(&state, 80, 30);
+        let rows = draw(&state, 80, 50);
         assert!(contains(&rows, " Keys: Files "), "{rows:#?}");
         let row = |needle: &str| {
             rows.iter()
@@ -1580,7 +1950,7 @@ mod tests {
         let mut state = remapped(state, &[("files.discard", &[])]);
         let rows = draw(&state, 80, 30);
         assert!(
-            rows[29].starts_with(" space stage  a all  c commit  r refresh"),
+            rows[29].starts_with(" space stage  a all  c commit  m menu  r refresh"),
             "{rows:#?}"
         );
 
@@ -1591,10 +1961,40 @@ mod tests {
     }
 
     #[test]
+    fn remapped_focus_keys_show_in_help_and_work() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = remapped(
+            state,
+            &[
+                ("workspace.zoom", &["Z"]),
+                ("workspace.focus_status", &["s"]),
+            ],
+        );
+        state.help_open = true;
+        let rows = draw(&state, 100, 50);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in {rows:#?}"))
+                .clone()
+        };
+        assert!(row("Zoom the focused panel").contains(" Z "), "{rows:#?}");
+        assert!(row("Focus the Status panel").contains(" s "), "{rows:#?}");
+
+        state.help_open = false;
+        state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
+            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
+        assert_eq!(state.focus, Focus::Status);
+    }
+
+    #[test]
     fn disabled_help_rows_are_dimmed() {
         let mut state = loaded(vec![]);
         state.help_open = true;
-        let buffer = draw_buffer(&state, 80, 30);
+        let buffer = draw_buffer(&state, 80, 50);
         let (x, y) = find(&buffer, "Stage the selected file");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
         let (x, y) = find(&buffer, "Quit Kika");
@@ -1624,9 +2024,9 @@ mod tests {
     fn workspace_shows_loading_before_status_arrives() {
         let mut state = AppState::new(Context::Workspace);
         state.busy = 1;
-        let rows = draw(&state, 40, 13);
-        assert!(rows[5].contains(" Files "), "{rows:#?}");
-        assert!(rows[6].starts_with("│Loading…"), "{rows:#?}");
+        let rows = thin(draw(&state, 40, 13));
+        assert!(rows[1].contains(" Files "), "{rows:#?}");
+        assert!(rows[2].starts_with("│Loading…"), "{rows:#?}");
         assert!(rows[12].contains("loading…"), "{rows:#?}");
     }
 
@@ -1640,13 +2040,13 @@ mod tests {
             worktree: '?',
             kind: EntryKind::Untracked,
         });
-        let rows = draw(&state, 80, 24);
+        let rows = thin(draw(&state, 80, 24));
         assert!(contains(&rows, "│R  old.txt → new.txt "), "{rows:#?}");
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
             rows[23].starts_with(
-                " space stage  a all  c commit  d discard  r refresh  bksp parent  ? keys  q quit"
+                " space stage  a all  c commit  d discard  m menu  r refresh  …  ? keys  q quit"
             ),
             "{rows:#?}"
         );
@@ -1682,7 +2082,7 @@ mod tests {
         // Inner width 18: " M " leaves 15 columns for the path.
         let state = loaded(vec![file("src/deeply/nested/module/file.rs")]);
         let rows = draw_files(&state, 20, 11);
-        assert_eq!(rows[6], "│ M …module/file.rs│", "{rows:#?}");
+        assert_eq!(rows[2], "│ M …module/file.rs│", "{rows:#?}");
     }
 
     #[test]
@@ -1690,14 +2090,14 @@ mod tests {
         // Inner width 28: "R  " + orig + " → " + path.
         let state = loaded(vec![renamed("src/old/location/a.rs", "src/new/b.rs")]);
         let rows = draw_files(&state, 30, 11);
-        assert_eq!(rows[6], "│R  …tion/a.rs → src/new/b.rs│", "{rows:#?}");
+        assert_eq!(rows[2], "│R  …tion/a.rs → src/new/b.rs│", "{rows:#?}");
     }
 
     #[test]
     fn very_long_rename_elides_both_paths() {
         let state = loaded(vec![renamed("old/name.rs", "src/brand/new/location/b.rs")]);
         let rows = draw_files(&state, 20, 11);
-        assert_eq!(rows[6], "│R  … → …ation/b.rs│", "{rows:#?}");
+        assert_eq!(rows[2], "│R  … → …ation/b.rs│", "{rows:#?}");
     }
 
     #[test]
@@ -1705,8 +2105,8 @@ mod tests {
         // Each CJK glyph is two columns wide; inner width 14 leaves 11 for the path.
         let state = loaded(vec![file("日本語/日本語/長い名前.md")]);
         let rows = draw_files(&state, 16, 11);
-        assert_eq!(rows[6], "│ M …い名前.md │", "{rows:#?}");
-        assert!(width_of(&rows[6]) <= 16, "{rows:#?}");
+        assert_eq!(rows[2], "│ M …い名前.md │", "{rows:#?}");
+        assert!(width_of(&rows[2]) <= 16, "{rows:#?}");
     }
 
     #[test]
@@ -1737,19 +2137,19 @@ mod tests {
         // Inner width 14 leaves 11 for the path; the escape counts its full width.
         let state = loaded(vec![file("a/long/\u{202E}folder/name\u{200B}")]);
         let rows = draw_files(&state, 16, 11);
-        assert_eq!(rows[6], "│ M …me<U+200B>│", "{rows:#?}");
-        assert!(width_of(&rows[6]) <= 16, "{rows:#?}");
+        assert_eq!(rows[2], "│ M …me<U+200B>│", "{rows:#?}");
+        assert!(width_of(&rows[2]) <= 16, "{rows:#?}");
     }
 
     #[test]
     fn overflowing_list_says_how_many_files_are_hidden() {
-        // Height 12: the bar, the Status panel and two borders leave 4 rows,
-        // so 3 files and "+N more".
+        // Height 12: the bar, four title rows and two borders leave 5 rows,
+        // so 4 files and "+N more".
         let files = (0..10).map(|i| file(&format!("f{i}"))).collect();
         let rows = draw_files(&loaded(files), 30, 12);
-        assert!(contains(&rows, "│ M f2 "), "{rows:#?}");
-        assert!(!contains(&rows, "│ M f3 "), "{rows:#?}");
-        assert!(contains(&rows, "│+7 more "), "{rows:#?}");
+        assert!(contains(&rows, "│ M f3 "), "{rows:#?}");
+        assert!(!contains(&rows, "│ M f4 "), "{rows:#?}");
+        assert!(contains(&rows, "│+6 more "), "{rows:#?}");
     }
 
     #[test]
@@ -1873,7 +2273,7 @@ mod tests {
             diff_line(Context, " same"),
         ]);
         let buffer = draw_buffer(&state, 80, 12);
-        let (title_x, title_y) = find(&buffer, " Diff ");
+        let (title_x, title_y) = find(&buffer, " [0] Diff ");
         let style = |needle| {
             let (x, y) = find(&buffer, needle);
             assert!(
@@ -1980,12 +2380,12 @@ mod tests {
 
     #[test]
     fn a_selection_below_the_first_screen_stays_visible() {
-        // Height 12: 4 rows, so 3 files plus "+N more" at a time.
+        // Height 12: 5 rows, so 4 files plus "+N more" at a time.
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
         state.selected = Some(5);
         let rows = draw_files(&state, 30, 12);
         assert!(contains(&rows, "│ M f5 "), "{rows:#?}");
-        assert!(!contains(&rows, "│ M f2 "), "{rows:#?}");
+        assert!(!contains(&rows, "│ M f1 "), "{rows:#?}");
         assert!(contains(&rows, "│+4 more "), "{rows:#?}");
 
         // Near the end the window shows the last files and no "more" row.
@@ -1999,10 +2399,10 @@ mod tests {
 
     #[test]
     fn a_one_row_list_shows_the_selection() {
-        // Height 9: one row inside the Files border.
+        // Height 4: three rows over the bar, all Files', one inside its border.
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
         state.selected = Some(4);
-        let rows = draw_files(&state, 30, 9);
+        let rows = draw_files(&state, 30, 4);
         assert!(contains(&rows, "│ M f4 "), "{rows:#?}");
     }
 
@@ -2076,7 +2476,7 @@ mod tests {
         assert_ne!(buffer[(line1.0 - 1, line1.1)].style().fg, Some(FOCUSED));
         assert!(
             rows[23].starts_with(
-                " q and ? are typed  ctrl-s commit  Tab subject/body  esc cancel  ctrl-c quit"
+                " q and ? are typed  ctrl-s commit  Tab subject/body  esc cancel  ctrl-c stop"
             ),
             "{rows:#?}"
         );
@@ -2247,6 +2647,15 @@ mod tests {
         let state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "ctrl-c quits Kika"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_handed_over_commit_says_ctrl_c_goes_to_git() {
+        let mut state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
+        state.commit_on_terminal = true;
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "ctrl-c stops git"), "{rows:#?}");
+        assert!(!contains(&rows, "quits Kika"), "{rows:#?}");
     }
 
     #[test]
@@ -2516,7 +2925,8 @@ mod tests {
         for (first, columns) in [('م', 1 + 7), ('👨', 1 + 2 + 8 + 2 + 8 + 2), ('क', 1 + 2)] {
             let (x, y) = added_row(&buffer, first);
             assert_eq!(buffer[(x + columns, y)].symbol(), "X", "{first:?}");
-            assert_eq!(buffer[(width - 1, y)].symbol(), "│", "{first:?}");
+            // The focused Diff pane's border is drawn thick.
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{first:?}");
         }
     }
 
@@ -2532,7 +2942,7 @@ mod tests {
             let buffer = draw_buffer(&hunks(DiffSide::Worktree, diff.as_bytes()), width, height);
             if height == 12 {
                 let (_, y) = added_row(&buffer, 'م');
-                assert_eq!(buffer[(width - 1, y)].symbol(), "│", "{width}x{height}");
+                assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{width}x{height}");
             }
             for cell in buffer.content() {
                 let lead = cell.symbol().chars().next();
@@ -2568,7 +2978,7 @@ mod tests {
         assert!(contains(&rows, "▌+new one"), "{rows:#?}");
         assert!(contains(&rows, "  same"), "{rows:#?}");
         assert!(contains(&rows, " @@ -1,2 +1,2 @@"), "{rows:#?}");
-        assert!(contains(&rows, " Unstaged · lines "), "{rows:#?}");
+        assert!(contains(&rows, " Unstaged a.rs · lines "), "{rows:#?}");
 
         // A one-line range marks only that line.
         if let Focus::Diff(view) = &mut state.focus {
@@ -2668,6 +3078,132 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_help_at_80_by_24_reaches_the_users_commands() {
+        use crate::intent::{AppIntent, Scroll};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "Tidy the file");
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 24,
+        });
+        state.update(AppIntent::OpenHelp);
+        assert!(!contains(&draw(&state, 80, 24), "Tidy"));
+        for _ in 0..5 {
+            state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        }
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "Tidy the file"), "{rows:#?}");
+        assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+    }
+
+    /// Whether `row` holds a help popup's `─` rule: a run of them between
+    /// the popup's side borders.
+    fn is_rule(row: &str) -> bool {
+        row.split('│')
+            .any(|cell| cell.chars().count() >= 10 && cell.chars().all(|c| c == '─'))
+    }
+
+    #[test]
+    fn a_rule_separates_the_users_commands_from_the_built_in_keys() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "Tidy the file");
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        let tidy = rows.iter().position(|r| r.contains("Tidy")).unwrap();
+        assert!(is_rule(&rows[tidy - 1]), "{rows:#?}");
+        assert!(!is_rule(&rows[tidy - 2]), "{rows:#?}");
+        // Quit is the Files panel's last built-in row.
+        assert!(rows[tidy - 2].contains("Quit Kika"), "{rows:#?}");
+        assert_eq!(rows.iter().filter(|r| is_rule(r)).count(), 1, "{rows:#?}");
+
+        let mut plain = loaded(vec![file("a.rs")]);
+        plain.selected = Some(0);
+        plain.help_open = true;
+        let rows = draw(&plain, 100, 60);
+        assert!(!rows.iter().any(|r| is_rule(r)), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_bar_offers_the_cancel_key_only_while_a_command_runs() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let rows = draw(&state, 100, 20);
+        assert!(!contains(&rows, "cancel command"), "{rows:#?}");
+
+        state.command_running = true;
+        state.busy = 1;
+        let rows = draw(&state, 100, 20);
+        assert!(
+            rows[19].starts_with(" loading…  ctrl-x cancel command"),
+            "{rows:#?}"
+        );
+
+        let state = remapped(state, &[("workspace.cancel_command", &["ctrl-k"])]);
+        let rows = draw(&state, 100, 20);
+        assert!(rows[19].contains("ctrl-k cancel command"), "{rows:#?}");
+        assert!(!contains(&rows, "ctrl-x"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_lists_the_cancel_key() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("Stop the running command"))
+            .unwrap_or_else(|| panic!("no cancel row in {rows:#?}"));
+        assert!(row.contains(" ctrl-x "), "{row:?}");
+    }
+
+    #[test]
+    fn a_bidi_character_in_a_command_description_is_shown_escaped() {
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::effect::Effect;
+        use crate::intent::AppIntent;
+        use crate::keymap::KeyPress;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "evil\u{202E}txt");
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        assert!(contains(&rows, "evil<U+202E>txt"), "{rows:#?}");
+        assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
+
+        // Its output popup is titled with the same description.
+        state.help_open = false;
+        let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::Popup);
+        table.description = "evil\u{202E}txt".into();
+        let keymap = crate::keymap::Keymap::default()
+            .with_commands(&[table])
+            .unwrap();
+        state.update(AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![],
+        });
+        let effects = state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )));
+        let [Effect::RunCommand { title, .. }] = effects.as_slice() else {
+            panic!("expected RunCommand, got {effects:?}");
+        };
+        state.update(AppIntent::CommandFinished {
+            title: title.clone(),
+            output: OutputMode::Popup,
+            result: Ok("done".into()),
+        });
+        let rows = draw(&state, 100, 30);
+        assert!(contains(&rows, "evil<U+202E>txt"), "{rows:#?}");
+        assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
+    }
+
+    #[test]
     fn the_bar_in_the_diff_focus_offers_the_hunk_keys() {
         let rows = draw(&hunks(DiffSide::Worktree, TWO_HUNKS), 100, 20);
         assert!(
@@ -2690,27 +3226,36 @@ mod tests {
     fn the_diff_title_names_the_diff_options_that_differ_from_the_defaults() {
         use crate::git::diff::DiffOptions;
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
-        let rows = draw(&state, 80, 12);
-        assert!(contains(&rows, "┌ Diff ─"), "{rows:#?}");
+        let rows = draw(&state, 120, 12);
+        assert!(contains(&rows, "┌ [0] Diff a.rs · 1/1 ─"), "{rows:#?}");
         assert!(!contains(&rows, "context"), "{rows:#?}");
 
         state.diff_options = DiffOptions {
             context: 5,
             ignore_whitespace: false,
         };
-        let rows = draw(&state, 80, 12);
-        assert!(contains(&rows, "┌ Diff · 5 lines context ─"), "{rows:#?}");
+        let rows = draw(&state, 120, 12);
+        assert!(
+            contains(&rows, "┌ [0] Diff a.rs · 1/1 · 5 lines context ─"),
+            "{rows:#?}"
+        );
 
         state.diff_options.ignore_whitespace = true;
-        let rows = draw(&state, 80, 12);
+        let rows = draw(&state, 120, 12);
         assert!(
-            contains(&rows, "┌ Diff · 5 lines context · whitespace hidden ─"),
+            contains(
+                &rows,
+                "┌ [0] Diff a.rs · 1/1 · 5 lines context · whitespace hidden ─"
+            ),
             "{rows:#?}"
         );
 
         state.diff_options.context = 3;
-        let rows = draw(&state, 80, 12);
-        assert!(contains(&rows, "┌ Diff · whitespace hidden ─"), "{rows:#?}");
+        let rows = draw(&state, 120, 12);
+        assert!(
+            contains(&rows, "┌ [0] Diff a.rs · 1/1 · whitespace hidden ─"),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -2720,7 +3265,10 @@ mod tests {
         state.diff_options.ignore_whitespace = true;
         let rows = draw(&state, 100, 20);
         assert!(
-            contains(&rows, " Unstaged · 7 lines context · whitespace hidden "),
+            contains(
+                &rows,
+                " Unstaged a.rs · 7 lines context · whitespace hidden "
+            ),
             "{rows:#?}"
         );
     }
@@ -2749,6 +3297,403 @@ mod tests {
                 "{rows:#?}"
             );
         }
+    }
+
+    /// The style of the top-left corner and of the first title letter of
+    /// the panel titled `title`.
+    fn frame_style(buffer: &ratatui::buffer::Buffer, title: &str) -> (Style, Style) {
+        let (x, y) = find(buffer, title);
+        // The title starts one column in, after the corner, or at the edge
+        // of a one-row panel.
+        let corner = buffer[(x.saturating_sub(1), y)].style();
+        let letter = buffer[(x + 1, y)].style();
+        (corner, letter)
+    }
+
+    #[test]
+    fn the_focused_panel_has_a_coloured_border_and_a_bold_title() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
+        let buffer = draw_buffer(&state, 80, 24);
+        let (border, title) = frame_style(&buffer, "[2] Files");
+        assert_eq!(border.fg, Some(FOCUSED));
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+        // Without colour too: the focused frame is thick, the others thin.
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "┏ [2] Files ━"), "{rows:#?}");
+        assert!(contains(&rows, "┌ [1] Status ─"), "{rows:#?}");
+        assert!(contains(&rows, "┌ [0] Diff "), "{rows:#?}");
+        for other in ["[1] Status", "[3] Branches", "[5] Stash", "[0] Diff"] {
+            let (border, title) = frame_style(&buffer, other);
+            assert_eq!(border.fg, Some(Color::DarkGray), "{other}");
+            assert!(!title.add_modifier.contains(Modifier::BOLD), "{other}");
+        }
+
+        state.focus = Focus::Stash;
+        state.expanded = SidePanel::Stash;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (border, title) = frame_style(&buffer, "[5] Stash");
+        assert_eq!(border.fg, Some(FOCUSED));
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+        for other in ["[1] Status", "[2] Files", "[0] Diff"] {
+            let (border, title) = frame_style(&buffer, other);
+            assert_eq!(border.fg, Some(Color::DarkGray), "{other}");
+            assert!(!title.add_modifier.contains(Modifier::BOLD), "{other}");
+        }
+    }
+
+    /// A workspace with three files, `a.rs` selected and its diff loaded,
+    /// focused on `panel`.
+    fn focused_on(panel: Panel, mode: crate::layout::ScreenMode) -> AppState {
+        let mut state = match panel {
+            Panel::Diff => hunks(DiffSide::Worktree, TWO_HUNKS),
+            Panel::Side(side) => {
+                let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
+                state.focus = Focus::side(side);
+                state.expanded = side;
+                state
+            }
+        };
+        state.files = vec![file("a.rs"), file("src/b.rs"), file("c.txt")];
+        state.diff.path = Some("a.rs".into());
+        state.diff.lines = vec![diff_line(LineKind::Added, "+new")];
+        state.diff.done = true;
+        state.screen_mode = mode;
+        state
+    }
+
+    const PANELS: [Panel; 6] = [
+        Panel::Side(SidePanel::Status),
+        Panel::Side(SidePanel::Files),
+        Panel::Side(SidePanel::Branches),
+        Panel::Side(SidePanel::Commits),
+        Panel::Side(SidePanel::Stash),
+        Panel::Diff,
+    ];
+
+    /// The title a panel is drawn with, up to the end of what must show.
+    fn title_of(state: &AppState, panel: Panel) -> String {
+        let mode = match state.screen_mode.note() {
+            Some(note) if state.focus.panel() == panel => format!(" · {note}"),
+            _ => String::new(),
+        };
+        match (panel, &state.focus) {
+            (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
+            (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
+            (Panel::Diff, _) => format!(" [0] Diff a.rs · 1/1{mode} "),
+        }
+    }
+
+    #[test]
+    fn every_title_is_whole_at_80_by_24_in_every_focus_and_mode() {
+        use crate::layout::ScreenMode;
+        for focus in PANELS {
+            for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+                let state = focused_on(focus, mode);
+                let rows = draw(&state, 80, 24);
+                let [main, _] = screen_layout(Rect::new(0, 0, 80, 24));
+                let layout = workspace_layout(main, focus, state.expanded, mode);
+                let mut drawn = 0;
+                for panel in PANELS {
+                    let Some(rect) = layout.rect(panel) else {
+                        continue;
+                    };
+                    drawn += 1;
+                    let title = title_of(&state, panel);
+                    let row = row_text(
+                        &draw_buffer(&state, 80, 24),
+                        rect.y,
+                        rect.x..rect.x + rect.width,
+                    );
+                    assert!(
+                        row.contains(&title),
+                        "{focus:?} {mode:?}: {title:?} in {row:?}\n{rows:#?}"
+                    );
+                }
+                let expected = if mode == ScreenMode::Full { 1 } else { 6 };
+                assert_eq!(drawn, expected, "{focus:?} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn any_screen_size_draws_without_panic() {
+        use crate::layout::ScreenMode;
+        for focus in PANELS {
+            for mode in [ScreenMode::Normal, ScreenMode::Half, ScreenMode::Full] {
+                let state = focused_on(focus, mode);
+                for (w, h) in [(20, 5), (1, 1), (200, 60), (0, 0), (40, 12), (20, 6)] {
+                    draw(&state, w, h);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn half_and_full_name_the_mode_in_the_focused_title() {
+        use crate::layout::ScreenMode;
+        let rows = draw(
+            &focused_on(Panel::Side(SidePanel::Files), ScreenMode::Half),
+            80,
+            24,
+        );
+        assert!(contains(&rows, "┏ [2] Files · half ━"), "{rows:#?}");
+        assert!(contains(&rows, "┌ [0] Diff a.rs · 1/1 ─"), "{rows:#?}");
+        let rows = draw(&focused_on(Panel::Diff, ScreenMode::Full), 80, 24);
+        assert!(
+            rows[0].starts_with("┏ [0] Unstaged a.rs · full ━"),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "[2] Files"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_diff_title_shows_the_path_and_where_the_pane_is() {
+        let mut state = with_diff(
+            (0..50)
+                .map(|i| diff_line(LineKind::Context, &format!("line {i}")))
+                .collect(),
+        );
+        state.diff.path = Some("src/deeply/nested/module/file.rs".into());
+        state.diff.scroll = 9;
+        let rows = draw(&state, 120, 12);
+        assert!(
+            contains(
+                &rows,
+                "┌ [0] Diff src/deeply/nested/module/file.rs · 10/50 ─"
+            ),
+            "{rows:#?}"
+        );
+        // Still streaming: more lines are coming.
+        state.diff.done = false;
+        let rows = draw(&state, 120, 12);
+        assert!(contains(&rows, " · 10/50+ ─"), "{rows:#?}");
+        // A narrow pane loses the path's start, never the position.
+        let rows = draw(&state, 60, 12);
+        assert!(
+            contains(&rows, "┌ [0] Diff …ed/module/file.rs · 10/50+ ┐"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_line_cut_at_the_pane_edge_ends_in_a_marker() {
+        let long = format!("+{}", "x".repeat(300));
+        let state = with_diff(vec![diff_line(LineKind::Added, &long)]);
+        let rows = thin(draw(&state, 80, 12));
+        // The diff pane is 53 wide: 51 columns inside.
+        assert!(
+            contains(&rows, &format!("│+{}…│", "x".repeat(49))),
+            "{rows:#?}"
+        );
+
+        let bytes =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n{long}\n");
+        let rows = thin(draw(&hunks(DiffSide::Worktree, bytes.as_bytes()), 80, 12));
+        assert!(contains(&rows, "x…│"), "{rows:#?}");
+
+        let rows = thin(draw(
+            &blamed(vec![blame_line(OID, "Ann", 1, &"y".repeat(300))], 0),
+            80,
+            12,
+        ));
+        assert!(contains(&rows, "y…│"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_bar_error_wider_than_the_bar_ends_in_a_marker() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.op_error = Some(format!("fatal: {}", "e".repeat(200)));
+        let rows = draw(&state, 80, 8);
+        assert_eq!(width_of(&rows[7]), 80, "{rows:#?}");
+        assert!(rows[7].ends_with("ee…"), "{rows:#?}");
+        state.busy = 1;
+        let rows = draw(&state, 80, 8);
+        assert!(
+            rows[7].starts_with(" loading…  error: fatal: e"),
+            "{rows:#?}"
+        );
+        assert!(rows[7].ends_with("ee…"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_in_files_lists_list_scroll_and_focus_keys() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.help_open = true;
+        let rows = draw(&state, 100, 50);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in {rows:#?}"))
+                .clone()
+        };
+        assert!(row("Select the next file").contains(" j/↓ "), "{rows:#?}");
+        assert!(
+            row("Select the previous file").contains(" k/↑ "),
+            "{rows:#?}"
+        );
+        assert!(
+            row("Scroll the diff down a page").contains(" PgDn "),
+            "{rows:#?}"
+        );
+        assert!(
+            row("Scroll the diff up a page").contains(" PgUp "),
+            "{rows:#?}"
+        );
+        assert!(row("Focus the Status panel").contains(" 1 "), "{rows:#?}");
+        assert!(row("Focus the diff").contains(" 0/l/→ "), "{rows:#?}");
+        assert!(row("Focus the next panel").contains(" Tab "), "{rows:#?}");
+        assert!(
+            row("Focus the previous panel").contains(" ⇧tab "),
+            "{rows:#?}"
+        );
+        assert!(row("Zoom the focused panel").contains(" z "), "{rows:#?}");
+        assert!(row("Open the actions menu").contains(" m "), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_scrolls_at_80_by_24_and_says_more_is_below() {
+        use crate::intent::{AppIntent, Scroll};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 24,
+        });
+        state.update(AppIntent::OpenHelp);
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " j/↓ more ▼"), "{rows:#?}");
+        assert!(!contains(&rows, "▲"), "{rows:#?}");
+        assert!(!contains(&rows, "Focus the next panel"), "{rows:#?}");
+
+        state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "▲"), "{rows:#?}");
+        assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+        for needle in [
+            "Focus the next panel",
+            "Zoom the focused panel",
+            "Quit Kika",
+        ] {
+            assert!(contains(&rows, needle), "{needle}: {rows:#?}");
+        }
+        // The bar still says how to close it and quit.
+        assert!(rows[23].starts_with(" ? close  q quit"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_from_a_side_panel_is_titled_with_its_name() {
+        let mut state = loaded(vec![]);
+        state.help_open = true;
+        for side in [SidePanel::Status, SidePanel::Branches, SidePanel::Stash] {
+            state.focus = Focus::side(side);
+            let rows = draw(&state, 80, 24);
+            let title = format!(" Keys: {} ", side.title());
+            assert!(contains(&rows, &title), "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn the_bar_drops_whole_hints_and_keeps_help_and_quit() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let all = [
+            "space stage",
+            "a all",
+            "c commit",
+            "d discard",
+            "m menu",
+            "r refresh",
+            "bksp parent",
+            "? keys",
+            "q quit",
+            "…",
+        ];
+        for width in [100, 80, 60, 40, 24] {
+            let rows = draw(&state, width, 10);
+            let bar = rows[9].trim();
+            assert!(bar.ends_with("? keys  q quit"), "{width}: {bar:?}");
+            for hint in bar.split("  ") {
+                assert!(all.contains(&hint), "{width}: {hint:?} in {bar:?}");
+            }
+            assert_eq!(bar.contains('…'), width < 87, "{width}: {bar:?}");
+        }
+        // Narrower than help and quit together: whole hints only, still.
+        let rows = draw(&state, 10, 10);
+        assert_eq!(rows[9].trim(), "…", "{rows:#?}");
+    }
+
+    #[test]
+    fn titles_fit_their_panel_below_80_by_24() {
+        use crate::layout::ScreenMode;
+        for (w, h, focus, mode) in [
+            (60, 20, Panel::Diff, ScreenMode::Half),
+            (40, 12, Panel::Side(SidePanel::Files), ScreenMode::Normal),
+            (40, 12, Panel::Side(SidePanel::Branches), ScreenMode::Half),
+            (30, 24, Panel::Side(SidePanel::Commits), ScreenMode::Normal),
+        ] {
+            let state = focused_on(focus, mode);
+            let buffer = draw_buffer(&state, w, h);
+            let [main, _] = screen_layout(Rect::new(0, 0, w, h));
+            let layout = workspace_layout(main, focus, state.expanded, mode);
+            for panel in PANELS {
+                let Some(rect) = layout.rect(panel) else {
+                    continue;
+                };
+                let row = row_text(&buffer, rect.y, rect.x..rect.x + rect.width);
+                let key = format!("[{}]", panel.number());
+                assert!(row.contains(&key), "{w}x{h} {focus:?}: {row:?}");
+                // Whole, or cut on purpose with `…`, the mode note kept.
+                let name = match panel {
+                    Panel::Side(side) => side.title(),
+                    Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
+                    Panel::Diff => "Diff",
+                };
+                assert!(
+                    row.contains(name) || row.contains('…'),
+                    "{w}x{h} {focus:?}: {row:?}"
+                );
+                if state.focus.panel() == panel && mode == ScreenMode::Half {
+                    assert!(row.contains("· half"), "{w}x{h}: {row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_title_row_carries_the_panels_one_line() {
+        let mut state = status_focused(&loaded((0..12).map(|i| file(&format!("f{i}"))).collect()));
+        let rows = draw(&state, 80, 12);
+        assert!(contains(&rows, " [2] Files · 12 files ─"), "{rows:#?}");
+        let mut merging = branch(Head::Branch("topic".into()));
+        merging.in_progress = vec![Operation::Merge];
+        state.branch = Some(merging);
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = draw(&state, 100, 12);
+        assert!(
+            rows[0].starts_with(" [1] Status · topic · merging ─"),
+            "{rows:#?}"
+        );
+        // Narrower, the branch name gives way first.
+        let rows = draw(&state, 80, 12);
+        assert!(
+            rows[0].starts_with("[1] Status · …c · merging"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_status_still_shows_an_operation_in_progress() {
+        let mut main = branch(Head::Branch("main".into()));
+        main.in_progress = vec![Operation::Rebase];
+        let state = on(main);
+        let buffer = draw_buffer(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
+        let (x, y) = find(&buffer, "rebasing");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
 
     const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
@@ -2964,7 +3909,7 @@ mod tests {
         through_renderer(&mut state, DECORATED);
         let buffer = draw_buffer(&state, 100, 20);
         let rows = buffer_rows(&buffer);
-        assert!(contains(&rows, " Diff · delta "), "{rows:#?}");
+        assert!(contains(&rows, " Diff a.rs · delta "), "{rows:#?}");
         assert!(contains(&rows, "│ 1 │old one"), "{rows:#?}");
         assert!(!contains(&rows, "built in"), "{rows:#?}");
         let (x, y) = find(&buffer, "1 │old one");
@@ -2987,7 +3932,10 @@ mod tests {
         through_renderer(&mut state, DECORATED);
         let buffer = draw_buffer(&state, 100, 20);
         let rows = buffer_rows(&buffer);
-        assert!(contains(&rows, " Unstaged · lines · delta "), "{rows:#?}");
+        assert!(
+            contains(&rows, " Unstaged a.rs · lines · delta "),
+            "{rows:#?}"
+        );
         let marked: Vec<&String> = rows.iter().filter(|r| r.contains('▌')).collect();
         assert_eq!(marked.len(), 1, "{rows:#?}");
         assert!(marked[0].contains("▌  │new one"), "{rows:#?}");
@@ -3022,7 +3970,7 @@ mod tests {
         through_renderer(&mut state, "old one │ new one\nsame │ same\n");
         let rows = draw(&state, 100, 20);
         assert!(
-            contains(&rows, " Unstaged · lines · delta (unmapped) "),
+            contains(&rows, " Unstaged a.rs · lines · delta (unmapped) "),
             "{rows:#?}"
         );
         assert!(contains(&rows, "▌-old one"), "{rows:#?}");
@@ -3039,7 +3987,7 @@ mod tests {
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "delta: bad \u{FFFD} flag"), "{rows:#?}");
         assert!(
-            contains(&rows, "Press enter, then R, for the built-in diff"),
+            contains(&rows, "Press l, then R, for the built-in diff"),
             "{rows:#?}"
         );
 
@@ -3062,10 +4010,10 @@ mod tests {
         through_renderer(&mut state, &wide);
         // 40 columns: the Diff pane's inside is 26 wide, 25 after the gutter.
         let rows = draw(&state, 40, 10);
-        let expected = format!("│ {}{}…│", "a".repeat(20), "b".repeat(4));
+        let expected = format!("│ {}{}…│", "a".repeat(20), "b".repeat(3));
         assert!(contains(&rows, &expected), "{rows:#?}");
-        // No half glyph at the edge: 12 two-column glyphs, then `…`.
-        assert!(contains(&rows, "│ 日本語日本語日本語日本語…"), "{rows:#?}");
+        // No half glyph at the edge: 11 two-column glyphs, then `…`.
+        assert!(contains(&rows, "│ 日本語日本語日本語日本… │"), "{rows:#?}");
         let wider = draw(&state, 100, 10);
         let whole = format!("{}{}", "a".repeat(20), "b".repeat(20));
         assert!(contains(&wider, &whole), "{wider:#?}");
@@ -3081,7 +4029,7 @@ mod tests {
         }
         let rows = draw(&state, 80, 24);
         assert!(
-            contains(&rows, "Press enter, then R, for the built-in diff"),
+            contains(&rows, "Press l, then R, for the built-in diff"),
             "{rows:#?}"
         );
         assert!(contains(&rows, "stderr line 0"), "{rows:#?}");
@@ -3094,7 +4042,7 @@ mod tests {
             });
         let rows = draw(&state, 80, 24);
         assert!(
-            contains(&rows, "Press enter, then R, for the next renderer"),
+            contains(&rows, "Press l, then R, for the next renderer"),
             "{rows:#?}"
         );
     }

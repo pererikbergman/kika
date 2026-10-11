@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
+use crate::custom_command::CommandFailure;
 use crate::git::diff::terminal_safe;
 use crate::handoff::start_error;
 
@@ -26,11 +27,12 @@ const DRAIN_AFTER_EXIT: Duration = Duration::from_millis(500);
 
 /// Run `argv` directly in `workdir`, stdin closed, and return what it
 /// printed on stdout and stderr together, made terminal-safe. A failure to
-/// start, or a non-zero exit with the output after the status, is `Err`.
+/// start is `Launch`; a non-zero exit, with the output after the status, is
+/// `Exited`.
 /// Dropping the future kills the program, so quitting never waits on it.
-pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<String, String> {
+pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<String, CommandFailure> {
     let Some((program, args)) = argv.split_first() else {
-        return Err("The command is empty".into());
+        return Err(CommandFailure::Launch("The command is empty".into()));
     };
     let mut child = tokio::process::Command::new(program)
         .args(args)
@@ -40,7 +42,7 @@ pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<Strin
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| start_error(program, &e))?;
+        .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let (mut out_buf, mut err_buf) = (vec![0; 8192], vec![0; 8192]);
@@ -83,15 +85,21 @@ pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<Strin
         Some(status) => status,
         None => child.wait().await,
     }
-    .map_err(|e| terminal_safe(format!("Could not wait for the command: {e}").as_bytes()))?;
+    .map_err(|e| {
+        CommandFailure::Launch(terminal_safe(
+            format!("Could not wait for the command: {e}").as_bytes(),
+        ))
+    })?;
     if status.success() {
         Ok(text)
     } else if text.is_empty() {
-        Err(terminal_safe(format!("exited with {status}").as_bytes()))
+        Err(CommandFailure::Exited(terminal_safe(
+            format!("exited with {status}").as_bytes(),
+        )))
     } else {
-        Err(terminal_safe(
+        Err(CommandFailure::Exited(terminal_safe(
             format!("exited with {status}\n{text}").as_bytes(),
-        ))
+        )))
     }
 }
 
@@ -178,14 +186,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failure_to_start_says_which_program() {
+    async fn a_failure_to_start_is_a_launch_failure_that_says_which_program() {
         let tmp = TempDir::new("captured-missing");
-        let e = run_captured(argv(&["kika-no-such-program"]), tmp.path().into())
+        let e = run_captured(argv(&["kika-no-such-program"]), tmp.path().into()).await;
+        match e {
+            Err(CommandFailure::Launch(e)) => assert!(
+                e.starts_with("Could not start kika-no-such-program: "),
+                "{e}"
+            ),
+            other => panic!("expected a launch failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_zero_exit_is_an_exit_failure_with_its_status() {
+        let tmp = TempDir::new("captured-exit");
+        let e = run_captured(argv(&["sh", "-c", "exit 3"]), tmp.path().into()).await;
+        match e {
+            Err(CommandFailure::Exited(e)) => {
+                assert!(e.starts_with("exited with") && e.contains('3'), "{e}")
+            }
+            other => panic!("expected an exit failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invisible_and_bidi_characters_in_the_output_are_made_visible() {
+        let tmp = TempDir::new("captured-bidi");
+        let script = r"printf 'evil\342\200\256txt zero\342\200\213width'";
+        let text = run_captured(argv(&["sh", "-c", script]), tmp.path().into())
             .await
-            .unwrap_err();
-        assert!(
-            e.starts_with("Could not start kika-no-such-program: "),
-            "{e}"
-        );
+            .unwrap();
+        assert_eq!(text, "evil<U+202E>txt zero<U+200B>width");
     }
 }

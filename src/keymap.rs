@@ -13,6 +13,7 @@ use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
+use crate::layout::{Panel, SidePanel};
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::Popup;
@@ -97,6 +98,8 @@ impl KeyPattern {
             KeyCode::Down => "↓".to_string(),
             KeyCode::Up => "↑".to_string(),
             KeyCode::Left => "←".to_string(),
+            KeyCode::Right => "→".to_string(),
+            KeyCode::BackTab => "⇧tab".to_string(),
             // Some platforms call it Delete, and the bar is short of room.
             KeyCode::Backspace => "bksp".to_string(),
             KeyCode::PageDown => "PgDn".to_string(),
@@ -136,6 +139,8 @@ pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
         "esc" => KeyCode::Esc,
         "enter" => KeyCode::Enter,
         "tab" => KeyCode::Tab,
+        // Terminals report Shift+Tab as a key of its own.
+        "shift-tab" => KeyCode::BackTab,
         "bksp" => KeyCode::Backspace,
         "up" => KeyCode::Up,
         "down" => KeyCode::Down,
@@ -153,8 +158,8 @@ pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
 /// Says what would have been accepted, since there is no list in Kika.
 fn bad_key(text: &str) -> String {
     format!(
-        "bad key \"{}\": use one character, or space, esc, enter, tab, bksp, up, down, \
-         left, right, pgup, pgdn, home or end, with an optional ctrl- prefix",
+        "bad key \"{}\": use one character, or space, esc, enter, tab, shift-tab, bksp, up, \
+         down, left, right, pgup, pgdn, home or end, with an optional ctrl- prefix",
         text.escape_debug()
     )
 }
@@ -700,6 +705,10 @@ pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+fn no_command_running(state: &AppState) -> Option<&'static str> {
+    (!state.command_running).then_some("No command is running")
+}
+
 fn no_file_selected(state: &AppState) -> Option<&'static str> {
     let selected = state.selected.and_then(|i| state.files.get(i));
     selected.is_none().then_some("No file selected")
@@ -986,7 +995,7 @@ static REGISTRY: &[Binding] = &[
         disabled: leave_submodule_disabled,
     },
     // Diff settings, in Workspace so they work from Files, Diff and Lines.
-    // Left out of the bar until the layout review (#10).
+    // Out of the bar, which is full at 80 columns; the help menu lists them.
     Binding {
         id: "workspace.more_context",
         keys: &[
@@ -1019,6 +1028,114 @@ static REGISTRY: &[Binding] = &[
         label: "whitespace",
         bar: false,
         disabled: blame_open,
+    },
+    // Moving between panels and zooming. Out of the bar, which is full at
+    // 80 columns; the help menu lists them.
+    Binding {
+        id: "workspace.focus_status",
+        keys: &[KeyPattern::exact(KeyCode::Char('1'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Status)),
+        description: "Focus the Status panel",
+        label: "status",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.focus_files",
+        keys: &[KeyPattern::exact(KeyCode::Char('2'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Files)),
+        description: "Focus the Files panel",
+        label: "files",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.focus_branches",
+        keys: &[KeyPattern::exact(KeyCode::Char('3'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Branches)),
+        description: "Focus the Branches panel",
+        label: "branches",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.focus_commits",
+        keys: &[KeyPattern::exact(KeyCode::Char('4'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Commits)),
+        description: "Focus the Commits panel",
+        label: "commits",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.focus_stash",
+        keys: &[KeyPattern::exact(KeyCode::Char('5'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Side(SidePanel::Stash)),
+        description: "Focus the Stash panel",
+        label: "stash",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.focus_diff",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('0'), NONE),
+            KeyPattern::exact(KeyCode::Char('l'), NONE),
+            KeyPattern::any(KeyCode::Right),
+        ],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::FocusPanel(Panel::Diff),
+        description: "Focus the diff, to work on the selected file's hunks",
+        label: "diff",
+        bar: false,
+        disabled: no_file_selected,
+    },
+    Binding {
+        id: "workspace.next_panel",
+        keys: &[KeyPattern::exact(KeyCode::Tab, NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CycleFocus { back: false },
+        description: "Focus the next panel",
+        label: "next panel",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.prev_panel",
+        keys: &[KeyPattern::any(KeyCode::BackTab)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CycleFocus { back: true },
+        description: "Focus the previous panel",
+        label: "previous panel",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.zoom",
+        keys: &[KeyPattern::exact(KeyCode::Char('z'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CycleScreenMode,
+        description: "Zoom the focused panel: normal, half, full",
+        label: "zoom",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "workspace.cancel_command",
+        keys: &[KeyPattern::exact(KeyCode::Char('x'), KeyModifiers::CONTROL)],
+        // Not `esc` or `ctrl-c`, which quit; the bar shows it only while a
+        // command runs.
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CancelCommand,
+        description: "Stop the running command",
+        label: "cancel command",
+        bar: false,
+        disabled: no_command_running,
     },
     Binding {
         id: "files.next",
@@ -1083,7 +1200,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::OpenAmend,
         description: "Amend the last commit with the staged changes, or reword it",
         label: "amend",
-        // Left out of the bar until the layout review (#10).
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: amend_disabled,
     },
@@ -1104,7 +1221,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::OpenInEditor,
         description: "Open the selected file in your editor",
         label: "open in editor",
-        // Left out of the bar until the layout review (#10).
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: open_disabled,
     },
@@ -1146,7 +1263,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::FocusDiff,
         description: "Work on the hunks of the selected file",
         label: "hunks",
-        // Left out of the bar until the layout review (#10), like `m`.
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: no_file_selected,
     },
@@ -1223,7 +1340,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::OpenInEditor,
         description: "Open the file in your editor at the selected hunk",
         label: "open in editor",
-        // Left out of the bar until the layout review (#10).
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: open_disabled,
     },
@@ -1234,7 +1351,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::EditHunk,
         description: "Edit the selected hunk in your editor, then stage it",
         label: "edit hunk",
-        // Left out of the bar until the layout review (#10).
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: edit_hunk_disabled,
     },
@@ -1256,8 +1373,8 @@ static REGISTRY: &[Binding] = &[
             KeyPattern::any(KeyCode::Left),
         ],
         scope: KeyScope::Diff,
-        intent: AppIntent::FocusFiles,
-        description: "Back to the file list",
+        intent: AppIntent::FocusLeft,
+        description: "Back to the side panel last focused",
         label: "back",
         bar: true,
         disabled: never,
@@ -1354,7 +1471,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::OpenInEditor,
         description: "Open the file in your editor at the selected line",
         label: "open in editor",
-        // Left out of the bar until the layout review (#10).
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: open_disabled,
     },
@@ -1495,9 +1612,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::OpenMenu(MenuId::Actions),
         description: "Open the actions menu",
         label: "menu",
-        // Left out of the bar until the layout review (#10): the bar's
-        // hints for this panel are pinned by existing tests.
-        bar: false,
+        bar: true,
         disabled: never,
     },
     Binding {
@@ -1581,9 +1696,9 @@ static REGISTRY: &[Binding] = &[
         id: "commit_editor.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::Quit,
-        description: "Quit Kika, stopping a commit that is running",
-        label: "quit",
+        intent: AppIntent::InterruptCommit,
+        description: "Close, asking before a typed message is lost; quit Kika while a commit runs",
+        label: "stop",
         bar: true,
         disabled: never,
     },
@@ -1654,6 +1769,53 @@ static REGISTRY: &[Binding] = &[
         description: "Close this menu",
         label: "close",
         bar: true,
+        disabled: never,
+    },
+    // Out of the bar; the help popup's border says how to scroll.
+    Binding {
+        id: "help.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::LineDown),
+        description: "Scroll the list down",
+        label: "scroll",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::LineUp),
+        description: "Scroll the list up",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::PageDown),
+        description: "Scroll the list down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::PageUp),
+        description: "Scroll the list up a page",
+        label: "",
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -2132,7 +2294,17 @@ mod tests {
         let help = available(registry(), &Keymap::default(), KeyScope::Help, &state);
         let intents: Vec<&AppIntent> = help.iter().map(|(b, _)| &b.intent).collect();
         // Esc is taken by CloseHelp, but q still quits; `?` to open is gone.
-        assert_eq!(intents, [&AppIntent::CloseHelp, &AppIntent::Quit]);
+        assert_eq!(
+            intents,
+            [
+                &AppIntent::CloseHelp,
+                &AppIntent::ScrollHelp(Scroll::LineDown),
+                &AppIntent::ScrollHelp(Scroll::LineUp),
+                &AppIntent::ScrollHelp(Scroll::PageDown),
+                &AppIntent::ScrollHelp(Scroll::PageUp),
+                &AppIntent::Quit
+            ]
+        );
     }
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
@@ -2214,7 +2386,7 @@ mod tests {
             plain('h'),
             key(KeyCode::Left, none),
         ] {
-            assert_eq!(diff(k), Some(FocusFiles), "{k:?}");
+            assert_eq!(diff(k), Some(FocusLeft), "{k:?}");
         }
         // Workspace and global keys still reach through.
         assert_eq!(diff(plain('r')), Some(RefreshStatus));
@@ -2261,7 +2433,7 @@ mod tests {
         assert_eq!(lines(plain('v')), Some(ExitLineMode));
         // Other Diff keys, and workspace and global ones, reach through.
         assert_eq!(lines(plain('t')), Some(ToggleDiffSide));
-        assert_eq!(lines(plain('h')), Some(FocusFiles));
+        assert_eq!(lines(plain('h')), Some(FocusLeft));
         assert_eq!(lines(plain('r')), Some(RefreshStatus));
         assert_eq!(lines(plain('q')), Some(Quit));
 
@@ -2512,7 +2684,7 @@ mod tests {
         assert_eq!(error(esc), Some(DismissCommitError));
         assert_eq!(error(enter), Some(DismissCommitError));
 
-        assert_eq!(editor(ctrl('c')), Some(Quit));
+        assert_eq!(editor(ctrl('c')), Some(InterruptCommit));
 
         let discard = |k| from(KeyScope::CommitDiscard, k);
         assert_eq!(discard(plain('y')), Some(DiscardCommit));
@@ -2856,7 +3028,7 @@ mod tests {
                 ctrl_c
             ),
             Resolution::Run(Binding {
-                intent: AppIntent::Quit,
+                intent: AppIntent::InterruptCommit,
                 ..
             })
         ));
@@ -2893,6 +3065,81 @@ mod tests {
         assert_eq!(label(KeyPattern::any(KeyCode::PageDown)), "PgDn");
         assert_eq!(label(KeyPattern::any(KeyCode::PageUp)), "PgUp");
         assert_eq!(label(KeyPattern::any(KeyCode::Char('J'))), "J");
+        assert_eq!(label(KeyPattern::any(KeyCode::Right)), "→");
+        assert_eq!(label(KeyPattern::any(KeyCode::BackTab)), "⇧tab");
+    }
+
+    #[test]
+    fn focus_and_zoom_keys_work_from_every_workspace_panel() {
+        use crate::layout::Panel::{Diff, Side};
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        let shift = KeyModifiers::SHIFT;
+        for scope in [
+            KeyScope::Workspace,
+            KeyScope::Files,
+            KeyScope::Diff,
+            KeyScope::Lines,
+            KeyScope::Blame,
+            KeyScope::BlameCommit,
+        ] {
+            let run = |k| from(scope, k);
+            assert_eq!(run(plain('1')), Some(FocusPanel(Side(SidePanel::Status))));
+            assert_eq!(run(plain('2')), Some(FocusPanel(Side(SidePanel::Files))));
+            assert_eq!(run(plain('3')), Some(FocusPanel(Side(SidePanel::Branches))));
+            assert_eq!(run(plain('4')), Some(FocusPanel(Side(SidePanel::Commits))));
+            assert_eq!(run(plain('5')), Some(FocusPanel(Side(SidePanel::Stash))));
+            assert_eq!(run(plain('0')), Some(FocusPanel(Diff)), "{scope:?}");
+            assert_eq!(
+                run(key(KeyCode::Tab, none)),
+                Some(CycleFocus { back: false })
+            );
+            assert_eq!(
+                run(key(KeyCode::BackTab, shift)),
+                Some(CycleFocus { back: true })
+            );
+            assert_eq!(run(plain('z')), Some(CycleScreenMode), "{scope:?}");
+        }
+        // `l` and `→` reach the diff from the side panels; in the diff,
+        // `h` and `←` go back.
+        for scope in [KeyScope::Workspace, KeyScope::Files] {
+            assert_eq!(from(scope, plain('l')), Some(FocusPanel(Diff)));
+            assert_eq!(
+                from(scope, key(KeyCode::Right, none)),
+                Some(FocusPanel(Diff))
+            );
+            assert_eq!(from(scope, plain('h')), None, "{scope:?}");
+        }
+        for scope in [KeyScope::Diff, KeyScope::Lines] {
+            assert_eq!(from(scope, plain('h')), Some(FocusLeft));
+            assert_eq!(from(scope, key(KeyCode::Left, none)), Some(FocusLeft));
+        }
+        // List movement stays list movement.
+        assert_eq!(from(KeyScope::Files, plain('j')), Some(SelectNext));
+        assert_eq!(from(KeyScope::Workspace, plain('j')), None);
+        // None of them are in the bar, which is full at 80 columns.
+        for c in ['0', '1', '2', '3', '4', '5', 'l', 'z'] {
+            let binding = registry()
+                .iter()
+                .find(|b| b.scope == KeyScope::Workspace && b.matches(plain(c)))
+                .expect("bound");
+            assert!(!binding.bar, "{c}");
+        }
+    }
+
+    #[test]
+    fn the_diff_keys_say_why_with_no_file_selected() {
+        let state = AppState::new(Context::Workspace);
+        for k in [
+            plain('0'),
+            plain('l'),
+            key(KeyCode::Right, KeyModifiers::NONE),
+        ] {
+            assert!(matches!(
+                resolve(registry(), &Keymap::default(), KeyScope::Files, &state, k),
+                Resolution::Disabled("No file selected")
+            ));
+        }
     }
 
     #[test]
@@ -3090,6 +3337,7 @@ mod tests {
             ("home", KeyCode::Home),
             ("end", KeyCode::End),
             ("tab", KeyCode::Tab),
+            ("shift-tab", KeyCode::BackTab),
         ] {
             assert_eq!(parse_key(name), Ok(KeyPattern::any(code)), "{name}");
         }
@@ -3234,7 +3482,8 @@ mod tests {
         for b in registry() {
             let risky = matches!(
                 b.intent,
-                Quit | OpenInEditor
+                Quit | InterruptCommit
+                    | OpenInEditor
                     | EditHunk
                     | CycleRenderer
                     | EditCommitExternally
@@ -3328,6 +3577,26 @@ mod tests {
             ),
             Resolution::Disabled("Already in a repository")
         ));
+    }
+
+    #[test]
+    fn ctrl_x_cancels_a_running_command_from_every_command_panel() {
+        let ctrl_x = key(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let mut state = AppState::new(Context::Workspace);
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Blame] {
+            let at =
+                |state: &AppState| resolve(registry(), &Keymap::default(), scope, state, ctrl_x);
+            state.command_running = false;
+            assert!(
+                matches!(at(&state), Resolution::Disabled("No command is running")),
+                "{scope:?}"
+            );
+            state.command_running = true;
+            assert!(
+                matches!(at(&state), Resolution::Run(b) if b.intent == AppIntent::CancelCommand),
+                "{scope:?}"
+            );
+        }
     }
 
     fn commands(tables: &[CommandTable]) -> Result<Keymap, String> {

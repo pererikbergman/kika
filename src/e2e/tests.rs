@@ -112,12 +112,14 @@ async fn c_commits_the_staged_file_with_the_typed_message() {
     app.assert_screen_contains("No changes");
 }
 
+/// A hook may ask the user something, so the commit runs on the terminal;
+/// what it printed went there, and the popup says so.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
+async fn a_failing_pre_commit_hook_runs_on_the_terminal_and_commits_nothing() {
     let repo = modified_repo()
         .stage("a.txt")
-        .hook("pre-commit", "#!/bin/sh\necho 'lint failed'\nexit 1\n");
+        .hook("pre-commit", "#!/bin/sh\ntouch .git/ran\nexit 1\n");
     let head = repo.head();
     let mut app = Harness::start(&repo).await;
 
@@ -126,8 +128,9 @@ async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
+    assert!(repo.exists(".git/ran"));
     app.assert_screen_contains(" Commit failed ");
-    app.assert_screen_contains("lint failed");
+    app.assert_screen_contains("git commit exited with status 1");
     assert_eq!(repo.head(), head);
     assert_eq!(repo.staged(), ["a.txt"]);
 
@@ -136,23 +139,26 @@ async fn a_failing_pre_commit_hook_shows_its_output_and_commits_nothing() {
     app.assert_screen_contains("Try this");
 }
 
+/// Skipped hooks cannot ask anything, so the commit runs detached and the
+/// failing commit-msg hook never runs.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failing_commit_msg_hook_shows_its_output_and_commits_nothing() {
+async fn with_hooks_skipped_a_commit_msg_hook_does_not_stop_the_commit() {
     let repo = modified_repo()
         .stage("a.txt")
-        .hook("commit-msg", "#!/bin/sh\necho 'bad message' >&2\nexit 1\n");
-    let head = repo.head();
+        .hook("commit-msg", "#!/bin/sh\ntouch .git/ran\nexit 1\n");
     let mut app = Harness::start(&repo).await;
 
     app.press(KeyCode::Char('c')).await;
+    app.press_with(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        .await;
     app.type_text("wip").await;
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
-    app.assert_screen_contains("bad message");
-    assert_eq!(repo.head(), head);
-    assert_eq!(repo.staged(), ["a.txt"]);
+    assert!(!repo.exists(".git/ran"));
+    assert_eq!(repo.head_message(), "wip\n\n");
+    assert!(repo.staged().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -183,48 +189,14 @@ async fn cancelling_the_commit_leaves_the_index_untouched() {
     app.assert_screen_contains("Discard the typed message? (y/n)");
     app.press(KeyCode::Char('y')).await;
 
-    assert!(!app.screen().iter().any(|row| row.contains("Commit")));
+    assert!(
+        !app.screen()
+            .iter()
+            .any(|row| row.contains("Commit message"))
+    );
     assert!(repo.staged().is_empty());
     assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
     assert!(!app.state().should_quit);
-}
-
-/// A hook that waits forever must not trap the user: Ctrl+C quits, and git
-/// and the hook are stopped without leaving `index.lock` behind.
-#[cfg(unix)]
-#[tokio::test(flavor = "multi_thread")]
-async fn ctrl_c_while_a_hook_hangs_quits_and_stops_git_cleanly() {
-    use std::time::{Duration, Instant};
-
-    let repo = modified_repo()
-        .stage("a.txt")
-        .hook("pre-commit", "#!/bin/sh\ntouch .git/started\nsleep 30\n");
-    let head = repo.head();
-    let mut app = Harness::start(&repo).await;
-
-    app.press(KeyCode::Char('c')).await;
-    app.type_text("Stuck").await;
-    app.send(KeyCode::Char('s'), KeyModifiers::CONTROL);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !repo.exists(".git/started") {
-        assert!(Instant::now() < deadline, "the hook never started");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    app.assert_screen_contains("ctrl-c quits Kika");
-
-    let start = Instant::now();
-    app.send(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    assert!(app.state().should_quit);
-    app.settle().await;
-
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        start.elapsed()
-    );
-    assert!(!repo.exists(".git/index.lock"));
-    assert_eq!(repo.head(), head);
-    assert_eq!(repo.staged(), ["a.txt"]);
 }
 
 /// One commit on branch `main`, whatever the default branch name is.
@@ -260,8 +232,10 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 
     let mut app = Harness::start(&repo).await;
 
+    // Collapsed, the panel shows only the branch; expanded, the rest.
     app.assert_screen_contains("│work ");
-    app.assert_screen_contains("│base ↑2 ↓1 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,7 +243,8 @@ async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
     app.assert_screen_contains("│main ");
-    app.assert_screen_contains("│no upstream ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃no upstream ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -292,8 +267,9 @@ async fn a_conflicting_merge_shows_merging() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│merging ");
+    app.assert_screen_contains("┃merging ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -305,8 +281,9 @@ async fn a_conflicting_rebase_shows_rebasing() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│rebasing ");
+    app.assert_screen_contains("┃rebasing ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -316,14 +293,17 @@ async fn committing_in_the_app_updates_the_ahead_count() {
     repo.git(["branch", "-q", "--set-upstream-to=base"]);
     let repo = repo.write("a.txt", "two\n").stage("a.txt");
     let mut app = Harness::start(&repo).await;
-    app.assert_screen_contains("│base ↑0 ↓0 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑0 ↓0 ");
 
+    app.press(KeyCode::Char('2')).await;
     app.press(KeyCode::Char('c')).await;
     app.type_text("Ahead").await;
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
-    app.assert_screen_contains("│base ↑1 ↓0 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑1 ↓0 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1121,9 +1101,9 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.press(KeyCode::Enter).await;
     app.press_with(KeyCode::Char('R'), KeyModifiers::SHIFT)
         .await;
-    app.assert_screen_contains(" Unstaged · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · cat ");
     app.press(KeyCode::Char('v')).await;
-    app.assert_screen_contains(" Unstaged · lines · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · lines · cat ");
     let shown = app
         .state()
         .rendered_shown()
@@ -1134,7 +1114,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     let staged = String::from_utf8(repo.git(["diff", "--cached"])).unwrap();
     assert!(staged.contains("+two\n"), "{staged}");
     assert!(!staged.contains("+three"), "{staged}");
-    app.assert_screen_contains(" Unstaged · lines · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · lines · cat ");
     app.assert_screen_contains("+three");
 }
 
