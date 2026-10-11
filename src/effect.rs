@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::ansi;
 use crate::captured_command::run_captured;
 use crate::config::{self, ConfigPaths};
-use crate::custom_command::OutputMode;
+use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
@@ -148,6 +148,9 @@ pub enum Effect {
         argv: Vec<OsString>,
         output: OutputMode,
     },
+    /// Stop the command `RunCommand` started, which then answers with
+    /// `CommandFailure::Cancelled`. Does nothing once it has finished.
+    CancelCommand,
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -167,6 +170,8 @@ pub struct Runtime {
     recent_store: Option<PathBuf>,
     /// The global config's `[diff] pager`, read once at startup.
     diff_pager: Option<String>,
+    /// Stops the last captured command; aborting a finished one is a no-op.
+    command: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl Runtime {
@@ -178,6 +183,7 @@ impl Runtime {
             global_config: None,
             recent_store: None,
             diff_pager: None,
+            command: Mutex::new(None),
         }
     }
 
@@ -406,15 +412,20 @@ impl Runtime {
             } => {
                 // Taken now: a `SetRepo` after this must not move the command.
                 let workdir = self.runner.workdir();
+                let task = tokio::spawn(run_captured(argv, workdir));
+                *self.command.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
                 tokio::spawn(async move {
-                    // A panic still reports back, or `command_running` would stay set.
-                    let result = tokio::spawn(run_captured(argv, workdir))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
+                    // A panic or a cancel still reports back, or
+                    // `command_running` would stay set.
+                    let result = task.await.unwrap_or_else(|e| {
+                        Err(if e.is_cancelled() {
+                            CommandFailure::Cancelled
+                        } else {
+                            CommandFailure::Launch(terminal_safe(
                                 format!("The command crashed: {e}").as_bytes(),
                             ))
-                        });
+                        })
+                    });
                     let result = match output {
                         OutputMode::Popup => result,
                         OutputMode::Terminal | OutputMode::None => result.map(|_| String::new()),
@@ -425,6 +436,17 @@ impl Runtime {
                         result,
                     });
                 });
+            }
+            Effect::CancelCommand => {
+                // Dropping the aborted future kills the program.
+                if let Some(task) = self
+                    .command
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    task.abort();
+                }
             }
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
@@ -1348,7 +1370,7 @@ mod tests {
             Some(AppIntent::CommandFinished {
                 title,
                 output: OutputMode::Popup,
-                result: Err(e),
+                result: Err(CommandFailure::Exited(e)),
             }) => {
                 assert_eq!(title, "Try");
                 assert!(e.contains('3') && e.contains("hi"), "{e}");
@@ -1380,11 +1402,45 @@ mod tests {
         // A program that cannot start still answers, once.
         runtime.spawn(run(&["kika-no-such-program"], OutputMode::None));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished { result: Err(e), .. }) => {
+            Some(AppIntent::CommandFinished {
+                result: Err(CommandFailure::Launch(e)),
+                ..
+            }) => {
                 assert!(e.starts_with("Could not start"), "{e}")
             }
             other => panic!("expected a start failure, got {other:?}"),
         }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_stops_a_hung_command_which_answers_once() {
+        let tmp = crate::git::fake::TempDir::new("effect-cancel");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runner = Arc::new(crate::git::CliRunner::new(tmp.path()));
+        let runtime = Runtime::new(runner, tx);
+        let started = std::time::Instant::now();
+
+        runtime.spawn(Effect::RunCommand {
+            title: "Hang".into(),
+            argv: ["sh", "-c", "sleep 30"].map(OsString::from).to_vec(),
+            output: OutputMode::Popup,
+        });
+        runtime.spawn(Effect::CancelCommand);
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommandFinished {
+                title: "Hang".into(),
+                output: OutputMode::Popup,
+                result: Err(CommandFailure::Cancelled),
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        // A second cancel finds nothing to stop and sends nothing.
+        runtime.spawn(Effect::CancelCommand);
+        tokio::task::yield_now().await;
         assert!(rx.try_recv().is_err());
     }
 

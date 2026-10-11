@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::custom_command::OutputMode;
+use crate::custom_command::{CommandFailure, OutputMode};
 use crate::git::GitRunner;
 use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
@@ -72,19 +72,21 @@ pub fn execute(job: HandOff, runner: &dyn GitRunner, workdir: &Path) -> AppInten
 }
 
 /// Run `argv` directly, with no shell in between, and wait for it.
-fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), String> {
+fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), CommandFailure> {
     let Some((program, args)) = argv.split_first() else {
-        return Err("The command is empty".into());
+        return Err(CommandFailure::Launch("The command is empty".into()));
     };
     let status = std::process::Command::new(program)
         .args(args)
         .current_dir(workdir)
         .status()
-        .map_err(|e| start_error(program, &e))?;
+        .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     if status.success() {
         Ok(())
     } else {
-        Err(terminal_safe(format!("exited with {status}").as_bytes()))
+        Err(CommandFailure::Exited(terminal_safe(
+            format!("exited with {status}").as_bytes(),
+        )))
     }
 }
 
@@ -867,12 +869,16 @@ mod tests {
             AppIntent::CommandFinished { result, .. } => result,
             other => panic!("expected CommandFinished, got {other:?}"),
         };
-        let failed = result(&["sh", "-c", "exit 3"]).unwrap_err();
+        let Err(CommandFailure::Exited(failed)) = result(&["sh", "-c", "exit 3"]) else {
+            panic!("expected an exit failure");
+        };
         assert!(
             failed.starts_with("exited with") && failed.contains('3'),
             "{failed}"
         );
-        let missing = result(&["kika-no-such-program\x1b[2J"]).unwrap_err();
+        let Err(CommandFailure::Launch(missing)) = result(&["kika-no-such-program\x1b[2J"]) else {
+            panic!("expected a launch failure");
+        };
         assert!(
             missing.starts_with("Could not start kika-no-such-program"),
             "{missing}"

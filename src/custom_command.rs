@@ -74,6 +74,19 @@ pub enum OutputMode {
     None,
 }
 
+/// Why a custom command did not succeed. The text in each is
+/// terminal-safe. Kept apart so the user is pointed at the config file only
+/// when the command itself could not run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandFailure {
+    /// It never ran as configured: it could not start, or Kika lost it.
+    Launch(String),
+    /// It ran and exited non-zero: the status, then any output.
+    Exited(String),
+    /// The user stopped it.
+    Cancelled,
+}
+
 /// A piece of one template element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Part {
@@ -120,7 +133,7 @@ impl CustomCommand {
         let keys = table
             .keys
             .iter()
-            .map(|text| parse_key(text).map_err(&fail))
+            .map(|text| parse_key(text).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         if keys.is_empty() {
             return Err(fail("needs at least one key".into()));
@@ -131,7 +144,7 @@ impl CustomCommand {
         let argv = table
             .command
             .iter()
-            .map(|element| parse_element(element).map_err(&fail))
+            .map(|element| parse_element(element).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         let program = match argv.first() {
             None => return Err(fail("`command` is empty".into())),
