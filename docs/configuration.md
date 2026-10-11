@@ -435,13 +435,13 @@ command line.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `status.continue` | `c` | Continue the merge, rebase or cherry-pick once conflicts are resolved | locked |
-| `status.skip` | `s` | Skip the commit the rebase or cherry-pick stopped on | locked |
+| `status.continue` | `c` | Continue the merge, rebase, cherry-pick or revert once conflicts are resolved | locked |
+| `status.skip` | `s` | Skip the commit the rebase, cherry-pick or revert stopped on | locked |
 | `status.abort` | `a` | Abort the operation in progress, asking first | locked |
 
-These act on the merge, rebase or cherry-pick the Status panel shows in
-progress. `cherry-pick --skip` needs git 2.23 or newer; an older git refuses it
-and changes nothing.
+These act on the merge, rebase, cherry-pick or revert the Status panel shows
+in progress. `cherry-pick --skip` and `revert --skip` need git 2.23 or newer;
+an older git refuses them and changes nothing.
 
 ### Commits
 
@@ -450,6 +450,18 @@ and changes nothing.
 | `commits.next` | `j`, `down` | Select the next commit | |
 | `commits.prev` | `k`, `up` | Select the previous commit | |
 | `commits.open` | `enter` | Show the files the selected commit changed | |
+| `commits.checkout` | `space` | Check out the selected commit as a detached HEAD, asking first | |
+| `commits.revert` | `R` | Make a commit that undoes the selected one | locked |
+| `commits.reset` | `X` | Reset the current branch to the selected commit: soft, mixed or hard | locked |
+
+`space` asks first, since a detached HEAD is on no branch: commits made there
+belong to no branch until you create one. Git refuses the checkout when it
+would overwrite local changes. `R` runs `git revert` on the terminal, so git's
+editor for the message and the commit hooks work as on the command line; a
+merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
+the worktree, mixed keeps the worktree and resets the index, and hard throws
+away every uncommitted change, so it asks first. Revert and reset wait until
+an operation in progress is finished or aborted.
 
 ### Commit files (a commit opened from the Commits panel)
 
@@ -612,6 +624,17 @@ that are not merged asks in stronger words, and only `D` deletes it.
 | `delete_branch.force` | `D` | Yes, delete the branch and its unmerged commits | locked |
 | `delete_branch.no` | `n`, `esc` | No, keep the branch | locked |
 | `delete_branch.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Reset hard?
+
+A hard reset throws away every uncommitted change, staged and unstaged, so
+`enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `reset_hard.yes` | `y` | Yes, reset and throw away every uncommitted change | locked |
+| `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
+| `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 

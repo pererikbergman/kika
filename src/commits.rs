@@ -4,6 +4,7 @@
 
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
+use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, Markers};
 
 /// Commits per page.
@@ -54,6 +55,9 @@ pub struct CommitsPanel {
     /// A commit opened to its files, shown in place of the log. `selected`
     /// stays where it was, so closing it returns to the same commit.
     pub open: Option<CommitFilesList>,
+    /// The commit an open question is about, kept from when it was asked,
+    /// since the question itself carries no data.
+    pub pending: Option<CommitId>,
 }
 
 impl CommitsPanel {
@@ -76,6 +80,18 @@ impl CommitsPanel {
         } else {
             Marker::Unknown
         }
+    }
+
+    /// `id` as the log shows it, or its first seven digits once its row
+    /// is no longer loaded.
+    pub fn short_oid(&self, id: &CommitId) -> String {
+        self.rows
+            .iter()
+            .find(|row| row.oid == id.as_str())
+            .map_or_else(
+                || id.as_str().chars().take(7).collect(),
+                |row| row.short_oid.clone(),
+            )
     }
 
     /// Page `skip` was asked for under `seq`.
