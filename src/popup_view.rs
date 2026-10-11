@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
-use crate::popup::{ErrorPopup, LineInput, Popup};
+use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::submodule_list::SubmoduleList;
 use crate::view::{
@@ -64,6 +64,11 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
+            Popup::Credential(prompt) if prompt.confirm => {
+                let text = format!("{}\n(y/n)", prompt.prompt);
+                render_question(CREDENTIAL_TITLE, &text, frame, area)
+            }
+            Popup::Credential(prompt) => render_credential(prompt, top, frame, area),
         }
     }
 }
@@ -293,19 +298,62 @@ fn render_prompt(title: &str, input: &LineInput, top: bool, frame: &mut Frame, a
     let block = Block::bordered().title(format!(" {title} "));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    if inner.is_empty() {
+    render_input_line(&input.text, input.col, top, frame, inner);
+}
+
+/// One line of typed `text` with the cursor at char `col`, marked while
+/// the popup is on `top`. Long text scrolls to keep the cursor inside,
+/// with `…` where it is cut.
+fn render_input_line(text: &str, col: usize, top: bool, frame: &mut Frame, area: Rect) {
+    if area.is_empty() {
         return;
     }
-    let width = usize::from(inner.width);
-    let before: String = input.text.chars().take(input.col).collect();
+    let width = usize::from(area.width);
+    let before: String = text.chars().take(col).collect();
     let x = width_of(&before);
     // One column to spare after the cursor for a `…`.
     let left = (x + 2).saturating_sub(width.max(2));
-    frame.render_widget(Line::raw(clip(&input.text, left, width)), inner);
+    frame.render_widget(Line::raw(clip(text, left, width)), area);
     if top {
         let column = u16::try_from(x - left).unwrap_or(u16::MAX);
-        frame.set_cursor_position((inner.x.saturating_add(column), inner.y));
+        frame.set_cursor_position((area.x.saturating_add(column), area.y));
     }
+}
+
+const CREDENTIAL_TITLE: &str = " Git is asking ";
+
+/// Git's or ssh's question over a line for the answer. A password or
+/// passphrase is drawn as one `•` per typed char, never as itself.
+fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, area: Rect) {
+    let width = COMMIT_WIDTH.min(area.width);
+    let text_width = usize::from(width.saturating_sub(4)).max(1);
+    let rows = wrap(&prompt.prompt, text_width);
+    let height = u16::try_from(rows.len() + 3).unwrap_or(u16::MAX);
+    let popup = centered(area, width, height);
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(CREDENTIAL_TITLE);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let [question, answer] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let rows: Vec<String> = rows.iter().map(|row| format!(" {row}")).collect();
+    frame.render_widget(
+        Paragraph::new(tail(&rows, usize::from(question.height))),
+        question,
+    );
+    // One column of padding, as the question has.
+    let answer = Rect {
+        x: answer.x.saturating_add(1),
+        width: answer.width.saturating_sub(2),
+        ..answer
+    };
+    let line = prompt.input.line();
+    let shown = if prompt.masked {
+        "•".repeat(line.text.chars().count())
+    } else {
+        line.text.clone()
+    };
+    render_input_line(&shown, line.col, top, frame, answer);
 }
 
 /// What failed in the red border's title, git's words below it, then what
@@ -1053,5 +1101,61 @@ mod tests {
 
         assert!(contains(&rows, " Not a git repository: …"), "{rows:#?}");
         assert!(contains(&rows, "d/end "), "{rows:#?}");
+    }
+
+    fn asked(prompt: &str, typed: &str) -> AppState {
+        use crate::popup::CredentialPrompt;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut state = workspace(&["a.txt"]);
+        let mut credential = CredentialPrompt::new(prompt.into(), false);
+        for c in typed.chars() {
+            credential.input.edit(crate::keymap::KeyPress::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            ));
+        }
+        state.popups = vec![Popup::Credential(credential)];
+        state
+    }
+
+    #[test]
+    fn a_password_is_drawn_as_dots_and_a_username_as_typed() {
+        let state = asked("Password for 'https://u@h':", "tok");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, "Password for 'https://u@h':"), "{rows:#?}");
+        assert!(contains(&rows, " ••• "), "{rows:#?}");
+        assert!(!contains(&rows, "tok"), "{rows:#?}");
+
+        let state = asked("Username for 'https://h':", "ann");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " ann "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_answer_line_keeps_the_cursor_after_the_last_dot() {
+        let state = asked("Passphrase:", "secret");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let rows = buffer_rows(terminal.backend().buffer());
+        let (x, y) = find(&rows, "••••••");
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (x + 6, y));
+    }
+
+    #[test]
+    fn ssh_yes_no_question_is_asked_with_y_and_n() {
+        use crate::popup::CredentialPrompt;
+
+        let mut state = workspace(&["a.txt"]);
+        state.popups = vec![Popup::Credential(CredentialPrompt::new(
+            "Allow use of key id_ed25519?".into(),
+            true,
+        ))];
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, "Allow use of key id_ed25519?"), "{rows:#?}");
+        assert!(contains(&rows, "(y/n)"), "{rows:#?}");
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("y yes") && bar.contains("n no"), "{bar:?}");
     }
 }

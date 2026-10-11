@@ -14,6 +14,9 @@ pub struct GitCommand {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     stdin: Option<Vec<u8>>,
+    // Only unix can take the terminal away.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    no_terminal: bool,
 }
 
 impl GitCommand {
@@ -22,6 +25,7 @@ impl GitCommand {
             args: vec![subcommand.into()],
             env: Vec::new(),
             stdin: None,
+            no_terminal: false,
         }
     }
 
@@ -39,6 +43,19 @@ impl GitCommand {
     pub fn stdin(mut self, bytes: Vec<u8>) -> Self {
         self.stdin = Some(bytes);
         self
+    }
+
+    /// Run with no controlling terminal (on unix, in a session of its
+    /// own), so nothing it starts can read the screen Kika owns, even a
+    /// program that opens `/dev/tty` itself. Only for `run`.
+    pub fn without_terminal(mut self) -> Self {
+        self.no_terminal = true;
+        self
+    }
+
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub fn is_without_terminal(&self) -> bool {
+        self.no_terminal
     }
 
     pub fn args(&self) -> &[OsString] {
@@ -275,8 +292,13 @@ impl GitRunner for CliRunner {
             command.stdin(Stdio::piped());
         }
         // Its own process group, so `interrupt` reaches hooks git starts.
+        // A session of its own is a group of its own too.
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        if cmd.is_without_terminal() {
+            detach_from_terminal(&mut command);
+        } else {
+            std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        }
         let child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -371,6 +393,21 @@ impl Drop for CliChild {
         let child = self.child.get_mut().unwrap_or_else(|e| e.into_inner());
         let _ = child.kill();
         let _ = child.wait();
+    }
+}
+
+/// Start `command` in a new session, which has no controlling terminal.
+#[cfg(unix)]
+fn detach_from_terminal(command: &mut Command) {
+    // SAFETY: `setsid` is async-signal-safe, so it may run between fork
+    // and exec, and the closure touches nothing else.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(command, || {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
 }
 
@@ -652,6 +689,35 @@ mod tests {
             "git started a new process group"
         );
         assert!(lock(&runner.running).is_empty());
+    }
+
+    /// A command run without the terminal cannot open `/dev/tty`, so an
+    /// old ssh that ignores `SSH_ASKPASS_REQUIRE` cannot prompt on the
+    /// screen and stop there. Only telling when the tests have a terminal.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_without_the_terminal_cannot_open_it_and_leads_its_group() {
+        let runner = CliRunner::isolated(std::env::temp_dir());
+        let probe = "!if (exec 3</dev/tty) 2>/dev/null; then echo tty; else echo none; fi; \
+                     ps -o pgid= -p $PPID";
+        let cmd = GitCommand::new("-c")
+            .arg(format!("alias.probe={probe}"))
+            .arg("probe")
+            .without_terminal();
+
+        let output = runner.run(&cmd).unwrap();
+
+        assert!(
+            output.success,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        assert_eq!(lines.next(), Some("none"));
+        // Git's group is not Kika's, so `interrupt` can stop it as a whole.
+        let group = lines.next().unwrap().trim().to_string();
+        assert_ne!(group, pgid_of(&std::process::id().to_string()));
     }
 
     #[test]

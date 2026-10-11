@@ -59,7 +59,11 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
             SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
             SidePanel::Branches => {
-                branches_view::render_panel(&state.branches, &look, expanded, frame, area)
+                let spinner = state
+                    .remote
+                    .as_ref()
+                    .and_then(|run| Some((run.branch.as_ref()?, run.spinner())));
+                branches_view::render_panel(&state.branches, &look, expanded, spinner, frame, area)
             }
             SidePanel::Commits => {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
@@ -701,9 +705,14 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
     let mut room = usize::from(width);
-    if state.busy > 0 {
-        spans.push(Span::raw(" loading… "));
-        room = room.saturating_sub(width_of(" loading… "));
+    // A fetch, pull or push says which; anything else is loading.
+    let busy = match &state.remote {
+        Some(run) => Some(format!(" {} ", run.op.doing())),
+        None => (state.busy > 0).then(|| " loading… ".to_string()),
+    };
+    if let Some(busy) = busy {
+        room = room.saturating_sub(width_of(&busy));
+        spans.push(Span::raw(busy));
     }
     if state.command_running
         && let Some(cancel) = cancel_hint(state)
@@ -711,9 +720,10 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
         room = room.saturating_sub(width_of(&cancel) + 1);
         spans.push(Span::raw(format!(" {cancel}")));
     }
-    if let Some(notice) = state.notice {
+    let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
+    if let Some(notice) = state.notice.or(remote_notice) {
         spans.push(Span::styled(
-            format!(" {notice}"),
+            elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
         ));
     } else if let Some(error) = &state.op_error {
@@ -3117,7 +3127,7 @@ mod tests {
         assert!(!contains(&rows, "ctrl-t"), "{rows:#?}");
 
         state.help_open = true;
-        let rows = draw(&state, 100, 40);
+        let rows = draw(&state, 100, 50);
         let row = rows
             .iter()
             .find(|row| row.contains("Tidy"))
