@@ -98,6 +98,8 @@ impl Harness {
     }
 
     /// Offer `renderers` instead of the ones the host has configured.
+    // Only `#[cfg(unix)]` tests call it so far.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub async fn use_renderers(&mut self, renderers: Vec<ExternalRenderer>) {
         self.dispatch(AppIntent::RenderersFound(renderers));
         self.wait_idle().await;
