@@ -471,7 +471,11 @@ impl AppState {
                     self.focus = Focus::Files;
                 }
             }
-            AppIntent::ConfigLoaded { keymap, errors } => self.config_loaded(keymap, errors),
+            AppIntent::ConfigLoaded {
+                repo,
+                keymap,
+                errors,
+            } => self.config_loaded(repo, keymap, errors),
             AppIntent::Start => return self.start(),
             AppIntent::OpenRecent => return self.open_recent(),
             AppIntent::RecentLoaded { seq, list } => {
@@ -495,7 +499,13 @@ impl AppState {
 
     /// Use the keys just read. A broken file is shown once: reloading on
     /// every focus-in must not bring the same popup back each time.
-    fn config_loaded(&mut self, keymap: Keymap, errors: Vec<ConfigError>) {
+    ///
+    /// A result read for another repository is dropped: the user switched
+    /// while it loaded, and its keys and errors are not the open one's.
+    fn config_loaded(&mut self, repo: Option<PathBuf>, keymap: Keymap, errors: Vec<ConfigError>) {
+        if repo != self.repo {
+            return;
+        }
         self.keymap = keymap;
         if errors.is_empty() {
             self.config_error = None;
@@ -6186,8 +6196,17 @@ mod tests {
     use crate::config::ConfigError;
     use crate::keymap::{Keymap, remap as keymap};
 
+    /// A config result for `idle_with_files`'s repository, `/r/a`.
     fn config_loaded(keymap: Keymap, errors: Vec<ConfigError>) -> AppIntent {
-        AppIntent::ConfigLoaded { keymap, errors }
+        config_for(Some("/r/a"), keymap, errors)
+    }
+
+    fn config_for(repo: Option<&str>, keymap: Keymap, errors: Vec<ConfigError>) -> AppIntent {
+        AppIntent::ConfigLoaded {
+            repo: repo.map(PathBuf::from),
+            keymap,
+            errors,
+        }
     }
 
     fn config_error(message: &str) -> ConfigError {
@@ -6274,6 +6293,73 @@ mod tests {
         assert_eq!(state.keymap, remapped);
         state.update(config_loaded(Keymap::default(), vec![config_error("bad")]));
         assert_eq!(state.keymap, Keymap::default());
+    }
+
+    #[test]
+    fn a_config_result_for_another_repository_changes_nothing() {
+        let mut state = idle_with_files();
+        let before = state.clone();
+        state.update(config_for(
+            Some("/r/b"),
+            keymap(&[("files.stage", &["x"])]),
+            vec![config_error("bad")],
+        ));
+        assert_eq!(state.keymap, before.keymap);
+        assert_eq!(state.config_error, before.config_error);
+        assert_eq!(state.popups, before.popups);
+    }
+
+    #[test]
+    fn a_late_config_result_from_before_a_switch_is_dropped() {
+        let mut state = idle_with_files();
+        assert_eq!(
+            watch(&mut state, WatchEvent::FocusGained)[0],
+            Effect::LoadConfig {
+                repo: Some("/r/a".into())
+            }
+        );
+        let effects = state.update(AppIntent::OpenRepo("/r/b".into()));
+        assert_eq!(
+            effects.last(),
+            Some(&Effect::LoadConfig {
+                repo: Some("/r/b".into())
+            })
+        );
+
+        // A's reload lands after the switch.
+        state.update(config_for(
+            Some("/r/a"),
+            keymap(&[("files.stage", &["x"])]),
+            vec![config_error("a is broken")],
+        ));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.config_error, None);
+        assert_eq!(state.keymap, Keymap::default());
+
+        // B's own result applies.
+        let remapped = keymap(&[("files.stage", &["y"])]);
+        state.update(config_for(
+            Some("/r/b"),
+            remapped.clone(),
+            vec![config_error("b is broken")],
+        ));
+        assert_eq!(state.keymap, remapped);
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => assert!(error.message.contains("b is broken")),
+            other => panic!("expected B's config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_result_without_a_repository_applies_while_none_is_open() {
+        let mut state = outside("/w");
+        state.update(AppIntent::Start);
+        let remapped = keymap(&[("files.stage", &["x"])]);
+        state.update(config_for(None, remapped.clone(), vec![]));
+        assert_eq!(state.keymap, remapped);
+        // Nor does a repository's result leak outside one.
+        state.update(config_for(Some("/w"), Keymap::default(), vec![]));
+        assert_eq!(state.keymap, remapped);
     }
 
     /// An idle workspace whose user opted in to auto-fetch.

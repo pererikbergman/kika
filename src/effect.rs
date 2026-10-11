@@ -124,7 +124,7 @@ pub enum Effect {
         tag: Tag,
     },
     /// Read the global config file and that of the repository whose top
-    /// level is `repo`; answered by one `ConfigLoaded`.
+    /// level is `repo`; answered by one `ConfigLoaded` for the same `repo`.
     LoadConfig {
         repo: Option<PathBuf>,
     },
@@ -330,6 +330,8 @@ impl Runtime {
                         tokio::task::spawn_blocking(move || config::load(&paths)).await
                     {
                         let _ = tx.send(AppIntent::ConfigLoaded {
+                            // Echoed so the reducer can drop a late result.
+                            repo,
                             keymap: loaded.keymap,
                             errors: loaded.errors,
                         });
@@ -394,9 +396,14 @@ mod tests {
         let commit = registry().iter().find(|b| b.id == "files.commit").unwrap();
         let mut load = async |text: &str, repo: Option<PathBuf>| -> Vec<KeyPattern> {
             std::fs::write(&global, text).unwrap();
-            runtime.spawn(Effect::LoadConfig { repo });
+            runtime.spawn(Effect::LoadConfig { repo: repo.clone() });
             match rx.recv().await {
-                Some(AppIntent::ConfigLoaded { keymap, errors }) => {
+                Some(AppIntent::ConfigLoaded {
+                    repo: echoed,
+                    keymap,
+                    errors,
+                }) => {
+                    assert_eq!(echoed, repo, "answers for the repository it read");
                     assert_eq!(errors, []);
                     [keymap.keys(stage), keymap.keys(commit)].concat()
                 }

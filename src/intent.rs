@@ -240,6 +240,9 @@ pub enum AppIntent {
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {
+        /// The top level the files were read for, so a result that
+        /// arrives after a repository switch can be told apart.
+        repo: Option<PathBuf>,
         keymap: Keymap,
         errors: Vec<ConfigError>,
     },

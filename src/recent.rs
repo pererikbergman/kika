@@ -3,6 +3,7 @@
 //! in the platform's state directory, apart from any config file.
 
 use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -67,7 +68,9 @@ pub fn load(path: &Path) -> Vec<PathBuf> {
 /// Put `repo` first in the list at `path`, without duplicates and with at
 /// most [`MAX_RECENT`] entries, and return the new list. The file is
 /// replaced in one rename, so a crash never leaves half a list. A path
-/// that cannot be written as one line is not recorded.
+/// that cannot be written as one line is not recorded. The temp file is
+/// new and owner-only, so a planted entry is never followed and others
+/// cannot read the list.
 pub fn record(path: &Path, repo: &Path) -> io::Result<Vec<PathBuf>> {
     let old = load(path);
     let Some(line) = encode(repo) else {
@@ -83,18 +86,58 @@ pub fn record(path: &Path, repo: &Path) -> io::Result<Vec<PathBuf>> {
         contents.extend(encode(other).unwrap_or_default());
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        let mut dirs = std::fs::DirBuilder::new();
+        dirs.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            dirs.mode(0o700);
+        }
+        dirs.create(parent)?;
     }
-    let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
-    temp_name.push(format!(".{}.tmp", std::process::id()));
-    let temp = path.with_file_name(temp_name);
-    let written = std::fs::File::create(&temp)
-        .and_then(|mut file| file.write_all(&contents))
+    let (temp, mut file) = create_temp(path)?;
+    let written = file
+        .write_all(&contents)
         .and_then(|()| std::fs::rename(&temp, path));
     if written.is_err() {
+        // Only ever a name this call created.
         let _ = std::fs::remove_file(&temp);
     }
     written.map(|()| list)
+}
+
+/// How many temp names [`create_temp`] tries before giving up.
+const TEMP_ATTEMPTS: u32 = 16;
+
+/// A new temp file beside `path`, created exclusively so an entry already
+/// at a name (a planted symlink, another process's file) is skipped, never
+/// followed or overwritten.
+fn create_temp(path: &Path) -> io::Result<(PathBuf, File)> {
+    let file_name = path.file_name().unwrap_or_default();
+    let pid = std::process::id();
+    let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
+    for n in 0..TEMP_ATTEMPTS {
+        let mut name = file_name.to_os_string();
+        if n == 0 {
+            name.push(format!(".{pid}.tmp"));
+        } else {
+            name.push(format!(".{pid}.{n}.tmp"));
+        }
+        let temp = path.with_file_name(name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temp) {
+            Ok(file) => return Ok((temp, file)),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = err,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last)
 }
 
 /// One line of the file for `repo`, newline included. Raw bytes on Unix;
@@ -262,6 +305,82 @@ mod tests {
         let odd = tmp.path().join("a\nb");
         std::fs::create_dir(&odd).unwrap();
         assert_eq!(record(&file, &odd).unwrap(), [r[0].clone()]);
+        assert_eq!(load(&file), [r[0].clone()]);
+    }
+
+    /// The name `record` tries first for its temp file.
+    fn first_temp_name(file: &Path) -> PathBuf {
+        let mut name = file.file_name().unwrap().to_os_string();
+        name.push(format!(".{}.tmp", std::process::id()));
+        file.with_file_name(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_symlink_at_the_temp_name_is_never_followed() {
+        let tmp = TempDir::new("recent");
+        let file = tmp.path().join("state").join("recent-repos");
+        std::fs::create_dir(file.parent().unwrap()).unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"precious").unwrap();
+        let planted = first_temp_name(&file);
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let r = repos(&tmp, 1);
+
+        record(&file, &r[0]).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        assert!(planted.symlink_metadata().unwrap().is_symlink());
+        assert_eq!(load(&file), [r[0].clone()]);
+    }
+
+    #[test]
+    fn a_file_already_at_the_temp_name_is_left_alone() {
+        let tmp = TempDir::new("recent");
+        let file = tmp.path().join("recent-repos");
+        let squatter = first_temp_name(&file);
+        std::fs::write(&squatter, b"not ours").unwrap();
+        let r = repos(&tmp, 1);
+
+        record(&file, &r[0]).unwrap();
+
+        assert_eq!(std::fs::read(&squatter).unwrap(), b"not ours");
+        assert_eq!(load(&file), [r[0].clone()]);
+    }
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_state_dir_and_list_are_private_to_the_user() {
+        let tmp = TempDir::new("recent");
+        let file = tmp.path().join("state").join("kika").join("recent-repos");
+        let r = repos(&tmp, 1);
+
+        record(&file, &r[0]).unwrap();
+
+        assert_eq!(mode(file.parent().unwrap()), 0o700);
+        assert_eq!(mode(&file), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacing_a_world_readable_list_makes_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new("recent");
+        let file = tmp.path().join("recent-repos");
+        std::fs::write(&file, b"").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let r = repos(&tmp, 1);
+
+        record(&file, &r[0]).unwrap();
+
+        assert_eq!(mode(&file), 0o600);
         assert_eq!(load(&file), [r[0].clone()]);
     }
 
