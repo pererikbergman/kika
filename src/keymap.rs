@@ -10,6 +10,7 @@ use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::rebase_plan::{self, Edit};
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
@@ -444,6 +445,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "remove_remote.yes",
     "remove_remote.no",
     "remove_remote.quit",
+    "commits.squash",
+    "commits.fixup",
+    "commits.drop",
+    "commits.reword",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -1171,6 +1176,31 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
         })
 }
 
+/// Why the selected commit cannot be rewritten with `edit` now: one
+/// operation at a time, none in progress, and a history the planner can
+/// rewrite.
+pub(crate) fn rewrite_disabled(state: &AppState, edit: Edit) -> Option<&'static str> {
+    commit_action_disabled(state)
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| rebase_plan::plan(&state.commits.rows, state.commits.selected, edit).err())
+}
+
+fn squash_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Squash)
+}
+
+fn fixup_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Fixup)
+}
+
+fn drop_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Drop)
+}
+
+fn reword_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Reword)
+}
+
 pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
@@ -1583,6 +1613,48 @@ static REGISTRY: &[Binding] = &[
         label: "reset",
         bar: true,
         disabled: reset_disabled,
+    },
+    Binding {
+        id: "commits.squash",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Squash),
+        description: "Squash the selected commit into the one below, combining their messages",
+        label: "squash",
+        bar: true,
+        disabled: squash_disabled,
+    },
+    // `f` is fetch.
+    Binding {
+        id: "commits.fixup",
+        keys: &[KeyPattern::any(KeyCode::Char('F'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Fixup),
+        description: "Fold the selected commit into the one below, keeping that one's message",
+        label: "fixup",
+        bar: true,
+        disabled: fixup_disabled,
+    },
+    Binding {
+        id: "commits.drop",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Drop),
+        description: "Drop the selected commit and its change from the history",
+        label: "drop",
+        bar: true,
+        disabled: drop_disabled,
+    },
+    // `r` is refresh.
+    Binding {
+        id: "commits.reword",
+        keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Reword),
+        description: "Write a new message for the selected commit",
+        label: "reword",
+        bar: true,
+        disabled: reword_disabled,
     },
     Binding {
         id: "commit_files.next",
@@ -4310,6 +4382,105 @@ mod tests {
     }
 
     #[test]
+    fn the_commits_panel_squashes_fixes_up_drops_and_rewords() {
+        use AppIntent::RewriteCommit;
+        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
+        let mut state = AppState::new(Context::Workspace);
+        state.commits.rows = (0..2)
+            .map(|i| crate::git::log::CommitRow {
+                oid: ids[i].clone(),
+                short_oid: "x".into(),
+                parents: vec![ids[i + 1].clone()],
+                author: "Ann".into(),
+                time: 0,
+                subject: "s".into(),
+            })
+            .collect();
+        let commits = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Commits,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(commits(plain('s')), Some(RewriteCommit(Edit::Squash)));
+        assert_eq!(
+            commits(key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            Some(RewriteCommit(Edit::Fixup))
+        );
+        assert_eq!(commits(plain('d')), Some(RewriteCommit(Edit::Drop)));
+        assert_eq!(commits(plain('e')), Some(RewriteCommit(Edit::Reword)));
+        for id in [
+            "commits.squash",
+            "commits.fixup",
+            "commits.drop",
+            "commits.reword",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn rewrites_say_why_they_cannot_run() {
+        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
+        let row = |i: usize, parents: Vec<String>| crate::git::log::CommitRow {
+            oid: ids[i].clone(),
+            short_oid: "x".into(),
+            parents,
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        };
+        let all = [
+            squash_disabled,
+            fixup_disabled,
+            drop_disabled,
+            reword_disabled,
+        ];
+        let mut state = AppState::new(Context::Workspace);
+        for disabled in all {
+            assert_eq!(disabled(&state), Some("No commits"));
+        }
+        // `a` on `b`, the root.
+        state.commits.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
+        assert_eq!(drop_disabled(&state), None);
+        assert_eq!(reword_disabled(&state), None);
+        let below_is_root = Some("The commit below is the first commit");
+        assert_eq!(squash_disabled(&state), below_is_root);
+        assert_eq!(fixup_disabled(&state), below_is_root);
+        state.commits.selected = 1;
+        for disabled in all {
+            assert_eq!(disabled(&state), Some("Cannot rewrite the first commit"));
+        }
+
+        state.commits.selected = 0;
+        state.commits.rows[1].parents = vec![ids[2].clone()];
+        for disabled in all {
+            assert_eq!(disabled(&state), None);
+        }
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Rebase],
+        });
+        for disabled in all {
+            assert_eq!(
+                disabled(&state),
+                Some("Finish or abort the operation in progress")
+            );
+        }
+        state.op_seq = Some(1);
+        for disabled in all {
+            assert_eq!(disabled(&state), Some(OP_RUNNING));
+        }
+    }
+
+    #[test]
     fn the_hard_reset_question_has_no_enter_and_n_or_esc_keeps_the_work() {
         let state = AppState::new(Context::Workspace);
         let resolve_in = |key| match resolve(
@@ -4353,7 +4524,7 @@ mod tests {
             assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
         }
         assert!(!REPO_LOCKED.contains(&"commits.checkout"));
-        assert!(build(&[("commits.checkout", &["F"])], Trust::Repo).is_ok());
+        assert!(build(&[("commits.checkout", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -4793,14 +4964,14 @@ mod tests {
                 registry().iter().any(|b| b.id == *id),
                 "{id} is not a binding"
             );
-            let moved = build(&[(id, &["F"])], Trust::Repo).unwrap_err();
+            let moved = build(&[(id, &["Z"])], Trust::Repo).unwrap_err();
             assert_eq!(
                 moved,
                 format!("\"{id}\" can only be changed in the global config file")
             );
             assert!(build(&[(id, &[])], Trust::Repo).is_err(), "{id}");
             if *id != "global.quit" {
-                assert!(build(&[(id, &["F"])], Trust::Global).is_ok(), "{id}");
+                assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
                 assert!(build(&[(id, &[])], Trust::Global).is_ok(), "{id}");
             }
         }
@@ -4846,6 +5017,7 @@ mod tests {
                     | ConfirmResetHard
                     | RemoveRemote
                     | ConfirmRemoveRemote
+                    | RewriteCommit(_)
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

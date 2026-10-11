@@ -17,6 +17,7 @@ use crate::git::ops::{GitOp, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
+use crate::sequence_editor::editor_value;
 
 /// Something to run with the terminal handed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +80,8 @@ pub fn execute_with(
             op,
         },
         HandOff::Attached { tag, op } => AppIntent::OpFinished {
-            result: run_on_terminal(op_command(&op), runner, pause),
+            result: attached_command(&op, std::env::current_exe)
+                .and_then(|cmd| run_on_terminal(cmd, runner, pause)),
             tag,
             op,
         },
@@ -100,6 +102,21 @@ pub fn execute_with(
             result: run_command(&argv, workdir).map(|()| String::new()),
         },
     }
+}
+
+/// The command for an attached `op`. An interactive rebase also names
+/// Kika, at `exe`, as git's sequence editor, which rewrites the todo list
+/// to the plan; without that path nothing may run.
+fn attached_command(
+    op: &GitOp,
+    exe: impl FnOnce() -> io::Result<PathBuf>,
+) -> Result<GitCommand, String> {
+    let cmd = op_command(op);
+    if !matches!(op, GitOp::InteractiveRebase(_)) {
+        return Ok(cmd);
+    }
+    let exe = exe().map_err(|e| io_error("Could not find Kika's own program", &e))?;
+    Ok(cmd.env("GIT_SEQUENCE_EDITOR", editor_value(&exe)))
 }
 
 /// Run `argv` directly, with no shell in between, and wait for it.
@@ -189,7 +206,7 @@ fn run_on_terminal(
     runner: &dyn GitRunner,
     pause: &dyn Fn(),
 ) -> Result<(), String> {
-    let subcommand = cmd.args()[0].to_string_lossy().into_owned();
+    let subcommand = cmd.subcommand().to_string_lossy().into_owned();
     if let Some(tty) = gpg_tty(std::env::var_os("GPG_TTY"), stdin_tty()) {
         cmd = cmd.env("GPG_TTY", tty);
     }
@@ -691,6 +708,61 @@ mod tests {
             op: op.clone(),
             result,
         }
+    }
+
+    #[test]
+    fn an_interactive_rebase_runs_attached_with_kika_as_the_sequence_editor() {
+        let op = GitOp::InteractiveRebase(crate::git::rebase_plan::sample());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let record = std::sync::Arc::clone(&seen);
+        let runner = FakeRunner::new()
+            .expect_attached(
+                &[
+                    "-c",
+                    "rebase.updateRefs=false",
+                    "-c",
+                    "rebase.rebaseMerges=false",
+                    "rebase",
+                    "-i",
+                    "--autostash",
+                    "--no-autosquash",
+                    "--keep-empty",
+                    &"c".repeat(40),
+                ],
+                true,
+            )
+            .on_attached(move |cmd| {
+                let editor = cmd
+                    .envs()
+                    .iter()
+                    .find(|(k, _)| k == "GIT_SEQUENCE_EDITOR")
+                    .map(|(_, v)| v.clone());
+                *record.lock().unwrap() = editor;
+            });
+        assert_eq!(attached_with(&runner, &op), (finished(&op, Ok(())), 0));
+        runner.assert_done();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some(editor_value(&exe)));
+        assert_eq!(runner.inputs(), [None]);
+    }
+
+    #[test]
+    fn without_its_own_path_kika_starts_no_rebase() {
+        let op = GitOp::InteractiveRebase(crate::git::rebase_plan::sample());
+        let missing = || Err(io::Error::from(io::ErrorKind::NotFound));
+        let error = attached_command(&op, missing).unwrap_err();
+        assert!(
+            error.starts_with("Could not find Kika's own program"),
+            "{error}"
+        );
+        // Other ops do not need it.
+        let other = GitOp::Continue(crate::git::repo_state::Operation::Rebase);
+        assert_eq!(attached_command(&other, missing), Ok(op_command(&other)));
+        let with = attached_command(&op, || Ok(PathBuf::from("/opt/k's/kika"))).unwrap();
+        assert_eq!(
+            with.envs().last(),
+            Some(&("GIT_SEQUENCE_EDITOR".into(), r"'/opt/k'\''s/kika'".into()))
+        );
     }
 
     /// What an attached run saw: its message file's path, contents and mode.

@@ -60,7 +60,11 @@ pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>) -> bool {
 pub fn runs_attached(op: &GitOp) -> bool {
     match op {
         GitOp::Merge { strategy, .. } => *strategy == MergeStrategy::NoFastForward,
-        GitOp::Rebase { .. } | GitOp::Revert(_) | GitOp::Continue(_) | GitOp::Skip(_) => true,
+        GitOp::Rebase { .. }
+        | GitOp::InteractiveRebase(_)
+        | GitOp::Revert(_)
+        | GitOp::Continue(_)
+        | GitOp::Skip(_) => true,
         // The merge tool is the user's own program on the terminal.
         GitOp::MergeTool(_) => true,
         _ => false,
@@ -169,6 +173,7 @@ mod tests {
             GitOp::MergeTool("a.txt".into()),
             GitOp::Revert(oid()),
             GitOp::Continue(Operation::Revert),
+            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
         ];
         for op in attached {
             assert!(runs_attached(&op), "{op:?}");
