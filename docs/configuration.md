@@ -67,8 +67,8 @@ Key names:
 
 - one printable character, such as `a`, `A`, `?` or `+`. Letters are
   case-sensitive: `J` is Shift+J;
-- or one of `space`, `esc`, `enter`, `tab`, `bksp`, `up`, `down`, `left`,
-  `right`, `pgup`, `pgdn`, `home`, `end`;
+- or one of `space`, `esc`, `enter`, `tab`, `shift-tab`, `bksp`, `up`, `down`,
+  `left`, `right`, `pgup`, `pgdn`, `home`, `end`;
 - either with an optional `ctrl-` prefix, written in lower case: `ctrl-s`.
 
 Key changes are picked up when Kika regains focus and when you switch
@@ -348,7 +348,7 @@ means a repository's `.kika.toml` cannot change it.
 | `global.help` | `?` | Show the keys for this panel | |
 | `global.quit` | `q`, `esc`, `ctrl-c` | Quit Kika | locked |
 
-### Workspace (file list, diff and blame)
+### Workspace (every panel: Status, Files, Branches, Commits, Stash, diff and blame)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -362,6 +362,15 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
+| `workspace.focus_status` | `1` | Focus the Status panel | |
+| `workspace.focus_files` | `2` | Focus the Files panel | |
+| `workspace.focus_branches` | `3` | Focus the Branches panel | |
+| `workspace.focus_commits` | `4` | Focus the Commits panel | |
+| `workspace.focus_stash` | `5` | Focus the Stash panel | |
+| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks | |
+| `workspace.next_panel` | `tab` | Focus the next panel | |
+| `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
+| `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
 
 ### File list
 
@@ -472,6 +481,10 @@ means a repository's `.kika.toml` cannot change it.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `help.close` | `?`, `esc` | Close this menu | |
+| `help.down` | `j`, `down` | Scroll the list down | |
+| `help.up` | `k`, `up` | Scroll the list up | |
+| `help.page_down` | `pgdn` | Scroll the list down a page | |
+| `help.page_up` | `pgup` | Scroll the list up a page | |
 
 ### Menus
 

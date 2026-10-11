@@ -50,6 +50,7 @@ fn doc_key(key: &KeyPattern) -> String {
         KeyCode::Down => "down".to_string(),
         KeyCode::Left => "left".to_string(),
         KeyCode::Right => "right".to_string(),
+        KeyCode::BackTab => "shift-tab".to_string(),
         _ => return label.to_lowercase(),
     };
     // The label ends in an arrow glyph; keep any `ctrl-` before it.
