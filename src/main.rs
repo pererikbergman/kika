@@ -1,3 +1,4 @@
+mod ansi;
 mod app;
 mod blame_view;
 mod cli;
@@ -10,6 +11,7 @@ mod diff_stream;
 #[cfg(test)]
 mod e2e;
 mod effect;
+mod external_diff;
 mod git;
 mod handoff;
 mod hunk_view;
@@ -22,6 +24,7 @@ mod popup_view;
 mod recent;
 mod recent_list;
 mod refresh;
+mod rendered_view;
 mod submodule_list;
 mod view;
 mod watch;
