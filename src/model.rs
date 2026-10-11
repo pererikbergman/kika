@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::BranchesPanel;
 use crate::commit_editor::CommitEditor;
+use crate::commit_files::CommitFilesList;
 use crate::commits::CommitsPanel;
 use crate::config::ConfigError;
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
@@ -14,6 +15,7 @@ use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::commit_files::{CommitFile, CommitRange};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
@@ -609,6 +611,13 @@ impl AppState {
                 return self.more_commits();
             }
             AppIntent::CommitPrev => self.commits.move_by(-1),
+            AppIntent::OpenCommitFiles => return self.open_commit_files(),
+            AppIntent::CloseCommitFiles => return self.close_commit_files(),
+            AppIntent::CommitFileNext => return self.move_commit_file(1),
+            AppIntent::CommitFilePrev => return self.move_commit_file(-1),
+            AppIntent::CommitFilesLoaded { tag, result } => {
+                return self.commit_files_loaded(tag, result);
+            }
             AppIntent::OpenSubmodules => return self.open_submodules(),
             AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
             AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
@@ -777,6 +786,9 @@ impl AppState {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
             (Context::Workspace, Focus::Branches) => KeyScope::Branches,
+            (Context::Workspace, Focus::Commits) if self.commits.open.is_some() => {
+                KeyScope::CommitFiles
+            }
             (Context::Workspace, Focus::Commits) => KeyScope::Commits,
             (Context::Workspace, Focus::Status) => KeyScope::Status,
             (Context::Workspace, Focus::Stash) => KeyScope::Workspace,
@@ -858,9 +870,11 @@ impl AppState {
 
     /// The diff the Diff pane shows: the selected file's from the Files
     /// panel, the focused view's side with the Diff pane focused (renames
-    /// off, as its patch has them), nothing behind a blame.
+    /// off, as its patch has them), nothing behind a blame. A commit's file
+    /// is never rendered, so it is not one of these.
     fn shown_request(&self) -> Option<DiffRequest> {
         match &self.focus {
+            Focus::Commits if self.commits.open.is_some() => None,
             Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
                 .selected
                 .and_then(|i| self.files.get(i))
@@ -870,6 +884,7 @@ impl AppState {
                 orig_path: None,
                 side: view.side,
                 options: self.diff_options,
+                commit: None,
             }),
             Focus::Blame(_) => None,
         }
@@ -1445,25 +1460,16 @@ impl AppState {
     /// Select file `index` and start loading its diff. With the Diff pane
     /// focused, its patch reloads too, on the same side while the file is
     /// the same one.
+    ///
+    /// While a commit's files are open the pane is theirs: the selection
+    /// moves, but nothing loads.
     fn select(&mut self, index: usize) -> Vec<Effect> {
         self.selected = Some(index);
+        if self.commits.open.is_some() {
+            return vec![];
+        }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
-        let seq = self.take_seq();
-        let want = self.diff.begin(seq, &request.path, self.pane_rows());
-        // Diff streams report many times, so they stay out of the busy count.
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: false,
-        };
-        let mut effects = vec![
-            Effect::LoadDiff {
-                tag,
-                request: request.clone(),
-                want,
-            },
-            Effect::DiffLoadingDelay { tag },
-        ];
+        let mut effects = self.stream_diff(request.clone());
         if let Focus::Diff(view) = &mut self.focus {
             // A file that stopped (or started) being untracked has other
             // sides now, so the remembered one no longer applies.
@@ -1478,6 +1484,22 @@ impl AppState {
         effects
     }
 
+    /// Start streaming `request` into the Diff pane.
+    fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
+        let seq = self.take_seq();
+        let want = self.diff.begin(seq, &request.path, self.pane_rows());
+        // Diff streams report many times, so they stay out of the busy count.
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: false,
+        };
+        vec![
+            Effect::LoadDiff { tag, request, want },
+            Effect::DiffLoadingDelay { tag },
+        ]
+    }
+
     /// Take new diff options, with the context clamped to its limits, and
     /// reload the selected file's diff with them. `select` keeps the scroll
     /// and the hunk cursor, since the file is the same one.
@@ -1490,6 +1512,9 @@ impl AppState {
             return vec![];
         }
         self.diff_options = options;
+        if self.commits.open.is_some() {
+            return self.commit_file_diff();
+        }
         match self.selected {
             Some(index) if index < self.files.len() => self.select(index),
             _ => vec![],
@@ -1497,17 +1522,25 @@ impl AppState {
     }
 
     /// Focus `panel`. A side panel expands, and closes a blame on the way.
-    /// The diff keeps its hunk view when it already has focus.
+    /// The diff keeps its hunk view when it already has focus. Leaving the
+    /// Commits panel closes a commit's files, so the pane never shows a
+    /// commit's diff under another panel.
     fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
         match panel {
             Panel::Side(side) => {
+                let mut effects = if side == SidePanel::Commits {
+                    vec![]
+                } else {
+                    self.close_commit_files()
+                };
                 self.focus = Focus::side(side);
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
-                self.render_if_stale()
+                effects.extend(self.render_if_stale());
+                effects
             }
             Panel::Diff if self.focus.is_side() => self.focus_diff(),
             Panel::Diff => vec![],
@@ -1529,7 +1562,11 @@ impl AppState {
     }
 
     /// Focus the Diff pane on the selected file, on the side its diff shows.
+    /// Not while a commit's file is shown: it has no hunks to stage.
     fn focus_diff(&mut self) -> Vec<Effect> {
+        if self.commits.open.is_some() {
+            return vec![];
+        }
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
             return vec![];
         };
@@ -1561,6 +1598,7 @@ impl AppState {
             orig_path: None,
             side: view.side,
             options: self.diff_options,
+            commit: None,
         };
         vec![Effect::LoadPatch { tag, request }]
     }
@@ -1682,6 +1720,9 @@ impl AppState {
     fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
         if self.files.is_empty() {
             self.selected = None;
+            if self.commits.open.is_some() {
+                return vec![];
+            }
             self.diff = DiffPane::default();
             self.rendered = None;
             // Nothing is left for the diff or a blame to show.
@@ -2559,6 +2600,114 @@ impl AppState {
     }
 }
 
+/// A commit opened to its files from the Commits panel. The Diff pane
+/// shows the selected file's change in that commit until it closes.
+impl AppState {
+    /// Open the selected commit's files in place of the log. A user
+    /// effect, so the busy indicator shows while git lists them.
+    fn open_commit_files(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace
+            || self.focus != Focus::Commits
+            || self.commits.open.is_some()
+        {
+            return vec![];
+        }
+        let Some(row) = self.commits.rows.get(self.commits.selected) else {
+            return vec![];
+        };
+        let range = match CommitRange::of(row) {
+            Ok(range) => range,
+            Err(message) => {
+                self.commits.error = Some(message);
+                return vec![];
+            }
+        };
+        let short_oid = row.short_oid.clone();
+        let seq = self.take_seq();
+        self.commits.open = Some(CommitFilesList::begin(range.clone(), short_oid, seq));
+        self.busy += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::LoadCommitFiles { tag, range }]
+    }
+
+    /// Show the first file's diff, or nothing for a commit with no files.
+    fn commit_files_loaded(
+        &mut self,
+        tag: Tag,
+        result: Result<Vec<CommitFile>, String>,
+    ) -> Vec<Effect> {
+        // Every user effect reports back once, stale or not.
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        let Some(open) = &mut self.commits.open else {
+            return vec![];
+        };
+        if !open.loaded(tag.seq, result) {
+            return vec![];
+        }
+        if open.selected_file().is_none() {
+            self.diff = DiffPane::default();
+            return vec![Effect::CancelDiff];
+        }
+        // Another commit's file: start at its top, whatever was shown.
+        self.diff.path = None;
+        self.commit_file_diff()
+    }
+
+    fn move_commit_file(&mut self, delta: isize) -> Vec<Effect> {
+        let moved = self
+            .commits
+            .open
+            .as_mut()
+            .is_some_and(|open| open.move_by(delta));
+        if moved {
+            self.commit_file_diff()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Stream the selected commit file's diff, if one is selected.
+    fn commit_file_diff(&mut self) -> Vec<Effect> {
+        let request = self.commits.open.as_ref().and_then(|open| {
+            let file = open.selected_file()?;
+            Some(DiffRequest::for_commit_file(
+                &open.range,
+                file,
+                self.diff_options,
+            ))
+        });
+        match request {
+            Some(request) => self.stream_diff(request),
+            None => vec![],
+        }
+    }
+
+    /// Back to the log, still on the same commit, with the pane showing the
+    /// selected working-tree file again.
+    fn close_commit_files(&mut self) -> Vec<Effect> {
+        if self.commits.open.take().is_none() {
+            return vec![];
+        }
+        self.diff.path = None;
+        match self.selected {
+            Some(index) if index < self.files.len() => self.select(index),
+            _ => {
+                self.diff = DiffPane::default();
+                vec![Effect::CancelDiff]
+            }
+        }
+    }
+}
+
 /// Watching for changes made outside Kika. None of it counts as busy.
 impl AppState {
     fn watch(&mut self, event: WatchEvent) -> Vec<Effect> {
@@ -3333,6 +3482,7 @@ mod tests {
                     orig_path: None,
                     side: DiffSide::Worktree,
                     options: Default::default(),
+                    commit: None,
                 },
                 want: 21 + DIFF_PREFETCH,
             }
@@ -3873,6 +4023,7 @@ mod tests {
                     orig_path: None,
                     side: DiffSide::Worktree,
                     options: Default::default(),
+                    commit: None,
                 }
             ),
             other => panic!("{other:?}"),
@@ -5005,6 +5156,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             }
         );
         assert_eq!(view(&state).side, DiffSide::Worktree);
@@ -7668,6 +7820,257 @@ mod tests {
         assert!(!state.commits.loaded);
         let (tag, _, skip) = commits_load(&effects);
         assert_eq!((tag.generation, skip), (state.generation, 0));
+    }
+
+    // --- A commit's files ---
+
+    use crate::git::commit_files::{CommitFile, CommitId};
+
+    /// `three_files` in the worktree, eight commits in the log, and the
+    /// Commits panel focused with the cursor on `c5`.
+    fn on_commit_five() -> AppState {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.commits.begin_page(900, 0);
+        state
+            .commits
+            .page_loaded(900, 0, Ok((page(0, 8, true), 1_000)));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.commits.selected = 5;
+        state
+    }
+
+    fn files_load(effects: &[Effect]) -> (Tag, CommitRange) {
+        match effects {
+            [Effect::LoadCommitFiles { tag, range }] => (*tag, range.clone()),
+            other => panic!("expected one LoadCommitFiles, got {other:?}"),
+        }
+    }
+
+    fn range_of(oid: &str, parent: &str) -> CommitRange {
+        CommitRange {
+            oid: CommitId::parse(oid).unwrap(),
+            parent: CommitId::parse(parent),
+        }
+    }
+
+    fn commit_file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
+        CommitFile {
+            status,
+            path: path.into(),
+            orig_path: orig.map(Into::into),
+        }
+    }
+
+    fn two_commit_files() -> Vec<CommitFile> {
+        vec![
+            commit_file('M', "src/lib.rs", None),
+            commit_file('R', "new.rs", Some("old.rs")),
+        ]
+    }
+
+    /// Open `c5` and answer with `files`; returns the effects of the answer.
+    fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect> {
+        let (tag, _) = files_load(&press(state, KeyCode::Enter));
+        state.update(AppIntent::CommitFilesLoaded {
+            tag,
+            result: Ok(files),
+        })
+    }
+
+    #[test]
+    fn enter_opens_the_commit_against_its_first_parent_as_a_user_load() {
+        let mut state = on_commit_five();
+        let busy = state.busy;
+
+        let (tag, range) = files_load(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(range, range_of("c5", "c6"));
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        let open = state.commits.open.as_ref().unwrap();
+        assert_eq!((open.short_oid.as_str(), open.loaded), ("c5", false));
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        assert_eq!(state.commits.selected, 5);
+    }
+
+    #[test]
+    fn a_commit_whose_id_or_parent_is_not_hex_opens_nothing_and_says_why() {
+        for (oid, parent) in [("--output=x", "c6"), ("c5", "-p")] {
+            let mut state = on_commit_five();
+            state.commits.rows[5].oid = oid.into();
+            state.commits.rows[5].parents = vec![parent.into()];
+
+            assert_eq!(state.update(AppIntent::OpenCommitFiles), vec![]);
+
+            assert_eq!(state.commits.open, None);
+            let error = state.commits.error.as_deref().unwrap();
+            assert!(error.starts_with("not a commit id"), "{error}");
+        }
+    }
+
+    #[test]
+    fn enter_with_no_commits_is_disabled() {
+        let mut state = on_commit_five();
+        state.commits.rows.clear();
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("No commits"));
+    }
+
+    #[test]
+    fn the_loaded_files_show_the_first_ones_diff_in_that_commit_and_j_the_next() {
+        let mut state = on_commit_five();
+        let busy = state.busy;
+        let range = range_of("c5", "c6");
+
+        let effects = opened(&mut state, two_commit_files());
+
+        assert_eq!(state.busy, busy);
+        let request = diff_request(&effects);
+        assert_eq!(request.commit, Some(range.clone()));
+        assert_eq!(request.path, "src/lib.rs".into());
+        assert_eq!(state.diff.path, Some("src/lib.rs".into()));
+
+        let request = diff_request(&press(&mut state, KeyCode::Char('j')));
+        assert_eq!(request.commit, Some(range));
+        assert_eq!(
+            (request.path, request.orig_path),
+            ("new.rs".into(), Some("old.rs".into()))
+        );
+        // The ends of the list load nothing more.
+        assert_eq!(press(&mut state, KeyCode::Down), vec![]);
+        let request = diff_request(&state.update(AppIntent::CommitFilePrev));
+        assert_eq!(request.path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn a_stale_or_other_repositorys_file_list_is_dropped_but_lowers_busy() {
+        let stale: [fn(Tag) -> Tag; 2] = [
+            |tag| Tag {
+                seq: tag.seq + 1,
+                ..tag
+            },
+            |tag| Tag {
+                generation: tag.generation + 1,
+                ..tag
+            },
+        ];
+        for stale in stale {
+            let mut state = on_commit_five();
+            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
+            let busy = state.busy;
+            let effects = state.update(AppIntent::CommitFilesLoaded {
+                tag: stale(tag),
+                result: Ok(two_commit_files()),
+            });
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.busy, busy - 1);
+            assert!(!state.commits.open.as_ref().unwrap().loaded);
+        }
+    }
+
+    #[test]
+    fn a_commit_with_no_files_or_a_failed_list_empties_the_diff() {
+        for result in [Ok(vec![]), Err("bad object".to_string())] {
+            let mut state = on_commit_five();
+            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
+            let effects = state.update(AppIntent::CommitFilesLoaded { tag, result });
+            assert_eq!(effects, vec![Effect::CancelDiff]);
+            assert_eq!(state.diff, DiffPane::default());
+        }
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_same_commit_and_reloads_the_worktree_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        press(&mut state, KeyCode::Char('j'));
+
+        let effects = press(&mut state, KeyCode::Esc);
+
+        assert!(!state.should_quit);
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.commits.selected, 5);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        let request = diff_request(&effects);
+        assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+    }
+
+    #[test]
+    fn closing_with_no_worktree_file_empties_the_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        state.files.clear();
+        state.selected = None;
+        assert_eq!(
+            state.update(AppIntent::CloseCommitFiles),
+            vec![Effect::CancelDiff]
+        );
+        assert_eq!(state.diff, DiffPane::default());
+    }
+
+    #[test]
+    fn a_status_refresh_while_open_keeps_the_commit_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        let diff = state.diff.clone();
+
+        for files in [vec![changed("b.rs", 'M', '.')], vec![]] {
+            let tag = refresh_tag(&mut state);
+            let effects = state.update(AppIntent::StatusLoaded {
+                tag,
+                result: Ok(repo(files.clone())),
+            });
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::LoadDiff { .. } | Effect::CancelDiff)),
+                "{effects:?}"
+            );
+            assert_eq!(state.diff, diff);
+            assert_eq!(state.selected, (!files.is_empty()).then_some(0));
+        }
+    }
+
+    #[test]
+    fn new_diff_options_reload_the_open_commits_file() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        assert!(request.options.ignore_whitespace);
+        assert_eq!(request.commit, Some(range_of("c5", "c6")));
+        assert_eq!(request.path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn the_diff_cannot_take_focus_from_an_open_commit() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        assert_eq!(press(&mut state, KeyCode::Char('l')), vec![]);
+        assert_eq!(
+            state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff)),
+            vec![]
+        );
+        assert_eq!(state.focus, Focus::Commits);
+    }
+
+    #[test]
+    fn focusing_another_panel_closes_the_commit_and_shows_the_worktree_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+
+        let effects = press(&mut state, KeyCode::Char('2'));
+
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.focus, Focus::Files);
+        let request = diff_request(&effects);
+        assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+
+        // Focusing the Commits panel again from itself keeps a commit open.
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        assert_eq!(press(&mut state, KeyCode::Char('4')), vec![]);
+        assert!(state.commits.open.is_some());
     }
 
     // --- Watching for outside changes ---

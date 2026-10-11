@@ -9,6 +9,7 @@ use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::commit_files::CommitFile;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy};
@@ -215,6 +216,18 @@ pub enum AppIntent {
     /// Move the commit cursor down or up.
     CommitNext,
     CommitPrev,
+    /// Show the selected commit's files in place of the log.
+    OpenCommitFiles,
+    /// Back from a commit's files to the log, at the same commit.
+    CloseCommitFiles,
+    /// Move the cursor in a commit's files down or up.
+    CommitFileNext,
+    CommitFilePrev,
+    /// A commit's files were read; `tag` says which load.
+    CommitFilesLoaded {
+        tag: Tag,
+        result: Result<Vec<CommitFile>, String>,
+    },
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.
