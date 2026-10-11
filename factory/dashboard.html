@@ -9,6 +9,7 @@
     --bg: #f6f6f4; --panel: #ffffff; --ink: #1d1d1b; --muted: #77776f; --line: #e3e2dc;
     --pass: #2f8f5b; --pass-bg: #e3f3ea; --changes: #b7791f; --changes-bg: #fbf0dc;
     --human: #c2410c; --human-bg: #fdebe2; --merged: #5b5bd6; --accent: #1d1d1b;
+    --go: #16a34a; --go-bg: #dcfce7; --stop: #dc2626; --stop-bg: #fee2e2;
     --shadow: 0 1px 2px rgba(0,0,0,.05), 0 2px 8px rgba(0,0,0,.04);
   }
   @media (prefers-color-scheme: dark) {
@@ -16,6 +17,7 @@
       --bg: #141413; --panel: #1e1e1c; --ink: #ecebe6; --muted: #9a998f; --line: #2e2d2a;
       --pass: #5cc48a; --pass-bg: #1d3327; --changes: #e0a84a; --changes-bg: #3a2e18;
       --human: #f08a5d; --human-bg: #3d2318; --merged: #9b9bf5; --accent: #ecebe6;
+      --go: #4ade80; --go-bg: #14361f; --stop: #f87171; --stop-bg: #451a1a;
       --shadow: none;
     }
   }
@@ -37,8 +39,20 @@
     box-shadow: var(--shadow); cursor: pointer; transition: transform .12s, border-color .12s; }
   .card:hover { transform: translateY(-1px); border-color: var(--muted); }
   .card.human { border-color: var(--human); background: var(--human-bg); }
-  .card.flash { animation: flash 1.2s ease-out; }
-  @keyframes flash { from { box-shadow: 0 0 0 3px var(--merged); } to { box-shadow: var(--shadow); } }
+  /* A card that just changed column pulses: green for any move, red into needs-human. */
+  .card.flash-go { animation: flash-go 2.4s ease-out both; }
+  .card.flash-stop { animation: flash-stop 2.4s ease-out both; }
+  @keyframes flash-go {
+    0%, 33%, 66% { box-shadow: 0 0 0 3px var(--go); background: var(--go-bg); border-color: var(--go); }
+    16%, 50%     { box-shadow: 0 0 0 1px var(--go); }
+  }
+  @keyframes flash-stop {
+    0%, 33%, 66% { box-shadow: 0 0 0 3px var(--stop); background: var(--stop-bg); border-color: var(--stop); }
+    16%, 50%     { box-shadow: 0 0 0 1px var(--stop); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .card.flash-go, .card.flash-stop { animation-timing-function: steps(1, end); }
+  }
   .id { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
   .title { font-weight: 600; margin: 2px 0 6px; }
   .meta { display: flex; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
@@ -107,6 +121,7 @@ const STAGES = [
 ];
 const REVIEWERS = [["security", "SEC"], ["ux", "UX"], ["ui", "UI"], ["code", "CODE"]];
 let board = { jobs: [] }, lastStages = {}, openJob = null, openFile = null;
+const FLASH_MS = 2400, flashes = {};
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
@@ -131,7 +146,11 @@ function prLink(job) {
 
 function card(job) {
   const human = job.stage === "needs-human";
-  const flash = lastStages[job.id] && lastStages[job.id] !== job.stage ? " flash" : "";
+  const f = flashes[job.id];
+  const elapsed = f ? Date.now() - f.start : FLASH_MS;
+  if (f && elapsed >= FLASH_MS) delete flashes[job.id];
+  // The board re-renders every poll; a negative delay resumes the pulse where it was.
+  const flash = elapsed < FLASH_MS ? ` flash-${f.kind}" style="animation-delay:-${elapsed}ms` : "";
   const rounds = (job.rounds || []).map((r, i) => `
     <div class="round"><span class="n">R${i + 1}</span>${REVIEWERS.map(([k, label]) =>
       `<span class="chip ${esc(r[k] || "pending")}" title="${k}: ${esc(r[k] || "pending")}">${label}</span>`).join("")}</div>`).join("");
@@ -147,6 +166,10 @@ function card(job) {
 
 function render() {
   const el = document.getElementById("board");
+  board.jobs.forEach(j => {
+    if (lastStages[j.id] && lastStages[j.id] !== j.stage)
+      flashes[j.id] = { kind: j.stage === "needs-human" ? "stop" : "go", start: Date.now() };
+  });
   el.innerHTML = STAGES.map(([key, label]) => {
     const jobs = board.jobs.filter(j => j.stage === key);
     return `<section class="col${key === "needs-human" ? " human" : ""}">
