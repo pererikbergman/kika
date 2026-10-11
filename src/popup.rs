@@ -34,6 +34,7 @@ pub enum Popup {
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
+    RemoveRemote(RemoveRemoteConfirm),
     Submodules(SubmoduleList),
     Recent(RecentList),
     /// Git or ssh asks something for a running fetch, pull or push.
@@ -196,6 +197,30 @@ impl ResetHardConfirm {
     }
 }
 
+/// "Remove this remote?" Like [`DeleteBranchConfirm`], it carries the op
+/// chosen when it was asked, so a reload before the answer cannot change
+/// the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveRemoteConfirm {
+    /// The remote's display name, already terminal-safe.
+    pub name: String,
+    pub op: GitOp,
+}
+
+impl RemoveRemoteConfirm {
+    pub fn title(&self) -> &'static str {
+        "Remove remote"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Remove remote {}? Its remote-tracking branches are deleted, and \
+             branches tracking it lose their upstream. (y/n)",
+            self.name
+        )
+    }
+}
+
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
@@ -300,6 +325,16 @@ pub enum PromptKind {
     NewBranch,
     /// A new name for the selected branch.
     RenameBranch,
+    /// The name of a local branch to track the selected remote branch.
+    TrackBranch,
+    /// A new remote's name.
+    RemoteName,
+    /// A new remote's URL, asked after its name.
+    RemoteUrl,
+    /// A new name for the selected remote.
+    RenameRemote,
+    /// The remote branch the selected local branch should track.
+    SetUpstream,
 }
 
 impl PromptKind {
@@ -309,6 +344,11 @@ impl PromptKind {
             PromptKind::Command => "Command",
             PromptKind::NewBranch => "New branch",
             PromptKind::RenameBranch => "Rename branch",
+            PromptKind::TrackBranch => "Check out as",
+            PromptKind::RemoteName => "New remote name",
+            PromptKind::RemoteUrl => "New remote URL",
+            PromptKind::RenameRemote => "Rename remote",
+            PromptKind::SetUpstream => "Set upstream",
         }
     }
 
@@ -318,6 +358,11 @@ impl PromptKind {
             PromptKind::Command => AppIntent::CommandPromptAnswered(text),
             PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
             PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
+            PromptKind::TrackBranch => AppIntent::TrackRemoteBranchNamed(text),
+            PromptKind::RemoteName => AppIntent::AddRemoteNamed(text),
+            PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
+            PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
+            PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
         }
     }
 }
@@ -545,6 +590,45 @@ mod tests {
         assert_eq!(
             PromptKind::RenameBranch.submit("r".into()),
             AppIntent::RenameBranchTo("r".into())
+        );
+    }
+
+    #[test]
+    fn remote_and_upstream_prompts_answer_with_their_intents() {
+        let t = || "t".to_string();
+        assert_eq!(
+            PromptKind::TrackBranch.submit(t()),
+            AppIntent::TrackRemoteBranchNamed(t())
+        );
+        assert_eq!(
+            PromptKind::RemoteName.submit(t()),
+            AppIntent::AddRemoteNamed(t())
+        );
+        assert_eq!(
+            PromptKind::RemoteUrl.submit(t()),
+            AppIntent::AddRemoteUrl(t())
+        );
+        assert_eq!(
+            PromptKind::RenameRemote.submit(t()),
+            AppIntent::RenameRemoteTo(t())
+        );
+        assert_eq!(
+            PromptKind::SetUpstream.submit(t()),
+            AppIntent::SetUpstreamTo(t())
+        );
+    }
+
+    #[test]
+    fn the_remove_remote_question_names_it_and_its_branches() {
+        let ask = RemoveRemoteConfirm {
+            name: "fork".into(),
+            op: GitOp::RemoveRemote("fork".into()),
+        };
+        let question = ask.question();
+        assert!(question.starts_with("Remove remote fork?"), "{question}");
+        assert!(
+            question.contains("remote-tracking branches are deleted"),
+            "{question}"
         );
     }
 

@@ -61,7 +61,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         ),
         // A checkout changes the worktree, which branch is current and so
         // the log of HEAD.
-        GitOp::Checkout(_) | GitOp::CreateBranch { .. } => (
+        GitOp::Checkout(_) | GitOp::CreateBranch { .. } | GitOp::CheckoutTracking { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
@@ -82,6 +82,18 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // The upstream shows in the Status panel and on the branch's row.
+        GitOp::SetUpstream { .. } | GitOp::UnsetUpstream(_) => {
+            (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath)
+        }
+        // A new remote has no branches until the user fetches.
+        GitOp::AddRemote { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // These rename or delete remote-tracking refs, which upstreams and
+        // the log's markers name.
+        GitOp::RenameRemote { .. } | GitOp::RemoveRemote(_) => (
+            &[Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
         // The tool resolves and stages the file, which can end the
         // conflicts the Status panel counts on.
         GitOp::MergeTool(_) => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
@@ -298,6 +310,55 @@ mod tests {
             force: true,
         };
         assert_eq!(plan(&delete).scopes, set(&[Scope::Branches]));
+    }
+
+    #[test]
+    fn tracking_checkout_reloads_what_a_checkout_does() {
+        let op = GitOp::CheckoutTracking {
+            name: "t".into(),
+            from: remote_branch(),
+        };
+        assert_eq!(plan(&op).scopes, plan(&GitOp::Checkout("t".into())).scopes);
+    }
+
+    #[test]
+    fn upstream_and_remote_ops_reload_the_branch_list_and_never_files() {
+        let upstream = [
+            GitOp::SetUpstream {
+                branch: "b".into(),
+                upstream: remote_branch(),
+            },
+            GitOp::UnsetUpstream("b".into()),
+        ];
+        for op in upstream {
+            assert_eq!(plan(&op).scopes, set(&[Scope::Branch, Scope::Branches]));
+        }
+        let add = GitOp::AddRemote {
+            name: "fork".into(),
+            url: "/srv/fork".into(),
+        };
+        assert_eq!(plan(&add).scopes, set(&[Scope::Branches]));
+        let refs = [
+            GitOp::RenameRemote {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GitOp::RemoveRemote("a".into()),
+        ];
+        for op in refs {
+            assert_eq!(
+                plan(&op).scopes,
+                set(&[Scope::Branch, Scope::Branches, Scope::Commits])
+            );
+        }
+    }
+
+    fn remote_branch() -> crate::git::remotes::RemoteBranch {
+        crate::git::remotes::RemoteBranch {
+            remote: "origin".into(),
+            short: b"t".to_vec(),
+            refname: b"refs/remotes/origin/t".to_vec(),
+        }
     }
 
     #[test]

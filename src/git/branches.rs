@@ -2,7 +2,7 @@
 //! it is ahead or behind, and whether deleting it would lose commits, in
 //! the order the user last checked them out. Also a branch's recent log.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use super::diff::terminal_safe;
 use super::runner::{GitCommand, GitOutput, GitRunner};
@@ -68,9 +68,14 @@ impl BranchName {
     /// `refs/heads/<name>`, for argv where a short name could be taken for
     /// something else, such as a tag or an option.
     pub fn full_ref(&self) -> OsString {
+        super::path::os_string(&self.ref_bytes())
+    }
+
+    /// `refs/heads/<name>` as bytes, to name the ref a log belongs to.
+    pub fn ref_bytes(&self) -> Vec<u8> {
         let mut bytes = b"refs/heads/".to_vec();
         bytes.extend(&self.0);
-        super::path::os_string(&bytes)
+        bytes
     }
 }
 
@@ -123,8 +128,9 @@ pub fn list_branches(runner: &dyn GitRunner) -> Result<Vec<Branch>, String> {
     Ok(rows.into_iter().map(|(branch, _)| branch).collect())
 }
 
-/// The newest commits of `name`.
-pub fn branch_log(runner: &dyn GitRunner, name: &BranchName) -> Result<Vec<LogRow>, String> {
+/// The newest commits of `refname`, a full ref such as `refs/heads/main`
+/// or `refs/remotes/origin/main`, so no tag or option can stand in for it.
+pub fn branch_log(runner: &dyn GitRunner, refname: &OsStr) -> Result<Vec<LogRow>, String> {
     let out = run(
         runner,
         GitCommand::new("log")
@@ -132,7 +138,7 @@ pub fn branch_log(runner: &dyn GitRunner, name: &BranchName) -> Result<Vec<LogRo
             .arg(LOG_LIMIT)
             .arg("--date=short")
             .arg("--format=%h%x1f%ad%x1f%an%x1f%s")
-            .arg(name.full_ref())
+            .arg(refname)
             .arg("--"),
     )?;
     Ok(out
@@ -244,7 +250,7 @@ fn recent_checkouts(runner: &dyn GitRunner) -> Vec<BranchName> {
 
 /// Run a read-only query that must not take the index lock from the user,
 /// returning its stdout or git's message.
-fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<Vec<u8>, String> {
+pub(super) fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<Vec<u8>, String> {
     let cmd = cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
     let GitOutput {
         success,
@@ -460,7 +466,7 @@ mod tests {
         commit(dir, "side \x1b[2J work", 86_400 * 365);
         git(dir, &["checkout", "-q", "main"]);
 
-        let rows = branch_log(&CliRunner::isolated(dir), &"side".into()).unwrap();
+        let rows = branch_log(&CliRunner::isolated(dir), OsStr::new("refs/heads/side")).unwrap();
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -489,7 +495,7 @@ mod tests {
             fail("fatal: bad \x1b[2Jref\n"),
         );
         assert_eq!(
-            branch_log(&fake, &"x".into()),
+            branch_log(&fake, OsStr::new("refs/heads/x")),
             Err("fatal: bad \u{FFFD}[2Jref".into())
         );
         let env: Vec<(OsString, OsString)> = vec![
@@ -535,7 +541,7 @@ mod tests {
             .expect("the raw name is listed");
         assert_eq!(raw.name.display(), "x\u{FFFD}");
 
-        let rows = branch_log(&runner, &raw.name).unwrap();
+        let rows = branch_log(&runner, &raw.name.full_ref()).unwrap();
         assert_eq!(rows.len(), 1, "only init, not the look-alike's commit");
         assert_eq!(rows[0].subject, "init");
     }
