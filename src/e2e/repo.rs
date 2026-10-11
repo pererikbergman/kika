@@ -94,6 +94,45 @@ impl TestRepo {
         self
     }
 
+    /// Add `n` empty commits on the current branch in one `git
+    /// fast-import`, a minute apart, with subjects `commit 1` to
+    /// `commit <n>`. Only for a repository with no commits yet.
+    pub fn history(self, n: usize) -> Self {
+        use std::io::Write;
+
+        let branch = String::from_utf8(self.git(["symbolic-ref", "HEAD"])).unwrap();
+        let mut stream = String::new();
+        for i in 1..=n {
+            let message = format!("commit {i}");
+            let time = 1_700_000_000 + 60 * i;
+            stream.push_str(&format!(
+                "commit {}\nmark :{i}\ncommitter Kika Test <test@example.com> {time} +0000\n\
+                 data {}\n{message}\n",
+                branch.trim(),
+                message.len()
+            ));
+            if i > 1 {
+                stream.push_str(&format!("from :{}\n", i - 1));
+            }
+            stream.push('\n');
+        }
+        let mut child = std::process::Command::new("git")
+            .current_dir(self.dir.path())
+            .envs(crate::git::runner::isolation_env())
+            .args(["fast-import", "--quiet"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stream.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        self
+    }
+
     pub fn stage(self, path: &str) -> Self {
         self.git(["add", "--", path]);
         self

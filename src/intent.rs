@@ -10,6 +10,7 @@ use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::{DiffChunk, DiffLine};
+use crate::git::log::{LogPage, Markers};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
 use crate::git::prompts::PromptFacts;
@@ -198,6 +199,21 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<(), String>,
     },
+    /// A page of the log finished; `tag` says which load, `skip` which
+    /// page. `Ok` also carries the unix time it was read at.
+    CommitsLoaded {
+        tag: Tag,
+        skip: usize,
+        result: Result<(LogPage, i64), String>,
+    },
+    /// The push and merge markers finished; `tag` says which load.
+    MarkersLoaded {
+        tag: Tag,
+        result: Result<Markers, String>,
+    },
+    /// Move the commit cursor down or up.
+    CommitNext,
+    CommitPrev,
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.

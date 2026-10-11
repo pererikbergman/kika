@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::BranchesPanel;
 use crate::commit_editor::CommitEditor;
+use crate::commits::CommitsPanel;
 use crate::config::ConfigError;
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
@@ -241,6 +242,8 @@ pub struct AppState {
     pub command_running: bool,
     /// The Branches panel and the selected branch's log.
     pub branches: BranchesPanel,
+    /// The history of `HEAD`, loaded at startup whether shown or not.
+    pub commits: CommitsPanel,
 }
 
 impl AppState {
@@ -288,6 +291,7 @@ impl AppState {
             pending_command: None,
             command_running: false,
             branches: BranchesPanel::default(),
+            commits: CommitsPanel::default(),
         }
     }
 
@@ -351,6 +355,7 @@ impl AppState {
                 self.status_selection = Selection::KeepPath;
                 let mut effects = self.refresh_status();
                 effects.extend(self.reload_branches());
+                effects.extend(self.reload_commits());
                 return effects;
             }
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
@@ -586,6 +591,22 @@ impl AppState {
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
             AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
+            AppIntent::CommitsLoaded { tag, skip, result } => {
+                if tag.generation == self.generation {
+                    self.commits.page_loaded(tag.seq, skip, result);
+                    return self.more_commits();
+                }
+            }
+            AppIntent::MarkersLoaded { tag, result } => {
+                if tag.generation == self.generation {
+                    self.commits.markers_loaded(tag.seq, result);
+                }
+            }
+            AppIntent::CommitNext => {
+                self.commits.move_by(1);
+                return self.more_commits();
+            }
+            AppIntent::CommitPrev => self.commits.move_by(-1),
             AppIntent::OpenSubmodules => return self.open_submodules(),
             AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
             AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
@@ -742,9 +763,8 @@ impl AppState {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
             (Context::Workspace, Focus::Branches) => KeyScope::Branches,
-            (Context::Workspace, Focus::Status | Focus::Commits | Focus::Stash) => {
-                KeyScope::Workspace
-            }
+            (Context::Workspace, Focus::Commits) => KeyScope::Commits,
+            (Context::Workspace, Focus::Status | Focus::Stash) => KeyScope::Workspace,
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -2032,7 +2052,44 @@ impl AppState {
         if plan.scopes.contains(&Scope::Branches) {
             effects.extend(self.reload_branches());
         }
+        if plan.scopes.contains(&Scope::Commits) {
+            effects.extend(self.reload_commits());
+        }
         effects
+    }
+
+    /// Load the log from the top, and the markers with it. What is shown
+    /// stays until the new page lands, which supersedes any page in flight.
+    fn reload_commits(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        let page = self.background_tag();
+        let markers = self.background_tag();
+        self.commits.begin_page(page.seq, 0);
+        self.commits.markers_seq = Some(markers.seq);
+        vec![
+            Effect::LoadCommits {
+                tag: page,
+                tip: None,
+                skip: 0,
+            },
+            Effect::LoadMarkers { tag: markers },
+        ]
+    }
+
+    /// Load the next page when the cursor nears the end of the log.
+    fn more_commits(&mut self) -> Vec<Effect> {
+        let Some(skip) = self.commits.wants_more() else {
+            return vec![];
+        };
+        let tag = self.background_tag();
+        self.commits.begin_page(tag.seq, skip);
+        vec![Effect::LoadCommits {
+            tag,
+            tip: self.commits.tip.clone(),
+            skip,
+        }]
     }
 
     /// The Submodules popup, wherever it is on the stack.
@@ -2140,6 +2197,7 @@ impl AppState {
         let mut effects = vec![self.set_repo(&root)];
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2169,6 +2227,7 @@ impl AppState {
         }
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2188,6 +2247,7 @@ impl AppState {
                 let mut effects = vec![self.record_recent(path)];
                 effects.extend(self.refresh_status());
                 effects.extend(self.reload_branches());
+                effects.extend(self.reload_commits());
                 effects
             }
             None => self.open_recent(),
@@ -2360,6 +2420,7 @@ impl AppState {
         }
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         // The keys follow the repository: its own file replaces the last one's.
         effects.push(Effect::LoadConfig {
             repo: self.repo.clone(),
@@ -2398,6 +2459,7 @@ impl AppState {
         self.op_error = None;
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
+        self.commits = CommitsPanel::default();
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -2520,6 +2582,7 @@ impl AppState {
         }
         let mut effects = self.background_status();
         effects.extend(self.background_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2857,6 +2920,8 @@ mod tests {
             [
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 let (tag, list) = (*tag, *list);
                 state.update(AppIntent::BranchesLoaded {
@@ -2865,7 +2930,7 @@ mod tests {
                 });
                 tag
             }
-            other => panic!("expected LoadStatus and LoadBranches, got {other:?}"),
+            other => panic!("expected LoadStatus, LoadBranches and the commits, got {other:?}"),
         }
     }
 
@@ -2910,12 +2975,12 @@ mod tests {
                 user: true
             }
         );
-        // Seq 1 went to the branch list `r` reloads too.
+        // Seq 1 went to the branch list `r` reloads too, 2 and 3 to the commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 2,
+                seq: 4,
                 user: true
             }
         );
@@ -3463,7 +3528,8 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 2);
+        // The status, the branch list, then the commits and their markers.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 4);
         assert_eq!(state.busy, 2, "the status and the branch list");
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
@@ -4029,7 +4095,12 @@ mod tests {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+                [
+                    Effect::LoadStatus { .. },
+                    Effect::LoadBranches { .. },
+                    Effect::LoadCommits { skip: 0, .. },
+                    Effect::LoadMarkers { .. },
+                ]
             ),
             "{effects:?}"
         );
@@ -4044,7 +4115,12 @@ mod tests {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+                [
+                    Effect::LoadStatus { .. },
+                    Effect::LoadBranches { .. },
+                    Effect::LoadCommits { skip: 0, .. },
+                    Effect::LoadMarkers { .. },
+                ]
             ),
             "{effects:?}"
         );
@@ -6044,9 +6120,13 @@ mod tests {
             assert_eq!(state.focus, focus, "{key}");
             assert_eq!(state.expanded, side, "{key}");
         }
-        // The new side panels have no keys of their own yet.
+        // Commits has keys of its own; the newer panels not yet.
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Commits,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Stash,
         )));
         assert_eq!(state.key_focus(), KeyScope::Workspace);
     }
@@ -6663,7 +6743,13 @@ mod tests {
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.diff, DiffPane::default());
         match effects.as_slice() {
-            [set, Effect::LoadStatus { tag }, Effect::LoadBranches { .. }] => {
+            [
+                set,
+                Effect::LoadStatus { tag },
+                Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
+            ] => {
                 assert_eq!(set_repo(set), [RepoPath::from("sub")]);
                 assert_eq!(tag.generation, state.generation);
             }
@@ -6729,6 +6815,8 @@ mod tests {
                 Effect::DiffLoadingDelay { .. },
                 Effect::LoadStatus { tag: status },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 assert_eq!(set_repo(set), []);
                 assert_eq!(request.path, "b.rs".into());
@@ -6817,10 +6905,12 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
-            other => panic!("expected RecordRecent and LoadStatus, got {other:?}"),
+            other => panic!("expected RecordRecent, LoadStatus and the commits, got {other:?}"),
         }
         assert_eq!(state.popups, []);
     }
@@ -6977,6 +7067,8 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!((root.as_path(), nested.len()), (Path::new("/w"), 0));
@@ -7049,6 +7141,8 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!(repo.as_deref(), Some(Path::new("/r/b")), "its own keys");
@@ -7096,10 +7190,12 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 3..],
+            effects[effects.len() - 5..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { .. }
             ]
         ));
@@ -7212,6 +7308,266 @@ mod tests {
         assert_eq!(state.repo, None);
     }
 
+    // --- The Commits panel ---
+
+    use crate::commits::{PAGE, PREFETCH};
+    use crate::git::log::{CommitRow, LogPage, Markers};
+
+    /// `n` commits named `c<from>`, `c<from+1>`, …, each the parent's child.
+    fn page(from: usize, n: usize, done: bool) -> LogPage {
+        let rows = (from..from + n)
+            .map(|i| CommitRow {
+                oid: format!("c{i}"),
+                short_oid: format!("c{i}"),
+                parents: vec![format!("c{}", i + 1)],
+                author: "Ann".into(),
+                time: 0,
+                subject: format!("commit {i}"),
+            })
+            .collect();
+        LogPage { rows, done }
+    }
+
+    /// The one page load in `effects`: its tag, tip and skip.
+    fn commits_load(effects: &[Effect]) -> (Tag, Option<String>, usize) {
+        let loads: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadCommits { tag, tip, skip } => Some((*tag, tip.clone(), *skip)),
+                _ => None,
+            })
+            .collect();
+        match loads.as_slice() {
+            [load] => load.clone(),
+            other => panic!("expected one LoadCommits, got {other:?} in {effects:?}"),
+        }
+    }
+
+    fn markers_tag(effects: &[Effect]) -> Tag {
+        match effects
+            .iter()
+            .find(|e| matches!(e, Effect::LoadMarkers { .. }))
+        {
+            Some(Effect::LoadMarkers { tag }) => *tag,
+            _ => panic!("expected LoadMarkers in {effects:?}"),
+        }
+    }
+
+    fn commits_loaded(tag: Tag, skip: usize, page: LogPage) -> AppIntent {
+        AppIntent::CommitsLoaded {
+            tag,
+            skip,
+            result: Ok((page, 1_000)),
+        }
+    }
+
+    /// Started in a repository with the first page of `first` commits in.
+    fn with_commits(first: usize, done: bool) -> AppState {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let effects = state.update(AppIntent::Start);
+        let (tag, _, _) = commits_load(&effects);
+        state.update(commits_loaded(tag, 0, page(0, first, done)));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state
+    }
+
+    #[test]
+    fn startup_loads_the_first_page_and_the_markers_without_waiting_for_focus() {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let effects = state.update(AppIntent::Start);
+        let (tag, tip, skip) = commits_load(&effects);
+        assert_eq!((tip, skip), (None, 0));
+        assert!(!tag.user, "the panel loads quietly");
+        markers_tag(&effects);
+        assert_eq!(state.focus, Focus::Files);
+    }
+
+    #[test]
+    fn a_loaded_page_fills_the_rows_and_the_graph() {
+        let state = with_commits(3, true);
+        let commits = &state.commits;
+        assert!(commits.loaded && commits.done);
+        assert_eq!(commits.rows.len(), 3);
+        assert_eq!(commits.graph.len(), 3);
+        assert_eq!(commits.tip.as_deref(), Some("c0"));
+        assert_eq!(commits.loaded_at, 1_000);
+        assert_eq!(commits.page_seq, None);
+    }
+
+    #[test]
+    fn j_and_k_move_the_commit_cursor_within_the_list() {
+        let mut state = with_commits(3, true);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        for _ in 0..5 {
+            press(&mut state, KeyCode::Char('j'));
+        }
+        assert_eq!(state.commits.selected, 2);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(state.commits.selected, 1);
+    }
+
+    #[test]
+    fn nearing_the_end_loads_the_next_page_once_from_the_same_tip() {
+        let mut state = with_commits(PAGE, false);
+        state.commits.selected = PAGE - PREFETCH - 2;
+        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+
+        let effects = state.update(AppIntent::CommitNext);
+        let (tag, tip, skip) = commits_load(&effects);
+        assert_eq!((tip.as_deref(), skip), (Some("c0"), PAGE));
+        assert_eq!(effects.len(), 1);
+        // Not again while that page is on its way.
+        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        assert!(state.commits.more_in_flight);
+
+        state.update(commits_loaded(tag, PAGE, page(PAGE, 10, true)));
+        assert_eq!(state.commits.rows.len(), PAGE + 10);
+        assert_eq!(state.commits.graph.len(), PAGE + 10);
+        assert_eq!(state.commits.rows[PAGE].oid, format!("c{PAGE}"));
+        assert!(!state.commits.more_in_flight);
+    }
+
+    #[test]
+    fn a_done_page_stops_further_loads() {
+        let mut state = with_commits(10, true);
+        for _ in 0..20 {
+            assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        }
+        assert_eq!(state.commits.selected, 9);
+    }
+
+    #[test]
+    fn stale_pages_and_markers_are_dropped() {
+        let mut state = with_commits(2, true);
+        let effects = state.update(AppIntent::RefreshStatus);
+        let (old, _, _) = commits_load(&effects);
+        let old_markers = markers_tag(&effects);
+        let effects = state.update(AppIntent::RefreshStatus);
+        let (new, _, _) = commits_load(&effects);
+        let new_markers = markers_tag(&effects);
+
+        state.update(commits_loaded(old, 0, page(50, 3, true)));
+        let unpushed = Markers {
+            unpushed: Some(["c0".to_string()].into()),
+            ..Markers::default()
+        };
+        state.update(AppIntent::MarkersLoaded {
+            tag: old_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(
+            state.commits.rows[0].oid, "c0",
+            "the superseded page is dropped"
+        );
+        assert_eq!(state.commits.markers, Markers::default());
+
+        // Right seq, but for a repository left since.
+        let mut other = state.clone();
+        other.generation += 1;
+        other.update(commits_loaded(new, 0, page(50, 3, true)));
+        other.update(AppIntent::MarkersLoaded {
+            tag: new_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(other.commits.rows[0].oid, "c0");
+        assert_eq!(other.commits.markers, Markers::default());
+
+        state.update(commits_loaded(new, 0, page(50, 3, true)));
+        state.update(AppIntent::MarkersLoaded {
+            tag: new_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(state.commits.rows[0].oid, "c50");
+        assert_eq!(state.commits.markers, unpushed);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_old_rows_until_it_lands_then_the_cursor_on_the_same_commit() {
+        let mut state = with_commits(5, true);
+        state.commits.selected = 2;
+        let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
+        assert_eq!(state.commits.rows.len(), 5, "shown while the reload runs");
+
+        // A new commit on top moves c2 one row down.
+        let mut newer = page(1, 4, true);
+        newer.rows.insert(0, page(99, 1, true).rows.remove(0));
+        newer.rows.splice(1..1, page(0, 1, true).rows);
+        state.update(commits_loaded(tag, 0, newer));
+        assert_eq!(state.commits.rows[state.commits.selected].oid, "c2");
+        assert_eq!(state.commits.tip.as_deref(), Some("c99"));
+
+        // Gone: the cursor stays near where it was, inside the list.
+        state.commits.selected = 5;
+        let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
+        state.update(commits_loaded(tag, 0, page(10, 2, true)));
+        assert_eq!(state.commits.selected, 1);
+    }
+
+    #[test]
+    fn a_finished_commit_reloads_the_commits_from_the_top() {
+        let mut state = with_commits(3, true);
+        let effects = state.apply_plan(refresh::plan(&GitOp::Commit {
+            message: Some("m".into()),
+            stage_all: false,
+            amend: false,
+            no_verify: false,
+        }));
+        let (_, tip, skip) = commits_load(&effects);
+        assert_eq!((tip, skip), (None, 0));
+        markers_tag(&effects);
+    }
+
+    #[test]
+    fn a_checkout_or_new_branch_reloads_the_commits_and_rename_or_delete_do_not() {
+        let moves = [
+            GitOp::Checkout("side".into()),
+            GitOp::CreateBranch {
+                name: "new".into(),
+                from: "main".into(),
+            },
+        ];
+        for op in moves {
+            let mut state = with_commits(3, true);
+            let effects = state.apply_plan(refresh::plan(&op));
+            let (_, tip, skip) = commits_load(&effects);
+            assert_eq!((tip, skip), (None, 0), "{op:?}");
+            markers_tag(&effects);
+        }
+        let stays = [
+            GitOp::RenameBranch {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GitOp::DeleteBranch {
+                name: "a".into(),
+                force: false,
+            },
+        ];
+        for op in stays {
+            let mut state = with_commits(3, true);
+            let effects = state.apply_plan(refresh::plan(&op));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::LoadCommits { .. } | Effect::LoadMarkers { .. })),
+                "{op:?}: {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_repositories_resets_the_panel_and_loads_the_new_one() {
+        let mut state = with_commits(3, true);
+        let effects = state.update(AppIntent::OpenRepo("/r/other".into()));
+        assert_eq!(state.commits.rows, []);
+        assert!(!state.commits.loaded);
+        let (tag, _, skip) = commits_load(&effects);
+        assert_eq!((tag.generation, skip), (state.generation, 0));
+    }
+
     // --- Watching for outside changes ---
 
     use crate::git::refs::RefsSnapshot;
@@ -7282,9 +7638,14 @@ mod tests {
         let tag = background_status_tag(&effects[..1]);
         assert_eq!(state.status_seq, Some(tag.seq));
         // Branches or their upstreams may have moved too, out of the busy count.
+        // The log moved too.
         match &effects[1..] {
-            [Effect::LoadBranches { tag }] => assert!(!tag.user),
-            other => panic!("expected a background LoadBranches, got {other:?}"),
+            [
+                Effect::LoadBranches { tag },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
+            ] => assert!(!tag.user),
+            other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
     }
@@ -7487,6 +7848,7 @@ mod tests {
                 _,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                ..,
             ] => (*tag, *list),
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };

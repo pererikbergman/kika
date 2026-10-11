@@ -1,6 +1,7 @@
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
+use crate::commits_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
@@ -59,9 +60,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             SidePanel::Branches => {
                 branches_view::render_panel(&state.branches, &look, expanded, frame, area)
             }
-            SidePanel::Commits | SidePanel::Stash => {
-                render_placeholder(side, &look, expanded, frame, area)
+            SidePanel::Commits => {
+                commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
+            SidePanel::Stash => render_placeholder(side, &look, expanded, frame, area),
         }
     }
     let Some(area) = layout.rect(Panel::Diff) else {
@@ -1813,15 +1815,15 @@ mod tests {
     fn an_expanded_placeholder_says_nothing_is_here_yet() {
         let mut state = loaded(vec![]);
         assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        for side in [SidePanel::Commits, SidePanel::Stash] {
-            state.focus = Focus::side(side);
-            state.expanded = side;
-            let buffer = draw_buffer(&state, 80, 24);
-            let (x, y) = find(&buffer, "Nothing here yet");
-            assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-            let title = format!("[{}] {}", side.number(), side.title());
-            assert!(y > find(&buffer, &title).1, "{side:?}");
-        }
+        // Only Stash is still a placeholder.
+        let side = SidePanel::Stash;
+        state.focus = Focus::side(side);
+        state.expanded = side;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (x, y) = find(&buffer, "Nothing here yet");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let title = format!("[{}] {}", side.number(), side.title());
+        assert!(y > find(&buffer, &title).1);
     }
 
     #[test]

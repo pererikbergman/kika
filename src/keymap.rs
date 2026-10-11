@@ -194,6 +194,8 @@ pub enum KeyScope {
     Files,
     /// The Branches panel with focus.
     Branches,
+    /// The Commits panel, with a cursor on the log.
+    Commits,
     /// The Diff pane with focus, working on hunks.
     Diff,
     /// The Diff pane picking changed lines inside a hunk.
@@ -241,6 +243,7 @@ impl KeyScope {
         match self {
             KeyScope::Files
             | KeyScope::Branches
+            | KeyScope::Commits
             | KeyScope::Diff
             | KeyScope::Blame
             | KeyScope::BlameCommit => Some(KeyScope::Workspace),
@@ -270,6 +273,7 @@ impl KeyScope {
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
             KeyScope::Branches => "Branches",
+            KeyScope::Commits => "Commits",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
             KeyScope::Blame => "Blame",
@@ -1225,6 +1229,32 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Files,
         intent: AppIntent::SelectPrev,
         description: "Select the previous file",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::CommitNext,
+        description: "Select the next commit",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::CommitPrev,
+        description: "Select the previous commit",
         label: "",
         bar: false,
         disabled: never,
@@ -2503,6 +2533,21 @@ mod tests {
     }
 
     #[test]
+    fn the_commits_panel_moves_its_cursor_and_falls_back_to_the_workspace() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::Commits.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Commits.title(), "Commits");
+        let commits = |k| from(KeyScope::Commits, k);
+        let none = KeyModifiers::NONE;
+        assert_eq!(commits(plain('j')), Some(CommitNext));
+        assert_eq!(commits(key(KeyCode::Down, none)), Some(CommitNext));
+        assert_eq!(commits(plain('k')), Some(CommitPrev));
+        assert_eq!(commits(key(KeyCode::Up, none)), Some(CommitPrev));
+        assert_eq!(commits(plain('r')), Some(RefreshStatus));
+        assert_eq!(commits(plain('q')), Some(Quit));
+    }
+
+    #[test]
     fn existing_keys_keep_their_meaning_from_the_files_panel() {
         use AppIntent::*;
         let files = |k| from(KeyScope::Files, k);
@@ -3535,6 +3580,7 @@ mod tests {
             KeyScope::Workspace => "workspace",
             KeyScope::Files => "files",
             KeyScope::Branches => "branches",
+            KeyScope::Commits => "commits",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",
             KeyScope::Blame => "blame",
