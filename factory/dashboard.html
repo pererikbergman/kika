@@ -40,16 +40,22 @@
   .card:hover { transform: translateY(-1px); border-color: var(--muted); }
   .card.human { border-color: var(--human); background: var(--human-bg); }
   /* A card that just changed column pulses: green for any move, red into needs-human. */
-  .card.flash-go { animation: flash-go 2.4s ease-out both; }
-  .card.flash-stop { animation: flash-stop 2.4s ease-out both; }
+  .card.flash-go { animation: flash-go 3s ease-in-out both; }
+  .card.flash-stop { animation: flash-stop 3s ease-in-out both; }
   @keyframes flash-go {
-    0%, 33%, 66% { box-shadow: 0 0 0 3px var(--go); background: var(--go-bg); border-color: var(--go); }
-    16%, 50%     { box-shadow: 0 0 0 1px var(--go); }
+    0%, 30%, 60% { background: var(--go); border-color: var(--go); color: #fff;
+                   box-shadow: 0 0 0 4px var(--go-bg), 0 0 18px var(--go); }
+    15%, 45%     { background: var(--go-bg); border-color: var(--go); }
+    80%          { background: var(--go-bg); border-color: var(--go); }
   }
   @keyframes flash-stop {
-    0%, 33%, 66% { box-shadow: 0 0 0 3px var(--stop); background: var(--stop-bg); border-color: var(--stop); }
-    16%, 50%     { box-shadow: 0 0 0 1px var(--stop); }
+    0%, 30%, 60% { background: var(--stop); border-color: var(--stop); color: #fff;
+                   box-shadow: 0 0 0 4px var(--stop-bg), 0 0 18px var(--stop); }
+    15%, 45%     { background: var(--stop-bg); border-color: var(--stop); }
+    80%          { background: var(--stop-bg); border-color: var(--stop); }
   }
+  .card.flash-go .id, .card.flash-go .meta, .card.flash-go .meta a,
+  .card.flash-stop .id, .card.flash-stop .meta, .card.flash-stop .meta a { color: inherit; }
   @media (prefers-reduced-motion: reduce) {
     .card.flash-go, .card.flash-stop { animation-timing-function: steps(1, end); }
   }
@@ -121,7 +127,7 @@ const STAGES = [
 ];
 const REVIEWERS = [["security", "SEC"], ["ux", "UX"], ["ui", "UI"], ["code", "CODE"]];
 let board = { jobs: [] }, lastStages = {}, openJob = null, openFile = null;
-const FLASH_MS = 2400, flashes = {};
+const FLASH_MS = 3000, flashes = {};
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
