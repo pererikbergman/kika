@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::config::{self, ConfigPaths};
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
@@ -103,6 +104,8 @@ pub enum Effect {
     Fetch {
         tag: Tag,
     },
+    /// Read the config files again; answered by one `ConfigLoaded`.
+    LoadConfig,
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -116,6 +119,8 @@ pub struct Runtime {
     root: PathBuf,
     tx: UnboundedSender<AppIntent>,
     diff: DiffStreamer,
+    /// The files `LoadConfig` reads; none unless `with_config` is given some.
+    config: ConfigPaths,
 }
 
 impl Runtime {
@@ -125,7 +130,14 @@ impl Runtime {
             root: runner.workdir(),
             runner,
             tx,
+            config: ConfigPaths::default(),
         }
+    }
+
+    /// Read the config files at `paths` on `LoadConfig`.
+    pub fn with_config(mut self, paths: ConfigPaths) -> Self {
+        self.config = paths;
+        self
     }
 
     /// Start an effect on tokio's blocking pool and return at once. The
@@ -265,6 +277,20 @@ impl Runtime {
                     let _ = tx.send(AppIntent::FetchFinished { tag, result });
                 });
             }
+            Effect::LoadConfig => {
+                let paths = self.config.clone();
+                tokio::spawn(async move {
+                    // `load` reports its own errors; a panic leaves the keys as they were.
+                    if let Ok(loaded) =
+                        tokio::task::spawn_blocking(move || config::load(&paths)).await
+                    {
+                        let _ = tx.send(AppIntent::ConfigLoaded {
+                            keymap: loaded.keymap,
+                            errors: loaded.errors,
+                        });
+                    }
+                });
+            }
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
@@ -284,6 +310,41 @@ mod tests {
     use crate::git::fake::{FakeChild, FakeRunner, ok};
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
+
+    #[tokio::test]
+    async fn load_config_reads_the_files_again_each_time() {
+        use crate::config::ConfigPaths;
+        use crate::keymap::{KeyPattern, parse_key, registry};
+
+        let dir = std::env::temp_dir().join(format!("kika-load-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let global = dir.join("config.toml");
+        let paths = ConfigPaths {
+            global: Some(global.clone()),
+            repo: None,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // No git calls are expected.
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_config(paths);
+        let stage = registry().iter().find(|b| b.id == "files.stage").unwrap();
+        let mut load = async |text: &str| -> Vec<KeyPattern> {
+            std::fs::write(&global, text).unwrap();
+            runtime.spawn(Effect::LoadConfig);
+            match rx.recv().await {
+                Some(AppIntent::ConfigLoaded { keymap, errors }) => {
+                    assert_eq!(errors, []);
+                    keymap.keys(stage).to_vec()
+                }
+                other => panic!("expected ConfigLoaded, got {other:?}"),
+            }
+        };
+
+        let first = load("[keys]\n\"files.stage\" = [\"x\"]\n").await;
+        let second = load("[keys]\n\"files.stage\" = [\"y\"]\n").await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(first, [parse_key("x").unwrap()]);
+        assert_eq!(second, [parse_key("y").unwrap()]);
+    }
 
     #[tokio::test]
     async fn load_status_reports_back_with_the_same_tag() {

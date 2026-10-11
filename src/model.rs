@@ -1,5 +1,6 @@
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::CommitEditor;
+use crate::config::ConfigError;
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
@@ -16,7 +17,7 @@ use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::AppIntent;
-use crate::keymap::{self, KeyScope, Resolution};
+use crate::keymap::{self, KeyScope, Keymap, Resolution};
 use crate::menu;
 use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -123,6 +124,11 @@ pub struct AppState {
     /// The repositories entered from, outermost first; the current one is
     /// a submodule of the last. Empty in the launch repository.
     pub repo_stack: Vec<ParentRepo>,
+    /// The keys in force, after the user's config files.
+    pub keymap: Keymap,
+    /// The config errors last shown, so a reload that finds the same
+    /// broken file does not show them again.
+    pub config_error: Option<String>,
 }
 
 impl AppState {
@@ -152,6 +158,8 @@ impl AppState {
             diff_options: DiffOptions::default(),
             watch: WatchState::default(),
             repo_stack: Vec::new(),
+            keymap: Keymap::default(),
+            config_error: None,
         }
     }
 
@@ -160,7 +168,8 @@ impl AppState {
         match intent {
             AppIntent::Key(key) => {
                 self.notice = None;
-                match keymap::resolve(keymap::registry(), self.key_focus(), self, key) {
+                let focus = self.key_focus();
+                match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
                     Resolution::Disabled(reason) => self.notice = Some(reason),
                     // Only a prompt or the editor takes text; elsewhere
@@ -408,8 +417,32 @@ impl AppState {
                     self.focus = Focus::Files;
                 }
             }
+            AppIntent::ConfigLoaded { keymap, errors } => self.config_loaded(keymap, errors),
         }
         vec![]
+    }
+
+    /// Use the keys just read. A broken file is shown once: reloading on
+    /// every focus-in must not bring the same popup back each time.
+    fn config_loaded(&mut self, keymap: Keymap, errors: Vec<ConfigError>) {
+        self.keymap = keymap;
+        if errors.is_empty() {
+            self.config_error = None;
+            return;
+        }
+        let text = errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.config_error.as_deref() != Some(text.as_str()) {
+            self.push_error(ErrorPopup::new(
+                "Config error",
+                &text,
+                "Kika ignored this file. Fix it, then come back to Kika to reload it.",
+            ));
+            self.config_error = Some(text);
+        }
     }
 
     /// The panel keys go to. Derived from the context until panels can
@@ -1471,26 +1504,30 @@ impl AppState {
 /// Watching for changes made outside Kika. None of it counts as busy.
 impl AppState {
     fn watch(&mut self, event: WatchEvent) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        // The user may have edited a config file while away, in any context.
+        if event == WatchEvent::FocusGained {
+            effects.push(Effect::LoadConfig);
+        }
         if self.context != Context::Workspace {
-            return vec![];
+            return effects;
         }
         match event {
-            WatchEvent::PollRefs => self.snapshot_refs(),
-            WatchEvent::PollFiles => self.background_status(),
+            WatchEvent::PollRefs => effects.extend(self.snapshot_refs()),
+            WatchEvent::PollFiles => effects.extend(self.background_status()),
             WatchEvent::FocusGained => {
-                let mut effects = self.background_status();
+                effects.extend(self.background_status());
                 effects.extend(self.snapshot_refs());
-                effects
             }
             WatchEvent::Fetch => {
-                if !self.watch.start_fetch() {
-                    return vec![];
+                if self.watch.start_fetch() {
+                    effects.push(Effect::Fetch {
+                        tag: self.background_tag(),
+                    });
                 }
-                vec![Effect::Fetch {
-                    tag: self.background_tag(),
-                }]
             }
         }
+        effects
     }
 
     fn snapshot_refs(&mut self) -> Vec<Effect> {
@@ -5249,17 +5286,18 @@ mod tests {
     }
 
     #[test]
-    fn focus_gained_starts_a_background_status_and_a_snapshot() {
+    fn focus_gained_reloads_the_config_and_starts_a_background_status_and_a_snapshot() {
         let mut state = idle_with_files();
         let effects = watch(&mut state, WatchEvent::FocusGained);
         match effects.as_slice() {
             [
+                Effect::LoadConfig,
                 Effect::LoadStatus { tag: status },
                 Effect::SnapshotRefs { tag: refs },
             ] => {
                 assert!(!status.user && !refs.user);
             }
-            other => panic!("expected a status and a snapshot, got {other:?}"),
+            other => panic!("expected a config, a status and a snapshot, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
     }
@@ -5288,7 +5326,9 @@ mod tests {
     fn focus_gained_while_busy_still_takes_a_snapshot() {
         let mut state = idle_with_files();
         state.busy = 1;
-        snapshot_tag(&watch(&mut state, WatchEvent::FocusGained));
+        let effects = watch(&mut state, WatchEvent::FocusGained);
+        assert_eq!(effects[0], Effect::LoadConfig);
+        snapshot_tag(&effects[1..]);
     }
 
     #[test]
@@ -5408,17 +5448,115 @@ mod tests {
     }
 
     #[test]
-    fn watch_events_do_nothing_in_review() {
+    fn watch_events_only_reload_the_config_in_review() {
         let mut state = AppState::new(Context::Review { number: 1 });
         for event in [
             WatchEvent::PollRefs,
             WatchEvent::PollFiles,
-            WatchEvent::FocusGained,
             WatchEvent::Fetch,
         ] {
             assert!(watch(&mut state, event).is_empty(), "{event:?}");
         }
+        assert_eq!(
+            watch(&mut state, WatchEvent::FocusGained),
+            [Effect::LoadConfig]
+        );
         assert!(!state.watch.is_pending());
+    }
+
+    // --- Config ---
+
+    use crate::config::ConfigError;
+    use crate::keymap::{Keymap, remap as keymap};
+
+    fn config_loaded(keymap: Keymap, errors: Vec<ConfigError>) -> AppIntent {
+        AppIntent::ConfigLoaded { keymap, errors }
+    }
+
+    fn config_error(message: &str) -> ConfigError {
+        ConfigError {
+            path: "/home/me/.config/kika/config.toml".into(),
+            message: message.into(),
+        }
+    }
+
+    fn is_stage(effects: &[Effect]) -> bool {
+        matches!(
+            effects,
+            [Effect::RunOp {
+                op: GitOp::Stage(_),
+                ..
+            }]
+        )
+    }
+
+    #[test]
+    fn a_remapped_key_runs_its_binding_and_the_old_one_does_nothing() {
+        let mut state = idle_with_files();
+        state.update(config_loaded(keymap(&[("files.stage", &["x"])]), vec![]));
+
+        assert_eq!(press_char(&mut state.clone(), 's'), []);
+        let mut space = state.clone();
+        assert_eq!(press_char(&mut space, ' '), []);
+        assert_eq!(space.op_seq, None);
+        assert_eq!(space.notice, None);
+        assert!(is_stage(&press_char(&mut state, 'x')), "x stages");
+    }
+
+    #[test]
+    fn a_disabled_binding_leaves_its_key_unbound() {
+        let mut state = idle_with_files();
+        let mut before = state.clone();
+        press_char(&mut before, 'd');
+        assert_eq!(before.popups.len(), 1, "d asks to discard by default");
+        state.update(config_loaded(keymap(&[("files.discard", &[])]), vec![]));
+        assert_eq!(press_char(&mut state, 'd'), []);
+        assert!(state.popups.is_empty(), "{:?}", state.popups);
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn config_errors_are_shown_once_until_they_change() {
+        let mut state = idle_with_files();
+        let errors = vec![config_error("unknown binding \"files.stag\"")];
+        state.update(config_loaded(Keymap::default(), errors.clone()));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Config error");
+                assert!(error.message.contains("config.toml: unknown binding"));
+                assert!(error.next.contains("ignored"), "{}", error.next);
+            }
+            other => panic!("expected one config error, got {other:?}"),
+        }
+
+        // The user closes it; refocusing finds the same broken file.
+        state.popups.clear();
+        state.update(config_loaded(Keymap::default(), errors.clone()));
+        assert!(state.popups.is_empty(), "{:?}", state.popups);
+
+        // A different error is news.
+        state.update(config_loaded(
+            Keymap::default(),
+            vec![config_error("other")],
+        ));
+        assert_eq!(state.popups.len(), 1);
+
+        // Once fixed, the same error later shows again.
+        state.popups.clear();
+        state.update(config_loaded(Keymap::default(), vec![]));
+        assert_eq!(state.config_error, None);
+        state.update(config_loaded(Keymap::default(), errors));
+        assert_eq!(state.popups.len(), 1);
+    }
+
+    #[test]
+    fn a_config_load_replaces_the_keymap_even_with_errors() {
+        let mut state = idle_with_files();
+        let remapped = keymap(&[("files.stage", &["x"])]);
+        state.update(config_loaded(remapped.clone(), vec![]));
+        assert_eq!(state.keymap, remapped);
+        state.update(config_loaded(Keymap::default(), vec![config_error("bad")]));
+        assert_eq!(state.keymap, Keymap::default());
     }
 
     /// An idle workspace whose user opted in to auto-fetch.
