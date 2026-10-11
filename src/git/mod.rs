@@ -12,6 +12,7 @@ pub mod repo_root;
 pub mod repo_state;
 pub mod runner;
 pub mod status;
+pub mod submodule;
 
 pub use runner::{CliRunner, GitRunner};
 pub use status::FileEntry;

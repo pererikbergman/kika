@@ -97,12 +97,22 @@ fn render_status_panel(state: &AppState, frame: &mut Frame, area: Rect) {
         return;
     }
     let stale = state.status_error.is_some() && state.branch.is_some();
+    // Inside a submodule, say which one: the paths from the launch
+    // repository. A long one loses its start, so the innermost name shows.
+    let location: Vec<&str> = state.repo_stack.iter().map(|p| p.path.display()).collect();
+    let location = if location.is_empty() {
+        String::new()
+    } else {
+        let fixed = width_of(" Status ·  ") + if stale { width_of("(stale) ") } else { 0 };
+        let room = usize::from(area.width.saturating_sub(2)).saturating_sub(fixed);
+        format!(" · {}", elide_left(&location.join("/"), room.max(1)))
+    };
     let block = if stale {
         Block::bordered()
-            .title(" Status (stale) ")
+            .title(format!(" Status{location} (stale) "))
             .style(Style::new().fg(Color::DarkGray))
     } else {
-        Block::bordered().title(" Status ")
+        Block::bordered().title(format!(" Status{location} "))
     };
     let width = usize::from(block.inner(area).width);
     let Some(branch) = &state.branch else {
@@ -1091,6 +1101,43 @@ mod tests {
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
     }
 
+    fn parent(path: &str) -> crate::model::ParentRepo {
+        crate::model::ParentRepo {
+            path: path.into(),
+            files: vec![],
+            files_loaded: true,
+            branch: None,
+            selected: None,
+        }
+    }
+
+    #[test]
+    fn inside_a_submodule_the_status_title_names_it() {
+        let mut state = on(branch(Head::Branch("main".into())));
+        state.repo_stack = vec![parent("sub")];
+        let rows = draw(&state, 80, 24);
+        assert!(rows[0].contains(" Status · sub "), "{rows:#?}");
+
+        // Nested, and with a name that must not drive the terminal.
+        state.repo_stack = vec![parent("libs/a"), parent("in\x1bner")];
+        state.status_error = Some("boom".into());
+        let rows = draw(&state, 160, 24);
+        assert!(
+            rows[0].contains(" Status · libs/a/in\u{FFFD}ner (stale) "),
+            "{rows:#?}"
+        );
+        // A narrow panel keeps the innermost name.
+        let rows = draw(&state, 80, 24);
+        assert!(rows[0].contains(" Status · …er (stale) "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_launch_repository_has_a_plain_status_title() {
+        let state = on(branch(Head::Branch("main".into())));
+        let rows = draw(&state, 80, 24);
+        assert!(rows[0].starts_with("┌ Status ─"), "{rows:#?}");
+    }
+
     /// The Files panel's title row and the row below it.
     fn files_rows(rows: &[String]) -> (usize, &String) {
         let title = rows
@@ -1215,7 +1262,8 @@ mod tests {
         let mut state = loaded(vec![file("a.rs")]);
         state.selected = Some(0);
         state.help_open = true;
-        let rows = draw(&state, 80, 24);
+        // Tall enough for every Files key; a shorter screen clips the list.
+        let rows = draw(&state, 80, 30);
         assert!(contains(&rows, " Keys: Files "), "{rows:#?}");
         let row = |needle: &str| {
             rows.iter()
@@ -1238,7 +1286,7 @@ mod tests {
     fn disabled_help_rows_are_dimmed() {
         let mut state = loaded(vec![]);
         state.help_open = true;
-        let buffer = draw_buffer(&state, 80, 24);
+        let buffer = draw_buffer(&state, 80, 30);
         let (x, y) = find(&buffer, "Stage the selected file");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
         let (x, y) = find(&buffer, "Quit Kika");
@@ -1289,8 +1337,9 @@ mod tests {
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
-            rows[23]
-                .starts_with(" space stage  a all  c commit  d discard  r refresh  ? keys  q quit"),
+            rows[23].starts_with(
+                " space stage  a all  c commit  d discard  r refresh  bksp parent  ? keys  q quit"
+            ),
             "{rows:#?}"
         );
     }

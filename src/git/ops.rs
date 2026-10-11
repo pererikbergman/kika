@@ -58,6 +58,12 @@ pub enum GitOp {
     ApplyEdited {
         patch: Vec<u8>,
     },
+    /// Record the submodule's URL in the parent's config. It stays
+    /// uninitialized in the list until it is cloned by an update.
+    SubmoduleInit(RepoPath),
+    /// Clone the submodule if needed and check out the commit the parent
+    /// records, initializing it first.
+    SubmoduleUpdate(RepoPath),
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -158,6 +164,17 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg("--whitespace=nowarn")
             .arg("-")
             .stdin(patch.clone()),
+        GitOp::SubmoduleInit(path) => with_paths(
+            GitCommand::new("submodule").arg("init"),
+            std::slice::from_ref(path),
+        ),
+        // Git has no terminal while Kika holds the screen, so a credential
+        // prompt would hang; it fails instead.
+        GitOp::SubmoduleUpdate(path) => with_paths(
+            GitCommand::new("submodule").arg("update").arg("--init"),
+            std::slice::from_ref(path),
+        )
+        .env("GIT_TERMINAL_PROMPT", "0"),
         GitOp::Commit {
             message,
             amend,
@@ -338,6 +355,32 @@ mod tests {
                 envs[0].contains(&("LC_ALL".into(), "C".into())),
                 "{op:?}: {envs:?}"
             );
+        }
+    }
+
+    #[test]
+    fn submodule_ops_name_one_path_literally_and_update_never_prompts() {
+        let literal = ("GIT_LITERAL_PATHSPECS".into(), "1".into());
+        let c = ("LC_ALL".into(), "C".into());
+        let no_prompt = ("GIT_TERMINAL_PROMPT".into(), "0".into());
+        let cases = [
+            (
+                GitOp::SubmoduleInit("libs/a b".into()),
+                &["submodule", "init", "--", "libs/a b"][..],
+                vec![literal.clone(), c.clone()],
+            ),
+            (
+                GitOp::SubmoduleUpdate("libs/a b".into()),
+                &["submodule", "update", "--init", "--", "libs/a b"][..],
+                vec![no_prompt, literal, c],
+            ),
+        ];
+        for (op, argv, env) in cases {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+            assert_eq!(runner.envs(), [env], "{op:?}");
+            assert_eq!(runner.inputs(), [None], "{op:?}");
         }
     }
 

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,9 @@ use crate::git::GitRunner;
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
+use crate::git::path::RepoPath;
 use crate::git::status::read_status;
+use crate::git::submodule::read_submodules;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 
@@ -65,6 +68,16 @@ pub enum Effect {
         tag: Tag,
         op: GitOp,
     },
+    /// List the submodules; always answered by one `SubmodulesLoaded`.
+    LoadSubmodules {
+        tag: Tag,
+    },
+    /// Point git at the repository `nested` names: each path is a
+    /// submodule of the one before, starting from the launch repository,
+    /// which an empty list means. Runs before the next effect starts.
+    SetRepo {
+        nested: Vec<RepoPath>,
+    },
     /// Hand the terminal to another process. Run by the loop, which owns
     /// the terminal, never by [`Runtime`].
     HandOff(HandOff),
@@ -77,6 +90,8 @@ pub const DIFF_LOADING_DELAY: Duration = Duration::from_millis(150);
 /// Makes no decisions: staleness and bookkeeping belong to the reducer.
 pub struct Runtime {
     runner: Arc<dyn GitRunner>,
+    /// The launch repository's top level, which `SetRepo` paths start from.
+    root: PathBuf,
     tx: UnboundedSender<AppIntent>,
     diff: DiffStreamer,
 }
@@ -85,6 +100,7 @@ impl Runtime {
     pub fn new(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>) -> Self {
         Self {
             diff: DiffStreamer::new(Arc::clone(&runner), tx.clone()),
+            root: runner.workdir(),
             runner,
             tx,
         }
@@ -117,6 +133,29 @@ impl Runtime {
                             });
                     let _ = tx.send(AppIntent::HeadMessageLoaded { tag, result });
                 });
+            }
+            Effect::LoadSubmodules { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_submodules(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git submodule crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::SubmodulesLoaded { tag, result });
+                });
+            }
+            // Synchronous, so no later effect runs in the old repository.
+            // A diff still streaming belongs to the old one.
+            Effect::SetRepo { nested } => {
+                self.diff.cancel();
+                let dir = nested
+                    .iter()
+                    .fold(self.root.clone(), |dir, path| dir.join(path.as_os_str()));
+                self.runner.set_workdir(dir);
             }
             Effect::LoadPatch { tag, request } => {
                 tokio::spawn(async move {
@@ -480,6 +519,140 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed PatchLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_submodules_reports_back_with_the_same_tag() {
+        use crate::git::submodule::{Submodule, SubmoduleState};
+
+        let runner = Arc::new(
+            FakeRunner::new().expect(&["submodule", "status"], ok(b" 1234567 sub (heads/main)\n")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 3,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadSubmodules { tag });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::SubmodulesLoaded {
+                tag,
+                result: Ok(vec![Submodule {
+                    path: "sub".into(),
+                    oid: "1234567".into(),
+                    state: SubmoduleState::UpToDate,
+                }]),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_submodule_load_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 6,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadSubmodules { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::SubmodulesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(
+                    message.starts_with("git submodule crashed: "),
+                    "{message:?}"
+                );
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed SubmodulesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_repo_moves_the_runner_into_nested_submodules_and_back_to_the_root() {
+        use std::path::Path;
+
+        use crate::git::CliRunner;
+
+        let runner = Arc::new(CliRunner::new("/r/top"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::SetRepo {
+            nested: vec!["libs/a b".into()],
+        });
+        assert_eq!(runner.workdir(), Path::new("/r/top/libs/a b"));
+
+        runtime.spawn(Effect::SetRepo {
+            nested: vec!["libs/a b".into(), "inner".into()],
+        });
+        assert_eq!(runner.workdir(), Path::new("/r/top/libs/a b/inner"));
+
+        runtime.spawn(Effect::SetRepo { nested: vec![] });
+        assert_eq!(runner.workdir(), Path::new("/r/top"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn set_repo_joins_the_raw_bytes_of_a_path() {
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::git::CliRunner;
+        use crate::git::path::RepoPath;
+
+        let runner = Arc::new(CliRunner::new("/r"));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::SetRepo {
+            nested: vec![RepoPath::from_bytes(b"x\xff")],
+        });
+        assert_eq!(runner.workdir().as_os_str().as_bytes(), b"/r/x\xff");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_repo_stops_the_diff_still_streaming() {
+        let child = FakeChild::hanging();
+        let runner = Arc::new(FakeRunner::new().expect_spawn(
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"],
+            child.clone(),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        runtime.spawn(Effect::LoadDiff {
+            tag: Tag {
+                generation: 0,
+                seq: 1,
+                user: false,
+            },
+            request: DiffRequest {
+                path: "a.rs".into(),
+                orig_path: None,
+                side: DiffSide::Worktree,
+                options: Default::default(),
+            },
+            want: 100,
+        });
+
+        runtime.spawn(Effect::SetRepo { nested: vec![] });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !child.was_killed() {
+            assert!(std::time::Instant::now() < deadline, "never killed");
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
 

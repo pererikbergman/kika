@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
-use crate::git::CliRunner;
+use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context};
@@ -93,7 +93,8 @@ impl Harness {
     fn dispatch(&mut self, intent: AppIntent) {
         let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
         while let Some(job) = jobs.pop_front() {
-            let intent = handoff::execute(job, self.runner.as_ref(), self.runner.workdir());
+            let workdir = self.runner.workdir();
+            let intent = handoff::execute(job, self.runner.as_ref(), &workdir);
             jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
     }

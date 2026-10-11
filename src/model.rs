@@ -7,6 +7,7 @@ use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
+use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::AppIntent;
@@ -14,6 +15,7 @@ use crate::keymap::{self, KeyScope, Resolution};
 use crate::menu;
 use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
+use crate::submodule_list::SubmoduleList;
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +46,18 @@ pub enum CommitFlow {
         editor: CommitEditor,
         output: String,
     },
+}
+
+/// What a repository showed when a submodule was entered from it, put
+/// back as it was on the way out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentRepo {
+    /// The entered submodule's path, relative to this repository.
+    pub path: RepoPath,
+    pub files: Vec<FileEntry>,
+    pub files_loaded: bool,
+    pub branch: Option<BranchStatus>,
+    pub selected: Option<usize>,
 }
 
 /// Which panel has the keys in the workspace.
@@ -96,6 +110,9 @@ pub struct AppState {
     /// How diffs are drawn. Kept in memory for the session: it outlives file
     /// selection, focus changes and reloads.
     pub diff_options: DiffOptions,
+    /// The repositories entered from, outermost first; the current one is
+    /// a submodule of the last. Empty in the launch repository.
+    pub repo_stack: Vec<ParentRepo>,
 }
 
 impl AppState {
@@ -123,6 +140,7 @@ impl AppState {
             notice: None,
             popups: Vec::new(),
             diff_options: DiffOptions::default(),
+            repo_stack: Vec::new(),
         }
     }
 
@@ -330,6 +348,24 @@ impl AppState {
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
             AppIntent::HunkEdited { result } => return self.hunk_edited(result),
+            AppIntent::OpenSubmodules => return self.open_submodules(),
+            AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
+            AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
+            AppIntent::SubmodulePrev => self.move_submodule_cursor(-1),
+            AppIntent::InitSubmodule => {
+                let op = self
+                    .selected_submodule()
+                    .map(|s| GitOp::SubmoduleInit(s.path.clone()));
+                return self.start_op(Ok(op));
+            }
+            AppIntent::UpdateSubmodule => {
+                let op = self
+                    .selected_submodule()
+                    .map(|s| GitOp::SubmoduleUpdate(s.path.clone()));
+                return self.start_op(Ok(op));
+            }
+            AppIntent::EnterSubmodule => return self.enter_submodule(),
+            AppIntent::LeaveSubmodule => return self.leave_submodule(),
         }
         vec![]
     }
@@ -355,6 +391,7 @@ impl AppState {
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
+            Some(Popup::Submodules(_)) => return KeyScope::Submodules,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -1053,16 +1090,169 @@ impl AppState {
 
     /// Reload what the plan says is stale. One status load serves both the
     /// files and the branch; reloading files reselects, which reloads the
-    /// diff too.
+    /// diff too. The submodule list reloads only while it is shown.
     fn apply_plan(&mut self, plan: RefreshPlan) -> Vec<Effect> {
-        if plan.scopes.contains(&Scope::Files) || plan.scopes.contains(&Scope::Branch) {
-            self.status_selection = plan.selection;
-            return self.refresh_status();
+        let mut effects =
+            if plan.scopes.contains(&Scope::Files) || plan.scopes.contains(&Scope::Branch) {
+                self.status_selection = plan.selection;
+                self.refresh_status()
+            } else {
+                match self.selected {
+                    Some(index) if plan.scopes.contains(&Scope::Diff) => self.select(index),
+                    _ => vec![],
+                }
+            };
+        if plan.scopes.contains(&Scope::Submodules) {
+            effects.extend(self.reload_submodules());
         }
-        match self.selected {
-            Some(index) if plan.scopes.contains(&Scope::Diff) => self.select(index),
-            _ => vec![],
+        effects
+    }
+
+    /// The Submodules popup, wherever it is on the stack.
+    fn submodule_list(&mut self) -> Option<&mut SubmoduleList> {
+        self.popups.iter_mut().rev().find_map(|popup| match popup {
+            Popup::Submodules(list) => Some(list),
+            _ => None,
+        })
+    }
+
+    /// The submodule under the popup's cursor.
+    pub fn selected_submodule(&self) -> Option<&Submodule> {
+        self.popups.iter().rev().find_map(|popup| match popup {
+            Popup::Submodules(list) => list.selected(),
+            _ => None,
+        })
+    }
+
+    fn move_submodule_cursor(&mut self, delta: isize) {
+        if let Some(list) = self.submodule_list() {
+            list.move_cursor(delta);
         }
+    }
+
+    /// Show the submodules, loading them afresh.
+    fn open_submodules(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        let seq = self.take_seq();
+        self.popups
+            .push(Popup::Submodules(SubmoduleList::loading(seq)));
+        self.load_submodules(seq)
+    }
+
+    /// Load the list again for the open popup, keeping what it shows
+    /// until the result lands. Nothing while the popup is closed.
+    fn reload_submodules(&mut self) -> Vec<Effect> {
+        if self.submodule_list().is_none() {
+            return vec![];
+        }
+        let seq = self.take_seq();
+        if let Some(list) = self.submodule_list() {
+            list.seq = seq;
+        }
+        self.load_submodules(seq)
+    }
+
+    fn load_submodules(&mut self, seq: u64) -> Vec<Effect> {
+        self.busy += 1;
+        vec![Effect::LoadSubmodules {
+            tag: Tag {
+                generation: self.generation,
+                seq,
+                user: true,
+            },
+        }]
+    }
+
+    fn submodules_loaded(&mut self, tag: Tag, result: Result<Vec<Submodule>, String>) {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return;
+        }
+        if let Some(list) = self.submodule_list()
+            && list.seq == tag.seq
+        {
+            list.loaded(result);
+        }
+    }
+
+    /// The paths from the launch repository to the current one.
+    fn nested(&self) -> Vec<RepoPath> {
+        self.repo_stack.iter().map(|p| p.path.clone()).collect()
+    }
+
+    /// Work in the selected submodule as if Kika had started there. This
+    /// repository's list and selection are kept for the way back.
+    fn enter_submodule(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::enter_submodule_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let Some(path) = self.selected_submodule().map(|s| s.path.clone()) else {
+            return vec![];
+        };
+        self.repo_stack.push(ParentRepo {
+            path,
+            files: std::mem::take(&mut self.files),
+            files_loaded: self.files_loaded,
+            branch: self.branch.take(),
+            selected: self.selected.take(),
+        });
+        self.switch_repo();
+        self.files_loaded = false;
+        let mut effects = vec![Effect::SetRepo {
+            nested: self.nested(),
+        }];
+        effects.extend(self.refresh_status());
+        effects
+    }
+
+    /// Back to the repository this one was entered from, showing what it
+    /// showed then while a fresh status load catches up.
+    fn leave_submodule(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::leave_submodule_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let Some(parent) = self.repo_stack.pop() else {
+            return vec![];
+        };
+        self.switch_repo();
+        self.files = parent.files;
+        self.files_loaded = parent.files_loaded;
+        self.branch = parent.branch;
+        let mut effects = vec![Effect::SetRepo {
+            nested: self.nested(),
+        }];
+        if let Some(index) = parent.selected.filter(|&i| i < self.files.len()) {
+            effects.extend(self.select(index));
+        }
+        effects.extend(self.refresh_status());
+        effects
+    }
+
+    /// Forget what belonged to the repository being left: results still in
+    /// flight for it are dropped by the new generation.
+    fn switch_repo(&mut self) {
+        self.generation += 1;
+        self.popups.clear();
+        self.focus = Focus::Files;
+        self.files.clear();
+        self.branch = None;
+        self.selected = None;
+        self.diff = DiffPane::default();
+        self.status_error = None;
+        self.op_error = None;
+        self.status_selection = Selection::KeepPath;
     }
 
     fn refresh_status(&mut self) -> Vec<Effect> {
@@ -1133,6 +1323,8 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::DeleteUntracked(_) => "Could not delete the file",
         GitOp::ApplyWorktree { .. } => "Could not discard the change",
         GitOp::ApplyEdited { .. } => "Could not stage the edited hunk",
+        GitOp::SubmoduleInit(_) => "Could not initialize the submodule",
+        GitOp::SubmoduleUpdate(_) => "Could not update the submodule",
     }
 }
 
@@ -1143,6 +1335,7 @@ mod tests {
     use crate::diff_pane::DIFF_PREFETCH;
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
+    use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
@@ -2680,9 +2873,9 @@ mod tests {
         for _ in 0..10 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.popups, [menu(MenuId::Actions, 5)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 6)]);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.popups, [menu(MenuId::Actions, 4)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 5)]);
         // The file selection did not move.
         assert_eq!(state.selected, Some(0));
     }
@@ -2744,7 +2937,7 @@ mod tests {
     fn the_quit_item_asks_first_and_y_quits() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..5 {
+        for _ in 0..6 {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
@@ -4073,5 +4266,331 @@ mod tests {
         });
         assert_eq!(diff_request(&effects).options, changed);
         assert_eq!(state.diff_options, changed);
+    }
+
+    fn submodule(path: &str, state: SubmoduleState) -> Submodule {
+        Submodule {
+            path: path.into(),
+            oid: "1234567890abcdef".into(),
+            state,
+        }
+    }
+
+    fn submodules_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::LoadSubmodules { tag }] => *tag,
+            other => panic!("expected one LoadSubmodules, got {other:?}"),
+        }
+    }
+
+    fn submodule_list(state: &AppState) -> &SubmoduleList {
+        match state.popups.last() {
+            Some(Popup::Submodules(list)) => list,
+            other => panic!("expected the Submodules popup, got {other:?}"),
+        }
+    }
+
+    /// Three files with `b.rs` selected, and the Submodules popup open
+    /// listing `subs`.
+    fn with_submodules(subs: Vec<Submodule>) -> AppState {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::SelectNext);
+        let tag = submodules_tag(&press_char(&mut state, 'S'));
+        state.update(AppIntent::SubmodulesLoaded {
+            tag,
+            result: Ok(subs),
+        });
+        state
+    }
+
+    #[test]
+    fn s_opens_the_submodules_popup_and_loads_it_once() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let busy = state.busy;
+        let tag = submodules_tag(&press_char(&mut state, 'S'));
+        assert!(tag.user);
+        assert_eq!(tag.generation, state.generation);
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.key_focus(), KeyScope::Submodules);
+        assert_eq!(*submodule_list(&state), SubmoduleList::loading(tag.seq));
+
+        let subs = vec![submodule("sub", SubmoduleState::UpToDate)];
+        state.update(AppIntent::SubmodulesLoaded {
+            tag,
+            result: Ok(subs.clone()),
+        });
+        assert_eq!(submodule_list(&state).items, Some(subs));
+        assert_eq!(state.busy, busy);
+    }
+
+    #[test]
+    fn the_actions_menu_opens_the_submodules_popup() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        for _ in 0..5 {
+            state.update(AppIntent::MenuNext);
+        }
+        submodules_tag(&state.update(AppIntent::MenuSelect));
+        assert!(matches!(state.popups[..], [Popup::Submodules(_)]));
+    }
+
+    #[test]
+    fn a_stale_or_unwanted_submodule_load_is_dropped_but_still_lowers_busy() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let old = submodules_tag(&press_char(&mut state, 'S'));
+        assert_eq!(state.busy, 1);
+        let subs = vec![submodule("sub", SubmoduleState::UpToDate)];
+        let stale_seq = Tag {
+            seq: old.seq + 100,
+            ..old
+        };
+        state.update(AppIntent::SubmodulesLoaded {
+            tag: stale_seq,
+            result: Ok(subs.clone()),
+        });
+        let stale_generation = Tag {
+            generation: old.generation + 1,
+            ..old
+        };
+        state.update(AppIntent::SubmodulesLoaded {
+            tag: stale_generation,
+            result: Ok(subs.clone()),
+        });
+        assert_eq!(submodule_list(&state).items, None);
+        assert_eq!(state.busy, 0);
+
+        // Closed before the answer: nothing comes back.
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+        state.update(AppIntent::SubmodulesLoaded {
+            tag: old,
+            result: Ok(subs),
+        });
+        assert_eq!(state.popups, []);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn j_and_k_move_the_submodule_cursor_within_bounds() {
+        let mut state = with_submodules(vec![
+            submodule("a", SubmoduleState::UpToDate),
+            submodule("b", SubmoduleState::OutOfDate),
+        ]);
+        press_char(&mut state, 'k');
+        assert_eq!(submodule_list(&state).cursor, 0);
+        for _ in 0..3 {
+            press_char(&mut state, 'j');
+        }
+        assert_eq!(submodule_list(&state).cursor, 1);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(submodule_list(&state).cursor, 0);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(submodule_list(&state).cursor, 1);
+        // The file selection did not move.
+        assert_eq!(state.selected, Some(1));
+    }
+
+    #[test]
+    fn i_and_u_run_one_op_on_the_selected_submodule() {
+        let mut state = with_submodules(vec![
+            submodule("a", SubmoduleState::Uninitialized),
+            submodule("libs/b", SubmoduleState::Uninitialized),
+        ]);
+        press_char(&mut state, 'j');
+        let (tag, op) = op_of(&press_char(&mut state, 'i'));
+        assert_eq!(op, GitOp::SubmoduleInit("libs/b".into()));
+
+        // One at a time.
+        assert_eq!(press_char(&mut state, 'u'), vec![]);
+        assert_eq!(state.notice, Some("An operation is running"));
+        state.update(AppIntent::OpFinished {
+            tag,
+            op,
+            result: Ok(()),
+        });
+
+        let (_, op) = op_of(&press_char(&mut state, 'u'));
+        assert_eq!(op, GitOp::SubmoduleUpdate("libs/b".into()));
+    }
+
+    #[test]
+    fn a_finished_submodule_op_reloads_the_files_and_the_open_list() {
+        let mut state = with_submodules(vec![submodule("a", SubmoduleState::Uninitialized)]);
+        let (tag, op) = op_of(&press_char(&mut state, 'u'));
+        let effects = state.update(AppIntent::OpFinished {
+            tag,
+            op: op.clone(),
+            result: Ok(()),
+        });
+        let seq = match effects.as_slice() {
+            [Effect::LoadStatus { .. }, Effect::LoadSubmodules { tag }] => tag.seq,
+            other => panic!("expected a status and a submodule load, got {other:?}"),
+        };
+        let list = submodule_list(&state);
+        assert_eq!(list.seq, seq);
+        // What it showed stays until the reload lands.
+        assert!(list.items.is_some());
+
+        // Closed: only the files reload.
+        let (tag, op) = op_of(&state.update(AppIntent::UpdateSubmodule));
+        state.popups.clear();
+        let effects = state.update(AppIntent::OpFinished {
+            tag,
+            op,
+            result: Ok(()),
+        });
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            "{effects:?}"
+        );
+    }
+
+    fn set_repo(effect: &Effect) -> &[RepoPath] {
+        match effect {
+            Effect::SetRepo { nested } => nested,
+            other => panic!("expected SetRepo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_a_checked_out_submodule_switches_to_it() {
+        let mut state = with_submodules(vec![
+            submodule("a", SubmoduleState::Uninitialized),
+            submodule("sub", SubmoduleState::UpToDate),
+        ]);
+        let generation = state.generation;
+        let files = state.files.clone();
+        let branch = state.branch.clone();
+        press_char(&mut state, 'j');
+
+        let effects = press(&mut state, KeyCode::Enter);
+
+        assert_eq!(
+            state.repo_stack,
+            [ParentRepo {
+                path: "sub".into(),
+                files,
+                files_loaded: true,
+                branch,
+                selected: Some(1),
+            }]
+        );
+        assert_eq!(state.generation, generation + 1);
+        assert_eq!(state.files, []);
+        assert!(!state.files_loaded);
+        assert_eq!(state.branch, None);
+        assert_eq!(state.selected, None);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.focus, Focus::Files);
+        assert_eq!(state.diff, DiffPane::default());
+        match effects.as_slice() {
+            [set, Effect::LoadStatus { tag }] => {
+                assert_eq!(set_repo(set), [RepoPath::from("sub")]);
+                assert_eq!(tag.generation, state.generation);
+            }
+            other => panic!("expected SetRepo then LoadStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_on_an_uninitialized_submodule_only_says_why() {
+        let mut state = with_submodules(vec![submodule("a", SubmoduleState::Uninitialized)]);
+        let before = state.clone();
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Update the submodule first"));
+        assert_eq!(
+            AppState {
+                notice: None,
+                ..state
+            },
+            before
+        );
+    }
+
+    #[test]
+    fn enter_waits_for_a_running_op() {
+        let mut state = with_submodules(vec![submodule("a", SubmoduleState::UpToDate)]);
+        state.op_seq = Some(99);
+        assert_eq!(state.update(AppIntent::EnterSubmodule), vec![]);
+        assert_eq!(state.notice, Some("Wait for the operation to finish"));
+        assert_eq!(state.repo_stack, []);
+    }
+
+    #[test]
+    fn backspace_restores_the_parent_exactly_and_reloads_it() {
+        let mut state = with_submodules(vec![submodule("sub", SubmoduleState::OutOfDate)]);
+        let files = state.files.clone();
+        let branch = state.branch.clone();
+        press(&mut state, KeyCode::Enter);
+        let tag = refresh_tag(&mut state);
+        state.update(loaded(tag, &["inner.txt"]));
+        let generation = state.generation;
+
+        let effects = press(&mut state, KeyCode::Backspace);
+
+        assert_eq!(state.repo_stack, []);
+        assert_eq!(state.generation, generation + 1);
+        assert_eq!(state.files, files);
+        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.branch, branch);
+        assert!(state.files_loaded);
+        match effects.as_slice() {
+            [
+                set,
+                Effect::LoadDiff { request, tag, .. },
+                Effect::DiffLoadingDelay { .. },
+                Effect::LoadStatus { tag: status },
+            ] => {
+                assert_eq!(set_repo(set), []);
+                assert_eq!(request.path, "b.rs".into());
+                assert_eq!(tag.generation, state.generation);
+                assert_eq!(status.generation, state.generation);
+            }
+            other => panic!("expected SetRepo, the diff, then status, got {other:?}"),
+        }
+        assert_eq!(state.status_selection, Selection::KeepPath);
+    }
+
+    #[test]
+    fn nested_submodules_stack_their_paths() {
+        let mut state = with_submodules(vec![submodule("outer", SubmoduleState::UpToDate)]);
+        press(&mut state, KeyCode::Enter);
+        let tag = submodules_tag(&state.update(AppIntent::OpenSubmodules));
+        state.update(AppIntent::SubmodulesLoaded {
+            tag,
+            result: Ok(vec![submodule("inner", SubmoduleState::UpToDate)]),
+        });
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            set_repo(&effects[0]),
+            [RepoPath::from("outer"), RepoPath::from("inner")]
+        );
+        let effects = press(&mut state, KeyCode::Backspace);
+        assert_eq!(set_repo(&effects[0]), [RepoPath::from("outer")]);
+    }
+
+    #[test]
+    fn backspace_outside_a_submodule_is_disabled() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let before = state.clone();
+        assert_eq!(press(&mut state, KeyCode::Backspace), vec![]);
+        assert_eq!(state.notice, Some("Not in a submodule"));
+        assert_eq!(
+            AppState {
+                notice: None,
+                ..state
+            },
+            before
+        );
+    }
+
+    #[test]
+    fn results_for_the_parent_are_dropped_inside_the_submodule() {
+        let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
+        let parent = refresh_tag(&mut state);
+        press(&mut state, KeyCode::Enter);
+        state.update(loaded(parent, &["parent.txt"]));
+        assert_eq!(state.files, []);
+        assert!(!state.files_loaded);
     }
 }
