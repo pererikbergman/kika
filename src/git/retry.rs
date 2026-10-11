@@ -2,6 +2,7 @@
 //! lock, so a background `git status` elsewhere never shows as an error.
 
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,7 +20,7 @@ type Sleep = Box<dyn Fn(Duration) + Send + Sync>;
 
 /// A [`GitRunner`] that runs a command again, after a pause, while it fails
 /// on a lock. Streamed commands are not retried: their output is already
-/// on its way to the reader.
+/// on its way to the reader. Everything else goes to the inner runner.
 pub struct RetryRunner {
     inner: Arc<dyn GitRunner>,
     delays: Vec<Duration>,
@@ -68,6 +69,16 @@ impl GitRunner for RetryRunner {
 
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild> {
         self.inner.spawn(cmd)
+    }
+
+    // The trait's defaults would hide the inner runner's directory, so
+    // hand-offs and submodule switches must reach it.
+    fn workdir(&self) -> PathBuf {
+        self.inner.workdir()
+    }
+
+    fn set_workdir(&self, dir: PathBuf) {
+        self.inner.set_workdir(dir);
     }
 }
 
@@ -163,6 +174,18 @@ mod tests {
         );
         fake.assert_done();
         assert_eq!(*slept.lock().unwrap(), ms(&[50]));
+    }
+
+    #[test]
+    fn the_working_directory_is_the_inner_runners() {
+        let inner = Arc::new(crate::git::CliRunner::new("/launch"));
+        let runner = RetryRunner::new(inner.clone());
+        assert_eq!(runner.workdir(), std::path::PathBuf::from("/launch"));
+
+        runner.set_workdir("/launch/sub".into());
+
+        assert_eq!(inner.workdir(), std::path::PathBuf::from("/launch/sub"));
+        assert_eq!(runner.workdir(), std::path::PathBuf::from("/launch/sub"));
     }
 
     #[test]

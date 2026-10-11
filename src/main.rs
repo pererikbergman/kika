@@ -17,6 +17,7 @@ mod model;
 mod popup;
 mod popup_view;
 mod refresh;
+mod submodule_list;
 mod view;
 mod watch;
 
@@ -41,8 +42,6 @@ fn main() -> color_eyre::Result<()> {
     let launch = std::env::current_dir()?;
     let workdir = repo_root::resolve_workdir(&CliRunner::new(&launch), launch);
     let cli_runner = CliRunner::new(workdir);
-    // Editors run where git does, so relative names mean the same to both.
-    let workdir = cli_runner.workdir().to_path_buf();
     // Another process holding a lock for a moment is not worth an error.
     let runner = Arc::new(RetryRunner::new(Arc::new(cli_runner)));
     let runtime = tokio::runtime::Runtime::new()?;
@@ -51,12 +50,7 @@ fn main() -> color_eyre::Result<()> {
     // Focus-in is a cue that the repository may have changed elsewhere.
     // A terminal that cannot report focus still has the timers.
     let _ = execute!(std::io::stdout(), EnableFocusChange);
-    let result = runtime.block_on(app::run(
-        terminal,
-        AppState::new(cli.context()),
-        runner,
-        workdir,
-    ));
+    let result = runtime.block_on(app::run(terminal, AppState::new(cli.context()), runner));
     let _ = execute!(std::io::stdout(), DisableFocusChange);
     ratatui::restore();
     // Quitting interrupts git, but a process that ignores it must not keep

@@ -16,6 +16,7 @@ pub mod repo_state;
 pub mod retry;
 pub mod runner;
 pub mod status;
+pub mod submodule;
 
 pub use runner::{CliRunner, GitRunner};
 pub use status::FileEntry;

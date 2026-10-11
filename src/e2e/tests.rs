@@ -927,6 +927,103 @@ async fn emptying_the_message_in_the_editor_aborts_and_keeps_the_popup() {
     app.assert_screen_contains("typed");
 }
 
+/// A parent with `a.txt` and `b.txt` changed, and a submodule `sub` cloned
+/// from another local repository holding `inner.txt`. Returns both, since
+/// the parent's submodule is cloned from the other's path.
+fn repo_with_submodule() -> (TestRepo, TestRepo) {
+    let inner = TestRepo::new().write("inner.txt", "one\n").commit("init");
+    let source = inner.path().to_str().expect("a UTF-8 temp dir").to_string();
+    let parent = TestRepo::new()
+        .write("a.txt", "one\n")
+        .write("b.txt", "one\n")
+        .commit("init");
+    parent.git([
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        source.as_str(),
+        "sub",
+    ]);
+    let parent = parent
+        .commit("add sub")
+        .write("a.txt", "two\n")
+        .write("b.txt", "two\n");
+    (parent, inner)
+}
+
+/// Git refuses local clones for submodules by default; only this test's
+/// runner allows them, through the environment.
+fn runner_allowing_local_clones(repo: &TestRepo) -> CliRunner {
+    repo.runner()
+        .with_env("GIT_CONFIG_COUNT", "1")
+        .with_env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+        .with_env("GIT_CONFIG_VALUE_0", "always")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_submodule_is_listed_updated_entered_and_left() {
+    use crate::git::submodule::SubmoduleState;
+    use crate::popup::Popup;
+
+    let (parent, _inner) = repo_with_submodule();
+    let mut app = Harness::start_with(runner_allowing_local_clones(&parent), 80, 24).await;
+    app.press(KeyCode::Char('j')).await;
+    assert_eq!(app.selected_line().as_deref(), Some("M b.txt"));
+
+    let states = |app: &Harness| match app.state().popups.last() {
+        Some(Popup::Submodules(list)) => list
+            .items
+            .iter()
+            .flatten()
+            .map(|s| (s.path.display().to_string(), s.state))
+            .collect::<Vec<_>>(),
+        other => panic!("expected the Submodules popup, got {other:?}"),
+    };
+
+    // Listed as checked out.
+    app.press_with(KeyCode::Char('S'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains(" Submodules ");
+    app.assert_screen_contains("sub");
+    assert_eq!(states(&app), [("sub".into(), SubmoduleState::UpToDate)]);
+    app.press(KeyCode::Esc).await;
+
+    // Deinitialized outside Kika, then brought back with `u`.
+    parent.git(["submodule", "deinit", "-q", "-f", "sub"]);
+    assert!(!parent.exists("sub/inner.txt"));
+    app.press_with(KeyCode::Char('S'), KeyModifiers::SHIFT)
+        .await;
+    assert_eq!(
+        states(&app),
+        [("sub".into(), SubmoduleState::Uninitialized)]
+    );
+    app.assert_screen_contains("not initialized");
+    app.press(KeyCode::Char('u')).await;
+    assert_eq!(states(&app), [("sub".into(), SubmoduleState::UpToDate)]);
+    app.assert_screen_contains("up to date");
+    assert_eq!(parent.read("sub/inner.txt"), "one\n");
+
+    // Entered: its own changes show, and the Status title says where.
+    std::fs::write(parent.path().join("sub/inner.txt"), "changed\n").unwrap();
+    app.press(KeyCode::Enter).await;
+    assert!(app.state().popups.is_empty());
+    assert_eq!(app.selected_line().as_deref(), Some("M inner.txt"));
+    app.assert_screen_contains("Status · sub");
+    app.assert_screen_contains("+changed");
+    let screen = app.screen().join("\n");
+    assert!(!screen.contains("a.txt"), "{screen}");
+
+    // Left: the parent's files and selection are back.
+    app.press(KeyCode::Backspace).await;
+    assert_eq!(app.selected_line().as_deref(), Some("M b.txt"));
+    app.assert_screen_contains("a.txt");
+    app.assert_screen_contains("+two");
+    let screen = app.screen().join("\n");
+    assert!(!screen.contains("Status · sub"), "{screen}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_edited_outside_appears_on_the_next_files_poll() {
     let repo = TestRepo::new().write("a.txt", "one\n").commit("init");

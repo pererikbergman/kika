@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -28,7 +28,6 @@ pub async fn run(
     mut terminal: DefaultTerminal,
     mut state: AppState,
     runner: Arc<dyn GitRunner>,
-    workdir: PathBuf,
 ) -> color_eyre::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone());
@@ -44,6 +43,9 @@ pub async fn run(
         let Some(intent) = rx.recv().await else { break };
         let mut jobs = VecDeque::from(dispatch(&mut state, &runtime, intent));
         while let Some(job) = jobs.pop_front() {
+            // Editors run where git does, so relative names mean the same
+            // to both, inside an entered submodule too.
+            let workdir = runner.workdir();
             let intent = suspend_and_run(&mut terminal, &input, job, runner.as_ref(), &workdir)?;
             // Resizes while the terminal was away were never seen.
             let size = terminal.size()?;
