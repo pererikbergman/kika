@@ -1392,6 +1392,7 @@ mod tests {
     /// `state` with one global `[keys]` table applied.
     fn remapped(mut state: AppState, entries: &[(&str, &[&str])]) -> AppState {
         state.update(crate::intent::AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
             keymap: crate::keymap::remap(entries),
             errors: vec![],
         });
