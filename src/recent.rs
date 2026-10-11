@@ -296,6 +296,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "Windows forbids a newline in file names")]
     fn a_path_with_a_newline_is_never_recorded() {
         let tmp = TempDir::new("recent");
         let file = tmp.path().join("recent-repos");

@@ -356,6 +356,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "/usr/bin/delta is not an absolute path on Windows")]
     fn parse_command_splits_plain_commands() {
         assert_eq!(parse_command("delta --dark"), Ok(os(&["delta", "--dark"])));
         assert_eq!(parse_command("/usr/bin/delta"), Ok(os(&["/usr/bin/delta"])));
@@ -393,6 +394,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "/opt/bin/diff-so-fancy is not an absolute path on Windows"
+    )]
     fn discover_puts_the_kika_pager_first_then_pager_diff_then_core_pager() {
         let runner = FakeRunner::new()
             .expect(&PAGER, ok(b"delta --dark\n"))
@@ -446,6 +451,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "sh and /bin/x are Unix names; Windows needs sh.exe and a drive letter"
+    )]
     fn resolve_never_searches_relative_path_entries() {
         let found = resolve(OsStr::new("sh")).expect("sh is on PATH");
         assert!(found.is_absolute());
