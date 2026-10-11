@@ -1,8 +1,11 @@
 //! Every menu Kika shows, declared once like the keymap. An item's result
 //! is an intent, and it can be disabled with a reason, as a key can.
 
+use crate::git::ops::MergeStrategy;
 use crate::intent::AppIntent;
-use crate::keymap::{amend_disabled, commit_disabled, never, stage_all_disabled, stage_disabled};
+use crate::keymap::{
+    amend_disabled, commit_disabled, merge_disabled, never, stage_all_disabled, stage_disabled,
+};
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
 
@@ -10,6 +13,8 @@ use crate::popup::{ConfirmKind, PromptKind};
 pub enum MenuId {
     Actions,
     Stage,
+    /// Merge the selected branch into the current one, or rebase onto it.
+    Merge,
 }
 
 impl MenuId {
@@ -17,6 +22,7 @@ impl MenuId {
         match self {
             MenuId::Actions => "Actions",
             MenuId::Stage => "Stage",
+            MenuId::Merge => "Merge / rebase",
         }
     }
 }
@@ -90,9 +96,33 @@ static STAGE: &[MenuItem] = &[
     },
 ];
 
+static MERGE: &[MenuItem] = &[
+    MenuItem {
+        label: "Fast-forward only",
+        intent: AppIntent::Merge(MergeStrategy::FastForwardOnly),
+        disabled: merge_disabled,
+    },
+    MenuItem {
+        label: "Merge commit",
+        intent: AppIntent::Merge(MergeStrategy::NoFastForward),
+        disabled: merge_disabled,
+    },
+    MenuItem {
+        label: "Squash",
+        intent: AppIntent::Merge(MergeStrategy::Squash),
+        disabled: merge_disabled,
+    },
+    MenuItem {
+        label: "Rebase current branch onto it",
+        intent: AppIntent::RebaseOnto,
+        disabled: merge_disabled,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
         MenuId::Stage => STAGE,
+        MenuId::Merge => MERGE,
     }
 }

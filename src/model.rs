@@ -19,11 +19,12 @@ use crate::git::commit_files::{CommitFile, CommitRange};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
-use crate::git::ops::GitOp;
+use crate::git::ops::{GitOp, MergeStrategy};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::prompts::{PromptFacts, needs_terminal};
+use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::refs::RefsSnapshot;
+use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
@@ -33,7 +34,8 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
-    DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind,
+    ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup,
+    PromptKind,
 };
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -712,6 +714,18 @@ impl AppState {
                 return self.named_branch_op(&text, |from, to| GitOp::RenameBranch { from, to });
             }
             AppIntent::ConfirmDeleteBranch { force } => return self.confirm_delete_branch(force),
+            AppIntent::Merge(strategy) => {
+                return self.branch_op(|branch| GitOp::Merge { branch, strategy });
+            }
+            AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
+            AppIntent::ContinueOperation => {
+                return self.resume(keymap::resume_disabled, GitOp::Continue);
+            }
+            AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
+            AppIntent::AbortOperation => self.ask_abort(),
+            AppIntent::ConfirmAbort(operation) => {
+                return self.start_op(Ok(Some(GitOp::Abort(operation))));
+            }
         }
         vec![]
     }
@@ -776,7 +790,8 @@ impl AppState {
                 KeyScope::CommitFiles
             }
             (Context::Workspace, Focus::Commits) => KeyScope::Commits,
-            (Context::Workspace, Focus::Status | Focus::Stash) => KeyScope::Workspace,
+            (Context::Workspace, Focus::Status) => KeyScope::Status,
+            (Context::Workspace, Focus::Stash) => KeyScope::Workspace,
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -2024,13 +2039,28 @@ impl AppState {
         } else {
             // A failed git command gets a popup; `op_error` is for refusals.
             self.op_error = None;
-            if let Err(message) = result {
-                let error = if matches!(op, GitOp::ApplyEdited { .. }) {
-                    self.edited_hunk_error(&message)
-                } else {
-                    ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
-                };
-                self.push_error(error);
+            match result {
+                // Git stops before committing a squash, so say what is left.
+                Ok(())
+                    if matches!(
+                        op,
+                        GitOp::Merge {
+                            strategy: MergeStrategy::Squash,
+                            ..
+                        }
+                    ) =>
+                {
+                    self.notice = Some("Squashed changes are staged; commit them");
+                }
+                Ok(()) => {}
+                Err(message) => {
+                    let error = if matches!(op, GitOp::ApplyEdited { .. }) {
+                        self.edited_hunk_error(&message)
+                    } else {
+                        ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
+                    };
+                    self.push_error(error);
+                }
             }
         }
         // Refresh even after a failure: a failed `add` of several paths can
@@ -2906,6 +2936,64 @@ impl AppState {
         }
     }
 
+    /// Merge the selected branch, or rebase onto it: the op `make` builds
+    /// from its name, run on the terminal when it may make commits.
+    fn branch_op(&mut self, make: impl FnOnce(BranchName) -> GitOp) -> Vec<Effect> {
+        match self.branch_for_action(keymap::merge_disabled) {
+            Some(name) => self.run_op_where_it_belongs(make(name)),
+            None => vec![],
+        }
+    }
+
+    /// Start `op` attached to the terminal or detached, as
+    /// [`runs_attached`] says.
+    fn run_op_where_it_belongs(&mut self, op: GitOp) -> Vec<Effect> {
+        if runs_attached(&op) {
+            self.start_op_as(Ok(Some(op)), |tag, op| {
+                Effect::HandOff(HandOff::Attached { tag, op })
+            })
+        } else {
+            self.start_op(Ok(Some(op)))
+        }
+    }
+
+    /// The merge, rebase or cherry-pick in progress, or why none can be
+    /// acted on now, said in the bar.
+    fn operation_for_action(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+    ) -> Option<Operation> {
+        if self.context != Context::Workspace {
+            return None;
+        }
+        if let Some(reason) = disabled(self) {
+            self.notice = Some(reason);
+            return None;
+        }
+        keymap::resumable_operation(self)
+    }
+
+    /// Continue or skip the operation in progress.
+    fn resume(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+        make: fn(Operation) -> GitOp,
+    ) -> Vec<Effect> {
+        match self.operation_for_action(disabled) {
+            Some(operation) => self.run_op_where_it_belongs(make(operation)),
+            None => vec![],
+        }
+    }
+
+    /// Ask before aborting: resolved conflicts are thrown away. The
+    /// question names the operation, and the answer aborts that one.
+    fn ask_abort(&mut self) {
+        if let Some(operation) = self.operation_for_action(keymap::resume_disabled) {
+            self.popups
+                .push(Popup::Confirm(ConfirmKind::Abort(operation)));
+        }
+    }
+
     /// Ask for a branch name, keeping the selected branch for the answer.
     /// Renaming starts from the old name.
     fn ask_branch_name(&mut self, kind: PromptKind) {
@@ -2982,6 +3070,9 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
+        GitOp::Merge { .. } | GitOp::Rebase { .. } | GitOp::Continue(_) | GitOp::Skip(_) => {
+            "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
+        }
         GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
@@ -3010,6 +3101,17 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::CreateBranch { .. } => "Could not create the branch",
         GitOp::RenameBranch { .. } => "Could not rename the branch",
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
+        GitOp::Merge { .. } => "Could not merge",
+        GitOp::Rebase { .. } => "Could not rebase",
+        GitOp::Continue(Operation::Merge) => "Could not continue the merge",
+        GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
+        GitOp::Continue(Operation::CherryPick) => "Could not continue the cherry-pick",
+        GitOp::Continue(Operation::Bisect) => "Could not continue the bisect",
+        GitOp::Skip(_) => "Could not skip",
+        GitOp::Abort(Operation::Merge) => "Could not abort the merge",
+        GitOp::Abort(Operation::Rebase) => "Could not abort the rebase",
+        GitOp::Abort(Operation::CherryPick) => "Could not abort the cherry-pick",
+        GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
     }
 }
 
@@ -3024,7 +3126,7 @@ mod tests {
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
-    use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat, PromptKind};
+    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
@@ -9615,5 +9717,274 @@ mod tests {
             "a delete changes no files: {effects:?}"
         );
         branches_tag(&effects);
+    }
+
+    // --- Merge, rebase and the operation in progress ---
+
+    /// The one attached hand-off in `effects`.
+    fn attached_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
+            other => panic!("expected one attached hand-off, got {other:?}"),
+        }
+    }
+
+    /// `with_branches`, with `ops` in progress.
+    fn in_progress(ops: &[Operation]) -> AppState {
+        let mut state = with_branches();
+        let mut branch = on_branch("main");
+        branch.in_progress = ops.to_vec();
+        state.branch = Some(branch);
+        state
+    }
+
+    /// `in_progress`, with the Status panel focused.
+    fn status_focused(ops: &[Operation]) -> AppState {
+        let mut state = in_progress(ops);
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Status,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Status);
+        state
+    }
+
+    #[test]
+    fn m_on_another_branch_opens_the_merge_menu() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        assert_eq!(press_char(&mut state, 'm'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Menu {
+                id: MenuId::Merge,
+                cursor: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn fast_forward_and_squash_run_detached_on_the_selected_branch() {
+        for strategy in [MergeStrategy::FastForwardOnly, MergeStrategy::Squash] {
+            let mut state = in_progress(&[]);
+            state.update(AppIntent::BranchNext);
+            let (_, op) = op_of(&state.update(AppIntent::Merge(strategy)));
+            assert_eq!(
+                op,
+                GitOp::Merge {
+                    branch: "topic".into(),
+                    strategy
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_commit_and_a_rebase_run_on_the_terminal() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        let (tag, op) = attached_of(&state.update(AppIntent::Merge(MergeStrategy::NoFastForward)));
+        assert_eq!(
+            op,
+            GitOp::Merge {
+                branch: "topic".into(),
+                strategy: MergeStrategy::NoFastForward
+            }
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        state.update(finished(tag, op, Ok(())));
+
+        let (_, op) = attached_of(&state.update(AppIntent::RebaseOnto));
+        assert_eq!(
+            op,
+            GitOp::Rebase {
+                onto: "topic".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_merge_menu_runs_the_chosen_item() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'm');
+        press_char(&mut state, 'j');
+        let (_, op) = attached_of(&press(&mut state, KeyCode::Enter));
+        assert!(matches!(
+            op,
+            GitOp::Merge {
+                strategy: MergeStrategy::NoFastForward,
+                ..
+            }
+        ));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn merging_the_current_branch_or_during_an_operation_is_refused() {
+        let mut state = in_progress(&[]);
+        assert_eq!(press_char(&mut state, 'm'), vec![]);
+        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.popups, []);
+        assert_eq!(
+            state.update(AppIntent::Merge(MergeStrategy::Squash)),
+            vec![]
+        );
+        assert_eq!(state.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(state.notice, Some("Already on this branch"));
+
+        let mut merging = in_progress(&[Operation::Merge]);
+        merging.update(AppIntent::BranchNext);
+        assert_eq!(press_char(&mut merging, 'm'), vec![]);
+        assert_eq!(
+            merging.notice,
+            Some("Finish or abort the operation in progress")
+        );
+        assert_eq!(merging.popups, []);
+        assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(merging.op_seq, None);
+    }
+
+    #[test]
+    fn a_bisect_alone_does_not_stop_a_merge() {
+        let mut state = in_progress(&[Operation::Bisect]);
+        state.update(AppIntent::BranchNext);
+        op_of(&state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)));
+    }
+
+    #[test]
+    fn c_continues_a_merge_on_the_terminal_and_s_cannot_skip_it() {
+        let mut state = status_focused(&[Operation::Merge]);
+        let (tag, op) = attached_of(&press_char(&mut state, 'c'));
+        assert_eq!(op, GitOp::Continue(Operation::Merge));
+        state.update(finished(tag, op, Ok(())));
+
+        assert_eq!(press_char(&mut state, 's'), vec![]);
+        assert_eq!(state.notice, Some("A merge cannot be skipped"));
+        assert_eq!(state.update(AppIntent::SkipOperation), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn s_skips_a_rebase_commit_on_the_terminal() {
+        let mut state = status_focused(&[Operation::Rebase]);
+        let (_, op) = attached_of(&press_char(&mut state, 's'));
+        assert_eq!(op, GitOp::Skip(Operation::Rebase));
+    }
+
+    #[test]
+    fn a_asks_first_and_y_aborts_detached() {
+        let mut state = status_focused(&[Operation::Merge]);
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))]
+        );
+        assert_eq!(state.op_seq, None);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::Abort(Operation::Merge));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_keeps_the_operation() {
+        let mut state = status_focused(&[Operation::Merge]);
+        press_char(&mut state, 'a');
+        assert_eq!(press_char(&mut state, 'n'), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn with_nothing_in_progress_the_status_keys_are_disabled() {
+        for ops in [&[][..], &[Operation::Bisect][..]] {
+            let mut state = status_focused(ops);
+            for c in ['c', 's', 'a'] {
+                state.notice = None;
+                assert_eq!(press_char(&mut state, c), vec![], "{c}");
+                assert_eq!(state.notice, Some("Nothing in progress"), "{c}");
+            }
+            for intent in [
+                AppIntent::ContinueOperation,
+                AppIntent::SkipOperation,
+                AppIntent::AbortOperation,
+            ] {
+                assert_eq!(state.update(intent), vec![]);
+            }
+            assert_eq!(state.popups, []);
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn the_status_keys_wait_for_a_running_op() {
+        let mut state = status_focused(&[Operation::Rebase]);
+        state.op_seq = Some(9);
+        for c in ['c', 's', 'a'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{c}");
+        }
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_finished_squash_says_the_changes_wait_to_be_committed() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        let (tag, op) = op_of(&state.update(AppIntent::Merge(MergeStrategy::Squash)));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(
+            state.notice,
+            Some("Squashed changes are staged; commit them")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+        branches_tag(&effects);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadCommits { .. })),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn failures_name_the_step_and_point_at_the_status_panel() {
+        let conflicts = "If git stopped on conflicts, resolve them, then continue or abort from the Status panel.";
+        let cases = [
+            (
+                GitOp::Merge {
+                    branch: "b".into(),
+                    strategy: MergeStrategy::NoFastForward,
+                },
+                "Could not merge",
+                conflicts,
+            ),
+            (
+                GitOp::Rebase { onto: "b".into() },
+                "Could not rebase",
+                conflicts,
+            ),
+            (
+                GitOp::Continue(Operation::CherryPick),
+                "Could not continue the cherry-pick",
+                conflicts,
+            ),
+            (GitOp::Skip(Operation::Rebase), "Could not skip", conflicts),
+            (
+                GitOp::Abort(Operation::Merge),
+                "Could not abort the merge",
+                "The file list was reloaded. Fix the cause above, then try again.",
+            ),
+        ];
+        for (op, title, next) in cases {
+            assert_eq!(failure_title(&op), title, "{op:?}");
+            assert_eq!(failure_next(&op), next, "{op:?}");
+        }
     }
 }
