@@ -1171,6 +1171,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.use_renderers(vec![ExternalRenderer {
         label: "cat".into(),
         argv: vec!["cat".into()],
+        kind: crate::external_diff::RendererKind::Pager,
     }])
     .await;
 

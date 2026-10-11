@@ -44,7 +44,8 @@ pub async fn run(
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
         .with_global_config(global_config)
-        .with_diff_pager(config.diff_pager.clone());
+        .with_diff_pager(config.diff_pager.clone())
+        .with_diff_tool(config.diff_tool.clone());
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);

@@ -15,7 +15,8 @@ pub struct RenderedDiff {
     pub side: DiffSide,
     pub rows: Vec<StyledRow>,
     /// Per row, `(hunk, line index in the hunk)` of the patch line it
-    /// shows; `None` for decoration. Empty when there is no patch to map to.
+    /// shows; `None` for decoration. Empty when there is no patch to map
+    /// to, and always for a diff tool, whose rows show no patch lines.
     pub map: Vec<Option<(usize, usize)>>,
     /// Index of the top visible row.
     pub scroll: usize,

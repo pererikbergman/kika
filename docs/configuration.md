@@ -31,6 +31,7 @@ fetch = 300     # leave out to keep auto-fetch off
 
 [diff]
 pager = "delta --paging=never"   # a program that draws the Diff pane
+tool = "difft --color=always"    # a display-only diff tool
 ```
 
 ## Layering
@@ -143,6 +144,41 @@ pager = "delta --paging=never"
   `core.pager`, under the same rules. Plain viewers (`less`, `more`, `most`,
   `cat`) and `true`/`false` values are skipped, from either source. A
   repository's own git config is never read for this.
+
+### `tool`: a display-only diff tool
+
+`tool` names a structural diff tool, such as difftastic, that compares the
+old and new file instead of reading a diff. `R` offers it after the pagers.
+
+```toml
+[diff]
+tool = "difft --color=always"
+```
+
+- Kika reads both sides of the shown file into two new temp files in a
+  private directory, runs the tool as `<tool> -- OLD NEW`, and removes the
+  directory afterwards. For unstaged changes OLD is the index and NEW the
+  working tree file; for staged changes OLD is `HEAD` and NEW the index; for
+  an untracked file OLD is empty. The temp files are named `old` and `new`,
+  plus the file's extension when it is 1 to 16 letters or digits, so your
+  file names never reach the tool's arguments.
+- The value follows the same rules as `pager`: run directly, never through a
+  shell, split on spaces, with a bare name or an absolute path.
+- The tool gets the pane's width in both `COLUMNS` and `DFT_WIDTH`, and runs
+  under the same limits: at most 10 seconds and 16 MiB of output, and at
+  most 16 MiB per side. Contents are the raw bytes, with no textconv or
+  clean filter applied.
+- Only regular files are shown. A symlink, a submodule or a conflicted file
+  says so instead.
+- **The tool's view is display-only.** Its rows cannot be matched to the
+  changes they show, so hunk and line staging, discard and hunk editing are
+  refused there, and the title says `(display only)`. Press `R` to get back
+  to the built-in view. Staging and discarding whole files from the Files
+  panel work as usual.
+- **Only Kika's global file sets `tool`.** Git's own external diff settings
+  (`diff.external`, `diff.tool`, `difftool.*` and `GIT_EXTERNAL_DIFF`) are
+  never read for it, since git runs those through a shell and a cloned
+  repository can bring them.
 
 **Changes to `[diff]` take effect after a restart.**
 
