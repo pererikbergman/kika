@@ -1,7 +1,9 @@
 //! Runs the app headless: the real model, effect runtime and git runner over
 //! a [`TestRepo`], drawn on a `TestBackend`, with keys injected the way the
-//! terminal would send them.
+//! terminal would send them. Hand-offs run as the loop runs them, minus the
+//! terminal, so a scripted editor can stand in for the user's.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +18,7 @@ use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
 use crate::git::CliRunner;
+use crate::handoff;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context};
 use crate::view;
@@ -30,6 +33,7 @@ pub struct Harness {
     state: AppState,
     rx: UnboundedReceiver<AppIntent>,
     runtime: Runtime,
+    runner: Arc<CliRunner>,
     terminal: Terminal<TestBackend>,
 }
 
@@ -51,11 +55,13 @@ impl Harness {
     /// Start over any runner, such as one resolved outside a repository.
     pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(runner), tx);
+        let runner = Arc::new(runner);
+        let runtime = Runtime::new(runner.clone(), tx);
         let mut harness = Self {
             state: AppState::new(Context::Workspace),
             rx,
             runtime,
+            runner,
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
         };
         app::boot(&mut harness.state, &harness.runtime, width, height);
@@ -78,7 +84,17 @@ impl Harness {
     pub fn send(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let event = Event::Key(KeyEvent::new(code, modifiers));
         if let Some(intent) = AppIntent::from_event(event) {
-            app::dispatch(&mut self.state, &self.runtime, intent);
+            self.dispatch(intent);
+        }
+    }
+
+    /// Apply `intent` as the loop does, running any hand-off it asks for
+    /// to the end before going on.
+    fn dispatch(&mut self, intent: AppIntent) {
+        let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
+        while let Some(job) = jobs.pop_front() {
+            let intent = handoff::execute(job, self.runner.as_ref(), self.runner.workdir());
+            jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
     }
 
@@ -154,13 +170,13 @@ impl Harness {
     async fn wait_idle(&mut self) {
         loop {
             while let Ok(intent) = self.rx.try_recv() {
-                app::dispatch(&mut self.state, &self.runtime, intent);
+                self.dispatch(intent);
             }
             if is_idle(&self.state) {
                 return;
             }
             match tokio::time::timeout(HANG_TIMEOUT, self.rx.recv()).await {
-                Ok(Some(intent)) => app::dispatch(&mut self.state, &self.runtime, intent),
+                Ok(Some(intent)) => self.dispatch(intent),
                 // The runtime holds a sender, so the channel cannot close.
                 Ok(None) => unreachable!("the runtime keeps the channel open"),
                 Err(_) => self.hang(),

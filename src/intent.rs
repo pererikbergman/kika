@@ -117,6 +117,20 @@ pub enum AppIntent {
     GoToFile(String),
     /// Close the top popup: back in a menu, cancel in a prompt, dismiss an error.
     PopPopup,
+    /// Open the selected file in the user's editor, at the selected line
+    /// when there is one.
+    OpenInEditor,
+    /// Edit the selected hunk in the user's editor, then stage the result.
+    EditHunk,
+    /// The editor opened by `OpenInEditor` has closed.
+    EditorClosed {
+        result: Result<(), String>,
+    },
+    /// The hunk edit finished: the patch to stage, `None` if the user
+    /// cancelled.
+    HunkEdited {
+        result: Result<Option<Vec<u8>>, String>,
+    },
 }
 
 /// How far to scroll the diff pane.

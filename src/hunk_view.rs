@@ -196,6 +196,30 @@ impl HunkView {
             .collect()
     }
 
+    /// Where to open the worktree file: the line cursor's line in line
+    /// mode, else the selected hunk's first change, numbered on the new
+    /// side (a removed line opens where it was). `None` on the staged side,
+    /// whose numbers are the index's, not the file's.
+    pub fn editor_line(&self) -> Option<u32> {
+        if self.side == DiffSide::Index {
+            return None;
+        }
+        let hunk = self.patch.as_ref()?.hunks.get(self.hunk)?;
+        let at = match self.lines {
+            Some(lines) => lines.cursor,
+            None => hunk
+                .lines
+                .iter()
+                .position(|l| l.kind != PatchLineKind::Context)?,
+        };
+        let first = hunk.new_start.saturating_add(u32::from(hunk.new_len == 0));
+        let before = hunk.lines.iter().take(at);
+        let line = before
+            .filter(|l| l.kind != PatchLineKind::Removed)
+            .fold(first, |n, _| n.saturating_add(1));
+        Some(line.max(1))
+    }
+
     /// Indexes of the selected hunk's changed lines.
     fn changes(&self) -> Vec<usize> {
         let Some(hunk) = self.patch.as_ref().and_then(|p| p.hunks.get(self.hunk)) else {
@@ -332,6 +356,34 @@ mod tests {
         let mut view = HunkView::new("x".into(), DiffSide::Worktree);
         view.loaded(parse(TWO).unwrap(), 20);
         view
+    }
+
+    #[test]
+    fn the_editor_line_is_the_first_change_or_the_cursor_on_the_new_side() {
+        let mut view = view();
+        assert_eq!(view.editor_line(), Some(1));
+        view.next(20);
+        // ` d` is context at 9, so `-e` sat at new line 10.
+        assert_eq!(view.editor_line(), Some(10));
+        view.enter_lines();
+        view.next_line(false);
+        assert_eq!(view.editor_line(), Some(10));
+
+        // A hunk that only removes opens after the line before it.
+        let mut gone = HunkView::new("x".into(), DiffSide::Worktree);
+        gone.loaded(
+            parse(b"diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -4,2 +3,0 @@\n-a\n-b\n").unwrap(),
+            20,
+        );
+        assert_eq!(gone.editor_line(), Some(4));
+
+        let mut staged = HunkView::new("x".into(), DiffSide::Index);
+        staged.loaded(parse(TWO).unwrap(), 20);
+        assert_eq!(staged.editor_line(), None);
+        assert_eq!(
+            HunkView::new("x".into(), DiffSide::Worktree).editor_line(),
+            None
+        );
     }
 
     #[test]
