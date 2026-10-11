@@ -42,7 +42,9 @@ pub async fn run(
     spawn_watch_timers(tx.clone(), &config.watch);
     spawn_input_listener(tx, Arc::clone(&input));
     state.watch.fetch_enabled = config.watch.fetch.is_some();
+    // Read by `main` for this repository, so it always applies.
     let loaded = AppIntent::ConfigLoaded {
+        repo: state.repo.clone(),
         keymap: config.keymap,
         errors: config.errors,
     };
