@@ -73,6 +73,11 @@ mod bridge {
     /// How often the accept loop looks for a connection or a stop.
     const POLL: Duration = Duration::from_millis(20);
 
+    /// How long a client may take to send its question. The askpass
+    /// program sends it at once; a connection that never finishes must
+    /// not hold up every later question.
+    const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// The listening end. Questions are answered one at a time, in the
     /// order they arrive, by the `ask` given to [`AskpassServer::start`].
     /// Dropping it removes the socket and its directory and hangs up on a
@@ -183,7 +188,9 @@ mod bridge {
         stop: &AtomicBool,
         current: &Mutex<Option<UnixStream>>,
     ) {
-        if stream.set_nonblocking(false).is_err() {
+        if stream.set_nonblocking(false).is_err()
+            || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
+        {
             return;
         }
         *lock(current) = stream.try_clone().ok();
@@ -401,6 +408,21 @@ mod bridge {
             assert_eq!(mode & 0o777, 0o700);
             let (other, _asked) = self::server();
             assert_ne!(other.socket(), server.socket());
+        }
+
+        #[test]
+        fn a_client_that_never_finishes_its_question_does_not_block_the_next() {
+            let (server, asked) = server();
+            // Connected, and never shut down its write side.
+            let _stuck = UnixStream::connect(server.socket()).unwrap();
+            let waiting = run_client(server.socket(), "Password: ", None);
+
+            let (question, answer) = asked
+                .recv_timeout(READ_TIMEOUT * 3)
+                .expect("the stuck connection gave up");
+            assert!(matches!(question, Question::Ask { .. }), "{question:?}");
+            answer.send(Some(Secret::new("x"))).unwrap();
+            assert_eq!(waiting.join().unwrap().0, ExitCode::SUCCESS);
         }
 
         #[test]

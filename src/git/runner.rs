@@ -14,6 +14,8 @@ pub struct GitCommand {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
     stdin: Option<Vec<u8>>,
+    // Only unix can take the terminal away.
+    #[cfg_attr(not(unix), allow(dead_code))]
     no_terminal: bool,
 }
 
@@ -51,6 +53,7 @@ impl GitCommand {
         self
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn is_without_terminal(&self) -> bool {
         self.no_terminal
     }

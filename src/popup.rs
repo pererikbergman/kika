@@ -53,8 +53,13 @@ pub struct CredentialPrompt {
 }
 
 impl CredentialPrompt {
+    /// Only git's username question and ssh's new-host-key question are
+    /// shown as typed, matched on their exact words, so a prompt a server
+    /// chose cannot ask for a secret with the text in sight.
     pub fn new(prompt: String, confirm: bool) -> Self {
-        let masked = !(prompt.starts_with("Username") || prompt.contains("(yes/no"));
+        let in_clear = prompt.starts_with("Username for '")
+            || prompt.contains("want to continue connecting (yes/no");
+        let masked = !in_clear;
         Self {
             prompt,
             masked,
@@ -482,8 +487,16 @@ mod tests {
         ));
         assert!(!masked("Username for 'https://h':"));
         assert!(!masked(
-            "Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+            "The authenticity of host 'h' can't be established.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])?"
         ));
+        // Older ssh asks without the fingerprint choice.
+        assert!(!masked(
+            "Are you sure you want to continue connecting (yes/no)?"
+        ));
+        // A server's own prompt that only looks like one stays masked.
+        assert!(masked("Username and token:"));
+        assert!(masked("Token (yes/no is fine):"));
     }
 
     #[test]

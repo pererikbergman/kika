@@ -357,6 +357,8 @@ pub enum AppIntent {
     ForcePush,
     /// Git or ssh, running for the remote operation `tag`, asks something.
     /// `confirm` is a yes/no question. The prompt is terminal-safe.
+    // Only the unix bridge asks.
+    #[cfg_attr(not(unix), allow(dead_code))]
     CredentialAsked {
         tag: Tag,
         prompt: String,
@@ -368,6 +370,8 @@ pub enum AppIntent {
     CredentialAnswered(Option<Secret>),
     /// Ssh, for the remote operation `tag`, says something that needs no
     /// answer, such as asking to touch a security key. Terminal-safe.
+    // Only the unix bridge passes these on.
+    #[cfg_attr(not(unix), allow(dead_code))]
     RemoteNotice {
         tag: Tag,
         text: String,

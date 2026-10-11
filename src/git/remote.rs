@@ -173,16 +173,17 @@ fn safe(bytes: &[u8]) -> String {
 
 /// `text` with the user part of every URL taken out: `scheme://user:pass@host`
 /// becomes `scheme://host`. Git quotes remote URLs in its errors, and a URL
-/// can carry a token.
+/// can carry a token. The authority ends at the path, query, fragment or
+/// whitespace, not at a quote, so a quote inside a password cannot cut the
+/// redaction short.
 pub fn redact_userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("://") {
         let (before, after) = rest.split_at(at + 3);
         out.push_str(before);
-        // The authority ends at the path, or wherever the URL does.
         let end = after
-            .find(|c: char| c == '/' || c == '\'' || c == '"' || c.is_whitespace())
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
             .unwrap_or(after.len());
         let authority = &after[..end];
         let host = authority.rfind('@').map_or(0, |i| i + 1);
@@ -426,8 +427,13 @@ mod tests {
             redact_userinfo("from https://ghp_x@github.com/a and http://a:b@c:8080"),
             "from https://github.com/a and http://c:8080"
         );
-        // A password with an `@` in it goes too.
+        // A password with an `@` or a quote in it goes too.
         assert_eq!(redact_userinfo("ssh://u:p@ss@h/r"), "ssh://h/r");
+        assert_eq!(
+            redact_userinfo("unable to access 'https://u:to'k@h/r/'"),
+            "unable to access 'https://h/r/'"
+        );
+        assert_eq!(redact_userinfo("\"https://u:p\"w@h?x\""), "\"https://h?x\"");
         // Nothing to take out.
         for text in ["git@github.com:a/b.git", "https://h/r", "no url", "a://"] {
             assert_eq!(redact_userinfo(text), text);
