@@ -1553,6 +1553,38 @@ mod tests {
     }
 
     #[test]
+    fn a_reordering_file_name_is_drawn_with_a_visible_escape() {
+        let state = loaded(vec![file("evil\u{202E}txt.exe")]);
+        let width = 80;
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\u{202E}')),
+            "a raw U+202E reached the buffer"
+        );
+        let rows = buffer_rows(buffer);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("evil"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(row.contains("evil<U+202E>txt.exe"), "{rows:#?}");
+        assert!(width_of(row) <= usize::from(width), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_long_name_with_escapes_still_fits_its_ellipsis() {
+        // Inner width 14 leaves 11 for the path; the escape counts its full width.
+        let state = loaded(vec![file("a/long/\u{202E}folder/name\u{200B}")]);
+        let rows = draw_files(&state, 16, 11);
+        assert_eq!(rows[6], "│ M …me<U+200B>│", "{rows:#?}");
+        assert!(width_of(&rows[6]) <= 16, "{rows:#?}");
+    }
+
+    #[test]
     fn overflowing_list_says_how_many_files_are_hidden() {
         // Height 12: the bar, the Status panel and two borders leave 4 rows,
         // so 3 files and "+N more".

@@ -223,16 +223,35 @@ impl Classifier {
 
 /// Decode lossily and make the text safe to draw: tabs become spaces and any
 /// other control character becomes `U+FFFD`, so file bytes never drive the terminal.
+/// Bidi controls and zero-width characters reorder or hide text, so a hostile
+/// name could pass for another; they become a visible `<U+XXXX>` escape rather
+/// than being dropped, so names that differ only by them still look different.
 pub fn sanitize(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     for c in String::from_utf8_lossy(raw).chars() {
         match c {
             '\t' => text.push_str("    "),
+            c if is_invisible_or_bidi(c) => text.push_str(&format!("<U+{:04X}>", u32::from(c))),
             c if c.is_control() => text.push('\u{FFFD}'),
             c => text.push(c),
         }
     }
     text
+}
+
+/// Format characters (not `is_control`) that reorder text or draw nothing.
+fn is_invisible_or_bidi(c: char) -> bool {
+    matches!(
+        c,
+        '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{061C}'
+            | '\u{200B}'..='\u{200D}'
+            | '\u{2060}'
+            | '\u{FEFF}'
+    )
 }
 
 /// git's message, line by line through the same sanitiser as diff lines,
@@ -751,5 +770,44 @@ mod tests {
     fn invalid_utf8_is_decoded_lossily() {
         let mut c = Classifier::new();
         assert_eq!(c.classify(b"a\xffb\n").text, "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn bidi_and_invisible_characters_become_visible_escapes() {
+        let classes: [(&str, &[char]); 6] = [
+            (
+                "embedding/override",
+                &['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'],
+            ),
+            ("isolate", &['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
+            ("mark", &['\u{200E}', '\u{200F}', '\u{061C}']),
+            ("zero-width", &['\u{200B}', '\u{200C}', '\u{200D}']),
+            ("word joiner", &['\u{2060}']),
+            ("byte order mark", &['\u{FEFF}']),
+        ];
+        for (class, chars) in classes {
+            for &c in chars {
+                let raw = format!("a{c}b");
+                let expected = format!("a<U+{:04X}>b", c as u32);
+                assert_eq!(sanitize(raw.as_bytes()), expected, "{class} {c:?}");
+            }
+        }
+        assert_eq!(sanitize("a\u{202E}b".as_bytes()), "a<U+202E>b");
+        assert_eq!(sanitize("\u{061C}".as_bytes()), "<U+061C>");
+    }
+
+    #[test]
+    fn ordinary_text_is_unchanged() {
+        for text in ["src/café.rs", "日本語", "🙂", "plain ascii"] {
+            assert_eq!(sanitize(text.as_bytes()), text);
+        }
+    }
+
+    #[test]
+    fn git_error_text_shows_bidi_escapes() {
+        assert_eq!(
+            terminal_safe("fatal: bad \u{2066}path\u{2069}\n".as_bytes()),
+            "fatal: bad <U+2066>path<U+2069>"
+        );
     }
 }
