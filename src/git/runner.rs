@@ -363,8 +363,10 @@ mod tests {
                 reverse: true,
             },
             GitOp::Commit {
-                message: "msg".into(),
+                message: Some("msg".into()),
                 stage_all: false,
+                amend: false,
+                no_verify: false,
             },
             GitOp::ApplyEdited {
                 patch: b"patch".to_vec(),

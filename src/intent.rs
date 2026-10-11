@@ -99,6 +99,22 @@ pub enum AppIntent {
     ToggleCommitField,
     /// Close the commit error and go back to the kept message.
     DismissCommitError,
+    /// Open the commit popup to amend the last commit, its message filled in.
+    OpenAmend,
+    /// `HEAD`'s message was read for amending; `tag` says which load.
+    HeadMessageLoaded {
+        tag: Tag,
+        result: Result<String, String>,
+    },
+    /// Turn skipping the commit hooks on or off for this commit.
+    ToggleNoVerify,
+    /// Write the message in the user's editor, then commit with it.
+    EditCommitExternally,
+    /// The editor opened by `EditCommitExternally` has closed: the message
+    /// to commit, `None` if the user emptied it.
+    CommitMessageEdited {
+        result: Result<Option<String>, String>,
+    },
     /// A Git operation finished, successfully or not.
     OpFinished {
         tag: Tag,

@@ -113,8 +113,10 @@ mod tests {
     #[test]
     fn a_commit_also_reloads_the_branch() {
         let op = GitOp::Commit {
-            message: "subj\n".into(),
+            message: Some("subj\n".into()),
             stage_all: true,
+            amend: false,
+            no_verify: false,
         };
         assert_eq!(
             plan(&op),
