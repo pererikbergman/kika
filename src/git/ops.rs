@@ -567,6 +567,7 @@ mod tests {
             path: "l.txt".into(),
             orig_path: None,
             side: DiffSide::Worktree,
+            options: Default::default(),
         };
         let patch = load_patch(&runner, &request).unwrap();
         // `ten a` is the 10th line of the new side.
@@ -630,6 +631,7 @@ mod tests {
             path: name.into(),
             orig_path: None,
             side,
+            options: Default::default(),
         };
         let cached = || String::from_utf8(git(dir, &["diff", "--cached"])).unwrap();
         let worktree = || String::from_utf8(git(dir, &["diff"])).unwrap();
@@ -719,6 +721,7 @@ mod tests {
             path: "l.txt".into(),
             orig_path: None,
             side,
+            options: Default::default(),
         };
         let apply = |patch: &FilePatch, text: &str, direction| {
             let selection = PatchSelection::Lines([id_of(patch, text)].into());
@@ -798,6 +801,7 @@ mod tests {
             path: "r.txt".into(),
             orig_path: None,
             side: DiffSide::Index,
+            options: Default::default(),
         };
         let patch = load_patch(&runner, &request).unwrap();
         assert_eq!(patch.hunks.len(), 2);
