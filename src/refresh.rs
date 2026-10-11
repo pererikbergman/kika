@@ -81,6 +81,9 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // The tool resolves and stages the file, which can end the
+        // conflicts the Status panel counts on.
+        GitOp::MergeTool(_) => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
         // The parent lists a submodule whose checkout moved as modified.
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
@@ -255,6 +258,14 @@ mod tests {
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_merge_tool_reloads_the_files_and_the_status_panel() {
+        assert_eq!(
+            plan(&GitOp::MergeTool("a".into())).scopes,
+            set(&[Scope::Files, Scope::Branch, Scope::Diff])
+        );
     }
 
     /// Neither moves `HEAD`, so the log stays as it is.
