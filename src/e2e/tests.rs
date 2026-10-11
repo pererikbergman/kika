@@ -1344,3 +1344,81 @@ async fn rebasing_onto_a_branch_from_the_menu_replays_the_current_one_on_its_tip
         screen.join("\n")
     );
 }
+
+/// `a.txt` committed on `main` as `one`, then as `two`. Returns the repo
+/// and the first commit's id.
+fn two_commits() -> (TestRepo, String) {
+    let repo = on_main();
+    let first = repo.head().trim().to_string();
+    (repo.write("a.txt", "two\n").commit("second"), first)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_then_y_in_the_commits_panel_detaches_head_at_the_commit() {
+    let (repo, first) = two_commits();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    app.assert_screen_contains("Detached checkout");
+    app.assert_screen_contains(&format!("Check out {}", &first[..7]));
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.head().trim(), first);
+    assert!(!repo.try_git(["symbolic-ref", "-q", "HEAD"]));
+    assert_eq!(repo.read("a.txt"), "one\n");
+    app.assert_screen_contains(&format!("detached {}", &first[..7]));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn capital_r_reverts_the_selected_commit_with_gits_editor() {
+    let (repo, first) = two_commits();
+    repo.git(["config", "core.editor", "true"]);
+    let second = repo.head().trim().to_string();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('R')).await;
+
+    assert_eq!(current_branch(&repo), "main");
+    let parent = String::from_utf8(repo.git(["rev-parse", "HEAD^"])).unwrap();
+    assert_eq!(parent.trim(), second);
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert!(repo.head_message().starts_with("Revert \"second\""));
+    assert_ne!(repo.head().trim(), first);
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("Could not")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hard_reset_from_the_menu_asks_then_leaves_a_clean_worktree_at_the_target() {
+    let (repo, first) = two_commits();
+    let repo = repo.write("a.txt", "dirty\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('X')).await;
+    app.assert_screen_contains("Reset to commit");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("throw away every uncommitted change");
+    // Enter does not answer; the work is still there.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(repo.read("a.txt"), "dirty\n");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.head().trim(), first);
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(
+        porcelain_status(&repo),
+        format!("# branch.oid {first}\n# branch.head main\n")
+    );
+}

@@ -12,6 +12,7 @@ pub enum Operation {
     Rebase,
     Merge,
     CherryPick,
+    Revert,
     Bisect,
 }
 
@@ -23,6 +24,7 @@ impl Operation {
             Operation::Rebase => "rebase",
             Operation::Merge => "merge",
             Operation::CherryPick => "cherry-pick",
+            Operation::Revert => "revert",
             Operation::Bisect => "bisect",
         }
     }
@@ -35,12 +37,17 @@ impl Operation {
 }
 
 /// The operation continue, skip and abort act on: the first of a rebase,
-/// a merge and a cherry-pick in `ops`. A bisect is never one; it has its
-/// own controls.
+/// a merge, a cherry-pick and a revert in `ops`. A bisect is never one; it
+/// has its own controls.
 pub fn resumable(ops: &[Operation]) -> Option<Operation> {
-    [Operation::Rebase, Operation::Merge, Operation::CherryPick]
-        .into_iter()
-        .find(|op| ops.contains(op))
+    [
+        Operation::Rebase,
+        Operation::Merge,
+        Operation::CherryPick,
+        Operation::Revert,
+    ]
+    .into_iter()
+    .find(|op| ops.contains(op))
 }
 
 /// Ask git where its dir is. It is not always `.git/`: linked worktrees and
@@ -66,6 +73,7 @@ pub fn in_progress(git_dir: &Path) -> Vec<Operation> {
         (rebase, Operation::Rebase),
         (has("MERGE_HEAD"), Operation::Merge),
         (has("CHERRY_PICK_HEAD"), Operation::CherryPick),
+        (has("REVERT_HEAD"), Operation::Revert),
         (has("BISECT_LOG"), Operation::Bisect),
     ]
     .into_iter()
@@ -88,6 +96,8 @@ mod tests {
         assert_eq!(resumable(&[Merge, CherryPick]), Some(Merge));
         // Ordered by kind, not by place in the list.
         assert_eq!(resumable(&[CherryPick, Rebase]), Some(Rebase));
+        assert_eq!(resumable(&[Revert, Bisect]), Some(Revert));
+        assert_eq!(resumable(&[Revert, CherryPick]), Some(CherryPick));
     }
 
     #[test]
@@ -95,6 +105,8 @@ mod tests {
         assert!(!Operation::Merge.can_skip());
         assert!(Operation::Rebase.can_skip());
         assert!(Operation::CherryPick.can_skip());
+        assert!(Operation::Revert.can_skip());
+        assert_eq!(Operation::Revert.subcommand(), "revert");
     }
 
     #[test]
@@ -134,11 +146,12 @@ mod tests {
 
     #[test]
     fn each_marker_names_its_operation() {
-        let cases: [(&[&str], &[&str], Operation); 5] = [
+        let cases: [(&[&str], &[&str], Operation); 6] = [
             (&["rebase-merge"], &[], Operation::Rebase),
             (&["rebase-apply"], &[], Operation::Rebase),
             (&[], &["MERGE_HEAD"], Operation::Merge),
             (&[], &["CHERRY_PICK_HEAD"], Operation::CherryPick),
+            (&[], &["REVERT_HEAD"], Operation::Revert),
             (&[], &["BISECT_LOG"], Operation::Bisect),
         ];
         for (dirs, files, op) in cases {
@@ -151,6 +164,28 @@ mod tests {
             }
             assert_eq!(in_progress(tmp.path()), [op], "{dirs:?} {files:?}");
         }
+    }
+
+    #[test]
+    fn a_revert_stopped_on_a_conflict_is_a_revert_in_progress_in_real_git() {
+        use crate::git::fake::{git, try_git};
+
+        let tmp = TempDir::new("revert-conflict");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        for text in ["one\n", "two\n", "three\n"] {
+            std::fs::write(dir.join("a.txt"), text).unwrap();
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "-q", "-m", text.trim()]);
+        }
+        // Undoing `two` clashes with `three`, which changed the same line.
+        let reverted = try_git(dir, &["-c", "core.editor=true", "revert", "HEAD^"]);
+        assert!(!reverted, "the revert was expected to stop on a conflict");
+        assert_eq!(in_progress(&dir.join(".git")), [Operation::Revert]);
+        assert_eq!(
+            resumable(&in_progress(&dir.join(".git"))),
+            Some(Operation::Revert)
+        );
     }
 
     #[test]
