@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::config::ConfigError;
+use crate::custom_command::OutputMode;
 use crate::effect::Tag;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
@@ -233,6 +234,16 @@ pub enum AppIntent {
     RepoInitialised {
         tag: Tag,
         result: Result<PathBuf, String>,
+    },
+    /// The answer to a custom command's current prompt.
+    CommandPromptAnswered(String),
+    /// A custom command finished. `Ok` holds the captured output, empty
+    /// unless `output` is `Popup`; `Err` why it could not start, or its
+    /// exit status followed by its output. Both are terminal-safe.
+    CommandFinished {
+        title: String,
+        output: OutputMode,
+        result: Result<String, String>,
     },
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.

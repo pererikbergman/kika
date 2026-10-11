@@ -8,7 +8,7 @@ use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
-use crate::keymap::{KeyPattern, available, registry};
+use crate::keymap::{KeyPattern, available, available_commands, registry};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use ratatui::Frame;
@@ -536,22 +536,29 @@ fn dimmed_if(disabled: bool) -> Style {
     }
 }
 
-/// A popup over `area` listing every key the focused panel answers to.
-/// Rows that do not fit are clipped.
+/// A popup over `area` listing every key the focused panel answers to,
+/// the user's own commands after the built-in ones. Rows that do not fit
+/// are clipped.
 fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     let focus = state.panel_focus();
-    let entries: Vec<(String, &str, bool)> = available(registry(), &state.keymap, focus, state)
+    let labels = |keys: &[KeyPattern]| {
+        let labels: Vec<String> = keys.iter().map(KeyPattern::label).collect();
+        labels.join("/")
+    };
+    let builtin = available(registry(), &state.keymap, focus, state)
         .into_iter()
         .map(|(binding, disabled)| {
-            let keys: Vec<String> = state
-                .keymap
-                .keys(binding)
-                .iter()
-                .map(KeyPattern::label)
-                .collect();
-            (keys.join("/"), binding.description, disabled.is_some())
-        })
-        .collect();
+            let keys = labels(state.keymap.keys(binding));
+            (keys, binding.description.to_string(), disabled.is_some())
+        });
+    // The description is the user's text: one line, safe to draw.
+    let commands = available_commands(&state.keymap, focus)
+        .into_iter()
+        .map(|command| {
+            let description = sanitize(command.description.as_bytes());
+            (labels(&command.keys), description, false)
+        });
+    let entries: Vec<(String, String, bool)> = builtin.chain(commands).collect();
     let key_width = entries
         .iter()
         .map(|(k, _, _)| width_of(k))
@@ -2364,6 +2371,55 @@ mod tests {
         assert!(contains(&rows, "Stage the selected hunk"), "{rows:#?}");
         assert!(contains(&rows, "esc/h/←"), "{rows:#?}");
         assert!(!contains(&rows, "Select the next file"), "{rows:#?}");
+    }
+
+    /// `state` with one global `[[commands]]` entry for the file list.
+    fn with_files_command(mut state: AppState, description: &str) -> AppState {
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        let mut table = test_table(
+            Panel::Files,
+            &["ctrl-t", "T"],
+            &["true"],
+            &[],
+            OutputMode::None,
+        );
+        table.description = description.into();
+        let keymap = crate::keymap::Keymap::default()
+            .with_commands(&[table])
+            .unwrap();
+        state.update(crate::intent::AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![],
+        });
+        state
+    }
+
+    #[test]
+    fn help_lists_a_command_in_its_panel_only_and_never_in_the_bar() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "Tidy \x1b[2Jthe file");
+        let rows = draw(&state, 100, 40);
+        assert!(!contains(&rows, "ctrl-t"), "{rows:#?}");
+
+        state.help_open = true;
+        let rows = draw(&state, 100, 40);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("Tidy"))
+            .unwrap_or_else(|| panic!("no command row in {rows:#?}"));
+        assert!(row.contains(" ctrl-t/T  "), "{row:?}");
+        assert!(row.contains("Tidy \u{FFFD}[2Jthe file"), "{row:?}");
+        // After the built-in rows.
+        let at = |needle: &str| rows.iter().position(|r| r.contains(needle)).unwrap();
+        assert!(at("Tidy") > at("Quit Kika"), "{rows:#?}");
+
+        let mut diff = with_files_command(hunks(DiffSide::Worktree, TWO_HUNKS), "Tidy it");
+        diff.help_open = true;
+        let rows = draw(&diff, 100, 40);
+        assert!(contains(&rows, " Keys: Diff "), "{rows:#?}");
+        assert!(!contains(&rows, "Tidy"), "{rows:#?}");
     }
 
     #[test]

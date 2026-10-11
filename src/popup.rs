@@ -100,18 +100,24 @@ impl ConfirmKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     GoToFile,
+    /// One of a custom command's prompts. Its title comes from the
+    /// command, so [`AppState::prompt_title`](crate::model::AppState::prompt_title)
+    /// gives it; this one is only a fallback.
+    Command,
 }
 
 impl PromptKind {
     pub fn title(self) -> &'static str {
         match self {
             PromptKind::GoToFile => "Go to file",
+            PromptKind::Command => "Command",
         }
     }
 
     pub fn submit(self, text: String) -> AppIntent {
         match self {
             PromptKind::GoToFile => AppIntent::GoToFile(text),
+            PromptKind::Command => AppIntent::CommandPromptAnswered(text),
         }
     }
 }
@@ -266,6 +272,10 @@ mod tests {
         assert_eq!(
             PromptKind::GoToFile.submit("b".into()),
             AppIntent::GoToFile("b".into())
+        );
+        assert_eq!(
+            PromptKind::Command.submit("c".into()),
+            AppIntent::CommandPromptAnswered("c".into())
         );
     }
 }
