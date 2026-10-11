@@ -1,25 +1,49 @@
 //! When a ZWJ/ZWNJ in file content actually changes how letters are drawn.
 //! Anywhere else it draws nothing and could make two different words look
 //! the same, so the caller escapes it. Joining types come from Unicode's
-//! ArabicShaping.txt (18.0); the tables cover only the blocks below. No
-//! character in them is a joiner or in the strict escape set, so a run of
-//! joiners, or a joiner next to a bidi or invisible character, stays escaped.
+//! ArabicShaping.txt and consonants from IndicSyllabicCategory.txt (18.0);
+//! the tables cover only the blocks below. No character in them is a joiner
+//! or in the strict escape set, so a run of joiners, or a joiner next to a
+//! bidi or invisible character, stays escaped.
 
-/// Whether a joiner between `before` and `after` changes how they are
-/// shaped: next to a virama or asat in an Indic or Myanmar cluster, or
-/// between Arabic-script, Syriac, N'Ko or Mongolian letters that join on
-/// the sides facing it.
-pub fn shapes(before: char, after: char) -> bool {
-    let indic = (is_virama(before) && is_indic(after)) || (is_indic(before) && is_virama(after));
-    indic || (joins_forward(before) && joins_backward(after))
+const ZWNJ: char = '\u{200C}';
+const ZWJ: char = '\u{200D}';
+
+/// Whether `joiner` (ZWJ or ZWNJ) between `before` and `after` changes how
+/// they are shaped. Three cases do:
+/// - after a virama and before a consonant of its script, it picks the
+///   conjunct, half form or chillu (Myanmar asat and Sinhala al-lakuna act
+///   only with a ZWJ);
+/// - a ZWJ between a consonant and a virama of its script gives the eyelash
+///   ra or ya-phala form;
+/// - a ZWNJ between Arabic-script, Syriac, N'Ko or Mongolian letters that
+///   would connect breaks the join. A ZWJ there draws the plain pair.
+pub fn shapes(joiner: char, before: char, after: char) -> bool {
+    let after_virama = is_virama(before)
+        && is_consonant(after)
+        && same_script(before, after)
+        && (joiner == ZWJ || !matches!(before, '\u{0DCA}' | '\u{103A}'));
+    let before_virama =
+        joiner == ZWJ && is_consonant(before) && is_virama(after) && same_script(before, after);
+    let breaks_join = joiner == ZWNJ
+        && joins_forward(before)
+        && joins_backward(after)
+        && !(is_join_causing(before) && is_join_causing(after));
+    after_virama || before_virama || breaks_join
 }
 
-/// Brahmic blocks (Devanagari to Sinhala) and Myanmar.
-fn is_indic(c: char) -> bool {
-    matches!(c, '\u{0900}'..='\u{0DFF}' | '\u{1000}'..='\u{109F}')
+/// Indic scripts each fill one 128-code-point block; Myanmar's block is
+/// 1000–109F.
+fn same_script(a: char, b: char) -> bool {
+    let script = |c: char| match c {
+        '\u{0900}'..='\u{0DFF}' => Some(u32::from(c) >> 7),
+        '\u{1000}'..='\u{109F}' => Some(0x1000),
+        _ => None,
+    };
+    script(a).is_some() && script(a) == script(b)
 }
 
-/// The virama of each Indic block, plus Myanmar's visible and invisible ones.
+/// The virama of each Indic block, plus Myanmar's invisible stacker and asat.
 fn is_virama(c: char) -> bool {
     matches!(
         c,
@@ -35,6 +59,14 @@ fn is_virama(c: char) -> bool {
             | '\u{0DCA}'
             | '\u{1039}'
             | '\u{103A}'
+    )
+}
+
+/// Indic_Syllabic_Category=Consonant in Devanagari to Sinhala and Myanmar.
+fn is_consonant(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0915}'..='\u{0939}' | '\u{0958}'..='\u{095F}' | '\u{0978}'..='\u{097F}' | '\u{0995}'..='\u{09A8}' | '\u{09AA}'..='\u{09B0}' | '\u{09B2}' | '\u{09B6}'..='\u{09B9}' | '\u{09DC}'..='\u{09DD}' | '\u{09DF}' | '\u{09F0}'..='\u{09F1}' | '\u{0A15}'..='\u{0A28}' | '\u{0A2A}'..='\u{0A30}' | '\u{0A32}'..='\u{0A33}' | '\u{0A35}'..='\u{0A36}' | '\u{0A38}'..='\u{0A39}' | '\u{0A59}'..='\u{0A5C}' | '\u{0A5E}' | '\u{0A95}'..='\u{0AA8}' | '\u{0AAA}'..='\u{0AB0}' | '\u{0AB2}'..='\u{0AB3}' | '\u{0AB5}'..='\u{0AB9}' | '\u{0AF9}' | '\u{0B15}'..='\u{0B28}' | '\u{0B2A}'..='\u{0B30}' | '\u{0B32}'..='\u{0B33}' | '\u{0B35}'..='\u{0B39}' | '\u{0B5C}'..='\u{0B5D}' | '\u{0B5F}' | '\u{0B71}' | '\u{0B95}' | '\u{0B99}'..='\u{0B9A}' | '\u{0B9C}' | '\u{0B9E}'..='\u{0B9F}' | '\u{0BA3}'..='\u{0BA4}' | '\u{0BA8}'..='\u{0BAA}' | '\u{0BAE}'..='\u{0BB9}' | '\u{0C15}'..='\u{0C28}' | '\u{0C2A}'..='\u{0C39}' | '\u{0C58}'..='\u{0C5A}' | '\u{0C95}'..='\u{0CA8}' | '\u{0CAA}'..='\u{0CB3}' | '\u{0CB5}'..='\u{0CB9}' | '\u{0CDE}' | '\u{0D15}'..='\u{0D3A}' | '\u{0D9A}'..='\u{0DB1}' | '\u{0DB3}'..='\u{0DBB}' | '\u{0DBD}' | '\u{0DC0}'..='\u{0DC6}' | '\u{1000}'..='\u{1020}' | '\u{103F}' | '\u{1050}'..='\u{1051}' | '\u{105A}'..='\u{105D}' | '\u{1061}' | '\u{1065}'..='\u{1066}' | '\u{106E}'..='\u{1070}' | '\u{1075}'..='\u{1081}' | '\u{108E}'
     )
 }
 

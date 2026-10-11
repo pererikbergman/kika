@@ -16,7 +16,7 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 
 #### Displaying repository text
 * **Strict by default:** names, paths, refs, authors, headers and git's messages are drawn through `sanitize`. Control characters become `U+FFFD`, and bidi controls and invisible characters become a visible `<U+XXXX>` escape.
-* **File content is a little more lenient:** diff and blame body lines and the external renderer's output go through `sanitize_body`. It keeps a ZWJ/ZWNJ only where Unicode gives it something to shape: next to an Indic or Myanmar virama, or between Arabic-script, Syriac, N'Ko or Mongolian letters that join on the sides facing it. Every other joiner is escaped.
+* **File content is a little more lenient:** diff and blame body lines and the external renderer's output go through `sanitize_body`. It keeps a ZWJ/ZWNJ only where it changes what is drawn. One case is next to an Indic or Myanmar virama within a consonant cluster of the same script. The other is a ZWNJ breaking a join between Arabic-script, Syriac, N'Ko or Mongolian letters. Every other joiner is escaped, including those in Latin, Greek, Cyrillic and CJK text.
 * **Known limit:** a terminal that does not shape these scripts draws a kept joiner as nothing. There, two words that differ only by it look the same. Kika cannot detect shaping support.
 * **Emoji ZWJ sequences stay escaped:** a terminal without grapheme clustering draws each part, wider than the two columns the layout reserves.
 

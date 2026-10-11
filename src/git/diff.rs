@@ -249,8 +249,8 @@ pub fn sanitize(raw: &[u8]) -> String {
 /// `sanitize` for the lines of a file (diff, blame, rendered diff). Persian,
 /// Arabic-script and Indic words need ZWJ/ZWNJ, which only shape their
 /// neighbours and cannot reorder text, so a joiner is kept where it changes
-/// the shaping: next to a virama, or after a letter that joins forward and
-/// before one that joins back (see `git::joiner`). Anywhere else it
+/// the shaping: next to a virama in a consonant cluster, or a ZWNJ breaking
+/// a join between Arabic-script letters (see `git::joiner`). Anywhere else it
 /// draws nothing, so `is\u{200D}admin` or `кл\u{200D}юч` would pass for the
 /// plain word: those stay escaped.
 ///
@@ -268,7 +268,7 @@ pub fn sanitize_body(raw: &[u8]) -> String {
         if matches!(c, '\u{200C}' | '\u{200D}')
             && before
                 .zip(chars.peek().copied())
-                .is_some_and(|(before, after)| joiner::shapes(before, after))
+                .is_some_and(|(before, after)| joiner::shapes(c, before, after))
         {
             text.push(c);
         } else {
@@ -918,23 +918,26 @@ mod tests {
     #[test]
     fn body_text_keeps_joiners_that_change_how_letters_join() {
         for text in [
-            // After a dual-joining Arabic-script letter, before a joining one.
+            // A ZWNJ breaking a join between Arabic-script letters.
             "می\u{200C}خواهم",
-            "ن\u{200D}ہ",
             "ب\u{200C}ا",
-            "ـ\u{200D}ب",
-            // Syriac, N'Ko and Mongolian dual-joining letters.
-            "ܒ\u{200D}ܐ",
-            "ߊ\u{200D}ߓ",
-            "ᠠ\u{200D}ᠢ",
-            // Next to a virama: Devanagari, Bengali, Malayalam and Sinhala.
+            "ـ\u{200C}ب",
+            // The same in Syriac, N'Ko and Mongolian.
+            "ܒ\u{200C}ܐ",
+            "ߊ\u{200C}ߓ",
+            "ᠠ\u{200C}ᠢ",
+            // After a virama, before a consonant of its script: Devanagari,
+            // Malayalam, Sinhala and Myanmar.
             "क्\u{200D}ष",
-            "र\u{200D}्य",
-            "র\u{200D}্য",
             "ന്\u{200D}ന",
             "ක්\u{200D}ෂ",
-            // Myanmar asat and virama.
-            "င်\u{200D}္က",
+            "က်\u{200D}ခ",
+            // Tamil: a ZWNJ after pulli breaks the க்ஷ and ஸ்ரீ ligatures.
+            "க்\u{200C}ஷ",
+            "ஸ்\u{200C}ர",
+            // A ZWJ between a consonant and a virama: eyelash ra, ya-phala.
+            "र\u{200D}्य",
+            "র\u{200D}্য",
         ] {
             assert_eq!(sanitize_body(text.as_bytes()), text);
         }
@@ -981,9 +984,37 @@ mod tests {
             ("क\u{200D}ष", "क<U+200D>ष"),
             ("म\u{200D}न", "म<U+200D>न"),
             ("က\u{200C}ခ", "က<U+200C>ခ"),
+            // A ZWJ between Arabic-script letters that already join draws
+            // the plain pair; so does a ZWNJ between two tatweels.
+            ("ن\u{200D}ہ", "ن<U+200D>ہ"),
+            ("ب\u{200D}ب", "ب<U+200D>ب"),
+            ("ب\u{200D}ا", "ب<U+200D>ا"),
+            ("می\u{200D}خواهم", "می<U+200D>خواهم"),
+            ("ـ\u{200D}ب", "ـ<U+200D>ب"),
+            ("ـ\u{200C}ـ", "ـ<U+200C>ـ"),
+            ("ܒ\u{200D}ܐ", "ܒ<U+200D>ܐ"),
+            ("ߊ\u{200D}ߓ", "ߊ<U+200D>ߓ"),
+            ("ᠠ\u{200D}ᠢ", "ᠠ<U+200D>ᠢ"),
+            // After a virama, anything but a consonant of the same script.
+            ("क्\u{200C}१", "क्<U+200C>१"),
+            ("क्\u{200D}।", "क्<U+200D>।"),
+            ("क्\u{200C}अ", "क्<U+200C>अ"),
+            ("क्\u{200C}ं", "क्<U+200C>ं"),
+            ("ক্\u{200D}১", "ক্<U+200D>১"),
+            ("१्\u{200C}२", "१्<U+200C>२"),
+            ("क्\u{200C}ক", "क्<U+200C>ক"),
+            ("क्\u{200D}က", "क्<U+200D>က"),
+            // Myanmar asat and Sinhala al-lakuna act only with a ZWJ.
+            ("က်\u{200C}ခ", "က်<U+200C>ခ"),
+            ("ක්\u{200C}ෂ", "ක්<U+200C>ෂ"),
+            // Before a virama: only a ZWJ, only after a consonant of its script.
+            ("र\u{200C}्य", "र<U+200C>्य"),
+            ("१\u{200D}्", "१<U+200D>्"),
+            ("ক\u{200D}्", "ক<U+200D>्"),
             // A virama with no letter of its scripts on the other side.
             ("क्\u{200D}a", "क्<U+200D>a"),
             ("م\u{200D}्", "م<U+200D>्"),
+            ("င်\u{200D}္က", "င်<U+200D>္က"),
             // Presentation forms are already shaped.
             ("\u{FE91}\u{200D}\u{FE92}", "\u{FE91}<U+200D>\u{FE92}"),
             ("\u{FB56}\u{200C}\u{FB57}", "\u{FB56}<U+200C>\u{FB57}"),
