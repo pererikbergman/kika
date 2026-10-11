@@ -9,10 +9,12 @@ use crate::ansi;
 use crate::captured_command::run_captured;
 use crate::commits;
 use crate::config::{self, ConfigPaths};
+use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
+use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::{BranchName, branch_log, list_branches};
 use crate::git::commit_files::{CommitRange, commit_files};
@@ -30,6 +32,7 @@ use crate::git::submodule::read_submodules;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::recent;
+use crate::worktree_file;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
 /// `generation` changes when the repository changes; `seq` orders loads of the
@@ -131,6 +134,20 @@ pub enum Effect {
     LoadBlame {
         tag: Tag,
         path: RepoPath,
+    },
+    /// Read conflicted `path` from the worktree and its marker size;
+    /// always answered by one `ConflictLoaded` for the same `path`.
+    LoadConflict {
+        tag: Tag,
+        path: RepoPath,
+    },
+    /// Write `content` over `path`, only while it still holds `expected`;
+    /// always answered by one `ResolvedWritten` for the same `path`.
+    WriteResolved {
+        tag: Tag,
+        path: RepoPath,
+        expected: Vec<u8>,
+        content: Vec<u8>,
     },
     /// Read commit `oid`'s message and diff; always answered by one
     /// `CommitLoaded`.
@@ -369,6 +386,49 @@ impl Runtime {
                                 Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
                             });
                     let _ = tx.send(AppIntent::BlameLoaded { tag, result });
+                });
+            }
+            Effect::LoadConflict { tag, path } => {
+                // Where git runs now, inside an entered submodule too.
+                let workdir = self.runner.workdir();
+                tokio::spawn(async move {
+                    let read = path.clone();
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let size = conflict_marker_size(runner.as_ref(), &read)?;
+                        let bytes = worktree_file::read(&workdir, &read, MAX_CONFLICT_FILE)?;
+                        Ok((bytes, size))
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("Reading the file crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::ConflictLoaded { tag, path, result });
+                });
+            }
+            Effect::WriteResolved {
+                tag,
+                path,
+                expected,
+                content,
+            } => {
+                let workdir = self.runner.workdir();
+                tokio::spawn(async move {
+                    let target = path.clone();
+                    // A panic still reports back, or `op_seq` would block every later op.
+                    let result = tokio::task::spawn_blocking(move || {
+                        worktree_file::replace(&workdir, &target, &expected, &content)
+                            .map(|()| content)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("Writing the file crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::ResolvedWritten { tag, path, result });
                 });
             }
             Effect::LoadCommit { tag, oid } => {

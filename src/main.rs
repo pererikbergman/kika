@@ -13,6 +13,8 @@ mod commits_view;
 mod config;
 #[cfg(test)]
 mod config_docs;
+mod conflict;
+mod conflict_view;
 mod custom_command;
 mod diff_pane;
 mod diff_stream;
@@ -37,6 +39,7 @@ mod rendered_view;
 mod submodule_list;
 mod view;
 mod watch;
+mod worktree_file;
 
 use std::process::ExitCode;
 use std::sync::Arc;

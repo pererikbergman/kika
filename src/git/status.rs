@@ -102,7 +102,9 @@ fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand, fallback: &str) -> Result
 /// Parse `git status --porcelain=v2 --branch -z`. Paths are taken as
 /// everything after the fixed fields, so spaces inside them survive, and are
 /// kept as raw bytes so a name that is not UTF-8 still reaches git unchanged.
-/// `in_progress` is left empty: status does not report it.
+/// `in_progress` is left empty: status does not report it. Conflicted
+/// files come first, since they block the operation in progress; each
+/// group keeps git's order.
 pub fn parse_status(bytes: &[u8]) -> Result<RepoStatus, String> {
     let mut entries = Vec::new();
     let mut headers = BranchHeaders::default();
@@ -145,6 +147,8 @@ pub fn parse_status(bytes: &[u8]) -> Result<RepoStatus, String> {
         };
         entries.push(entry?);
     }
+    // Stable, so git's order holds within each group.
+    entries.sort_by_key(|e| e.kind != EntryKind::Conflicted);
     Ok(RepoStatus {
         branch: headers.finish(),
         files: entries,
@@ -374,6 +378,23 @@ mod tests {
             [
                 entry('A', 'A', EntryKind::Conflicted, "added.txt", None),
                 entry('U', 'U', EntryKind::Conflicted, "both.txt", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn conflicts_come_first_in_their_own_order() {
+        let mut bytes = b"1 .M N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 a.txt\0".to_vec();
+        bytes.extend_from_slice(include_bytes!("fixtures/conflicts.bin"));
+        bytes.extend_from_slice(b"? z.txt\0");
+        let entries = parse_status(&bytes).unwrap().files;
+        assert_eq!(
+            entries,
+            [
+                entry('A', 'A', EntryKind::Conflicted, "added.txt", None),
+                entry('U', 'U', EntryKind::Conflicted, "both.txt", None),
+                entry('.', 'M', EntryKind::Changed, "a.txt", None),
+                entry('?', '?', EntryKind::Untracked, "z.txt", None),
             ]
         );
     }
