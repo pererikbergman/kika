@@ -14,7 +14,7 @@ pub struct WatchConfig {
     pub fetch: Option<Duration>,
 }
 
-/// Built in until the settings file exists. Refs are cheap to read, so they
+/// Used where the global config file sets nothing. Refs are cheap to read, so they
 /// are polled more often than `git status`. Auto-fetch is off: it talks to
 /// the network, which Kika does only when the user has turned it on.
 pub const DEFAULT_WATCH: WatchConfig = WatchConfig {

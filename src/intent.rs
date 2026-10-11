@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
+use crate::config::ConfigError;
 use crate::effect::Tag;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
@@ -10,7 +11,7 @@ use crate::git::patch::FilePatch;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
-use crate::keymap::KeyPress;
+use crate::keymap::{KeyPress, Keymap};
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::watch::WatchEvent;
@@ -232,6 +233,12 @@ pub enum AppIntent {
     RepoInitialised {
         tag: Tag,
         result: Result<PathBuf, String>,
+    },
+    /// The config files were read: the keys now in force, and the files
+    /// that were ignored and why.
+    ConfigLoaded {
+        keymap: Keymap,
+        errors: Vec<ConfigError>,
     },
 }
 
