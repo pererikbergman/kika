@@ -5,13 +5,15 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::custom_command::{CommandFailure, OutputMode};
+use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::diff::terminal_safe;
+use crate::git::ops::{GitOp, commit_command, run_op};
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
@@ -28,6 +30,9 @@ pub enum HandOff {
     /// Let the user write the commit message in their editor, starting
     /// from `initial`, the popup's text.
     EditCommitMessage { initial: String },
+    /// Run a commit that may ask something on the terminal: a signing
+    /// passphrase or a hook's question. Answered like a detached run.
+    Commit { tag: Tag, op: GitOp },
     /// Run the user's command, its argv already expanded, on the terminal.
     RunCommand { title: String, argv: Vec<OsString> },
 }
@@ -51,7 +56,23 @@ impl HandOff {
 /// Run `job` on the terminal, which the caller has handed over, and say how
 /// it went. Blocking; knows nothing about the screen.
 pub fn execute(job: HandOff, runner: &dyn GitRunner, workdir: &Path) -> AppIntent {
+    execute_with(job, runner, workdir, &wait_for_enter)
+}
+
+/// [`execute`], with `pause` run after a failed commit so git's output
+/// stays readable; tests pass one that returns at once.
+pub fn execute_with(
+    job: HandOff,
+    runner: &dyn GitRunner,
+    workdir: &Path,
+    pause: &dyn Fn(),
+) -> AppIntent {
     match job {
+        HandOff::Commit { tag, op } => AppIntent::OpFinished {
+            result: commit_on_terminal(&op, runner, pause),
+            tag,
+            op,
+        },
         HandOff::OpenFile { path, line } => {
             let file = workdir.join(path.as_os_str());
             let result = editor(runner).and_then(|editor| launch(&editor, &file, line, workdir));
@@ -115,6 +136,95 @@ fn editor(runner: &dyn GitRunner) -> Result<String, String> {
         return Err("No editor is configured".into());
     }
     String::from_utf8(editor.to_vec()).map_err(|_| "The editor setting is not valid UTF-8".into())
+}
+
+/// Run the commit `op` attached to the terminal, staging everything first
+/// when asked. On failure, `pause` keeps git's output on screen until the
+/// user is done reading it, since nothing of it is captured.
+fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> Result<(), String> {
+    let GitOp::Commit {
+        message,
+        stage_all,
+        amend,
+        no_verify,
+    } = op
+    else {
+        // Only commits are handed over; anything else runs as usual.
+        return run_op(runner, op);
+    };
+    if *stage_all {
+        run_op(runner, &GitOp::StageAll)?;
+    }
+    // Stdin is the terminal now, so the message goes in a file. Kept until
+    // git has exited.
+    let file = match message {
+        Some(message) => {
+            let (temp, mut file) = TempFile::create("kika-commit-msg", "txt")
+                .map_err(|e| io_error("Could not create the message file", &e))?;
+            file.write_all(message.as_bytes())
+                .map_err(|e| io_error("Could not write the message file", &e))?;
+            drop(file);
+            Some(temp)
+        }
+        None => None,
+    };
+    let mut cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    if let Some(tty) = gpg_tty(std::env::var_os("GPG_TTY"), stdin_tty()) {
+        cmd = cmd.env("GPG_TTY", tty);
+    }
+    let exit = runner
+        .run_attached(&cmd)
+        .map_err(|e| io_error("Could not start git commit", &e))?;
+    if exit.success {
+        return Ok(());
+    }
+    pause();
+    Err(format!(
+        "git commit exited with {}; its output was shown in the terminal",
+        exit.status
+    ))
+}
+
+/// The `GPG_TTY` to give an attached commit: Kika's terminal, `tty`, unless
+/// the user already set one (an empty value counts as unset). Git pipes
+/// gpg's stdin, so a terminal pinentry cannot find the terminal by itself;
+/// without this, signing fails with "Operation cancelled".
+fn gpg_tty(existing: Option<OsString>, tty: Option<OsString>) -> Option<OsString> {
+    match existing {
+        Some(value) if !value.is_empty() => None,
+        _ => tty,
+    }
+}
+
+/// The name of the terminal on Kika's stdin, such as `/dev/ttys003`; `None`
+/// when stdin is not a terminal.
+#[cfg(unix)]
+fn stdin_tty() -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len()` bytes, and `ttyname_r` writes
+    // a NUL-terminated name within it or returns an error.
+    let failed = unsafe { libc::ttyname_r(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if failed != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    Some(std::ffi::OsStr::from_bytes(&buf[..len]).to_os_string())
+}
+
+#[cfg(not(unix))]
+fn stdin_tty() -> Option<OsString> {
+    None
+}
+
+/// Keep the terminal as git left it until the user presses Enter.
+fn wait_for_enter() {
+    // On its own line, whatever git printed last.
+    print!("\ngit commit failed. Press Enter to return to Kika.");
+    let _ = io::stdout().flush();
+    let mut line = String::new();
+    let _ = io::stdin().lock().read_line(&mut line);
 }
 
 /// Known editors' ways of opening a file at a line, by the basename of the
@@ -381,7 +491,7 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{ANY_ARG, FakeRunner, fail, ok};
 
     fn argv(editor: &str, line: Option<u32>) -> Vec<String> {
         editor_argv(editor, Path::new("/r/a b.txt"), line)
@@ -520,6 +630,156 @@ mod tests {
             AppIntent::EditorClosed {
                 result: Err("fatal: \u{FFFD}[2Jno".into())
             }
+        );
+        runner.assert_done();
+    }
+
+    fn commit_op(message: Option<&str>, stage_all: bool, amend: bool, no_verify: bool) -> GitOp {
+        GitOp::Commit {
+            message: message.map(Into::into),
+            stage_all,
+            amend,
+            no_verify,
+        }
+    }
+
+    const TAG: Tag = Tag {
+        generation: 2,
+        seq: 5,
+        user: true,
+    };
+
+    /// Run `op` as a commit hand-off, counting the pauses.
+    fn commit_with(runner: &FakeRunner, op: &GitOp) -> (AppIntent, usize) {
+        let pauses = std::cell::Cell::new(0);
+        let job = HandOff::Commit {
+            tag: TAG,
+            op: op.clone(),
+        };
+        let intent = execute_with(job, runner, Path::new("/nowhere"), &|| {
+            pauses.set(pauses.get() + 1)
+        });
+        (intent, pauses.get())
+    }
+
+    fn finished(op: &GitOp, result: Result<(), String>) -> AppIntent {
+        AppIntent::OpFinished {
+            tag: TAG,
+            op: op.clone(),
+            result,
+        }
+    }
+
+    /// What an attached run saw: its message file's path, contents and mode.
+    type Seen = std::sync::Arc<std::sync::Mutex<Option<(PathBuf, Vec<u8>, u32)>>>;
+
+    fn watch_message_file(runner: FakeRunner) -> (FakeRunner, Seen) {
+        let seen: Seen = Default::default();
+        let record = std::sync::Arc::clone(&seen);
+        let runner = runner.on_attached(move |cmd| {
+            let args = cmd.args();
+            let at = args.iter().position(|a| a == "-F").unwrap();
+            let path = PathBuf::from(&args[at + 1]);
+            let meta = fs::metadata(&path).unwrap();
+            #[cfg(unix)]
+            let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
+            #[cfg(not(unix))]
+            let mode = 0o600;
+            *record.lock().unwrap() = Some((path.clone(), fs::read(&path).unwrap(), mode));
+        });
+        (runner, seen)
+    }
+
+    #[test]
+    fn a_commit_message_goes_to_git_in_a_private_file_that_is_gone_afterwards() {
+        let op = commit_op(Some("subj\n\nbody\n"), false, false, false);
+        let (runner, seen) =
+            watch_message_file(FakeRunner::new().expect_attached(&["commit", "-F", ANY_ARG], true));
+
+        let (intent, pauses) = commit_with(&runner, &op);
+
+        assert_eq!(intent, finished(&op, Ok(())));
+        assert_eq!(pauses, 0);
+        runner.assert_done();
+        let (path, contents, mode) = seen.lock().unwrap().clone().expect("git ran");
+        assert_eq!(contents, b"subj\n\nbody\n");
+        assert_eq!(mode, 0o600);
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("kika-commit-msg-"), "{name}");
+        assert!(!path.exists(), "{path:?} was left behind");
+        // It lived in a private directory of its own, gone with it.
+        let dir = path.parent().unwrap();
+        assert_ne!(dir, std::env::temp_dir());
+        assert!(!dir.exists(), "{dir:?} was left behind");
+        // Stdin is the terminal's, never bytes from Kika.
+        assert_eq!(runner.inputs(), [None]);
+    }
+
+    #[test]
+    fn gpg_tty_is_kikas_terminal_unless_the_user_set_one() {
+        let tty = || Some(OsString::from("/dev/ttys003"));
+        assert_eq!(gpg_tty(None, tty()), tty());
+        assert_eq!(gpg_tty(Some("".into()), tty()), tty());
+        assert_eq!(gpg_tty(Some("/dev/pts/7".into()), tty()), None);
+        assert_eq!(gpg_tty(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_tty_names_a_device_or_nothing() {
+        // Under a test runner stdin may or may not be a terminal.
+        if let Some(name) = stdin_tty() {
+            assert!(name.to_string_lossy().starts_with("/dev/"), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn amend_without_a_message_keeps_heads_and_no_verify_is_passed_through() {
+        let amend = commit_op(None, false, true, false);
+        let runner = FakeRunner::new().expect_attached(&["commit", "--amend", "--no-edit"], true);
+        assert_eq!(commit_with(&runner, &amend), (finished(&amend, Ok(())), 0));
+        runner.assert_done();
+
+        let skip = commit_op(Some("m\n"), false, false, true);
+        let runner =
+            FakeRunner::new().expect_attached(&["commit", "--no-verify", "-F", ANY_ARG], true);
+        assert_eq!(commit_with(&runner, &skip), (finished(&skip, Ok(())), 0));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn stage_all_runs_add_detached_first_and_a_failed_add_skips_the_commit() {
+        let op = commit_op(Some("m\n"), true, false, false);
+        let runner = FakeRunner::new()
+            .expect(&["add", "-A"], ok(b""))
+            .expect_attached(&["commit", "-F", ANY_ARG], true);
+        assert_eq!(commit_with(&runner, &op), (finished(&op, Ok(())), 0));
+        runner.assert_done();
+
+        // No attached run is expected, so the fake would panic on one.
+        let runner = FakeRunner::new().expect(&["add", "-A"], fail("fatal: index broken\n"));
+        assert_eq!(
+            commit_with(&runner, &op),
+            (finished(&op, Err("fatal: index broken".into())), 0)
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_commit_pauses_once_and_says_where_its_output_went() {
+        let op = commit_op(Some("m\n"), false, false, false);
+        let runner = FakeRunner::new().expect_attached(&["commit", "-F", ANY_ARG], false);
+        assert_eq!(
+            commit_with(&runner, &op),
+            (
+                finished(
+                    &op,
+                    Err("git commit exited with status 1; \
+                         its output was shown in the terminal"
+                        .into())
+                ),
+                1
+            )
         );
         runner.assert_done();
     }

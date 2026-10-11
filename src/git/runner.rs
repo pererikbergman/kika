@@ -63,6 +63,15 @@ pub struct GitOutput {
     pub stderr: Vec<u8>,
 }
 
+/// How a command run on the real terminal ended. Its output went to the
+/// terminal, so only the exit is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachedExit {
+    pub success: bool,
+    /// The exit for a message, such as `status 1` or `signal 2`.
+    pub status: String,
+}
+
 /// Runs Git commands. Synchronous and object-safe so it can be shared as
 /// `Arc<dyn GitRunner>` and called from tokio's blocking pool.
 pub trait GitRunner: Send + Sync {
@@ -75,6 +84,13 @@ pub trait GitRunner: Send + Sync {
     /// Start a command whose stdout is read as it arrives. The pipe and the
     /// handle are separate so one thread can kill while another is blocked reading.
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild>;
+
+    /// Run a command on the inherited terminal, so it can ask the user
+    /// things, and wait for it. Only for hand-offs, while Kika has given
+    /// the terminal up; `stdin` bytes on `cmd` are ignored.
+    fn run_attached(&self, _cmd: &GitCommand) -> io::Result<AttachedExit> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// The directory commands run in. Empty for runners with no directory.
     fn workdir(&self) -> PathBuf {
@@ -278,6 +294,22 @@ impl GitRunner for CliRunner {
         output
     }
 
+    /// Not in `running` and not in a group of its own: Ctrl+C on the
+    /// terminal reaches git and its hooks directly, while the loop keeps
+    /// Kika alive through it.
+    fn run_attached(&self, cmd: &GitCommand) -> io::Result<AttachedExit> {
+        let status = self
+            .command(cmd)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        Ok(AttachedExit {
+            success: status.success(),
+            status: describe_exit(status),
+        })
+    }
+
     fn interrupt(&self) {
         for (_, child) in lock(&self.running).iter() {
             let mut child = lock(child);
@@ -340,6 +372,18 @@ impl Drop for CliChild {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// `status 1`, or `signal 2` for a process that was stopped.
+fn describe_exit(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("status {code}");
+    }
+    #[cfg(unix)]
+    if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+        return format!("signal {signal}");
+    }
+    status.to_string()
 }
 
 /// A poisoned lock only means another thread panicked; the child is still valid.
@@ -547,6 +591,81 @@ mod tests {
         assert!(!dir.join(".git/index.lock").exists());
         // Nothing is left to interrupt, so a second call is harmless.
         runner.interrupt();
+    }
+
+    /// The pgid of process `pid`, as `ps` prints it.
+    #[cfg(unix)]
+    fn pgid_of(pid: &str) -> String {
+        let out = Command::new("ps")
+            .args(["-o", "pgid=", "-p", pid])
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_attached_runs_git_in_the_workdir_without_a_group_of_its_own() {
+        use crate::git::fake::{TempDir, git};
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new("attached");
+        let outside = tmp.path().join("outside");
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(&dir, &["config", "user.name", "t"]);
+        git(&dir, &["config", "user.email", "t@t"]);
+        let hook = dir.join(".git/hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\npwd > .git/cwd\nps -o pgid= -p $$ > .git/pgid\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a"), "a\n").unwrap();
+        git(&dir, &["add", "a"]);
+        let runner = CliRunner::isolated(&outside);
+        runner.set_workdir(dir.clone());
+
+        let cmd = GitCommand::new("commit").arg("-q").arg("-m").arg("msg");
+        let exit = runner.run_attached(&cmd).unwrap();
+
+        assert_eq!(
+            exit,
+            AttachedExit {
+                success: true,
+                status: "status 0".into()
+            }
+        );
+        let cwd = std::fs::read_to_string(dir.join(".git/cwd")).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(cwd.trim_end()).unwrap(),
+            std::fs::canonicalize(&dir).unwrap()
+        );
+        let hook_pgid = std::fs::read_to_string(dir.join(".git/pgid")).unwrap();
+        assert_eq!(
+            hook_pgid.trim(),
+            pgid_of(&std::process::id().to_string()),
+            "git started a new process group"
+        );
+        assert!(lock(&runner.running).is_empty());
+    }
+
+    #[test]
+    fn run_attached_reports_a_failed_exit() {
+        // An unset key fails with status 1 and prints nothing.
+        let runner = CliRunner::isolated(std::env::temp_dir());
+        let exit = runner
+            .run_attached(
+                &GitCommand::new("config")
+                    .arg("--get")
+                    .arg("kika.no-such-key"),
+            )
+            .unwrap();
+        assert!(!exit.success);
+        assert_eq!(exit.status, "status 1");
     }
 
     #[test]

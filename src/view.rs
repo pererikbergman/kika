@@ -37,7 +37,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     if state.help_open {
         render_help(state, frame, main);
     }
-    render_commit(&state.commit, frame, main);
+    render_commit(&state.commit, state.commit_on_terminal, frame, main);
     popup_view::render_popups(state, frame, main);
     frame.render_widget(status_bar(state, status.width), status);
 }
@@ -369,8 +369,14 @@ const FOCUSED: Color = Color::Cyan;
 /// Popups wider than this are harder to read; it is a common message width.
 pub(crate) const COMMIT_WIDTH: u16 = 72;
 
-/// The commit popup for the current step, over `area`.
-fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
+/// The footer of a running commit: where Ctrl+C goes, which depends on
+/// whether git has the terminal.
+const DETACHED_FOOTER: &str = " waiting for git · ctrl-c quits Kika ";
+const ON_TERMINAL_FOOTER: &str = " git has the terminal · ctrl-c stops git ";
+
+/// The commit popup for the current step, over `area`. `on_terminal` says
+/// a running commit was handed the terminal.
+fn render_commit(commit: &CommitFlow, on_terminal: bool, frame: &mut Frame, area: Rect) {
     match commit {
         CommitFlow::Closed => {}
         CommitFlow::ConfirmStageAll => render_question(
@@ -391,8 +397,15 @@ fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
             frame,
             area,
         ),
-        CommitFlow::Editing(editor) => render_commit_editor(editor, true, frame, area),
-        CommitFlow::Running(editor) => render_commit_editor(editor, false, frame, area),
+        CommitFlow::Editing(editor) => render_commit_editor(editor, None, frame, area),
+        CommitFlow::Running(editor) => {
+            let footer = if on_terminal {
+                ON_TERMINAL_FOOTER
+            } else {
+                DETACHED_FOOTER
+            };
+            render_commit_editor(editor, Some(footer), frame, area)
+        }
         CommitFlow::Failed { output, .. } => render_commit_failed(output, frame, area),
     }
 }
@@ -420,18 +433,25 @@ pub(crate) fn render_question(title: &str, question: &str, frame: &mut Frame, ar
 }
 
 /// The message popup: a one-line Subject box over a Body box. While
-/// `editing`, the focused box is marked and holds the terminal cursor.
-/// When there is no room for both, only the focused one is drawn.
-fn render_commit_editor(editor: &CommitEditor, editing: bool, frame: &mut Frame, area: Rect) {
+/// editing, the focused box is marked and holds the terminal cursor; a
+/// `running` commit shows that footer instead. When there is no room for
+/// both boxes, only the focused one is drawn.
+fn render_commit_editor(
+    editor: &CommitEditor,
+    running: Option<&str>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let editing = running.is_none();
     // Two outer borders, a three-row Subject box and a Body box of ten text rows.
     let popup = centered(area, COMMIT_WIDTH, 2 + 3 + 12);
     frame.render_widget(Clear, popup);
-    let block = match (editing, editor.amend.is_some()) {
-        (true, true) => Block::bordered().title(" Amend last commit "),
-        (true, false) => Block::bordered().title(" Commit message "),
-        (false, _) => Block::bordered()
+    let block = match (running, editor.amend.is_some()) {
+        (None, true) => Block::bordered().title(" Amend last commit "),
+        (None, false) => Block::bordered().title(" Commit message "),
+        (Some(footer), _) => Block::bordered()
             .title(" Committing… ")
-            .title_bottom(" waiting for git · ctrl-c quits Kika "),
+            .title_bottom(footer),
     };
     // Skipping hooks skips the user's own checks, so it is never quiet.
     let block = if editor.no_verify {
@@ -2620,6 +2640,15 @@ mod tests {
         let state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "ctrl-c quits Kika"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_handed_over_commit_says_ctrl_c_goes_to_git() {
+        let mut state = with_commit(CommitFlow::Running(commit_editor("subj", &[""])));
+        state.commit_on_terminal = true;
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "ctrl-c stops git"), "{rows:#?}");
+        assert!(!contains(&rows, "quits Kika"), "{rows:#?}");
     }
 
     #[test]
