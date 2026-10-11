@@ -198,10 +198,20 @@ e.g. issue #3 "Rate limiting" → `003-rate-limiting`. **Branch:** `factory/<job
    conflict needed a behaviour decision." If the builder reports a non-trivial conflict
    (behaviour or tests changed to resolve it), run one more review round (step 4); it does
    not count toward the 2-resume limit. A clean or purely mechanical merge goes straight on.
-8. **Merge.** `gh pr ready <pr>`, `gh pr merge <pr> --squash --delete-branch`, then in the
-   main checkout `git pull --ff-only`, `git worktree remove <worktree>` and
-   `git branch -D <branch>`. Remove the `factory:*` labels (the PR's `Closes #n` closes the
-   issue). Stage → `merged`.
+8. **Merge.** `main` is protected: the `check (ubuntu-latest)` CI job must pass before a PR
+   can merge (macOS and Windows run on ready PRs too, but are not required).
+   - Check that neither the branch's files nor its commit messages name another git client
+     (`git grep -il <name> origin/<branch>` and
+     `git log origin/main..origin/<branch> --format=%B | grep -ic <name>` find nothing).
+   - `gh pr ready <pr>`, then `gh pr checks <pr> --watch` and wait for the run to finish.
+     If any check fails, resume the builder to fix it (this does not count toward the
+     2-resume limit) and run the checks again; never merge with `--admin` to skip them.
+   - `gh pr merge <pr> --squash`.
+   - In the main checkout: `git fetch && git merge --ff-only origin/main`, then
+     `git worktree remove <worktree>`, `git branch -D <branch>` and
+     `git push origin --delete <branch>` (remove the worktree first; git will not delete a
+     branch a worktree still uses).
+   - Remove the `factory:*` labels (the PR's `Closes #n` closes the issue). Stage → `merged`.
 
 Finish every command by telling the user the job id, stage, PR link, and anything
 waiting on them.
