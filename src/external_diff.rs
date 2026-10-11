@@ -12,7 +12,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::ansi::StyledRow;
-use crate::git::diff::{DiffRequest, diff_command, run_diff, sanitize, terminal_safe};
+use crate::git::diff::{
+    DiffRequest, diff_command, run_diff, sanitize, sanitize_body, terminal_safe,
+};
 use crate::git::patch::FilePatch;
 use crate::git::runner::{GitCommand, GitRunner};
 
@@ -312,7 +314,8 @@ pub fn map_rows(patch: &FilePatch, rows: &[StyledRow]) -> Vec<Option<(usize, usi
         for (i, line) in hunk.lines.iter().enumerate() {
             let text = line.text.strip_suffix(b"\n").unwrap_or(&line.text);
             let text = text.strip_suffix(b"\r").unwrap_or(text);
-            let content = squeeze(&sanitize(text));
+            // The same sanitiser `ansi` used on the rows, or the texts differ.
+            let content = squeeze(&sanitize_body(text));
             let found = if content.is_empty() {
                 // Only the next row, and only if nothing but a gutter is on it.
                 plain
@@ -598,6 +601,16 @@ mod tests {
             map,
             [Some((0, 1)), Some((0, 2)), Some((0, 3)), Some((0, 5))]
         );
+    }
+
+    #[test]
+    fn a_line_with_a_joined_word_maps_to_its_rendered_row() {
+        let patch = patch::parse(
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+می\u{200C}خواهم\n".as_bytes(),
+        )
+        .unwrap();
+        let map = map_rows(&patch, &rows("decoration\n  ⋮ 1 │می\u{200C}خواهم\n"));
+        assert_eq!(map, [None, Some((0, 0))]);
     }
 
     #[test]
