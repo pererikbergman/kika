@@ -145,15 +145,20 @@ An argument may contain placeholders, replaced when you press the key:
   as it is: never split at spaces, never expanded as a glob, never given to a
   shell. A file named `a b;$(rm -rf x)` arrives as that one argument.
   `"--file={path}"` is one argument too.
-- A `{path}` at the start of an argument that would begin with `-` is given
-  as `./-…`, so a file name can never be read as an option.
+- When `{path}` would begin an argument with `-` (it comes first, or only
+  empty answers come before it), it is given as `./-…`, so a file name can
+  never be read as an option.
 - The program, the first item of `command`, must be plain text. A
   placeholder there is an error.
 - Without a selection the key does nothing and says why: no file selected, or
   for `{line}` and `{commit}`, no line here or a line not committed yet.
 
 The program runs in the repository's top level (or the submodule you
-entered), so `{path}` names the file from there.
+entered), so `{path}` names the file from there. That is also where a
+program path containing `/`, such as `./scripts/fmt.sh` or `bin/tool`, is
+looked up: it runs whatever file that repository ships, including one that
+came with a clone. Use a bare program name found on your `PATH`, or an
+absolute path, for anything you have not checked.
 
 ### Output
 
@@ -187,12 +192,19 @@ command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
 The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 
 **Never put a placeholder inside the script text.** The shell would read a
-file name such as `$(rm -rf ~)` as code. For `sh`, `bash`, `zsh`, `dash`, `ksh`
-and `fish`, Kika rejects a placeholder in the script, or in any argument
-before it. It cannot check other interpreters, so the same rule is yours to
-keep for `python -c`, `perl -e`, `node -e` and the like: pass values as
-arguments after the code, and read them from there (`sys.argv`, `@ARGV`,
-`process.argv`).
+file name such as `$(rm -rf ~)` as code. When `command[0]` is `sh`, `bash`,
+`zsh`, `dash`, `ksh` or `fish`, Kika rejects a placeholder in the script or in
+any argument before it. Options with a value, such as
+`["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`, work the
+same way: the value goes after the script.
+
+That check looks only at the program name in `command[0]`. It does not see a
+shell started through another program, such as `env sh -c`, `busybox sh -c`,
+`xargs sh -c`, `exec`, `nice` or `timeout`, or `cmd /c` and `pwsh -c` on
+Windows, and it cannot check other interpreters either. For all of those,
+and for `python -c`, `perl -e`, `node -e` and the like, the rule is yours to
+keep: pass values as arguments after the code, and read them from there
+(`"$1"`, `sys.argv`, `@ARGV`, `process.argv`).
 
 ### Keys
 

@@ -184,13 +184,14 @@ impl CustomCommand {
             .iter()
             .map(|parts| {
                 let mut arg = OsString::new();
-                for (i, part) in parts.iter().enumerate() {
+                for part in parts {
                     match part {
                         Part::Text(text) => arg.push(text),
                         Part::Path => {
                             let raw = target.path.as_os_str();
-                            // Only at the start of an argument can it read as an option.
-                            if i == 0 && raw.as_encoded_bytes().first() == Some(&b'-') {
+                            // Only at the start of an argument can it read as an option,
+                            // which is also where an empty answer before it leaves it.
+                            if arg.is_empty() && raw.as_encoded_bytes().first() == Some(&b'-') {
                                 arg.push("./");
                             }
                             arg.push(raw);
@@ -292,6 +293,11 @@ fn placeholder_named(name: &str) -> Option<Part> {
 /// A shell reads its script, and the options before it, as code. A value
 /// placed there would run as code too, so it must come after the script,
 /// where the script reads it as `"$1"`.
+///
+/// Conservative, since some options take an argument (`-o pipefail`,
+/// `--rcfile f`) and `+x` is an option too: the last option before the
+/// first placeholder ends the options, and the first plain element after
+/// it is taken as the script. The placeholder must come after that.
 fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     let program = command[0].rsplit(['/', '\\']).next().unwrap_or_default();
     let program = program.to_ascii_lowercase();
@@ -299,24 +305,28 @@ fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     if !SHELLS.contains(&program) {
         return Ok(());
     }
-    let script = command
-        .iter()
-        .skip(1)
-        .position(|element| !element.starts_with('-'))
-        .map_or(command.len(), |i| i + 1);
-    let end = (script + 1).min(argv.len());
-    let unsafe_part = argv[1..end]
-        .iter()
-        .flatten()
-        .find(|part| !matches!(part, Part::Text(_)));
-    match unsafe_part {
-        Some(part) => Err(format!(
+    let Some((first, part)) = argv.iter().enumerate().skip(1).find_map(|(i, parts)| {
+        let value = parts.iter().find(|p| !matches!(p, Part::Text(_)));
+        value.map(|part| (i, part))
+    }) else {
+        return Ok(());
+    };
+    let is_option = |element: &String| element.starts_with(['-', '+']);
+    let options_end = (1..first)
+        .rev()
+        .find(|&i| is_option(&command[i]))
+        .unwrap_or(0);
+    let script = (options_end + 1..command.len())
+        .find(|&i| !is_option(&command[i]))
+        .unwrap_or(command.len());
+    if first <= script {
+        return Err(format!(
             "\"{}\" is in the shell script or before it, where it would run as code; \
              pass it after the script and read it as \"$1\"",
             placeholder(part)
-        )),
-        None => Ok(()),
+        ));
     }
+    Ok(())
 }
 
 /// A `[[commands]]` entry, for tests elsewhere.
@@ -491,6 +501,14 @@ mod tests {
             &["ksh", "-c{path}", "x"],
             &["fish", "-c", "--", "{path}"],
             &["SH.exe", "-c", "x {path}"],
+            // Options that take an argument, or start with `+`.
+            &["bash", "-o", "pipefail", "-c", "grep x {path}"],
+            &["bash", "-O", "extglob", "-c", "x {path}"],
+            &["sh", "+x", "-c", "x {path}"],
+            &["zsh", "-o", "errexit", "-c", "x {path}"],
+            &["bash", "--rcfile", "f", "-c", "x {path}"],
+            &["bash", "--rcfile", "{path}", "-c", "x"],
+            &["sh", "-c", "x", "sh", "-e", "{path}"],
             &["sh", "-{path}"],
         ] {
             let e = error(Panel::Files, command, &[]);
@@ -509,6 +527,18 @@ mod tests {
             )
             .is_ok()
         );
+        let pipefail = [
+            "bash",
+            "-o",
+            "pipefail",
+            "-c",
+            "x \"$1\" | y",
+            "bash",
+            "{path}",
+        ];
+        assert!(parse(Panel::Files, &pipefail, &[]).is_ok());
+        // Plain text after the script, then a value: still an argument.
+        assert!(parse(Panel::Files, &["sh", "-c", "x", "sh", "--to={path}"], &[]).is_ok());
         // Not a shell: the value is an argument like any other.
         assert!(parse(Panel::Files, &["shellcheck", "{path}"], &[]).is_ok());
     }
@@ -561,6 +591,11 @@ mod tests {
         assert_eq!(argv[1], OsString::from("./-rf"));
         assert_eq!(argv[2], OsString::from("--file=-rf"));
         assert_eq!(argv[3], OsString::from("./-rf.bak"));
+        // An empty answer before it leaves the path at the start.
+        let argv = expand(&["rm", "{prompt1}{path}"], &dash, &[""]).unwrap();
+        assert_eq!(argv[1], OsString::from("./-rf"));
+        let argv = expand(&["rm", "{prompt1}{path}"], &dash, &["x"]).unwrap();
+        assert_eq!(argv[1], OsString::from("x-rf"));
     }
 
     #[cfg(unix)]
