@@ -4932,6 +4932,15 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_conflicted_submodule_says_why_and_stays_in_the_parent() {
+        let mut state = with_submodules(vec![submodule("a", SubmoduleState::Conflicted)]);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Resolve the submodule conflict first"));
+        assert_eq!(state.repo_stack, []);
+        assert!(matches!(state.popups[..], [Popup::Submodules(_)]));
+    }
+
+    #[test]
     fn enter_waits_for_a_running_op() {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::UpToDate)]);
         state.op_seq = Some(99);

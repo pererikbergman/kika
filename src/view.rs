@@ -911,7 +911,7 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
 }
 
 /// Fit `text` into `max` columns by replacing its start with `…`.
-fn elide_left(text: &str, max: usize) -> String {
+pub(crate) fn elide_left(text: &str, max: usize) -> String {
     if width_of(text) <= max {
         return text.to_string();
     }

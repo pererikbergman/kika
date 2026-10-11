@@ -201,13 +201,26 @@ pub fn op_command(op: &GitOp) -> GitCommand {
 /// quote repo-controlled paths. A commit's failure also carries stdout:
 /// hooks print to stderr, but git says "nothing to commit" on stdout.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
+    run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
+}
+
+/// [`run_op`], with `env_set` saying which variables Kika's own
+/// environment sets, so tests do not depend on the host's.
+fn run_op_with(
+    runner: &dyn GitRunner,
+    op: &GitOp,
+    env_set: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
     if let GitOp::Commit {
         stage_all: true, ..
     } = op
     {
         run_op(runner, &GitOp::StageAll)?;
     }
-    let cmd = op_command(op);
+    let mut cmd = op_command(op);
+    if matches!(op, GitOp::SubmoduleUpdate(_)) && ssh_is_default(runner, env_set) {
+        cmd = cmd.env("GIT_SSH_COMMAND", BATCH_SSH);
+    }
     let output = runner.run(&cmd).map_err(|e| e.to_string())?;
     if output.success {
         return Ok(());
@@ -226,6 +239,26 @@ pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
         return Err(format!("git {subcommand} failed"));
     }
     Err(message)
+}
+
+/// ssh that fails instead of asking. `GIT_TERMINAL_PROMPT=0` stops git's
+/// own prompts, but ssh asks about host keys and passphrases on the
+/// terminal itself, and git has none while Kika holds the screen: the
+/// update would hang until Kika quits.
+const BATCH_SSH: &str = "ssh -o BatchMode=yes";
+
+/// Whether git would run plain `ssh`, so [`BATCH_SSH`] replaces nothing
+/// the user chose. Any doubt, such as a failed config read, keeps theirs.
+fn ssh_is_default(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> bool {
+    if env_set("GIT_SSH_COMMAND") || env_set("GIT_SSH") {
+        return false;
+    }
+    let cmd = GitCommand::new("config")
+        .arg("--get")
+        .arg("core.sshCommand")
+        .env("LC_ALL", "C");
+    // Unset is exit 1 with nothing on stderr.
+    matches!(runner.run(&cmd), Ok(out) if !out.success && out.stderr.is_empty())
 }
 
 /// Untracked, or changed in the worktree (including partly staged files).
@@ -376,12 +409,66 @@ mod tests {
             ),
         ];
         for (op, argv, env) in cases {
-            let runner = FakeRunner::new().expect(argv, ok(b""));
-            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            let update = matches!(op, GitOp::SubmoduleUpdate(_));
+            let mut runner = FakeRunner::new();
+            if update {
+                runner = runner.expect(SSH_CONFIG, fail(""));
+            }
+            let runner = runner.expect(argv, ok(b""));
+            assert_eq!(run_op_with(&runner, &op, &|_| false), Ok(()), "{op:?}");
             runner.assert_done();
-            assert_eq!(runner.envs(), [env], "{op:?}");
-            assert_eq!(runner.inputs(), [None], "{op:?}");
+            let envs = runner.envs();
+            let mut env = env;
+            if update {
+                env.push(("GIT_SSH_COMMAND".into(), BATCH_SSH.into()));
+            }
+            assert_eq!(envs.last(), Some(&env), "{op:?}");
         }
+    }
+
+    const SSH_CONFIG: &[&str] = &["config", "--get", "core.sshCommand"];
+
+    #[test]
+    fn update_keeps_the_users_own_ssh_command() {
+        let op = GitOp::SubmoduleUpdate("sub".into());
+        let argv = &["submodule", "update", "--init", "--", "sub"];
+        let has_batch = |runner: &FakeRunner| {
+            runner
+                .envs()
+                .last()
+                .unwrap()
+                .iter()
+                .any(|(k, _)| k == "GIT_SSH_COMMAND")
+        };
+        // Set in the environment: git is not even asked.
+        for key in ["GIT_SSH_COMMAND", "GIT_SSH"] {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            assert_eq!(run_op_with(&runner, &op, &|k| k == key), Ok(()));
+            runner.assert_done();
+            assert!(!has_batch(&runner), "{key}");
+        }
+        // Set in config, or the config read failed.
+        for config in [ok(b"ssh -i key\n"), fail("fatal: bad config")] {
+            let runner = FakeRunner::new()
+                .expect(SSH_CONFIG, config)
+                .expect(argv, ok(b""));
+            assert_eq!(run_op_with(&runner, &op, &|_| false), Ok(()));
+            runner.assert_done();
+            assert!(!has_batch(&runner));
+        }
+    }
+
+    #[test]
+    fn an_ssh_command_in_the_repo_config_is_seen_in_real_git() {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("batch-ssh");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert!(ssh_is_default(&runner, &|_| false));
+        git(dir, &["config", "core.sshCommand", "my-ssh"]);
+        assert!(!ssh_is_default(&runner, &|_| false));
     }
 
     #[test]

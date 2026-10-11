@@ -509,8 +509,8 @@ fn submodule_op_disabled(state: &AppState) -> Option<&'static str> {
     no_submodule(state)
 }
 
-/// Why the selected submodule cannot be entered: it must be checked out,
-/// and an operation must not be running in the repository being left.
+/// Why the selected submodule cannot be entered: it must be surely checked
+/// out, and an operation must not be running in the repository being left.
 pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some("Wait for the operation to finish");
@@ -519,6 +519,11 @@ pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<&'static str>
         None => Some("No submodule selected"),
         Some(sub) if sub.state == SubmoduleState::Uninitialized => {
             Some("Update the submodule first")
+        }
+        // Git marks a conflict before it looks for a checkout, so the
+        // directory may hold none, and git there would find the parent.
+        Some(sub) if sub.state == SubmoduleState::Conflicted => {
+            Some("Resolve the submodule conflict first")
         }
         Some(_) => None,
     }

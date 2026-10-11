@@ -7,11 +7,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 use crate::submodule_list::SubmoduleList;
-use crate::view::{COMMIT_WIDTH, centered, clip, render_question, tail, width_of, wrap};
+use crate::view::{
+    COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
+};
 
 /// Wide enough for a path, narrow enough to look like a question.
 const PROMPT_WIDTH: u16 = 50;
@@ -116,21 +119,35 @@ fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut 
 const SHORT_OID: usize = 7;
 
 /// One row per submodule: git's marker, the path, the short commit and the
-/// marker in words. The cursor row is reversed while the list is on top,
-/// and kept in view on a short screen. Until a load lands, and when it
-/// fails or finds nothing, one line says so instead.
+/// marker in words. A path too long for the screen loses its start to `…`,
+/// so the commit and the state, which carry the meaning, stay in sight.
+/// The cursor row is reversed while the list is on top, and kept in view
+/// on a short screen. Until a load lands, and when it fails or finds
+/// nothing, that is said instead; a failure wraps to the box.
 fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: Rect) {
     let title = " Submodules ";
+    // Text columns inside the borders.
+    let room = usize::from(area.width.saturating_sub(2));
     let rows: Vec<String> = match (&list.items, &list.error) {
-        (_, Some(error)) => error.lines().map(|line| format!(" {line} ")).collect(),
+        (_, Some(error)) => {
+            let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
+            wrap(&safe.join("\n"), room.saturating_sub(2).max(1))
+                .into_iter()
+                .map(|row| format!(" {row} "))
+                .collect()
+        }
         (None, None) => vec![" Loading… ".into()],
         (Some(items), None) if items.is_empty() => vec![" No submodules ".into()],
         (Some(items), None) => items
             .iter()
             .map(|sub| {
                 let oid: String = sub.oid.chars().take(SHORT_OID).collect();
-                let (marker, word) = (sub.state.marker(), sub.state.word());
-                format!(" {marker} {} {oid} {word} ", sub.path.display())
+                let head = format!(" {} ", sub.state.marker());
+                let tail = format!(" {oid} {} ", sub.state.word());
+                let path_room = room
+                    .saturating_sub(width_of(&head) + width_of(&tail))
+                    .max(1);
+                format!("{head}{}{tail}", elide_left(sub.path.display(), path_room))
             })
             .collect(),
     };
@@ -140,12 +157,14 @@ fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: R
         .map(|row| width_of(row))
         .chain([width_of(title)])
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(room);
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let text = format!("{row}{}", " ".repeat(width - width_of(row)));
+            let pad = width.saturating_sub(width_of(row));
+            let text = format!("{row}{}", " ".repeat(pad));
             let style = if Some(i) == cursor {
                 Style::new().add_modifier(Modifier::REVERSED)
             } else {
@@ -620,6 +639,66 @@ mod tests {
             assert!(contains(&rows, " Submodules "), "{rows:#?}");
             assert!(contains(&rows, text), "{text}: {rows:#?}");
         }
+    }
+
+    #[test]
+    fn a_long_submodule_path_loses_its_start_so_oid_and_state_stay_visible() {
+        let mut state = workspace(&["a.rs"]);
+        let long = "vendor/some/deeply/nested/library/with/a/long/name/core";
+        state.popups = vec![submodules(
+            Some(vec![
+                sub(long, "1111111aaaa", SubmoduleState::OutOfDate),
+                sub("short", "2222222bbbb", SubmoduleState::UpToDate),
+            ]),
+            None,
+        )];
+        for (width, height) in [(40, 12), (30, 12)] {
+            let (buffer, rows) = draw(&state, width, height);
+            assert!(contains(&rows, "1111111 out of date │"), "{rows:#?}");
+            assert!(contains(&rows, "ore 1111111"), "{rows:#?}");
+            assert!(contains(&rows, " + …"), "{rows:#?}");
+            assert!(!contains(&rows, "vendor"), "{rows:#?}");
+            // The cursor still marks the short row, which is not cut.
+            assert!(contains(&rows, " short 2222222 up to date"), "{rows:#?}");
+            assert!(reversed(&buffer, find(&rows, "short")), "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn a_failure_wraps_inside_the_box_without_control_characters() {
+        let mut state = workspace(&["a.rs"]);
+        let error = "fatal: a rather long first line that cannot fit in thirty columns\n\
+                     hint: \x1b[2Jsecond";
+        state.popups = vec![submodules(None, Some(error))];
+        let (_, rows) = draw(&state, 30, 16);
+        assert!(contains(&rows, "fatal: a rather long"), "{rows:#?}");
+        assert!(contains(&rows, "thirty columns"), "{rows:#?}");
+        assert!(contains(&rows, "hint: \u{FFFD}[2Jsecond"), "{rows:#?}");
+        // Every row of the box ends at its border, so nothing was clipped.
+        for row in rows
+            .iter()
+            .filter(|r| r.contains("columns") || r.contains("fatal"))
+        {
+            assert!(row.trim_end().ends_with('│'), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_list_taller_than_the_screen_keeps_the_cursor_in_view() {
+        let mut state = workspace(&["a.rs"]);
+        let items: Vec<Submodule> = (0..10)
+            .map(|i| sub(&format!("sub{i}"), "1234567", SubmoduleState::UpToDate))
+            .collect();
+        state.popups = vec![Popup::Submodules(SubmoduleList {
+            seq: 0,
+            items: Some(items),
+            error: None,
+            cursor: 9,
+        })];
+        // Six rows: the bar leaves five, so three of the ten rows show.
+        let (buffer, rows) = draw(&state, 40, 6);
+        assert!(reversed(&buffer, find(&rows, "sub9")), "{rows:#?}");
+        assert!(!contains(&rows, "sub0"), "{rows:#?}");
     }
 
     #[test]
