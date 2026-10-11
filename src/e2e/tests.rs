@@ -1161,6 +1161,28 @@ async fn a_commit_made_outside_is_noticed_by_the_refs_poll() {
     assert!(app.state().files.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_commits_panel_shows_head_and_loads_more_as_the_cursor_nears_the_end() {
+    let repo = TestRepo::new().history(260);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('z')).await;
+    app.assert_screen_contains("commit 260");
+    assert_eq!(app.state().commits.rows.len(), 200);
+
+    for _ in 0..210 {
+        app.press(KeyCode::Char('j')).await;
+    }
+
+    let commits = &app.state().commits;
+    assert_eq!(commits.rows.len(), 260);
+    assert!(commits.done);
+    assert_eq!(commits.selected, 210);
+    assert_eq!(commits.rows[210].subject, "commit 50");
+    app.assert_screen_contains("commit 50");
+}
+
 /// Every local branch's name, as git lists them.
 fn branch_names(repo: &TestRepo) -> Vec<String> {
     String::from_utf8(repo.git(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))

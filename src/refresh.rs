@@ -19,6 +19,8 @@ pub enum Scope {
     Submodules,
     /// The Branches panel's list, with upstreams and ahead/behind.
     Branches,
+    /// The Commits panel's log and markers.
+    Commits,
 }
 
 /// How the file selection survives a refresh.
@@ -51,17 +53,18 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::DeleteUntracked(_)
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
-        // Ahead/behind moves with a commit.
+        // Ahead/behind moves with a commit, and so does the log.
         GitOp::Commit { .. } => (
-            &[Scope::Files, Scope::Branch, Scope::Branches][..],
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
-        // A checkout changes the worktree and which branch is current.
+        // A checkout changes the worktree, which branch is current and so
+        // the log of HEAD.
         GitOp::Checkout(_) | GitOp::CreateBranch { .. } => (
-            &[Scope::Files, Scope::Branch, Scope::Branches][..],
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
-        // Renaming the current branch renames what the Status panel shows.
+        // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
         // The parent lists a submodule whose checkout moved as modified.
@@ -131,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_also_reloads_the_branch_and_the_list() {
+    fn a_commit_also_reloads_the_branch_the_list_and_the_commits() {
         let op = GitOp::Commit {
             message: Some("subj\n".into()),
             stage_all: true,
@@ -141,14 +144,20 @@ mod tests {
         assert_eq!(
             plan(&op),
             RefreshPlan {
-                scopes: set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Branches]),
+                scopes: set(&[
+                    Scope::Files,
+                    Scope::Branch,
+                    Scope::Diff,
+                    Scope::Branches,
+                    Scope::Commits
+                ]),
                 selection: Selection::KeepPath,
             }
         );
     }
 
     #[test]
-    fn checkout_and_create_reload_files_diff_the_branch_and_the_list() {
+    fn checkout_and_create_reload_files_diff_the_branch_the_list_and_the_commits() {
         let ops = [
             GitOp::Checkout("b".into()),
             GitOp::CreateBranch {
@@ -159,12 +168,19 @@ mod tests {
         for op in ops {
             assert_eq!(
                 plan(&op).scopes,
-                set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Branches]),
+                set(&[
+                    Scope::Files,
+                    Scope::Branch,
+                    Scope::Diff,
+                    Scope::Branches,
+                    Scope::Commits
+                ]),
                 "{op:?}"
             );
         }
     }
 
+    /// Neither moves `HEAD`, so the log stays as it is.
     #[test]
     fn rename_reloads_the_branch_and_the_list_and_delete_only_the_list() {
         let rename = GitOp::RenameBranch {

@@ -353,10 +353,10 @@ global file.
 ## Binding reference
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
-then its enclosing scopes: the file list, branch list, diff and blame panels fall back to
-Workspace, and Workspace falls back to Global. Popups, menus and the commit
-editor do not fall back, so `q` and `?` do not quit or open help there; each
-popup that can stay open has its own `ctrl-c` to quit.
+then its enclosing scopes: the file list, branch list, commits, diff and blame
+panels fall back to Workspace, and Workspace falls back to Global. Popups,
+menus and the commit editor do not fall back, so `q` and `?` do not quit or
+open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
 `(none)` means a binding has no default keys. `locked` in the last column
 means a repository's `.kika.toml` cannot change it.
@@ -423,6 +423,13 @@ means a repository's `.kika.toml` cannot change it.
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
+
+### Commits
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `commits.next` | `j`, `down` | Select the next commit | |
+| `commits.prev` | `k`, `up` | Select the previous commit | |
 
 ### Diff (hunks)
 
