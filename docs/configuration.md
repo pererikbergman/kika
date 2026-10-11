@@ -411,6 +411,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
 | `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
+| `workspace.command_log` | `@` | Show the git commands Kika ran | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
@@ -911,6 +912,22 @@ commits, so `enter` does not answer it.
 | `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
 | `worktrees.close` | `esc`, `q` | Close the list | |
 | `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Command log
+
+Every git command Kika ran this session, oldest first, with how it ended and
+how long it took. Lines never show env, stdin, credentials in URLs, secret
+config values or message bodies. `@` opens it with any modifiers, since
+layouts type it with Shift, AltGr or Option.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `command_log.next` | `j`, `down` | Select the next command | |
+| `command_log.prev` | `k`, `up` | Select the previous command | |
+| `command_log.page_down` | `pgdn` | Move a page down | |
+| `command_log.page_up` | `pgup` | Move a page up | |
+| `command_log.close` | `esc`, `q` | Close the log | |
+| `command_log.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Remove this worktree?
 

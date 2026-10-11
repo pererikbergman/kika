@@ -1045,6 +1045,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_message_read_is_logged_and_a_clipboard_copy_is_not() {
+        use crate::clipboard::RecordingSink;
+        use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink, RecordingRunner};
+
+        let oid = CommitId::parse("0123abcd").unwrap();
+        let fake = Arc::new(FakeRunner::new().expect(
+            &["log", "-1", "--format=%B", "0123abcd", "--"],
+            ok(b"subj\n"),
+        ));
+        let sink = CommandSink::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        sink.connect(move |event| seen.lock().unwrap().push(event));
+        let runner = Arc::new(RecordingRunner::new(fake.clone(), sink));
+        let clipboard = Arc::new(RecordingSink::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner, tx).with_clipboard(clipboard.clone());
+
+        assert_eq!(runtime.copy_to_clipboard("clip secret"), Ok(()));
+        assert_eq!(clipboard.copies().len(), 1);
+        assert!(events.lock().unwrap().is_empty(), "a copy runs no command");
+
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        runtime.spawn(Effect::LoadCommitMessage {
+            tag,
+            oid: oid.clone(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitMessageLoaded {
+                tag,
+                oid,
+                result: Ok("subj".into()),
+            })
+        );
+        fake.assert_done();
+        let events = events.lock().unwrap().clone();
+        let [
+            CommandEvent::Started { line, .. },
+            CommandEvent::Finished { outcome, .. },
+        ] = events.as_slice()
+        else {
+            panic!("expected one started and finished command, got {events:?}");
+        };
+        assert!(line.ends_with("log -1 --format=%B 0123abcd --"), "{line:?}");
+        assert!(!line.contains("clip"), "{line:?}");
+        assert_eq!(outcome, &CommandOutcome::Ok);
+    }
+
+    #[tokio::test]
     async fn load_status_reports_back_with_the_same_tag() {
         let runner = Arc::new(
             FakeRunner::new()

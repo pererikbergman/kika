@@ -7,6 +7,7 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::git::askpass::Secret;
 use crate::git::diff::terminal_safe;
@@ -46,6 +47,8 @@ pub enum Popup {
     Credential(CredentialPrompt),
     /// "Undo this?" or "Redo this?", with what would happen.
     Travel(TravelConfirm),
+    /// The git commands Kika ran; the entries live in `AppState`.
+    CommandLog(CommandLogView),
 }
 
 /// A question from git or ssh, and what the user has typed so far. The

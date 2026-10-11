@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
 use crate::git::GitRunner;
+use crate::git::recording::CommandSink;
 use crate::handoff::{self, HandOff};
 use crate::intent::AppIntent;
 use crate::model::AppState;
@@ -29,11 +30,17 @@ pub async fn run(
     mut terminal: DefaultTerminal,
     mut state: AppState,
     runner: Arc<dyn GitRunner>,
+    sink: CommandSink,
     recent_store: Option<PathBuf>,
     global_config: Option<PathBuf>,
     config: Loaded,
 ) -> color_eyre::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
+    // Before anything runs git, so every command reaches the log.
+    let log_tx = tx.clone();
+    sink.connect(move |event| {
+        let _ = log_tx.send(AppIntent::CommandLogged(event));
+    });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
         .with_global_config(global_config)
