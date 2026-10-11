@@ -375,6 +375,7 @@ fn doing(op: Operation) -> &'static str {
         Operation::Rebase => "rebasing",
         Operation::Merge => "merging",
         Operation::CherryPick => "cherry-picking",
+        Operation::Revert => "reverting",
         Operation::Bisect => "bisecting",
     }
 }
