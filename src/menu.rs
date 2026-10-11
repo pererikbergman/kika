@@ -61,6 +61,11 @@ static ACTIONS: &[MenuItem] = &[
         disabled: never,
     },
     MenuItem {
+        label: "Submodules…",
+        intent: AppIntent::OpenSubmodules,
+        disabled: never,
+    },
+    MenuItem {
         label: "Quit…",
         intent: AppIntent::Ask(ConfirmKind::Quit),
         disabled: never,

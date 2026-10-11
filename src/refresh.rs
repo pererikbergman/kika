@@ -15,6 +15,8 @@ pub enum Scope {
     Branch,
     /// The selected file's diff.
     Diff,
+    /// The Submodules popup's list.
+    Submodules,
 }
 
 /// How the file selection survives a refresh.
@@ -48,6 +50,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
         GitOp::Commit { .. } => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
+        // The parent lists a submodule whose checkout moved as modified.
+        GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
+            (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
+        }
     };
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
@@ -125,6 +131,23 @@ mod tests {
                 selection: Selection::KeepPath,
             }
         );
+    }
+
+    #[test]
+    fn submodule_ops_reload_files_diff_and_the_submodule_list() {
+        for op in [
+            GitOp::SubmoduleInit("sub".into()),
+            GitOp::SubmoduleUpdate("sub".into()),
+        ] {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[Scope::Files, Scope::Diff, Scope::Submodules]),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
     }
 
     #[test]

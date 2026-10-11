@@ -6,6 +6,7 @@ use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
 use crate::git::status::RepoStatus;
+use crate::git::submodule::Submodule;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -154,6 +155,23 @@ pub enum AppIntent {
     HunkEdited {
         result: Result<Option<Vec<u8>>, String>,
     },
+    /// Open the list of submodules and load it.
+    OpenSubmodules,
+    /// The submodule list was read; `tag` says which load.
+    SubmodulesLoaded {
+        tag: Tag,
+        result: Result<Vec<Submodule>, String>,
+    },
+    /// Move the submodule cursor down or up.
+    SubmoduleNext,
+    SubmodulePrev,
+    /// Initialize or update the submodule under the cursor.
+    InitSubmodule,
+    UpdateSubmodule,
+    /// Work in the submodule under the cursor as if Kika started there.
+    EnterSubmodule,
+    /// Back to the repository the current one was entered from.
+    LeaveSubmodule,
     /// Blame the selected file: who last changed each line, and when.
     OpenBlame,
     /// A blame load finished; `tag` says which one.

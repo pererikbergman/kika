@@ -17,6 +17,7 @@ mod model;
 mod popup;
 mod popup_view;
 mod refresh;
+mod submodule_list;
 mod view;
 
 use std::sync::Arc;
@@ -37,17 +38,10 @@ fn main() -> color_eyre::Result<()> {
     let launch = std::env::current_dir()?;
     let workdir = repo_root::resolve_workdir(&CliRunner::new(&launch), launch);
     let runner = Arc::new(CliRunner::new(workdir));
-    // Editors run where git does, so relative names mean the same to both.
-    let workdir = runner.workdir().to_path_buf();
     let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();
-    let result = runtime.block_on(app::run(
-        terminal,
-        AppState::new(cli.context()),
-        runner,
-        workdir,
-    ));
+    let result = runtime.block_on(app::run(terminal, AppState::new(cli.context()), runner));
     ratatui::restore();
     // Quitting interrupts git, but a process that ignores it must not keep
     // Kika from exiting: dropping the runtime would wait for it forever.
