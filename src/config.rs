@@ -25,6 +25,9 @@
 //! a plain file, not a symlink. Either file must be a regular file of at most
 //! 64 KiB. A file with any error is ignored as a whole, and the layer below
 //! it applies.
+//!
+//! The user's guide to both files, with every binding id, is
+//! `docs/configuration.md`.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -552,6 +555,37 @@ mod tests {
         let loaded = files.load();
         assert_eq!(loaded.errors.len(), 1);
         assert_eq!(loaded.errors[0].message, "not a regular file");
+    }
+
+    /// Every fenced `toml` block in the user page, so an example there
+    /// cannot go stale.
+    fn documented_examples() -> Vec<String> {
+        let page = include_str!("../docs/configuration.md");
+        let mut blocks = Vec::new();
+        let mut open: Option<String> = None;
+        for line in page.lines() {
+            match (&mut open, line.trim_end()) {
+                (None, "```toml") => open = Some(String::new()),
+                (Some(_), "```") => blocks.extend(open.take()),
+                (Some(block), text) => {
+                    block.push_str(text);
+                    block.push('\n');
+                }
+                (None, _) => {}
+            }
+        }
+        blocks
+    }
+
+    #[test]
+    fn documented_examples_load() {
+        let examples = documented_examples();
+        assert!(examples.len() >= 2, "{examples:?}");
+        for example in examples {
+            if let Err(e) = global(&example) {
+                panic!("docs/configuration.md example does not load: {e}\n{example}");
+            }
+        }
     }
 
     #[test]
