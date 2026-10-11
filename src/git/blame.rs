@@ -281,10 +281,10 @@ mod tests {
 
     #[test]
     fn line_text_keeps_a_joiner_that_the_author_name_escapes() {
-        let out = format!("{A} 1 1 1\nauthor 👨\u{200D}👩\n\t👨\u{200D}👩\n");
+        let out = format!("{A} 1 1 1\nauthor می\u{200C}خواهم\n\tمی\u{200C}خواهم\n");
         let lines = parse_blame(out.as_bytes()).unwrap();
-        assert_eq!(lines[0].author, "👨<U+200D>👩");
-        assert_eq!(lines[0].text, "👨\u{200D}👩");
+        assert_eq!(lines[0].author, "می<U+200C>خواهم");
+        assert_eq!(lines[0].text, "می\u{200C}خواهم");
     }
 
     #[test]

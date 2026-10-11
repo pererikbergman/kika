@@ -358,8 +358,8 @@ mod tests {
     }
 
     #[test]
-    fn body_text_keeps_a_joined_emoji_and_escapes_bidi() {
-        let rows = parse("\x1b[32m+👨\u{200D}👩 é\u{202E}ü\x1b[0m".as_bytes());
-        assert_eq!(texts(&rows), ["+👨\u{200D}👩 é<U+202E>ü"]);
+    fn body_text_keeps_a_joined_word_and_escapes_bidi_and_emoji_joiners() {
+        let rows = parse("\x1b[32m+می\u{200C}خواهم é\u{202E}ü 👨\u{200D}👩\x1b[0m".as_bytes());
+        assert_eq!(texts(&rows), ["+می\u{200C}خواهم é<U+202E>ü 👨<U+200D>👩"]);
     }
 }

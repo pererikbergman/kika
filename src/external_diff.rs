@@ -595,12 +595,12 @@ mod tests {
     }
 
     #[test]
-    fn a_line_with_a_joined_emoji_maps_to_its_rendered_row() {
+    fn a_line_with_a_joined_word_maps_to_its_rendered_row() {
         let patch = patch::parse(
-            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+👨\u{200D}👩\n".as_bytes(),
+            "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+می\u{200C}خواهم\n".as_bytes(),
         )
         .unwrap();
-        let map = map_rows(&patch, &rows("decoration\n  ⋮ 1 │👨\u{200D}👩\n"));
+        let map = map_rows(&patch, &rows("decoration\n  ⋮ 1 │می\u{200C}خواهم\n"));
         assert_eq!(map, [None, Some((0, 0))]);
     }
 

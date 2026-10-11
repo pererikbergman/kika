@@ -245,11 +245,14 @@ pub fn sanitize(raw: &[u8]) -> String {
     text
 }
 
-/// `sanitize` for the lines of a file (diff, blame, rendered diff). Emoji
-/// sequences and Persian, Arabic-script and Indic words need ZWJ/ZWNJ, which
-/// only shape their neighbours and cannot reorder text, so a joiner is kept
-/// when both neighbours are visible non-ASCII characters. The neighbour rule
-/// keeps a joiner hidden in ASCII, such as `is\u{200D}admin`, visible.
+/// `sanitize` for the lines of a file (diff, blame, rendered diff). Persian,
+/// Arabic-script and Indic words need ZWJ/ZWNJ, which only shape their
+/// neighbours and cannot reorder text, so a joiner is kept when both
+/// neighbours are letters of a script it shapes. Anywhere else it draws
+/// nothing, so `is\u{200D}admin` or `кл\u{200D}юч` would pass for the plain
+/// word: those stay escaped. Emoji ZWJ sequences stay escaped too: a terminal
+/// without grapheme clustering draws each part, wider than the two columns
+/// the layout reserves, which pushes the row past its pane.
 pub fn sanitize_body(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     let mut before = None;
@@ -257,8 +260,8 @@ pub fn sanitize_body(raw: &[u8]) -> String {
     let mut chars = decoded.chars().peekable();
     while let Some(c) = chars.next() {
         if matches!(c, '\u{200C}' | '\u{200D}')
-            && before.is_some_and(shapes_with_joiner)
-            && chars.peek().is_some_and(|&after| shapes_with_joiner(after))
+            && before.is_some_and(is_joining_letter)
+            && chars.peek().is_some_and(|&after| is_joining_letter(after))
         {
             text.push(c);
         } else {
@@ -279,10 +282,23 @@ fn push_safe(text: &mut String, c: char) {
     }
 }
 
-/// A visible non-ASCII character a kept ZWJ/ZWNJ may sit next to. Joiners are
-/// in the strict set themselves, so a run of them is escaped.
-fn shapes_with_joiner(c: char) -> bool {
-    !c.is_ascii() && !c.is_control() && !is_invisible_or_bidi(c)
+/// A character of a script where a ZWJ/ZWNJ visibly changes how letters
+/// join: Arabic (with its presentation forms), Syriac, N'Ko, the Indic
+/// blocks, Myanmar and Mongolian letters. Joiners and the Arabic letter mark
+/// are in the strict set, so a run of joiners is escaped.
+fn is_joining_letter(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0600}'..='\u{077F}'
+            | '\u{07C0}'..='\u{07FF}'
+            | '\u{0870}'..='\u{08FF}'
+            | '\u{0900}'..='\u{0DFF}'
+            | '\u{1000}'..='\u{109F}'
+            | '\u{1820}'..='\u{18AF}'
+            | '\u{FB50}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFC}'
+    ) && !is_invisible_or_bidi(c)
 }
 
 /// Format characters (not `is_control`) that reorder text or draw nothing:
@@ -912,12 +928,21 @@ mod tests {
     }
 
     #[test]
-    fn body_text_keeps_joiners_inside_non_ascii_text() {
+    fn body_text_keeps_joiners_inside_joining_scripts() {
         for text in [
-            "👨\u{200D}👩\u{200D}👧",
-            "❤\u{FE0F}\u{200D}🔥",
+            // Persian, Urdu and Arabic, also as presentation forms.
             "می\u{200C}خواهم",
+            "ن\u{200D}ہ",
+            "\u{FE91}\u{200D}\u{FE92}",
+            // Devanagari, Bengali and Malayalam.
             "क्\u{200D}ष",
+            "র\u{200D}্য",
+            "ന്\u{200D}ന",
+            // Syriac, N'Ko, Myanmar and Mongolian letters.
+            "ܐ\u{200D}ܒ",
+            "ߊ\u{200D}ߓ",
+            "က\u{200C}ခ",
+            "ᠠ\u{200D}ᠢ",
         ] {
             assert_eq!(sanitize_body(text.as_bytes()), text);
         }
@@ -931,38 +956,50 @@ mod tests {
                 .filter(|&&c| c != '\u{200C}' && c != '\u{200D}')
             {
                 let escape = format!("<U+{:04X}>", c as u32);
-                for (before, after) in [('a', 'b'), ('é', 'ü'), ('👨', '👩')] {
+                for (before, after) in [('a', 'b'), ('é', 'ü'), ('👨', '👩'), ('م', 'ی')] {
                     let raw = format!("{before}{c}{after}");
                     let expected = format!("{before}{escape}{after}");
                     assert_eq!(sanitize_body(raw.as_bytes()), expected, "{class} {c:?}");
                 }
             }
         }
-        assert_eq!(sanitize_body("é\u{202E}ü".as_bytes()), "é<U+202E>ü");
-        assert_eq!(sanitize_body("é\u{2066}ü".as_bytes()), "é<U+2066>ü");
+        assert_eq!(sanitize_body("م\u{202E}ی".as_bytes()), "م<U+202E>ی");
+        assert_eq!(sanitize_body("क\u{2066}ष".as_bytes()), "क<U+2066>ष");
     }
 
     #[test]
-    fn body_text_escapes_joiners_without_two_non_ascii_neighbours() {
+    fn body_text_escapes_joiners_that_would_change_nothing_on_screen() {
         let cases = [
-            // An ASCII neighbour: hides a split inside an identifier.
+            // Scripts where a joiner draws nothing: two strings look the same.
+            ("кл\u{200D}юч", "кл<U+200D>юч"),
+            ("中\u{200D}文", "中<U+200D>文"),
+            ("é\u{200D}ü", "é<U+200D>ü"),
+            ("α\u{200C}β", "α<U+200C>β"),
+            ("한\u{200D}국", "한<U+200D>국"),
+            // Emoji sequences: their width depends on the terminal.
+            ("👨\u{200D}👩\u{200D}👧", "👨<U+200D>👩<U+200D>👧"),
+            ("❤\u{FE0F}\u{200D}🔥", "❤\u{FE0F}<U+200D>🔥"),
+            // Only one neighbour in a joining script.
             ("is\u{200D}admin", "is<U+200D>admin"),
-            ("👨\u{200D}a", "👨<U+200D>a"),
+            ("م\u{200D}a", "م<U+200D>a"),
             ("a\u{200C}خ", "a<U+200C>خ"),
+            ("م\u{200D}ю", "م<U+200D>ю"),
             // Start or end of the line.
-            ("\u{200D}👩", "<U+200D>👩"),
-            ("👨\u{200D}", "👨<U+200D>"),
+            ("\u{200D}م", "<U+200D>م"),
+            ("م\u{200D}", "م<U+200D>"),
             ("\u{200C}", "<U+200C>"),
             // A run of joiners.
-            ("👨\u{200D}\u{200D}👩", "👨<U+200D><U+200D>👩"),
+            ("م\u{200D}\u{200D}ی", "م<U+200D><U+200D>ی"),
             ("می\u{200C}\u{200D}خ", "می<U+200C><U+200D>خ"),
-            // Next to a tag or a strict variation selector.
-            ("👨\u{200D}\u{E0041}", "👨<U+200D><U+E0041>"),
-            ("\u{E0041}\u{200D}👩", "<U+E0041><U+200D>👩"),
-            ("👨\u{200D}\u{FE00}", "👨<U+200D><U+FE00>"),
-            ("\u{FE00}\u{200C}👩", "<U+FE00><U+200C>👩"),
-            // Next to a control character.
-            ("👨\u{200D}\u{7}", "👨<U+200D>\u{FFFD}"),
+            // Next to a tag, a strict variation selector or a bidi mark.
+            ("م\u{200D}\u{E0041}", "م<U+200D><U+E0041>"),
+            ("\u{E0041}\u{200D}م", "<U+E0041><U+200D>م"),
+            ("म\u{200D}\u{FE00}", "म<U+200D><U+FE00>"),
+            ("\u{FE00}\u{200C}م", "<U+FE00><U+200C>م"),
+            ("م\u{200D}\u{061C}ی", "م<U+200D><U+061C>ی"),
+            // Next to a control character or a noncharacter.
+            ("م\u{200D}\u{7}", "م<U+200D>\u{FFFD}"),
+            ("م\u{200D}\u{FDD0}", "م<U+200D>\u{FDD0}"),
         ];
         for (raw, expected) in cases {
             assert_eq!(sanitize_body(raw.as_bytes()), expected, "{raw:?}");
@@ -988,16 +1025,16 @@ mod tests {
     #[test]
     fn classify_keeps_joiners_in_body_lines_and_escapes_them_in_headers() {
         let mut c = Classifier::new();
-        let header = c.classify("+++ b/👨\u{200D}👩.txt\n".as_bytes());
+        let header = c.classify("+++ b/می\u{200C}خواهم.txt\n".as_bytes());
         assert_eq!(header.kind, LineKind::Header);
-        assert_eq!(header.text, "+++ b/👨<U+200D>👩.txt");
-        let hunk = c.classify("@@ -1 +1 @@ 👨\u{200D}👩\n".as_bytes());
+        assert_eq!(header.text, "+++ b/می<U+200C>خواهم.txt");
+        let hunk = c.classify("@@ -1 +1 @@ می\u{200C}خواهم\n".as_bytes());
         assert_eq!(hunk.kind, LineKind::Hunk);
-        assert_eq!(hunk.text, "@@ -1 +1 @@ 👨<U+200D>👩");
+        assert_eq!(hunk.text, "@@ -1 +1 @@ می<U+200C>خواهم");
         for (raw, kind) in [
-            ("+👨\u{200D}👩", LineKind::Added),
-            ("-👨\u{200D}👩", LineKind::Removed),
-            (" 👨\u{200D}👩", LineKind::Context),
+            ("+می\u{200C}خواهم", LineKind::Added),
+            ("-می\u{200C}خواهم", LineKind::Removed),
+            (" می\u{200C}خواهم", LineKind::Context),
         ] {
             let line = c.classify(raw.as_bytes());
             assert_eq!(line.kind, kind);
