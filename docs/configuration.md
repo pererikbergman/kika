@@ -1,14 +1,14 @@
 # Configuration
 
 Kika works without any configuration. Two optional TOML files let you remap
-keys, tune how often Kika looks for changes made outside it, and choose a
-program to draw the Diff pane.
+keys, bind your own programs to keys, tune how often Kika looks for changes
+made outside it, and choose a program to draw the Diff pane.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]` and `[diff]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -120,6 +120,148 @@ pager = "delta --paging=never"
 
 **Changes to `[diff]` take effect after a restart.**
 
+## Custom commands
+
+`[[commands]]` binds a key to a program of your own. Each entry works in one
+panel and can pass the selected file, line or commit to the program.
+
+```toml
+[[commands]]
+context = "files"
+keys = ["ctrl-t"]
+description = "Copy the file to…"
+command = ["cp", "--", "{path}", "{prompt1}"]
+prompts = ["Copy to"]
+output = "none"
+
+[[commands]]
+context = "diff"
+keys = ["ctrl-g"]
+description = "Open the file in vim at this line"
+command = ["vim", "+{line}", "--", "{path}"]
+
+[[commands]]
+context = "blame"
+keys = ["ctrl-y"]
+description = "Show the files this commit changed"
+command = ["git", "show", "--stat", "{commit}"]
+output = "popup"
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `context` | yes | The panel the keys work in: `"files"`, `"diff"` or `"blame"` |
+| `keys` | yes | At least one key, named as in `[keys]` |
+| `description` | yes | The text shown for it in the help menu (`?`) |
+| `command` | yes | The program and its arguments, one list item per argument |
+| `prompts` | no | Titles of text prompts, asked in order before it runs |
+| `output` | no | Where the output goes, see below; `"terminal"` if left out |
+
+**Commands are read from the global file only.** A `.kika.toml` that holds
+`[[commands]]` is an error and is ignored as a whole, because a file that
+arrives with a clone must never be able to run a program.
+
+### Placeholders
+
+An argument may contain placeholders, replaced when you press the key:
+
+| Placeholder | Replaced by | Allowed in |
+|---|---|---|
+| `{path}` | The selected file, relative to the repository's top level | files, diff, blame |
+| `{line}` | The line: the selected change in the diff, the cursor's line in the blame | diff, blame |
+| `{commit}` | The full id of the commit that last changed the blame cursor's line | blame |
+| `{prompt1}`, `{prompt2}`, … | Your answer to that prompt, counted from 1 | files, diff, blame |
+
+- Write `{{` and `}}` for literal braces. Any other `{` or `}`, an unknown
+  placeholder, or a prompt number with no matching entry in `prompts` is an
+  error.
+- **Each list item is always exactly one argument.** A value is put into it
+  as it is: never split at spaces, never expanded as a glob, never given to a
+  shell. A file named `a b;$(rm -rf x)` arrives as that one argument.
+  `"--file={path}"` is one argument too.
+- When `{path}` would begin an argument with `-` (it comes first, or only
+  empty answers come before it), it is given as `./-…`, so a file name can
+  never be read as an option.
+- The program, the first item of `command`, must be plain text. A
+  placeholder there is an error.
+- Without a selection the key does nothing and says why: no file selected, or
+  for `{line}` and `{commit}`, no line here or a line not committed yet.
+
+The program runs in the repository's top level (or the submodule you
+entered), so `{path}` names the file from there. That is also where a
+program path containing `/`, such as `./scripts/fmt.sh` or `bin/tool`, is
+looked up: it runs whatever file that repository ships, including one that
+came with a clone. Use a bare program name found on your `PATH`, or an
+absolute path, for anything you have not checked.
+
+### Output
+
+| Mode | What happens |
+|---|---|
+| `"terminal"` | Kika hands the terminal to the program and comes back when it exits. For interactive programs. |
+| `"popup"` | The program runs in the background. Its output, stdout and stderr together, is shown in a popup when it ends. |
+| `"none"` | The program runs in the background. Its output is shown only if it fails. |
+
+In `"popup"` and `"none"` mode the program gets no input, and only one runs
+at a time. At most 256 KiB of output is kept; a program that prints more is
+stopped. A program that exits with a non-zero status, or cannot start, is
+shown as failed with its output. After any command Kika reloads the file
+list, since the command may have changed the repository.
+
+### Shell commands
+
+Kika never runs `command` through a shell. If you need one, for a pipe or a
+redirection, call the shell yourself, and pass each value as a positional
+parameter after the script. Inside the script, read it as `"$1"`, `"$2"`, and
+so on, always in double quotes:
+
+```toml
+[[commands]]
+context = "files"
+keys = ["ctrl-l"]
+description = "Page the file's history"
+command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
+```
+
+The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
+
+**Never put a placeholder inside the script text.** The shell would read a
+file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
+`bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
+`pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
+such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
+placeholder in the script, in any argument before it, or in the `$0` slot
+right after it.
+The check is cautious: it assumes the last option before the first
+placeholder takes a value, so write the script, then a name for `$0`, then
+the values. Options work in either order around `-c`:
+
+- `["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`
+- `["bash", "-c", "-o", "pipefail", "… \"$1\" …", "bash", "{path}"]`
+
+`["bash", "-o", "pipefail", "{path}"]` is rejected too: it would run the
+selected file as a script.
+
+That check looks only at the program name in `command[0]`. It does not see a
+shell started through another program, such as `env sh -c`, `busybox sh -c`,
+`xargs sh -c`, `exec`, `nice` or `timeout`, or `cmd /c` and `pwsh -c` on
+Windows, and it cannot check other interpreters either. For all of those,
+and for `python -c`, `perl -e`, `node -e` and the like, the rule is yours to
+keep: pass values as arguments after the code, and read them from there
+(`"$1"`, `sys.argv`, `@ARGV`, `process.argv`).
+
+### Keys
+
+- A command's keys follow the `[keys]` rules: one key cannot be bound twice in
+  the same scope, so a command key must be free of the panel's own bindings
+  and of other commands in that panel.
+- A command key may shadow a key of an enclosing scope, but not one of a
+  locked binding: `q` in a `files` command would take over `global.quit`,
+  and is an error.
+- A repository's `.kika.toml` cannot move a binding onto a command's key.
+- Commands are listed in the help menu (`?`) after the panel's own keys.
+  They are not shown in the bottom bar.
+
 ## Global-only settings and trust
 
 - **Auto-fetch is off unless `fetch` is set in the global file.** Setting it
@@ -129,6 +271,8 @@ pager = "delta --paging=never"
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
+- **`[[commands]]` is allowed only in the global file**, for the same reason:
+  a cloned repository must not be able to run a program.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an

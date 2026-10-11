@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::custom_command::OutputMode;
 use crate::git::GitRunner;
 use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
@@ -27,6 +28,8 @@ pub enum HandOff {
     /// Let the user write the commit message in their editor, starting
     /// from `initial`, the popup's text.
     EditCommitMessage { initial: String },
+    /// Run the user's command, its argv already expanded, on the terminal.
+    RunCommand { title: String, argv: Vec<OsString> },
 }
 
 impl HandOff {
@@ -60,7 +63,35 @@ pub fn execute(job: HandOff, runner: &dyn GitRunner, workdir: &Path) -> AppInten
         HandOff::EditCommitMessage { initial } => AppIntent::CommitMessageEdited {
             result: edit_commit_message(&initial, runner, workdir),
         },
+        HandOff::RunCommand { title, argv } => AppIntent::CommandFinished {
+            title,
+            output: OutputMode::Terminal,
+            result: run_command(&argv, workdir).map(|()| String::new()),
+        },
     }
+}
+
+/// Run `argv` directly, with no shell in between, and wait for it.
+fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), String> {
+    let Some((program, args)) = argv.split_first() else {
+        return Err("The command is empty".into());
+    };
+    let status = std::process::Command::new(program)
+        .args(args)
+        .current_dir(workdir)
+        .status()
+        .map_err(|e| start_error(program, &e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(terminal_safe(format!("exited with {status}").as_bytes()))
+    }
+}
+
+/// Why `program` did not start, safe to draw.
+pub fn start_error(program: &OsString, error: &io::Error) -> String {
+    let program = program.to_string_lossy();
+    terminal_safe(format!("Could not start {program}: {error}").as_bytes())
 }
 
 /// The editor git would use: `GIT_EDITOR`, `core.editor`, `VISUAL`,
@@ -792,5 +823,65 @@ mod tests {
         assert!(!dir.join("x").exists());
         let cwd = fs::canonicalize(fs::read_to_string(dir.join("cwd")).unwrap().trim_end());
         assert_eq!(cwd.unwrap(), fs::canonicalize(dir).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_runs_in_the_workdir_with_each_value_one_argument() {
+        let tmp = crate::git::fake::TempDir::new("handoff-command");
+        let dir = tmp.path();
+        let argv: Vec<OsString> = ["sh", "-c", "pwd > cwd; printf '%s\\n' \"$@\" > args", "sh"]
+            .into_iter()
+            .map(OsString::from)
+            .chain([OsString::from("a b;$(touch x)"), OsString::from("*")])
+            .collect();
+        let job = HandOff::RunCommand {
+            title: "Show".into(),
+            argv,
+        };
+
+        let intent = execute(job, &FakeRunner::new(), dir);
+
+        assert_eq!(
+            intent,
+            AppIntent::CommandFinished {
+                title: "Show".into(),
+                output: OutputMode::Terminal,
+                result: Ok(String::new()),
+            }
+        );
+        let args = fs::read_to_string(dir.join("args")).unwrap();
+        assert_eq!(args, "a b;$(touch x)\n*\n");
+        assert!(!dir.join("x").exists());
+        let cwd = fs::canonicalize(fs::read_to_string(dir.join("cwd")).unwrap().trim_end());
+        assert_eq!(cwd.unwrap(), fs::canonicalize(dir).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_or_missing_command_says_why() {
+        let tmp = crate::git::fake::TempDir::new("handoff-command-fail");
+        let result = |argv: &[&str]| match execute(
+            HandOff::RunCommand {
+                title: "t".into(),
+                argv: argv.iter().map(OsString::from).collect(),
+            },
+            &FakeRunner::new(),
+            tmp.path(),
+        ) {
+            AppIntent::CommandFinished { result, .. } => result,
+            other => panic!("expected CommandFinished, got {other:?}"),
+        };
+        let failed = result(&["sh", "-c", "exit 3"]).unwrap_err();
+        assert!(
+            failed.starts_with("exited with") && failed.contains('3'),
+            "{failed}"
+        );
+        let missing = result(&["kika-no-such-program\x1b[2J"]).unwrap_err();
+        assert!(
+            missing.starts_with("Could not start kika-no-such-program"),
+            "{missing}"
+        );
+        assert!(!missing.contains('\x1b'), "{missing}");
     }
 }

@@ -1,11 +1,13 @@
 mod ansi;
 mod app;
 mod blame_view;
+mod captured_command;
 mod cli;
 mod commit_editor;
 mod config;
 #[cfg(test)]
 mod config_docs;
+mod custom_command;
 mod diff_pane;
 mod diff_stream;
 #[cfg(test)]
