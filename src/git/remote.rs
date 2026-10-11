@@ -8,10 +8,12 @@ use std::path::PathBuf;
 
 use super::askpass::SOCKET_ENV;
 use super::diff::terminal_safe;
+use super::remotes::RemoteName;
 use super::runner::{GitCommand, GitRunner};
+use super::tags::TagName;
 
 /// A network operation the user started with a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteOp {
     /// Every remote, like auto-fetch.
     Fetch,
@@ -21,24 +23,31 @@ pub enum RemoteOp {
     Push {
         force_with_lease: bool,
     },
+    /// One tag to one remote, under the same name. Never forced.
+    PushTag {
+        remote: RemoteName,
+        tag: TagName,
+    },
 }
 
 impl RemoteOp {
     /// What it is doing, for the status bar.
-    pub fn doing(self) -> &'static str {
+    pub fn doing(&self) -> &'static str {
         match self {
             RemoteOp::Fetch => "fetching…",
             RemoteOp::Pull => "pulling…",
             RemoteOp::Push { .. } => "pushing…",
+            RemoteOp::PushTag { .. } => "pushing tag…",
         }
     }
 
     /// What the error popup calls its failure.
-    pub fn failure_title(self) -> &'static str {
+    pub fn failure_title(&self) -> &'static str {
         match self {
             RemoteOp::Fetch => "Fetch failed",
             RemoteOp::Pull => "Pull failed",
             RemoteOp::Push { .. } => "Push failed",
+            RemoteOp::PushTag { .. } => "Push tag failed",
         }
     }
 }
@@ -70,7 +79,12 @@ pub enum RemoteFailure {
 /// bridge on this platform, or it failed to start) they fail instead of
 /// asking. Runs away from the terminal, so an ssh too old for
 /// `SSH_ASKPASS_REQUIRE` cannot read it either.
-pub fn remote_command(op: RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand {
+///
+/// A tag goes as `refs/tags/<name>:refs/tags/<name>`, which starts with
+/// `refs/` and so is never an option. The remote's name comes from the
+/// config, which can be edited by hand: [`run_remote`] refuses one that
+/// starts with `-` before this is built.
+pub fn remote_command(op: &RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand {
     let cmd = match op {
         RemoteOp::Fetch => GitCommand::new("fetch").arg("--all"),
         RemoteOp::Pull => GitCommand::new("pull").env("GIT_MERGE_AUTOEDIT", "no"),
@@ -80,6 +94,15 @@ pub fn remote_command(op: RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand 
         RemoteOp::Push {
             force_with_lease: true,
         } => GitCommand::new("push").arg("--force-with-lease"),
+        RemoteOp::PushTag { remote, tag } => {
+            let full = tag.full_ref();
+            let mut refspec = full.clone();
+            refspec.push(":");
+            refspec.push(&full);
+            GitCommand::new("push")
+                .arg(remote.as_os_string())
+                .arg(refspec)
+        }
     };
     let cmd = cmd
         .env("LC_ALL", "C")
@@ -102,10 +125,11 @@ pub fn remote_command(op: RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand 
 }
 
 /// Run `op`. A plain push the remote rejects as behind is `Rejected`, so
-/// the user can be offered `--force-with-lease`.
+/// the user can be offered `--force-with-lease`; a rejected tag push is
+/// only ever `Failed`.
 pub fn run_remote(
     runner: &dyn GitRunner,
-    op: RemoteOp,
+    op: &RemoteOp,
     askpass: Option<&AskpassEnv>,
 ) -> Result<(), RemoteFailure> {
     run_remote_with(runner, op, askpass, &|key| std::env::var_os(key).is_some())
@@ -115,10 +139,17 @@ pub fn run_remote(
 /// environment sets, so tests do not depend on the host's.
 fn run_remote_with(
     runner: &dyn GitRunner,
-    op: RemoteOp,
+    op: &RemoteOp,
     askpass: Option<&AskpassEnv>,
     env_set: &dyn Fn(&str) -> bool,
 ) -> Result<(), RemoteFailure> {
+    if let RemoteOp::PushTag { remote, .. } = op
+        && remote.0.starts_with(b"-")
+    {
+        return Err(RemoteFailure::Failed(
+            "Push to a remote named like an option with git directly".into(),
+        ));
+    }
     let askpass = askpass.map(|env| AskpassEnv {
         git_askpass: env.git_askpass && !user_askpass(runner, env_set),
         ..env.clone()
@@ -140,7 +171,7 @@ fn run_remote_with(
     let behind = message.contains("[rejected]")
         && (message.contains("(non-fast-forward)") || message.contains("(fetch first)"));
     if behind
-        && op
+        && *op
             == (RemoteOp::Push {
                 force_with_lease: false,
             })
@@ -254,7 +285,7 @@ mod tests {
                 .expect(argv, ok(b""));
 
             assert_eq!(
-                run_remote_with(&fake, op, Some(&bridge()), &|_| false),
+                run_remote_with(&fake, &op, Some(&bridge()), &|_| false),
                 Ok(())
             );
 
@@ -283,8 +314,8 @@ mod tests {
                 force_with_lease: false,
             },
         ] {
-            assert!(remote_command(op, Some(&bridge())).is_without_terminal());
-            assert!(remote_command(op, None).is_without_terminal());
+            assert!(remote_command(&op, Some(&bridge())).is_without_terminal());
+            assert!(remote_command(&op, None).is_without_terminal());
         }
     }
 
@@ -298,7 +329,7 @@ mod tests {
             .expect(ASKPASS_UNSET, ok(b"my-askpass\n"))
             .expect(&["fetch", "--all"], ok(b""));
         assert_eq!(
-            run_remote_with(&fake, RemoteOp::Fetch, Some(&bridge()), &|_| false),
+            run_remote_with(&fake, &RemoteOp::Fetch, Some(&bridge()), &|_| false),
             Ok(())
         );
         fake.assert_done();
@@ -310,7 +341,7 @@ mod tests {
         let fake = FakeRunner::new().expect(&["fetch", "--all"], ok(b""));
         let env_set = |key: &str| key == "GIT_ASKPASS";
         assert_eq!(
-            run_remote_with(&fake, RemoteOp::Fetch, Some(&bridge()), &env_set),
+            run_remote_with(&fake, &RemoteOp::Fetch, Some(&bridge()), &env_set),
             Ok(())
         );
         fake.assert_done();
@@ -320,7 +351,7 @@ mod tests {
         let fake = FakeRunner::new()
             .expect(ASKPASS_UNSET, fail("error: bad config\n"))
             .expect(&["fetch", "--all"], ok(b""));
-        run_remote_with(&fake, RemoteOp::Fetch, Some(&bridge()), &|_| false).unwrap();
+        run_remote_with(&fake, &RemoteOp::Fetch, Some(&bridge()), &|_| false).unwrap();
         assert!(without_git_askpass(&fake));
     }
 
@@ -343,7 +374,7 @@ mod tests {
             force_with_lease: false,
         };
 
-        assert_eq!(run_remote_with(&fake, push, None, &|_| false), Ok(()));
+        assert_eq!(run_remote_with(&fake, &push, None, &|_| false), Ok(()));
 
         fake.assert_done();
         assert_eq!(
@@ -364,7 +395,9 @@ mod tests {
             &["push"]
         };
         let fake = FakeRunner::new().expect(argv, fail(stderr));
-        run_remote_with(&fake, RemoteOp::Push { force_with_lease }, None, &|_| false)
+        run_remote_with(&fake, &RemoteOp::Push { force_with_lease }, None, &|_| {
+            false
+        })
     }
 
     #[test]
@@ -401,7 +434,7 @@ mod tests {
             fail("fatal: unable to access 'https://u:tok@h/r/': \x1b[31mdenied\n"),
         );
         assert_eq!(
-            run_remote_with(&fake, RemoteOp::Fetch, None, &|_| false),
+            run_remote_with(&fake, &RemoteOp::Fetch, None, &|_| false),
             Err(RemoteFailure::Failed(
                 "fatal: unable to access 'https://h/r/': \u{FFFD}[31mdenied".into()
             ))
@@ -409,9 +442,78 @@ mod tests {
 
         let fake = FakeRunner::new().expect(&["pull"], fail(""));
         assert_eq!(
-            run_remote_with(&fake, RemoteOp::Pull, None, &|_| false),
+            run_remote_with(&fake, &RemoteOp::Pull, None, &|_| false),
             Err(RemoteFailure::Failed("git pull failed".into()))
         );
+    }
+
+    fn push_tag(remote: &str, tag: &[u8]) -> RemoteOp {
+        RemoteOp::PushTag {
+            remote: remote.into(),
+            tag: TagName::from_bytes(tag),
+        }
+    }
+
+    #[test]
+    fn a_tag_push_names_the_remote_and_the_full_ref_on_both_sides() {
+        let argv = ["push", "origin", "refs/tags/v1:refs/tags/v1"];
+        let fake = FakeRunner::new()
+            .expect(ASKPASS_UNSET, fail(""))
+            .expect(&argv, ok(b""));
+        let op = push_tag("origin", b"v1");
+
+        assert_eq!(
+            run_remote_with(&fake, &op, Some(&bridge()), &|_| false),
+            Ok(())
+        );
+
+        fake.assert_done();
+        assert_eq!(
+            op_env(&fake),
+            env(&[
+                ("LC_ALL", "C"),
+                ("GIT_TERMINAL_PROMPT", "0"),
+                ("GIT_ASKPASS", "/opt/my apps/kika"),
+                ("SSH_ASKPASS", "/opt/my apps/kika"),
+                ("SSH_ASKPASS_REQUIRE", "force"),
+                ("KIKA_ASKPASS_SOCKET", "/tmp/kika-askpass-1-0/s"),
+            ])
+        );
+        assert!(remote_command(&op, None).is_without_terminal());
+        // A hand-made tag named like an option stays inside the refspec.
+        let odd = remote_command(&push_tag("origin", b"-f"), None);
+        assert_eq!(odd.args()[2], "refs/tags/-f:refs/tags/-f");
+    }
+
+    #[test]
+    fn a_tag_push_to_a_remote_named_like_an_option_never_runs() {
+        let fake = FakeRunner::new();
+        let result = run_remote_with(&fake, &push_tag("-x", b"v1"), None, &|_| false);
+        assert!(
+            matches!(result, Err(RemoteFailure::Failed(_))),
+            "{result:?}"
+        );
+        fake.assert_done();
+    }
+
+    #[test]
+    fn a_rejected_tag_push_is_a_failure_with_no_offer_to_force() {
+        let argv = ["push", "origin", "refs/tags/v1:refs/tags/v1"];
+        for stderr in [
+            " ! [rejected]        v1 -> v1 (already exists)\n",
+            " ! [rejected]        v1 -> v1 (non-fast-forward)\n",
+            " ! [rejected]        v1 -> v1 (fetch first)\n",
+        ] {
+            let fake = FakeRunner::new().expect(&argv, fail(stderr));
+            let result = run_remote_with(&fake, &push_tag("origin", b"v1"), None, &|_| false);
+            assert!(
+                matches!(result, Err(RemoteFailure::Failed(_))),
+                "{stderr}: {result:?}"
+            );
+        }
+        let op = push_tag("origin", b"v1");
+        assert_eq!(op.doing(), "pushing tag…");
+        assert_eq!(op.failure_title(), "Push tag failed");
     }
 
     #[test]
