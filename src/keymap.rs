@@ -116,6 +116,10 @@ pub enum KeyScope {
     Diff,
     /// The Diff pane picking changed lines inside a hunk.
     Lines,
+    /// A blame of the selected file, with a cursor on its lines.
+    Blame,
+    /// The commit opened from a blame line.
+    BlameCommit,
     Review,
     Help,
     /// "Stage everything and commit?"
@@ -149,7 +153,9 @@ impl KeyScope {
     /// there is always a way out.
     pub fn parent(self) -> Option<KeyScope> {
         match self {
-            KeyScope::Files | KeyScope::Diff => Some(KeyScope::Workspace),
+            KeyScope::Files | KeyScope::Diff | KeyScope::Blame | KeyScope::BlameCommit => {
+                Some(KeyScope::Workspace)
+            }
             KeyScope::Lines => Some(KeyScope::Diff),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
@@ -175,6 +181,8 @@ impl KeyScope {
             KeyScope::Files => "Files",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
+            KeyScope::Blame => "Blame",
+            KeyScope::BlameCommit => "Commit",
             KeyScope::Review => "Review",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
@@ -301,12 +309,37 @@ fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
 }
 
+/// The diff keys of the Workspace scope reach the blame through its
+/// parent, but the diff they would change is hidden behind it.
+const BLAME_OPEN: &str = "Close the blame first";
+
+fn blame_open(state: &AppState) -> Option<&'static str> {
+    matches!(state.focus, Focus::Blame(_)).then_some(BLAME_OPEN)
+}
+
 fn most_context(state: &AppState) -> Option<&'static str> {
-    (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context")
+    blame_open(state).or_else(|| {
+        (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context")
+    })
 }
 
 fn least_context(state: &AppState) -> Option<&'static str> {
-    (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
+    blame_open(state).or_else(|| {
+        (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
+    })
+}
+
+/// Why `b` cannot blame the selected file. An untracked or deleted file
+/// has no lines git can blame.
+pub(crate) fn blame_disabled(state: &AppState) -> Option<&'static str> {
+    match state.selected.and_then(|i| state.files.get(i)) {
+        None => Some("No file selected"),
+        Some(file) if file.kind == EntryKind::Untracked => Some("Untracked file: nothing to blame"),
+        Some(file) if file.worktree == 'D' || file.index == 'D' => {
+            Some("The file is deleted: nothing to blame")
+        }
+        Some(_) => None,
+    }
 }
 
 pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
@@ -543,7 +576,7 @@ static REGISTRY: &[Binding] = &[
         description: "Scroll the diff down a line",
         label: "",
         bar: false,
-        disabled: never,
+        disabled: blame_open,
     },
     Binding {
         keys: &[KeyPattern::any(KeyCode::Char('K'))],
@@ -552,7 +585,7 @@ static REGISTRY: &[Binding] = &[
         description: "Scroll the diff up a line",
         label: "",
         bar: false,
-        disabled: never,
+        disabled: blame_open,
     },
     Binding {
         keys: &[KeyPattern::any(KeyCode::PageDown)],
@@ -611,7 +644,7 @@ static REGISTRY: &[Binding] = &[
         description: "Hide or show whitespace-only changes",
         label: "whitespace",
         bar: false,
-        disabled: never,
+        disabled: blame_open,
     },
     Binding {
         keys: &[
@@ -701,6 +734,15 @@ static REGISTRY: &[Binding] = &[
         label: "submodules",
         bar: false,
         disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenBlame,
+        description: "Blame the selected file",
+        label: "blame",
+        bar: false,
+        disabled: blame_disabled,
     },
     Binding {
         keys: &[KeyPattern::any(KeyCode::Enter)],
@@ -892,6 +934,125 @@ static REGISTRY: &[Binding] = &[
         // Left out of the bar until the layout review (#10).
         bar: false,
         disabled: open_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Blame,
+        intent: AppIntent::BlameNext,
+        description: "Move to the next line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Blame,
+        intent: AppIntent::BlamePrev,
+        description: "Move to the previous line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::Blame,
+        intent: AppIntent::BlamePageDown,
+        description: "Move down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::Blame,
+        intent: AppIntent::BlamePageUp,
+        description: "Move up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Blame,
+        intent: AppIntent::OpenBlameCommit,
+        description: "Show the commit that last changed this line",
+        label: "commit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('h'), NONE),
+            KeyPattern::any(KeyCode::Left),
+        ],
+        scope: KeyScope::Blame,
+        intent: AppIntent::CloseBlame,
+        description: "Back to the file list",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::ScrollCommit(Scroll::LineDown),
+        description: "Scroll the commit down a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::ScrollCommit(Scroll::LineUp),
+        description: "Scroll the commit up a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::ScrollCommit(Scroll::PageDown),
+        description: "Scroll the commit down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::ScrollCommit(Scroll::PageUp),
+        description: "Scroll the commit up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('h'), NONE),
+            KeyPattern::any(KeyCode::Left),
+        ],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::CloseBlameCommit,
+        description: "Back to the blame, at the same line",
+        label: "back",
+        bar: true,
+        disabled: never,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -1567,6 +1728,63 @@ mod tests {
         };
         assert_eq!(bound(KeyScope::Lines, plain(' ')), Some(ToggleLinesStage));
         assert_eq!(bound(KeyScope::Diff, plain('v')), Some(EnterLineMode));
+    }
+
+    #[test]
+    fn b_blames_from_files_and_the_blame_scopes_have_their_own_keys() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        let b = registry()
+            .iter()
+            .find(|b| b.scope == KeyScope::Files && b.matches(plain('b')))
+            .expect("b is bound in Files");
+        assert_eq!(b.intent, OpenBlame);
+        assert_eq!(b.label, "blame");
+        assert!(!b.bar);
+        assert_eq!(from(KeyScope::Diff, plain('b')), None);
+
+        for scope in [KeyScope::Blame, KeyScope::BlameCommit] {
+            assert_eq!(scope.parent(), Some(KeyScope::Workspace));
+        }
+        assert_eq!(KeyScope::Blame.title(), "Blame");
+        assert_eq!(KeyScope::BlameCommit.title(), "Commit");
+
+        let blame = |k| from(KeyScope::Blame, k);
+        assert_eq!(blame(plain('j')), Some(BlameNext));
+        assert_eq!(blame(key(KeyCode::Down, none)), Some(BlameNext));
+        assert_eq!(blame(plain('k')), Some(BlamePrev));
+        assert_eq!(blame(key(KeyCode::Up, none)), Some(BlamePrev));
+        assert_eq!(blame(key(KeyCode::PageDown, none)), Some(BlamePageDown));
+        assert_eq!(blame(key(KeyCode::PageUp, none)), Some(BlamePageUp));
+        assert_eq!(blame(key(KeyCode::Enter, none)), Some(OpenBlameCommit));
+        for k in [
+            key(KeyCode::Esc, none),
+            plain('h'),
+            key(KeyCode::Left, none),
+        ] {
+            assert_eq!(blame(k), Some(CloseBlame), "{k:?}");
+        }
+        assert_eq!(blame(plain('q')), Some(Quit));
+        // File and hunk keys do not reach the blame.
+        for c in [' ', 'a', 'c', 'd', 'o', 'b', 'v', 't', 'e'] {
+            assert_eq!(blame(plain(c)), None, "{c:?}");
+        }
+
+        let commit = |k| from(KeyScope::BlameCommit, k);
+        assert_eq!(commit(plain('j')), Some(ScrollCommit(Scroll::LineDown)));
+        assert_eq!(commit(plain('k')), Some(ScrollCommit(Scroll::LineUp)));
+        assert_eq!(
+            commit(key(KeyCode::PageDown, none)),
+            Some(ScrollCommit(Scroll::PageDown))
+        );
+        for k in [
+            key(KeyCode::Esc, none),
+            plain('h'),
+            key(KeyCode::Left, none),
+        ] {
+            assert_eq!(commit(k), Some(CloseBlameCommit), "{k:?}");
+        }
+        assert_eq!(commit(key(KeyCode::Enter, none)), None);
     }
 
     #[test]

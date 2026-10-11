@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
+use crate::git::blame::{read_blame, read_commit};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
@@ -77,6 +78,17 @@ pub enum Effect {
     /// which an empty list means. Runs before the next effect starts.
     SetRepo {
         nested: Vec<RepoPath>,
+    },
+    /// Blame `path` in the worktree; always answered by one `BlameLoaded`.
+    LoadBlame {
+        tag: Tag,
+        path: RepoPath,
+    },
+    /// Read commit `oid`'s message and diff; always answered by one
+    /// `CommitLoaded`.
+    LoadCommit {
+        tag: Tag,
+        oid: String,
     },
     /// Hand the terminal to another process. Run by the loop, which owns
     /// the terminal, never by [`Runtime`].
@@ -167,6 +179,30 @@ impl Runtime {
                                 Err(terminal_safe(format!("git diff crashed: {e}").as_bytes()))
                             });
                     let _ = tx.send(AppIntent::PatchLoaded { tag, result });
+                });
+            }
+            Effect::LoadBlame { tag, path } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_blame(runner.as_ref(), &path))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
+                            });
+                    let _ = tx.send(AppIntent::BlameLoaded { tag, result });
+                });
+            }
+            Effect::LoadCommit { tag, oid } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_commit(runner.as_ref(), &oid))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
+                            });
+                    let _ = tx.send(AppIntent::CommitLoaded { tag, result });
                 });
             }
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
@@ -439,6 +475,124 @@ mod tests {
             }
             other => panic!("expected a failed HeadMessageLoaded, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn load_blame_reports_back_with_the_same_tag() {
+        let oid = "a".repeat(40);
+        let out = format!("{oid} 1 1 1\nauthor Ann\nauthor-time 0\nauthor-tz +0000\n\tx\n");
+        let runner = Arc::new(
+            FakeRunner::new().expect(&["blame", "--porcelain", "--", "a.rs"], ok(out.as_bytes())),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadBlame {
+            tag,
+            path: "a.rs".into(),
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::BlameLoaded {
+                tag: got,
+                result: Ok(lines),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].author, "Ann");
+            }
+            other => panic!("expected a loaded blame, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_blame_or_commit_load_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 5,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadBlame {
+            tag,
+            path: "a.rs".into(),
+        });
+        match rx.recv().await {
+            Some(AppIntent::BlameLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git blame crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed BlameLoaded, got {other:?}"),
+        }
+
+        runtime.spawn(Effect::LoadCommit {
+            tag,
+            oid: "abc".into(),
+        });
+        match rx.recv().await {
+            Some(AppIntent::CommitLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git show crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed CommitLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_commit_reports_back_with_the_same_tag() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "show",
+                "--no-color",
+                "--no-ext-diff",
+                "--pretty=medium",
+                "--date=iso",
+                "abc",
+                "--",
+            ],
+            ok(b"commit abc\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadCommit {
+            tag,
+            oid: "abc".into(),
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::CommitLoaded {
+                tag: got,
+                result: Ok(lines),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].text, "commit abc");
+            }
+            other => panic!("expected a loaded commit, got {other:?}"),
+        }
+        runner.assert_done();
     }
 
     fn patch_request() -> DiffRequest {
