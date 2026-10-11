@@ -19,13 +19,13 @@
 //! ```
 //!
 //! `[watch]` is read from the global file only, at startup.
-//! `[[commands]]` is read from the global file only. A repository
-//! file arrives with a clone and is not trusted: it may hold `[keys]` and
+//! `[[commands]]` is read from the global file only. A repository file
+//! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching or run a program, and it
 //! cannot change the bindings in [`REPO_LOCKED`](crate::keymap::REPO_LOCKED),
-//! and it must be a plain file, not a symlink. Either file must be a regular file of at most
-//! 64 KiB. A file with any error is ignored as a whole, and the layer below
-//! it applies.
+//! and it must be a plain file, not a symlink. Either file must be a
+//! regular file of at most 64 KiB. A file with any error is ignored as a
+//! whole, and the layer below it applies.
 //!
 //! The user's guide to both files, with every binding id, is
 //! `docs/configuration.md`.
