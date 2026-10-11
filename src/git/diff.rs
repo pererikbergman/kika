@@ -1,3 +1,4 @@
+use super::joiner;
 use super::patch::{self, FilePatch};
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
@@ -247,12 +248,17 @@ pub fn sanitize(raw: &[u8]) -> String {
 
 /// `sanitize` for the lines of a file (diff, blame, rendered diff). Persian,
 /// Arabic-script and Indic words need ZWJ/ZWNJ, which only shape their
-/// neighbours and cannot reorder text, so a joiner is kept when both
-/// neighbours are letters of a script it shapes. Anywhere else it draws
-/// nothing, so `is\u{200D}admin` or `кл\u{200D}юч` would pass for the plain
-/// word: those stay escaped. Emoji ZWJ sequences stay escaped too: a terminal
-/// without grapheme clustering draws each part, wider than the two columns
-/// the layout reserves, which pushes the row past its pane.
+/// neighbours and cannot reorder text, so a joiner is kept where it changes
+/// the shaping: next to a virama, or after a letter that joins forward and
+/// before one that joins back (see `git::joiner`). Anywhere else it
+/// draws nothing, so `is\u{200D}admin` or `кл\u{200D}юч` would pass for the
+/// plain word: those stay escaped.
+///
+/// Known limits: a terminal that does not shape these scripts draws a kept
+/// joiner as nothing, so there `می\u{200C}خواهم` and `میخواهم` look alike.
+/// Emoji ZWJ sequences stay escaped: a terminal without grapheme clustering
+/// draws each part, wider than the two columns the layout reserves, which
+/// pushes the row past its pane.
 pub fn sanitize_body(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     let mut before = None;
@@ -260,8 +266,9 @@ pub fn sanitize_body(raw: &[u8]) -> String {
     let mut chars = decoded.chars().peekable();
     while let Some(c) = chars.next() {
         if matches!(c, '\u{200C}' | '\u{200D}')
-            && before.is_some_and(is_joining_letter)
-            && chars.peek().is_some_and(|&after| is_joining_letter(after))
+            && before
+                .zip(chars.peek().copied())
+                .is_some_and(|(before, after)| joiner::shapes(before, after))
         {
             text.push(c);
         } else {
@@ -280,25 +287,6 @@ fn push_safe(text: &mut String, c: char) {
         c if c.is_control() => text.push('\u{FFFD}'),
         c => text.push(c),
     }
-}
-
-/// A character of a script where a ZWJ/ZWNJ visibly changes how letters
-/// join: Arabic (with its presentation forms), Syriac, N'Ko, the Indic
-/// blocks, Myanmar and Mongolian letters. Joiners and the Arabic letter mark
-/// are in the strict set, so a run of joiners is escaped.
-fn is_joining_letter(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0600}'..='\u{077F}'
-            | '\u{07C0}'..='\u{07FF}'
-            | '\u{0870}'..='\u{08FF}'
-            | '\u{0900}'..='\u{0DFF}'
-            | '\u{1000}'..='\u{109F}'
-            | '\u{1820}'..='\u{18AF}'
-            | '\u{FB50}'..='\u{FDCF}'
-            | '\u{FDF0}'..='\u{FDFF}'
-            | '\u{FE70}'..='\u{FEFC}'
-    ) && !is_invisible_or_bidi(c)
 }
 
 /// Format characters (not `is_control`) that reorder text or draw nothing:
@@ -928,21 +916,25 @@ mod tests {
     }
 
     #[test]
-    fn body_text_keeps_joiners_inside_joining_scripts() {
+    fn body_text_keeps_joiners_that_change_how_letters_join() {
         for text in [
-            // Persian, Urdu and Arabic, also as presentation forms.
+            // After a dual-joining Arabic-script letter, before a joining one.
             "می\u{200C}خواهم",
             "ن\u{200D}ہ",
-            "\u{FE91}\u{200D}\u{FE92}",
-            // Devanagari, Bengali and Malayalam.
+            "ب\u{200C}ا",
+            "ـ\u{200D}ب",
+            // Syriac, N'Ko and Mongolian dual-joining letters.
+            "ܒ\u{200D}ܐ",
+            "ߊ\u{200D}ߓ",
+            "ᠠ\u{200D}ᠢ",
+            // Next to a virama: Devanagari, Bengali, Malayalam and Sinhala.
             "क्\u{200D}ष",
+            "र\u{200D}्य",
             "র\u{200D}্য",
             "ന്\u{200D}ന",
-            // Syriac, N'Ko, Myanmar and Mongolian letters.
-            "ܐ\u{200D}ܒ",
-            "ߊ\u{200D}ߓ",
-            "က\u{200C}ခ",
-            "ᠠ\u{200D}ᠢ",
+            "ක්\u{200D}ෂ",
+            // Myanmar asat and virama.
+            "င်\u{200D}္က",
         ] {
             assert_eq!(sanitize_body(text.as_bytes()), text);
         }
@@ -970,6 +962,31 @@ mod tests {
     #[test]
     fn body_text_escapes_joiners_that_would_change_nothing_on_screen() {
         let cases = [
+            // Letters that never join on that side: right-joining ones,
+            // hamza, digits, punctuation and Indic consonants with no virama.
+            ("ر\u{200C}د", "ر<U+200C>د"),
+            ("د\u{200C}ر", "د<U+200C>ر"),
+            ("و\u{200C}ا", "و<U+200C>ا"),
+            ("ء\u{200D}ب", "ء<U+200D>ب"),
+            ("ܐ\u{200D}ܒ", "ܐ<U+200D>ܒ"),
+            ("ب\u{200C}١", "ب<U+200C>١"),
+            ("١\u{200D}٢", "١<U+200D>٢"),
+            ("۱\u{200C}۲", "۱<U+200C>۲"),
+            ("१\u{200D}२", "१<U+200D>२"),
+            ("၁\u{200D}၂", "၁<U+200D>၂"),
+            ("߁\u{200D}߂", "߁<U+200D>߂"),
+            ("،\u{200D}؛", "،<U+200D>؛"),
+            ("।\u{200D}॥", "।<U+200D>॥"),
+            ("क\u{200C}ष", "क<U+200C>ष"),
+            ("क\u{200D}ष", "क<U+200D>ष"),
+            ("म\u{200D}न", "म<U+200D>न"),
+            ("က\u{200C}ခ", "က<U+200C>ခ"),
+            // A virama with no letter of its scripts on the other side.
+            ("क्\u{200D}a", "क्<U+200D>a"),
+            ("م\u{200D}्", "م<U+200D>्"),
+            // Presentation forms are already shaped.
+            ("\u{FE91}\u{200D}\u{FE92}", "\u{FE91}<U+200D>\u{FE92}"),
+            ("\u{FB56}\u{200C}\u{FB57}", "\u{FB56}<U+200C>\u{FB57}"),
             // Scripts where a joiner draws nothing: two strings look the same.
             ("кл\u{200D}юч", "кл<U+200D>юч"),
             ("中\u{200D}文", "中<U+200D>文"),
@@ -1003,6 +1020,29 @@ mod tests {
         ];
         for (raw, expected) in cases {
             assert_eq!(sanitize_body(raw.as_bytes()), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn body_text_escapes_a_joiner_next_to_any_strict_character() {
+        for (class, chars) in STRICT_CLASSES {
+            for &c in chars {
+                let escape = format!("<U+{:04X}>", c as u32);
+                for letter in ['ب', '्'] {
+                    for (raw, expected) in [
+                        (
+                            format!("{letter}\u{200D}{c}"),
+                            format!("{letter}<U+200D>{escape}"),
+                        ),
+                        (
+                            format!("{c}\u{200C}{letter}"),
+                            format!("{escape}<U+200C>{letter}"),
+                        ),
+                    ] {
+                        assert_eq!(sanitize_body(raw.as_bytes()), expected, "{class} {c:?}");
+                    }
+                }
+            }
         }
     }
 
