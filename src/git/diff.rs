@@ -922,7 +922,6 @@ mod tests {
             // A ZWNJ breaking a join between Arabic-script letters.
             "می\u{200C}خواهم",
             "ب\u{200C}ا",
-            "ـ\u{200C}ب",
             // The same in Syriac, N'Ko and Mongolian.
             "ܒ\u{200C}ܐ",
             "ߊ\u{200C}ߓ",
@@ -936,6 +935,9 @@ mod tests {
             // Tamil: a ZWNJ after pulli breaks the க்ஷ and ஸ்ரீ ligatures.
             "க்\u{200C}ஷ",
             "ஸ்\u{200C}ர",
+            // Owner decision: Tamil pulli takes the same consonant rule, so
+            // this is kept although it draws like the plain pair.
+            "த்\u{200C}த",
             // A ZWJ between a consonant and a virama: eyelash ra, ya-phala.
             "र\u{200D}्य",
             "র\u{200D}্য",
@@ -994,6 +996,18 @@ mod tests {
             ("می\u{200D}خواهم", "می<U+200D>خواهم"),
             ("ـ\u{200D}ب", "ـ<U+200D>ب"),
             ("ـ\u{200C}ـ", "ـ<U+200C>ـ"),
+            // UTS #39 A1 allows only Joining_Type D before and D or R after a
+            // ZWNJ, so join-causing characters such as tatweel do not count.
+            ("ـ\u{200C}ب", "ـ<U+200C>ب"),
+            ("ب\u{200C}ـ", "ب<U+200C>ـ"),
+            ("ب\u{200C}ߺ", "ب<U+200C>ߺ"),
+            // Letters of two scripts never join, so a ZWNJ between them
+            // breaks nothing.
+            ("ب\u{200C}ܐ", "ب<U+200C>ܐ"),
+            ("ܒ\u{200C}ا", "ܒ<U+200C>ا"),
+            ("ب\u{200C}ᠠ", "ب<U+200C>ᠠ"),
+            ("ᠠ\u{200C}ߊ", "ᠠ<U+200C>ߊ"),
+            ("ߊ\u{200C}ب", "ߊ<U+200C>ب"),
             ("ܒ\u{200D}ܐ", "ܒ<U+200D>ܐ"),
             ("ߊ\u{200D}ߓ", "ߊ<U+200D>ߓ"),
             ("ᠠ\u{200D}ᠢ", "ᠠ<U+200D>ᠢ"),

@@ -14,8 +14,9 @@
 //!   distinctly (eyelash ra, ya-phala, touching letters);
 //! - tighter restrictions, which the standard allows: after a virama only a
 //!   consonant of the same script may follow, Myanmar asat and Sinhala
-//!   al-lakuna act only with a ZWJ, and Myanmar's invisible stacker (U+1039)
-//!   does not count as a virama.
+//!   al-lakuna act only with a ZWJ, Myanmar's invisible stacker (U+1039)
+//!   does not count as a virama, and A1 does not look past transparent
+//!   marks next to the ZWNJ.
 
 const ZWNJ: char = '\u{200C}';
 const ZWJ: char = '\u{200D}';
@@ -26,31 +27,52 @@ const ZWJ: char = '\u{200D}';
 ///   conjunct, half form or chillu (UTS #39 A2 and B);
 /// - a ZWJ between a consonant and a virama of Devanagari, Bengali or
 ///   Sinhala gives the eyelash ra, ya-phala or touching form (the extension);
-/// - a ZWNJ between Arabic-script, Syriac, N'Ko or Mongolian letters that
-///   would connect breaks the join (A1). A ZWJ there draws the plain pair.
+/// - a ZWNJ after a dual-joining letter and before a dual- or right-joining
+///   letter of the same script (Arabic, Syriac, N'Ko or Mongolian) breaks
+///   the join (A1). A ZWJ there draws the plain pair.
 pub fn shapes(joiner: char, before: char, after: char) -> bool {
     let after_virama = is_virama(before)
         && is_consonant(after)
-        && same_script(before, after)
+        && same_indic_script(before, after)
         && (joiner == ZWJ || !matches!(before, '\u{0DCA}' | '\u{103A}'));
     let before_virama = joiner == ZWJ
         && is_consonant(before)
         && is_virama(after)
-        && same_script(before, after)
+        && same_indic_script(before, after)
         && matches!(after, '\u{094D}' | '\u{09CD}' | '\u{0DCA}');
     let breaks_join = joiner == ZWNJ
-        && joins_forward(before)
-        && joins_backward(after)
-        && !(is_join_causing(before) && is_join_causing(after));
+        && is_dual_joining(before)
+        && (is_dual_joining(after) || is_right_joining(after))
+        && same_cursive_script(before, after);
     after_virama || before_virama || breaks_join
 }
 
 /// Indic scripts each fill one 128-code-point block; Myanmar's block is
 /// 1000–109F.
-fn same_script(a: char, b: char) -> bool {
+fn same_indic_script(a: char, b: char) -> bool {
     let script = |c: char| match c {
         '\u{0900}'..='\u{0DFF}' => Some(u32::from(c) >> 7),
         '\u{1000}'..='\u{109F}' => Some(0x1000),
+        _ => None,
+    };
+    script(a).is_some() && script(a) == script(b)
+}
+
+/// Letters of two scripts never join: shapers split text into runs by
+/// script, so a ZWNJ between them breaks nothing.
+fn same_cursive_script(a: char, b: char) -> bool {
+    #[derive(PartialEq)]
+    enum Cursive {
+        Arabic,
+        Syriac,
+        Nko,
+        Mongolian,
+    }
+    let script = |c: char| match c {
+        '\u{0700}'..='\u{074F}' | '\u{0860}'..='\u{086F}' => Some(Cursive::Syriac),
+        '\u{0600}'..='\u{077F}' | '\u{0870}'..='\u{08FF}' => Some(Cursive::Arabic),
+        '\u{07C0}'..='\u{07FF}' => Some(Cursive::Nko),
+        '\u{1800}'..='\u{18AF}' => Some(Cursive::Mongolian),
         _ => None,
     };
     script(a).is_some() && script(a) == script(b)
@@ -139,21 +161,7 @@ fn is_consonant(c: char) -> bool {
     )
 }
 
-/// Connects to the letter after it: Joining_Type D (dual) or C (causing,
-/// such as tatweel).
-fn joins_forward(c: char) -> bool {
-    is_dual_joining(c) || is_join_causing(c)
-}
-
-/// Connects to the letter before it: Joining_Type D, R (right) or C.
-fn joins_backward(c: char) -> bool {
-    is_dual_joining(c) || is_join_causing(c) || is_right_joining(c)
-}
-
-fn is_join_causing(c: char) -> bool {
-    matches!(c, '\u{0640}' | '\u{07FA}' | '\u{0883}'..='\u{0885}')
-}
-
+/// Joining_Type D: joins on both sides.
 fn is_dual_joining(c: char) -> bool {
     matches!(
         c,
@@ -202,6 +210,7 @@ fn is_dual_joining(c: char) -> bool {
     )
 }
 
+/// Joining_Type R: joins only to the letter before it.
 fn is_right_joining(c: char) -> bool {
     matches!(
         c,
