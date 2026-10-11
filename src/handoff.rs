@@ -80,6 +80,7 @@ fn editor(runner: &dyn GitRunner) -> Result<String, String> {
 
 /// Known editors' ways of opening a file at a line, by the basename of the
 /// editor's first word.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn line_style(editor: &str) -> LineStyle {
     let program = editor
         .split_whitespace()
@@ -97,6 +98,7 @@ fn line_style(editor: &str) -> LineStyle {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 enum LineStyle {
     /// `+N file`
     PlusLine,
@@ -110,6 +112,7 @@ enum LineStyle {
 /// The argv that runs `editor` on `file`, the way git runs editors: through
 /// `sh` so the setting may carry arguments, with the file and line only as
 /// positional parameters, never inside the shell string.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn editor_argv(editor: &str, file: &Path, line: Option<u32>) -> Vec<OsString> {
     let with_line = |n: u32| {
         let mut arg = file.as_os_str().to_os_string();

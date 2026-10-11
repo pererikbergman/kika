@@ -94,7 +94,7 @@ fn suspend_and_run(
         let _paused = input.pause();
         let intent = {
             let _restore = Suspended::enter()?;
-            let _sigint = IgnoreInterrupt::new();
+            let _sigint = CatchInterrupts::new();
             handoff::execute(job, runner, workdir)
         };
         // The other process drew over everything; start from a blank
@@ -131,12 +131,12 @@ impl Drop for Suspended {
 /// While alive, Ctrl+C in the cooked terminal reaches only the other
 /// process: Kika handles SIGINT instead of dying of it. A handler, unlike
 /// ignoring the signal, is reset by `exec`, so the editor still gets it.
-struct IgnoreInterrupt {
+struct CatchInterrupts {
     #[cfg(unix)]
     _signal: Option<tokio::signal::unix::Signal>,
 }
 
-impl IgnoreInterrupt {
+impl CatchInterrupts {
     fn new() -> Self {
         Self {
             #[cfg(unix)]
