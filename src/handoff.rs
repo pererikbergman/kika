@@ -322,6 +322,8 @@ impl TempFile {
     /// Not recursive, so an existing directory or symlink at `dir` fails
     /// with `AlreadyExists` instead of being used.
     fn create_dir(dir: &Path) -> io::Result<()> {
+        // Only Unix sets a mode on it.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
