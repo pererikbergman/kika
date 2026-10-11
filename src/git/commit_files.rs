@@ -251,13 +251,24 @@ mod tests {
     }
 
     #[test]
-    fn names_with_a_newline_or_bytes_that_are_not_utf8_keep_their_bytes() {
-        let fake = FakeRunner::new().expect(&argv(&[OID, "--"]), ok(b"M\0two\nlines\0A\0x\xff\0"));
+    fn a_name_with_a_newline_is_one_name_and_never_drawn_as_a_line_break() {
+        let fake = FakeRunner::new().expect(&argv(&[OID, "--"]), ok(b"M\0two\nlines\0A\0b\0"));
         let files = commit_files(&fake, &range(None)).unwrap();
         assert_eq!(files[0].path, RepoPath::from_bytes(b"two\nlines"));
-        assert_eq!(files[1].path, RepoPath::from_bytes(b"x\xff"));
-        assert_ne!(files[1].path, RepoPath::from("x\u{FFFD}"));
+        assert_eq!(files[1].path, RepoPath::from("b"));
         assert!(!files[0].path.display().contains('\n'));
+    }
+
+    /// Only unix names can hold bytes that are not UTF-8; elsewhere a
+    /// `RepoPath` is decoded lossily by design.
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_keeps_its_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let fake = FakeRunner::new().expect(&argv(&[OID, "--"]), ok(b"A\0x\xff\0"));
+        let files = commit_files(&fake, &range(None)).unwrap();
+        assert_eq!(files[0].path.as_os_str().as_bytes(), b"x\xff");
+        assert_ne!(files[0].path, RepoPath::from("x\u{FFFD}"));
     }
 
     #[test]
