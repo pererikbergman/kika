@@ -7,6 +7,7 @@ mod diff_stream;
 mod e2e;
 mod effect;
 mod git;
+mod hunk_view;
 mod intent;
 mod keymap;
 mod menu;

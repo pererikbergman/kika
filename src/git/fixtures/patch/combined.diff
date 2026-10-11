@@ -1,0 +1,10 @@
+diff --cc c.txt
+index b19a1e9,950b81b..0000000
+--- a/c.txt
++++ b/c.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +ours
+++=======
++ theirs
+++>>>>>>> other

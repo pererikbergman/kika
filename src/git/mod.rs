@@ -5,6 +5,7 @@ pub mod diff;
 #[cfg(test)]
 pub mod fake;
 pub mod ops;
+pub mod patch;
 pub mod path;
 pub mod repo_state;
 pub mod runner;

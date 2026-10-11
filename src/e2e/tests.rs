@@ -389,3 +389,92 @@ async fn a_failing_git_command_shows_an_error_popup_and_the_app_keeps_running() 
     assert_eq!(repo.staged(), ["a.txt"]);
     assert!(app.state().popups.is_empty());
 }
+
+/// `a.txt` of 20 committed lines, then lines 1 and 20 changed in the
+/// worktree: two hunks far enough apart to stay separate.
+fn two_hunk_repo() -> TestRepo {
+    let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    let changed = lines
+        .replace("line 1\n", "line one\n")
+        .replace("line 20\n", "line twenty\n");
+    TestRepo::new()
+        .write("a.txt", &lines)
+        .commit("init")
+        .write("a.txt", &changed)
+}
+
+fn diff_text(repo: &TestRepo, cached: bool) -> String {
+    let args: &[&str] = if cached {
+        &["diff", "--cached"]
+    } else {
+        &["diff"]
+    };
+    String::from_utf8(repo.git(args)).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_in_the_diff_stages_one_of_two_hunks() {
+    let repo = two_hunk_repo();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+
+    let cached = diff_text(&repo, true);
+    assert!(cached.contains("+line twenty"), "{cached}");
+    assert!(!cached.contains("line one"), "{cached}");
+    let worktree = diff_text(&repo, false);
+    assert!(worktree.contains("+line one"), "{worktree}");
+    assert!(!worktree.contains("line twenty"), "{worktree}");
+    let entry = repo.entry("a.txt").expect("a.txt is listed");
+    assert_eq!((entry.index, entry.worktree), ('M', 'M'));
+    assert!(app.state().popups.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_in_the_staged_view_unstages_one_hunk() {
+    let repo = two_hunk_repo().stage("a.txt");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains(" Staged ");
+    app.press(KeyCode::Char(' ')).await;
+
+    let cached = diff_text(&repo, true);
+    assert!(cached.contains("+line twenty"), "{cached}");
+    assert!(!cached.contains("line one"), "{cached}");
+    let worktree = diff_text(&repo, false);
+    assert!(worktree.contains("+line one"), "{worktree}");
+    assert!(!worktree.contains("line twenty"), "{worktree}");
+    assert!(app.state().popups.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_switches_between_the_unstaged_and_staged_changes() {
+    // Stage only the line-20 change, then make the line-1 change on top.
+    let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    let line_20 = lines.replace("line 20\n", "line twenty\n");
+    let both = line_20.replace("line 1\n", "line one\n");
+    let repo = TestRepo::new()
+        .write("a.txt", &lines)
+        .commit("init")
+        .write("a.txt", &line_20)
+        .stage("a.txt")
+        .write("a.txt", &both);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains(" Unstaged ");
+    app.assert_screen_contains("+line one");
+    assert!(!app.screen().iter().any(|row| row.contains("+line twenty")));
+
+    app.press(KeyCode::Char('t')).await;
+    app.assert_screen_contains(" Staged ");
+    app.assert_screen_contains("+line twenty");
+    assert!(!app.screen().iter().any(|row| row.contains("+line one")));
+
+    app.press(KeyCode::Esc).await;
+    assert!(!app.state().should_quit);
+    app.assert_screen_contains(" Diff ");
+}

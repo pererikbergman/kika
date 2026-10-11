@@ -1,0 +1,9 @@
+diff --git "a/tab\there.txt" "b/tab\there.txt"
+index de98044..7be73ce 100644
+--- "a/tab\there.txt"
++++ "b/tab\there.txt"
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c

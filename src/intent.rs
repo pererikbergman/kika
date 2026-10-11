@@ -3,6 +3,7 @@ use crossterm::event::{Event, KeyEventKind};
 use crate::effect::Tag;
 use crate::git::diff::DiffChunk;
 use crate::git::ops::GitOp;
+use crate::git::patch::FilePatch;
 use crate::git::status::RepoStatus;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
@@ -39,6 +40,22 @@ pub enum AppIntent {
     /// The diff for `tag` has taken long enough to show "Loading…".
     DiffSlow {
         tag: Tag,
+    },
+    /// Give the Diff pane focus, to work on the selected file's hunks.
+    FocusDiff,
+    /// Back to the Files panel.
+    FocusFiles,
+    /// Move the hunk cursor down or up.
+    NextHunk,
+    PrevHunk,
+    /// Stage the selected hunk, or unstage it in the staged view.
+    ToggleHunkStage,
+    /// Switch the focused Diff pane between unstaged and staged changes.
+    ToggleDiffSide,
+    /// A whole-file patch load finished; `tag` says which one.
+    PatchLoaded {
+        tag: Tag,
+        result: Result<FilePatch, String>,
     },
     /// Stage the selected file, or unstage it when it is fully staged.
     ToggleStage,
