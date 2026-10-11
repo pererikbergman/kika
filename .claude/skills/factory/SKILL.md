@@ -59,7 +59,7 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
 | `/factory <issue-number>` | Run that GitHub issue through the loop. |
 | `/factory <feature text>` | `gh issue create` with the text as title (and body), then run it. |
 | `/factory next` | Run the next **free** issue (see Picking the next issue), then keep going (see Continuous run). Stop and say so if there is none. |
-| `/factory approve <job-id>` | Human sign-off on a `needs-human` job: merge its PR (step 7). |
+| `/factory approve <job-id>` | Human sign-off on a `needs-human` job: update from main and merge its PR (steps 7–8). |
 | `/factory rework <job-id> <note>` | Send a job back to the builder with human feedback (see Rework). |
 
 ## Picking the next issue
@@ -77,10 +77,13 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
 
 ### Continuous run
 
-`/factory next` does not stop after one job. When a job reaches `merged`, give the user a
-one-line note (job id, PR link) and immediately pick the next free issue and run it.
-Stop only when:
-- a job ends in `needs-human` (escalation, or CHANGES after 2 resumes): report it and wait;
+`/factory next` does not stop after one job. It keeps up to **3 active jobs** (stage not
+`merged` or `needs-human`) running in parallel, each in its own worktree (see Parallel
+jobs). Whenever a slot is free, pick the next free issue and start it. When a job reaches
+`merged`, give the user a one-line note (job id, PR link) and fill the slot.
+Stop starting new jobs only when:
+- a job ends in `needs-human` (escalation, or CHANGES after 2 resumes): report it and wait
+  for the user; let the other active jobs finish but start no new ones;
 - no free issue is left: say so, and list what is blocked and by what.
 
 `/factory <issue-number>` runs that one issue only and does not continue.
@@ -89,7 +92,23 @@ Stop only when:
 `/factory <issue-number>` is allowed, but its job always ends in `needs-human` (tell the
 approver it is a HITL issue; it must ESCALATE).
 
-## Files
+## Parallel jobs
+
+Each job builds in its own git worktree, so jobs never share a checkout:
+
+- **Worktree:** `<repo-parent>/kika-wt/<job-id>`, on branch `factory/<job-id>`, created by
+  you in step 3 with `git worktree add -b <branch> <worktree> origin/main`. Record it on the
+  job as `"worktree"`. The builder and the code reviewer work only there.
+- **Main checkout:** always stays on a clean `main`. Only you touch it (`git pull`, the
+  board, job folders). `factory/jobs/` lives here, so agents get its **absolute** path.
+- **Cap:** at most 3 active jobs. Each worktree has its own `target/`, so first builds are
+  cold; don't raise the cap without asking the user.
+- **Picking:** when choosing among free issues for a parallel slot, prefer the lowest
+  number, but skip one whose issue text clearly overlaps an active job's area (same panel or
+  same feature) and take the next; mention the skip.
+- **Agents in flight:** track each job's agents separately; a reviewer or builder finishing
+  only advances its own job. Never resume a builder mid-round of its own job.
+
 
 ```
 factory/
@@ -112,7 +131,7 @@ e.g. issue #3 "Rate limiting" → `003-rate-limiting`. **Branch:** `factory/<job
 ```json
 { "repo": "pererikbergman/kika", "jobs": [ {
   "id": "003-rate-limiting", "issue": 3, "title": "Rate limiting",
-  "branch": "factory/003-rate-limiting", "pr": 12,
+  "branch": "factory/003-rate-limiting", "worktree": "../kika-wt/003-rate-limiting", "pr": 12,
   "stage": "review", "round": 2,
   "rounds": [
     { "security": "CHANGES", "ux": "PASS", "ui": "PASS", "code": "PASS" },
@@ -146,12 +165,13 @@ e.g. issue #3 "Rate limiting" → `003-rate-limiting`. **Branch:** `factory/<job
    exists. Stage → `build`.
 3. **Build.** Spawn `builder`, named `builder-<job-id>` (use the Agent `name` field if
    available; otherwise keep the returned agent id on the job as `"builder_agent"`).
-   Give it the job folder, branch and issue number. When done, check `build.md` exists
+   First create the worktree (see Parallel jobs). Give the builder the absolute job folder,
+   the worktree path, branch and issue number. When done, check `build.md` exists
    and the branch is pushed, then open a draft PR:
    `gh pr create --draft --base main --head <branch> --title "<title>" --body "Closes #<n>. Built by the factory; see review rounds in the PR comments."`
    Record `pr`. Stage → `review`, `round: 1`, push a `pending` round.
 4. **Review (WAIT FOR ALL).** `mkdir jobs/<id>/round-N`. Spawn all four reviewers **in
-   one message**, each given the job folder, branch and round folder. As each finishes,
+   one message**, each given the absolute job folder, branch, worktree and round folder. As each finishes,
    read the first line of its file and update its chip on the board.
    The round is done **only when all four files exist** in the round folder and each
    starts with `VERDICT: PASS` or `VERDICT: CHANGES`. If a reviewer finished without a
@@ -171,9 +191,17 @@ e.g. issue #3 "Rate limiting" → `003-rate-limiting`. **Branch:** `factory/<job
    - `ESCALATE`: stage → `needs-human`, label `factory:needs-human`, `gh pr ready <pr>`,
      comment the escalation questions on the PR. Stop and tell the user.
    - `APPROVE`: go to 7.
-7. **Merge.** `gh pr ready <pr>`, `gh pr merge <pr> --squash --delete-branch`,
-   `git switch main && git pull --ff-only`. Remove the `factory:*` labels (the PR's
-   `Closes #n` closes the issue). Stage → `merged`.
+7. **Update from main.** Another job may have merged since this branch was built. If
+   `git merge-base --is-ancestor origin/main origin/<branch>` fails, resume the builder:
+   "Merge origin/main into your branch in the worktree, resolve conflicts, re-run all
+   checks, push, and add an `## Update from main` section to build.md saying whether any
+   conflict needed a behaviour decision." If the builder reports a non-trivial conflict
+   (behaviour or tests changed to resolve it), run one more review round (step 4); it does
+   not count toward the 2-resume limit. A clean or purely mechanical merge goes straight on.
+8. **Merge.** `gh pr ready <pr>`, `gh pr merge <pr> --squash --delete-branch`, then in the
+   main checkout `git pull --ff-only`, `git worktree remove <worktree>` and
+   `git branch -D <branch>`. Remove the `factory:*` labels (the PR's `Closes #n` closes the
+   issue). Stage → `merged`.
 
 Finish every command by telling the user the job id, stage, PR link, and anything
 waiting on them.
@@ -190,8 +218,8 @@ Rework does not count toward the 2-resume limit.
 ## Rules
 
 - Agents get context from files, not this conversation, and write only their own file.
-- One job at a time: the builder and the code reviewer use git, so don't run two jobs
-  in parallel in this checkout.
+- Jobs run in parallel only through separate worktrees (see Parallel jobs); nothing
+  switches branches in the main checkout.
 - Nothing goes to `main` except through a merged PR.
 - The factory definition (`.claude/`, `factory/project.md`, `factory/dashboard.html`) is
   committed; change it through a PR like any code. Runtime state (`factory/board.json`,

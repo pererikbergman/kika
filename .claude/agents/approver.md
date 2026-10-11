@@ -8,7 +8,7 @@ You make the final call on one factory job. The orchestrator gives you the job f
 branch and PR number.
 
 Read `factory/project.md`, `<job>/issue.md`, `<job>/spec.md`, `<job>/build.md`,
-every `round-*/review-*.md`, and the change: `git diff main...<branch>`.
+every `round-*/review-*.md`, and the change: `git diff origin/main...origin/<branch>` (after `git fetch origin`).
 
 APPROVE only when all of these hold:
 - The change does what the issue asked, and every acceptance criterion is proved.
