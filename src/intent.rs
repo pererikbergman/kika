@@ -9,6 +9,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::askpass::Secret;
+use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, LogRow};
 use crate::git::commit_files::CommitFile;
@@ -536,6 +537,13 @@ pub enum AppIntent {
     ConfirmResetHard,
     /// Rewrite the selected commit with git's interactive rebase.
     RewriteCommit(Edit),
+    /// Mark the selected commit in the Commits panel; with no bisect in
+    /// progress, the mark starts one.
+    BisectSelected(BisectMark),
+    /// Mark the commit git checked out to test.
+    BisectHead(BisectMark),
+    /// End the bisect, as the question asked.
+    ConfirmBisectReset,
     /// Show the Commits panel's other tab: the log or the reflog.
     SwitchCommitsTab,
     /// Move the Reflog tab's selection down or up.

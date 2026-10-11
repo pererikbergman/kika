@@ -1,5 +1,6 @@
 mod ansi;
 mod app;
+mod bisect;
 mod blame_view;
 mod branches;
 mod branches_view;
