@@ -64,6 +64,16 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
+        // These move HEAD, rewrite the worktree and index, and start or
+        // end an operation the Status panel shows.
+        GitOp::Merge { .. }
+        | GitOp::Rebase { .. }
+        | GitOp::Continue(_)
+        | GitOp::Skip(_)
+        | GitOp::Abort(_) => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
         // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
@@ -175,6 +185,38 @@ mod tests {
                     Scope::Branches,
                     Scope::Commits
                 ]),
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_rebase_and_their_controls_reload_everything_head_touches() {
+        use crate::git::ops::MergeStrategy;
+        use crate::git::repo_state::Operation;
+        let ops = [
+            GitOp::Merge {
+                branch: "b".into(),
+                strategy: MergeStrategy::Squash,
+            },
+            GitOp::Rebase { onto: "b".into() },
+            GitOp::Continue(Operation::Merge),
+            GitOp::Skip(Operation::Rebase),
+            GitOp::Abort(Operation::CherryPick),
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
                 "{op:?}"
             );
         }
