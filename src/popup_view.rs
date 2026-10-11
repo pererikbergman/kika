@@ -237,7 +237,7 @@ mod tests {
         let mut state = workspace(&[]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 3,
+            cursor: 4,
         }];
         let (buffer, rows) = draw(&state, 80, 24);
         assert!(contains(&rows, " Actions "), "{rows:#?}");
@@ -433,9 +433,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 4,
+            cursor: 5,
         }];
-        // Six rows: the bar leaves five, so three of the five items show.
+        // Six rows: the bar leaves five, so three of the six items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");

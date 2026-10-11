@@ -194,6 +194,12 @@ fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
             frame,
             area,
         ),
+        CommitFlow::LoadingAmend { .. } => render_question(
+            " Amend last commit ",
+            "Loading the last commit…",
+            frame,
+            area,
+        ),
         CommitFlow::ConfirmDiscard(_) => render_question(
             " Discard message ",
             "Discard the typed message? (y/n)",
@@ -235,12 +241,18 @@ fn render_commit_editor(editor: &CommitEditor, editing: bool, frame: &mut Frame,
     // Two outer borders, a three-row Subject box and a Body box of ten text rows.
     let popup = centered(area, COMMIT_WIDTH, 2 + 3 + 12);
     frame.render_widget(Clear, popup);
-    let block = if editing {
-        Block::bordered().title(" Commit message ")
-    } else {
-        Block::bordered()
+    let block = match (editing, editor.amend.is_some()) {
+        (true, true) => Block::bordered().title(" Amend last commit "),
+        (true, false) => Block::bordered().title(" Commit message "),
+        (false, _) => Block::bordered()
             .title(" Committing… ")
-            .title_bottom(" waiting for git · ctrl-c quits Kika ")
+            .title_bottom(" waiting for git · ctrl-c quits Kika "),
+    };
+    // Skipping hooks skips the user's own checks, so it is never quiet.
+    let block = if editor.no_verify {
+        block.title(Line::styled(" hooks skipped ", Style::new().fg(Color::Yellow)).right_aligned())
+    } else {
+        block
     };
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
@@ -1737,6 +1749,64 @@ mod tests {
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, " Committing… "), "{rows:#?}");
         assert!(contains(&rows, "subj"), "{rows:#?}");
+    }
+
+    #[test]
+    fn an_amend_popup_is_titled_amend_last_commit() {
+        let state = with_commit(CommitFlow::Editing(CommitEditor::amend("subj\n\nbody")));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " Amend last commit "), "{rows:#?}");
+        assert!(!contains(&rows, " Commit message "), "{rows:#?}");
+        assert!(contains(&rows, "subj"), "{rows:#?}");
+        assert!(contains(&rows, "│body "), "{rows:#?}");
+    }
+
+    #[test]
+    fn hooks_skipped_shows_only_when_skipping_hooks() {
+        let mut editor = commit_editor("subj", &[""]);
+        let rows = draw(&with_commit(CommitFlow::Editing(editor.clone())), 80, 24);
+        assert!(!contains(&rows, "hooks skipped"), "{rows:#?}");
+
+        editor.no_verify = true;
+        let rows = draw(&with_commit(CommitFlow::Editing(editor.clone())), 80, 24);
+        assert!(contains(&rows, " hooks skipped "), "{rows:#?}");
+        // On the popup's title row, next to its title.
+        assert_eq!(
+            find_row(&rows, " hooks skipped "),
+            find_row(&rows, " Commit message ")
+        );
+        let rows = draw(&with_commit(CommitFlow::Running(editor)), 80, 24);
+        assert!(contains(&rows, " hooks skipped "), "{rows:#?}");
+    }
+
+    fn find_row(rows: &[String], needle: &str) -> Option<usize> {
+        rows.iter().position(|row| row.contains(needle))
+    }
+
+    #[test]
+    fn loading_the_last_commit_draws_a_small_box() {
+        let state = with_commit(CommitFlow::LoadingAmend { seq: 3 });
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "Loading the last commit…"), "{rows:#?}");
+        assert!(
+            rows[23].starts_with(" esc cancel  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_an_amend_popup() {
+        let mut editor = CommitEditor::amend("subj");
+        editor.no_verify = true;
+        for commit in [
+            CommitFlow::LoadingAmend { seq: 0 },
+            CommitFlow::Editing(editor),
+        ] {
+            let state = with_commit(commit);
+            for (w, h) in [(1, 1), (5, 3), (12, 4), (30, 6)] {
+                draw(&state, w, h);
+            }
+        }
     }
 
     #[test]

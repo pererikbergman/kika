@@ -24,6 +24,11 @@ pub struct CommitEditor {
     pub col: usize,
     /// Stage everything before committing, because nothing was staged.
     pub stage_all: bool,
+    /// Commit with `--no-verify`. Off in every new popup, never remembered.
+    pub no_verify: bool,
+    /// Amending `HEAD`: its subject and body as first shown, to tell
+    /// whether the user changed the message.
+    pub amend: Option<(String, Vec<String>)>,
 }
 
 impl CommitEditor {
@@ -35,7 +40,47 @@ impl CommitEditor {
             row: 0,
             col: 0,
             stage_all,
+            no_verify: false,
+            amend: None,
         }
+    }
+
+    /// An editor holding `message`, read from `HEAD` to amend it, with
+    /// the cursor at the end of the subject.
+    pub fn amend(message: &str) -> Self {
+        let mut editor = Self::from_message(message);
+        editor.col = char_len(&editor.subject);
+        editor.amend = Some((editor.subject.clone(), editor.body.clone()));
+        editor
+    }
+
+    /// An editor holding `message`: the first line is the subject, the
+    /// rest the body, less one blank line between them. Control characters
+    /// are dropped, since the text is drawn.
+    pub fn from_message(message: &str) -> Self {
+        let clean = |line: &str| line.chars().filter(|c| !c.is_control()).collect::<String>();
+        let mut lines = message.lines().map(clean);
+        let subject = lines.next().unwrap_or_default();
+        let mut body: Vec<String> = lines.collect();
+        if body.first().is_some_and(|line| line.trim().is_empty()) {
+            body.remove(0);
+        }
+        if body.is_empty() {
+            body.push(String::new());
+        }
+        Self {
+            subject,
+            body,
+            ..Self::new(false)
+        }
+    }
+
+    /// Amending, with the message just as it was first shown, so git can
+    /// keep `HEAD`'s own message.
+    pub fn message_unchanged(&self) -> bool {
+        self.amend
+            .as_ref()
+            .is_some_and(|(subject, body)| *subject == self.subject && *body == self.body)
     }
 
     /// The message for `git commit -F -`: the subject, then a blank line and
@@ -214,6 +259,49 @@ mod tests {
         assert_eq!(editor.field, Field::Subject);
         assert_eq!((editor.row, editor.col), (0, 0));
         assert!(editor.stage_all);
+    }
+
+    #[test]
+    fn amend_splits_the_message_and_drops_one_blank_separator() {
+        let editor = CommitEditor::amend("subj\n\nbody 1\n\nbody 2");
+        assert_eq!(editor.subject, "subj");
+        assert_eq!(editor.body, ["body 1", "", "body 2"]);
+        assert_eq!(
+            (editor.field, editor.row, editor.col),
+            (Field::Subject, 0, 4)
+        );
+        assert!(!editor.stage_all && !editor.no_verify);
+        assert!(editor.message_unchanged());
+        assert_eq!(editor.message(), "subj\n\nbody 1\n\nbody 2\n");
+
+        let editor = CommitEditor::amend("only a subject");
+        assert_eq!(editor.subject, "only a subject");
+        assert_eq!(editor.body, [""]);
+        // Without a blank separator, the body starts on the second line.
+        assert_eq!(CommitEditor::amend("s\nb").body, ["b"]);
+    }
+
+    #[test]
+    fn any_edit_of_an_amended_message_counts_as_changed() {
+        let mut editor = CommitEditor::amend("subj\n\nbody");
+        press(&mut editor, KeyCode::Char('x'));
+        assert!(!editor.message_unchanged());
+        press(&mut editor, KeyCode::Backspace);
+        assert!(editor.message_unchanged(), "typed back to the original");
+        press(&mut editor, KeyCode::Down);
+        press(&mut editor, KeyCode::Enter);
+        assert!(!editor.message_unchanged());
+        // A new commit has no original to keep.
+        assert!(!CommitEditor::new(false).message_unchanged());
+    }
+
+    #[test]
+    fn from_message_fills_the_text_cleaned_for_drawing() {
+        let editor = CommitEditor::from_message("x\x1b[2J\r\n\ny\tz\nw\n");
+        assert_eq!(editor.subject, "x[2J");
+        assert_eq!(editor.body, ["yz", "w"]);
+        assert_eq!(editor.amend, None);
+        assert_eq!(editor.message(), "x[2J\n\nyz\nw\n");
     }
 
     #[test]
