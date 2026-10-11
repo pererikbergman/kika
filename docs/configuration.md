@@ -460,6 +460,17 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.hunks` | `enter` | Work on the hunks of the selected file, or resolve its conflicts | |
 | `files.mergetool` | `M` | Resolve the selected conflicted file in your merge tool | locked |
 | `files.menu` | `m` | Open the actions menu | |
+| `files.filter` | `/` | Filter the files by typed text | |
+| `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
+| `files.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+
+The filter matches each word you type, in order but not necessarily side by
+side, against the file's path; it ignores case until you type an uppercase
+letter. `V` starts a range at the selected file, and moving the cursor grows
+it. `space` then stages the whole range in one go (or unstages it, when
+nothing in it is left to stage), skipping conflicted files, and `d` asks
+once before discarding the range; only `y` answers that question. Keys that
+act on one file are refused while a range is selected.
 
 ### Branches
 
@@ -571,6 +582,9 @@ an older git refuses them and changes nothing.
 | `commits.copy` | `c` | Add the selected commit to the copied set, or take it out | |
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |
+| `commits.filter` | `/` | Filter the loaded commits by typed text | |
+| `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
+| `commits.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -653,7 +667,11 @@ goes back to the log.
 | `diff.open` | `o` | Open the file in your editor at the selected hunk | locked |
 | `diff.edit_hunk` | `e` | Edit the selected hunk in your editor, then stage it | locked |
 | `diff.renderer` | `R` | Cycle diff renderer | locked |
-| `diff.back` | `esc`, `h`, `left` | Back to the file list | |
+| `diff.back` | `h`, `left` | Back to the side panel last focused | |
+| `diff.search` | `/` | Search the diff for typed text | |
+| `diff.search_next` | `n` | Go to the next match of the search | |
+| `diff.search_prev` | `N` | Go to the previous match of the search | |
+| `diff.escape` | `esc` | Clear the search, else go back to the side panel | |
 
 ### Diff (lines)
 
@@ -776,6 +794,17 @@ picked yet keep their markers. Once every block is picked, Kika offers to stage 
 | `prompt.ok` | `enter` | Use the typed text | |
 | `prompt.cancel` | `esc` | Close without using the text | |
 | `prompt.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Filter or search (typing on the bottom bar)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `input.accept` | `enter` | Keep the typed text; a search goes to its match | |
+| `input.cancel` | `esc` | Clear the typed text and close | |
+| `input.quit` | `ctrl-c` | Quit Kika | locked |
+
+Every other key is typed, `q` and `?` included. The list or the search
+follows each key as you type.
 
 ### Git is asking (a credential or other question)
 

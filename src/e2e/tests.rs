@@ -1974,3 +1974,26 @@ async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone(
         1
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_filtered_range_stages_exactly_the_files_it_shows() {
+    let repo = TestRepo::new()
+        .write("notes.txt", "one\n")
+        .write("src/one.rs", "one\n")
+        .write("src/two.rs", "one\n")
+        .commit("init")
+        .write("notes.txt", "changed\n")
+        .write("src/one.rs", "changed\n")
+        .write("src/two.rs", "changed\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.type_text("/rs").await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Files · /rs 2 of 3");
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+
+    assert_eq!(repo.staged(), ["src/one.rs", "src/two.rs"]);
+    assert_eq!(app.state().files_anchor, None);
+}

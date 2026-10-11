@@ -4,8 +4,8 @@
 use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::intent::AppIntent;
 use crate::keymap::{
-    amend_disabled, commit_disabled, merge_disabled, never, reset_disabled, stage_all_disabled,
-    stage_disabled,
+    amend_disabled, commit_disabled, files_stage_disabled, merge_disabled, never, reset_disabled,
+    stage_all_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -96,7 +96,7 @@ static STAGE: &[MenuItem] = &[
     MenuItem {
         label: "Selected file",
         intent: AppIntent::ToggleStage,
-        disabled: stage_disabled,
+        disabled: files_stage_disabled,
     },
     MenuItem {
         label: "Everything",

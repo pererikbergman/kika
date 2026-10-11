@@ -59,6 +59,13 @@ pub enum GitOp {
     /// Delete these untracked files from disk. Ignored files are never
     /// removed.
     DeleteUntracked(Vec<RepoPath>),
+    /// Discard a range of files at once: restore `restore` as
+    /// [`GitOp::DiscardWorktree`] does, then delete the untracked `delete`
+    /// as [`GitOp::DeleteUntracked`] does, stopping at the first failure.
+    DiscardFiles {
+        restore: Vec<RepoPath>,
+        delete: Vec<RepoPath>,
+    },
     /// Take `patch` back out of the worktree, from stdin. How a hunk or some
     /// lines are discarded; the index is not touched.
     ApplyWorktree {
@@ -281,6 +288,51 @@ impl GitOp {
             _ => Ok(Some(GitOp::DiscardWorktree(vec![entry.path.clone()]))),
         }
     }
+
+    /// What one key press does to a range of entries: stage them all while
+    /// any has unstaged changes, else unstage them all, with each staged
+    /// rename's old path. Conflicts are skipped, as one at a time.
+    pub fn toggle_many(entries: &[&FileEntry]) -> Option<GitOp> {
+        let entries: Vec<&FileEntry> = entries
+            .iter()
+            .copied()
+            .filter(|e| e.kind != EntryKind::Conflicted)
+            .collect();
+        if entries.is_empty() {
+            return None;
+        }
+        if entries.iter().any(|e| has_unstaged(e)) {
+            return Some(GitOp::Stage(
+                entries.iter().map(|e| e.path.clone()).collect(),
+            ));
+        }
+        let paths = entries
+            .iter()
+            .flat_map(|e| e.orig_path.iter().chain([&e.path]))
+            .cloned()
+            .collect();
+        Some(GitOp::Unstage(paths))
+    }
+
+    /// What discarding a range of entries does: each as
+    /// [`GitOp::discard_for`] would, skipping those it refuses, in one op.
+    /// `None` when nothing is left to discard.
+    pub fn discard_many(entries: &[&FileEntry]) -> Option<GitOp> {
+        let (mut restore, mut delete) = (Vec::new(), Vec::new());
+        for entry in entries {
+            match GitOp::discard_for(entry) {
+                Ok(Some(GitOp::DiscardWorktree(paths))) => restore.extend(paths),
+                Ok(Some(GitOp::DeleteUntracked(paths))) => delete.extend(paths),
+                _ => {}
+            }
+        }
+        match (restore.is_empty(), delete.is_empty()) {
+            (true, true) => None,
+            (false, true) => Some(GitOp::DiscardWorktree(restore)),
+            (true, false) => Some(GitOp::DeleteUntracked(delete)),
+            (false, false) => Some(GitOp::DiscardFiles { restore, delete }),
+        }
+    }
 }
 
 /// The command for `op`. Unlike reads, these need `index.lock`, so
@@ -311,7 +363,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::DiscardWorktree(paths) => with_paths(GitCommand::new("checkout").arg("-q"), paths),
         // Status lists untracked files one by one, so `-d` is never needed;
         // without `-x`, ignored files are left alone.
-        GitOp::DeleteUntracked(paths) => {
+        GitOp::DeleteUntracked(paths) | GitOp::DiscardFiles { delete: paths, .. } => {
             with_paths(GitCommand::new("clean").arg("-f").arg("-q"), paths)
         }
         // Without `--cached`, git applies to the worktree only.
@@ -579,6 +631,10 @@ fn run_op_with(
     } = op
     {
         run_op(runner, &GitOp::StageAll)?;
+    }
+    // The restore runs first; the command below is the delete.
+    if let GitOp::DiscardFiles { restore, .. } = op {
+        run_op(runner, &GitOp::DiscardWorktree(restore.clone()))?;
     }
     if let Some(reason) = refusal(op) {
         return Err(reason.into());
@@ -2388,6 +2444,68 @@ mod tests {
         runner.assert_done();
         assert_eq!(runner.envs(), [vec![]]);
         assert_eq!(runner.inputs(), [Some(b"subj\n\nbody\n".to_vec())]);
+    }
+
+    #[test]
+    fn discarding_files_restores_then_deletes_with_literal_paths() {
+        let runner = FakeRunner::new()
+            .expect(&["checkout", "-q", "--", "a.rs", "*.rs"], ok(b""))
+            .expect(&["clean", "-f", "-q", "--", "n.txt"], ok(b""));
+        let op = GitOp::DiscardFiles {
+            restore: paths(&["a.rs", "*.rs"]),
+            delete: paths(&["n.txt"]),
+        };
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+        assert_eq!(runner.envs().len(), 2);
+        for env in runner.envs() {
+            let literal = (OsString::from("GIT_LITERAL_PATHSPECS"), OsString::from("1"));
+            assert!(env.contains(&literal), "{env:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_restore_deletes_nothing() {
+        let runner = FakeRunner::new().expect(&["checkout", "-q", "--", "a.rs"], fail("nope\n"));
+        let op = GitOp::DiscardFiles {
+            restore: paths(&["a.rs"]),
+            delete: paths(&["n.txt"]),
+        };
+        assert_eq!(run_op(&runner, &op), Err("nope".into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_range_toggles_and_discards_as_one_op() {
+        let unstaged = entry("a.rs", '.', 'M', EntryKind::Changed);
+        let staged = entry("s.rs", 'M', '.', EntryKind::Changed);
+        let new = entry("n.txt", '?', '?', EntryKind::Untracked);
+        let conflict = entry("c.rs", 'U', 'U', EntryKind::Conflicted);
+        assert_eq!(
+            GitOp::toggle_many(&[&unstaged, &conflict, &staged]),
+            stage(&["a.rs", "s.rs"])
+        );
+        assert_eq!(
+            GitOp::toggle_many(&[&staged, &conflict]),
+            unstage(&["s.rs"])
+        );
+        assert_eq!(GitOp::toggle_many(&[&conflict]), None);
+        assert_eq!(
+            GitOp::discard_many(&[&unstaged, &staged, &new, &conflict]),
+            Some(GitOp::DiscardFiles {
+                restore: paths(&["a.rs"]),
+                delete: paths(&["n.txt"]),
+            })
+        );
+        assert_eq!(
+            GitOp::discard_many(&[&unstaged]),
+            Some(GitOp::DiscardWorktree(paths(&["a.rs"])))
+        );
+        assert_eq!(
+            GitOp::discard_many(&[&new]),
+            Some(GitOp::DeleteUntracked(paths(&["n.txt"])))
+        );
+        assert_eq!(GitOp::discard_many(&[&staged, &conflict]), None);
     }
 
     #[test]

@@ -47,7 +47,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             Popup::Error(error) => render_error(error, frame, area),
             Popup::Discard(confirm) => {
                 let what = confirm.what;
-                let text = format!("{}\n{}", what.question(), confirm.path);
+                // A range has no one path to name; its counts are the question.
+                let text = if confirm.path.is_empty() {
+                    what.question().into_owned()
+                } else {
+                    format!("{}\n{}", what.question(), confirm.path)
+                };
                 render_question(&format!(" {} ", what.title()), &text, frame, area)
             }
             Popup::DeleteBranch(confirm) => render_question(

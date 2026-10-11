@@ -121,26 +121,61 @@ pub enum DiscardWhat {
     Untracked,
     Hunk,
     Lines,
+    /// A range of files: `restore` lose their unstaged changes and
+    /// `delete` untracked ones are deleted.
+    Range {
+        restore: usize,
+        delete: usize,
+    },
 }
 
 impl DiscardWhat {
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            DiscardWhat::File => "Discard file",
-            DiscardWhat::Untracked => "Delete file",
-            DiscardWhat::Hunk => "Discard hunk",
-            DiscardWhat::Lines => "Discard lines",
+            DiscardWhat::File => "Discard file".into(),
+            DiscardWhat::Untracked => "Delete file".into(),
+            DiscardWhat::Hunk => "Discard hunk".into(),
+            DiscardWhat::Lines => "Discard lines".into(),
+            DiscardWhat::Range { restore, delete } => {
+                format!("Discard {}", files(restore + delete)).into()
+            }
         }
     }
 
-    pub fn question(self) -> &'static str {
+    pub fn question(self) -> Cow<'static, str> {
         match self {
-            DiscardWhat::File => "Discard all unstaged changes to this file? (y/n)",
-            DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)",
-            DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)",
-            DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)",
+            DiscardWhat::File => "Discard all unstaged changes to this file? (y/n)".into(),
+            DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)".into(),
+            DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)".into(),
+            DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)".into(),
+            DiscardWhat::Range { restore, delete: 0 } => {
+                format!("Discard unstaged changes to {}? (y/n)", files(restore)).into()
+            }
+            DiscardWhat::Range { restore: 0, delete } => {
+                format!("Delete {} from disk? (y/n)", untracked(delete)).into()
+            }
+            DiscardWhat::Range { restore, delete } => format!(
+                "Discard unstaged changes to {} and delete {}? (y/n)",
+                files(restore),
+                untracked(delete)
+            )
+            .into(),
         }
     }
+}
+
+/// `1 file` or `n files`.
+fn files(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{n} files")
+    }
+}
+
+/// `1 untracked file` or `n untracked files`.
+fn untracked(n: usize) -> String {
+    format!("{n} untracked {}", if n == 1 { "file" } else { "files" })
 }
 
 /// "Delete this branch?" Like [`DiscardConfirm`], it carries the op chosen

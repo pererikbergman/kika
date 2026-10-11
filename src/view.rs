@@ -7,12 +7,12 @@ use crate::conflict_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
-use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
-use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
+use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
@@ -46,7 +46,13 @@ pub fn render(state: &AppState, frame: &mut Frame) {
     }
     render_commit(&state.commit, state.commit_on_terminal, frame, main);
     popup_view::render_popups(state, frame, main);
-    frame.render_widget(status_bar(state, status.width), status);
+    let (bar, cursor) = status_bar(state, status.width);
+    frame.render_widget(bar, status);
+    if let Some(col) = cursor.and_then(|col| u16::try_from(col).ok())
+        && col < status.width
+    {
+        frame.set_cursor_position((status.x + col, status.y));
+    }
 }
 
 /// Every panel the layout has room for: the left column, then the diff
@@ -723,8 +729,12 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 /// not it. Hints come from the keymap, so the bar always matches what the
 /// keys do; disabled ones are dimmed. An error wider than the bar's `width`
 /// columns ends in `…`.
-fn status_bar(state: &AppState, width: u16) -> Line<'_> {
+///
+/// While a filter or search is typed, `/` and the text come after the
+/// indicator, and the column of its cursor is returned too.
+fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
     let mut spans = Vec::new();
+    let mut cursor = None;
     let mut room = usize::from(width);
     // A fetch, pull or push says which, and a tag push where to;
     // anything else is loading.
@@ -745,6 +755,22 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     {
         room = room.saturating_sub(width_of(&cancel) + 1);
         spans.push(Span::raw(format!(" {cancel}")));
+    }
+    if let Some(input) = state
+        .input
+        .as_ref()
+        .filter(|_| state.key_focus() == KeyScope::Input)
+    {
+        // Typed text is drawn as it would be in a list: never raw.
+        let before: String = input.line.text.chars().take(input.line.col).collect();
+        let used = usize::from(width).saturating_sub(room);
+        cursor = Some(used + 2 + width_of(&sanitize(before.as_bytes())));
+        let typed = format!(" /{}", sanitize(input.line.text.as_bytes()));
+        room = room.saturating_sub(width_of(&typed) + 1);
+        spans.push(Span::styled(
+            typed,
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
     }
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
     let notice = state.notice.or(state.notice_text.as_deref());
@@ -797,7 +823,7 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
             spans.push(Span::styled(hint, dimmed_if(disabled)));
         }
     }
-    Line::from(spans)
+    (Line::from(spans), cursor)
 }
 
 /// The bindings that lead the hints while commits are copied.
@@ -987,7 +1013,18 @@ fn render_files_panel(
         1 => "1 file".to_string(),
         n => format!("{n} files"),
     };
-    let title = if look.title_only && state.files_loaded && state.status_error.is_none() {
+    let shown = state.files_visible();
+    let range = state.files_range();
+    let selected = match state.files_anchor {
+        Some(_) => format!(" · {} selected", range.len()),
+        None => String::new(),
+    };
+    let title = if !state.files_filter.is_empty() {
+        let counts = format!("{} of {}{selected}", shown.len(), state.files.len());
+        look.title(&filter_title(look, "Files", &state.files_filter, &counts))
+    } else if !selected.is_empty() {
+        look.title(&format!("Files{selected}"))
+    } else if look.title_only && state.files_loaded && state.status_error.is_none() {
         look.title(&format!("Files · {count}"))
     } else {
         look.title("Files")
@@ -1002,58 +1039,76 @@ fn render_files_panel(
         Paragraph::new("Loading…")
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
+    } else if shown.is_empty() {
+        Paragraph::new(Line::styled("No matches", Style::new().fg(Color::DarkGray)))
     } else if !expanded {
         Paragraph::new(count)
     } else {
-        Paragraph::new(file_lines(&state.files, state.selected, inner))
+        Paragraph::new(file_lines(
+            &state.files,
+            &shown,
+            state.selected,
+            &range,
+            inner,
+        ))
     };
     frame.render_widget(panel.block(block), area);
 }
 
-/// The files that fit in `area`, scrolled so `selected` is visible and drawn
-/// reversed. When files below the window are cut, the last row says how many,
-/// so the cut is never silent.
-fn file_lines(files: &[FileEntry], selected: Option<usize>, area: Rect) -> Vec<Line<'static>> {
+/// The `shown` files that fit in `area`, scrolled so `selected` is visible.
+/// It and the files in `range` are drawn reversed. When files below the
+/// window are cut, the last row says how many, so the cut is never silent.
+fn file_lines(
+    files: &[FileEntry],
+    shown: &[usize],
+    selected: Option<usize>,
+    range: &[usize],
+    area: Rect,
+) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
-    let line = |(i, f): (usize, &FileEntry)| {
-        let line = file_line(f, width);
-        if Some(i) == selected {
+    let line = |&i: &usize| {
+        let line = file_line(&files[i], width);
+        if Some(i) == selected || range.contains(&i) {
             reversed(line, width)
         } else {
             line
         }
     };
-    if files.len() <= rows {
-        return files.iter().enumerate().map(line).collect();
+    if shown.len() <= rows {
+        return shown.iter().map(line).collect();
     }
-    let selected = selected.unwrap_or(0);
+    let selected = selected
+        .and_then(|s| shown.iter().position(|&i| i == s))
+        .unwrap_or(0);
     if rows <= 1 {
         // No room for a "+N more" row; the selection matters more.
-        return files
-            .iter()
-            .enumerate()
-            .skip(selected)
-            .take(rows)
-            .map(line)
-            .collect();
+        return shown.iter().skip(selected).take(rows).map(line).collect();
     }
     // One row is kept for "+N more" unless the window reaches the end.
-    let shown = rows - 1;
-    let start = selected.saturating_sub(shown - 1);
-    if start + rows >= files.len() {
-        let start = files.len() - rows;
-        return files.iter().enumerate().skip(start).map(line).collect();
+    let more = rows - 1;
+    let start = selected.saturating_sub(more - 1);
+    if start + rows >= shown.len() {
+        let start = shown.len() - rows;
+        return shown.iter().skip(start).map(line).collect();
     }
-    let mut lines: Vec<Line> = files
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(shown)
-        .map(line)
-        .collect();
-    lines.push(Line::from(format!("+{} more", files.len() - start - shown)));
+    let mut lines: Vec<Line> = shown.iter().skip(start).take(more).map(line).collect();
+    lines.push(Line::from(format!("+{} more", shown.len() - start - more)));
     lines
+}
+
+/// `<name> · /<query> <counts>` for a filtered list's title, the query
+/// made safe to draw and cut short so the counts still fit.
+pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &str) -> String {
+    let query = sanitize(query.as_bytes());
+    let mut room = width_of(&query);
+    loop {
+        let text = format!("{name} · /{} {counts}", elide_right(&query, room));
+        if room <= 1 || look.fits(&text) {
+            return text;
+        }
+        room -= 1;
+    }
 }
 
 /// Highlight a whole row, not just its text, by padding it to `width`.
@@ -1152,9 +1207,10 @@ fn render_hunk_view(
             let lines = view
                 .rows()
                 .into_iter()
+                .enumerate()
                 .skip(view.scroll)
                 .take(rows)
-                .map(|row| {
+                .map(|(at, row)| {
                     let in_hunk = row.hunk == Some(view.hunk);
                     // In line mode only the picked lines are marked.
                     let selected = if view.lines.is_some() {
@@ -1171,18 +1227,10 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = match row.kind {
-                        RowKind::Header | RowKind::HunkHeader => sanitize(&row.text),
-                        RowKind::Context
-                        | RowKind::Added
-                        | RowKind::Removed
-                        | RowKind::NoNewline => sanitize_body(&row.text),
-                    };
-                    let text = clip(&text, 0, width.saturating_sub(1));
-                    let line = Line::from(vec![
-                        Span::styled(gutter, Style::new().fg(FOCUSED)),
-                        Span::styled(text, style),
-                    ]);
+                    let text = clip(&drawn_text(&row), 0, width.saturating_sub(1));
+                    let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
+                    spans.extend(marked_spans(text, style, &search_marks(view, at)));
+                    let line = Line::from(spans);
                     let mark = match view.lines {
                         Some(_) => row.line.is_some(),
                         None => row.kind == RowKind::HunkHeader,
@@ -1202,6 +1250,60 @@ fn render_hunk_view(
 
 /// The focused pane's title: the side, the path, the mode, the options
 /// and `suffix` after a `·`, the path giving way to fit.
+/// Matches of the search on row `at`: char ranges and their style, the
+/// current match standing out from the rest.
+fn search_marks(view: &HunkView, at: usize) -> Vec<(usize, usize, Style)> {
+    let Some(search) = &view.search else {
+        return Vec::new();
+    };
+    search
+        .matches
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.row == at)
+        .map(|(i, m)| {
+            let style = if Some(i) == search.current {
+                CURRENT_MATCH
+            } else {
+                MATCH
+            };
+            (m.start, m.end, style)
+        })
+        .collect()
+}
+
+/// A search match, and the one `n` and `N` step from.
+pub(crate) const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
+pub(crate) const CURRENT_MATCH: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::LightRed)
+    .add_modifier(Modifier::BOLD);
+
+/// `text` in `style`, split so each char range in `marks` (in order, not
+/// overlapping) takes its own style on top. Ranges past the end of a
+/// clipped text are cut to it.
+fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
+    if marks.is_empty() {
+        return vec![Span::styled(text, style)];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let piece = |from: usize, to: usize| {
+        chars[from.min(chars.len())..to.min(chars.len())]
+            .iter()
+            .collect::<String>()
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    for &(start, end, mark) in marks {
+        spans.push(Span::styled(piece(at, start), style));
+        spans.push(Span::styled(piece(start, end), style.patch(mark)));
+        at = end;
+    }
+    spans.push(Span::styled(piece(at, chars.len()), style));
+    spans.retain(|span| !span.content.is_empty());
+    spans
+}
+
 fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
     let side = match view.side {
         DiffSide::Index => "Staged",
@@ -1217,7 +1319,14 @@ fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelL
     } else {
         format!(" · {suffix}")
     };
-    let tail = format!("{mode}{}{suffix}", options_note(options));
+    let found = match &view.search {
+        Some(search) => match search.current {
+            Some(i) => format!(" · match {} of {}", i + 1, search.matches.len()),
+            None => " · no matches".to_string(),
+        },
+        None => String::new(),
+    };
+    let tail = format!("{mode}{}{found}{suffix}", options_note(options));
     look.path_title(side, view.path.display(), &tail)
 }
 
@@ -3142,7 +3251,11 @@ mod tests {
         let rows = draw(&state, 100, 30);
         assert!(contains(&rows, " Keys: Diff "), "{rows:#?}");
         assert!(contains(&rows, "Stage the selected hunk"), "{rows:#?}");
-        assert!(contains(&rows, "esc/h/←"), "{rows:#?}");
+        assert!(contains(&rows, "h/←"), "{rows:#?}");
+        assert!(
+            contains(&rows, "Clear the search, else go back"),
+            "{rows:#?}"
+        );
         assert!(!contains(&rows, "Select the next file"), "{rows:#?}");
     }
 
@@ -4245,5 +4358,112 @@ mod tests {
                 }
             }
         }
+    }
+
+    // --- List filters, ranges and the diff search ---
+
+    /// The buffer cell where `needle` starts, by its char column.
+    fn cell_at<'a>(buffer: &'a ratatui::buffer::Buffer, needle: &str) -> &'a ratatui::buffer::Cell {
+        let rows = buffer_rows(buffer);
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")));
+        let x = row[..row.find(needle).unwrap()].chars().count();
+        &buffer[(x as u16, y as u16)]
+    }
+
+    fn typing(state: &mut AppState, target: crate::list_filter::InputTarget, text: &str) {
+        state.input = Some(crate::list_filter::ListInput {
+            target,
+            line: crate::popup::LineInput::with_text(text),
+        });
+    }
+
+    #[test]
+    fn the_bar_shows_the_typed_filter_made_safe() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        typing(
+            &mut state,
+            crate::list_filter::InputTarget::FilesFilter,
+            "a\u{202E}b",
+        );
+        let rows = draw(&state, 100, 20);
+        assert!(rows[19].starts_with(" /a<U+202E>b"), "{rows:#?}");
+        assert!(rows[19].contains("q and ? are typed"), "{rows:#?}");
+        assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_filtered_files_title_counts_what_shows() {
+        let files: Vec<FileEntry> = (0..7)
+            .map(|i| file(&format!("a{i}.rs")))
+            .chain((0..3).map(|i| file(&format!("b{i}.md"))))
+            .collect();
+        let mut state = loaded(files);
+        state.selected = Some(7);
+        state.files_filter = "md".into();
+        let rows = draw(&state, 100, 30);
+        assert!(contains(&rows, "Files · /md 3 of 10"), "{rows:#?}");
+        assert!(contains(&rows, "b2.md"), "{rows:#?}");
+        assert!(!contains(&rows, "a0.rs"), "{rows:#?}");
+
+        state.files_filter = "zzz".into();
+        let rows = draw(&state, 100, 30);
+        assert!(contains(&rows, "No matches"), "{rows:#?}");
+    }
+
+    #[test]
+    fn range_rows_are_drawn_like_the_selected_row() {
+        let mut state = loaded(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
+        state.selected = Some(1);
+        state.files_anchor = Some("c.rs".into());
+        let buffer = draw_buffer(&state, 100, 20);
+        let reversed = |needle| {
+            cell_at(&buffer, needle)
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(reversed("b.rs"), "the cursor row");
+        assert!(reversed("c.rs"), "the anchor row");
+        assert!(!reversed("a.rs"));
+        assert!(contains(&buffer_rows(&buffer), "Files · 2 selected"));
+    }
+
+    #[test]
+    fn diff_matches_are_marked_and_the_current_one_stands_out() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        if let Focus::Diff(view) = &mut state.focus {
+            view.set_search("one");
+        }
+        let buffer = draw_buffer(&state, 100, 20);
+        assert!(contains(&buffer_rows(&buffer), "match 1 of 2"));
+        // `-old one` is row 4 and holds the current match; `+new one` the other.
+        let style = |needle: &str, skip: u16| {
+            let cell = cell_at(&buffer, needle);
+            let (x, y) = position_of(&buffer, cell);
+            buffer[(x + skip, y)].style()
+        };
+        assert_eq!(style("old one", 4).bg, CURRENT_MATCH.bg);
+        assert_eq!(style("new one", 4).bg, MATCH.bg);
+        assert_ne!(MATCH.bg, CURRENT_MATCH.bg);
+        assert_eq!(
+            style("old one", 0).bg,
+            Some(Color::Reset),
+            "only the match is marked"
+        );
+    }
+
+    /// Where `cell` sits in `buffer`.
+    fn position_of(buffer: &ratatui::buffer::Buffer, cell: &ratatui::buffer::Cell) -> (u16, u16) {
+        let index = buffer
+            .content
+            .iter()
+            .position(|c| std::ptr::eq(c, cell))
+            .unwrap();
+        let (x, y) = buffer.pos_of(index);
+        (x, y)
     }
 }
