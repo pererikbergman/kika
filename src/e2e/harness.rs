@@ -92,6 +92,12 @@ impl Harness {
         }
     }
 
+    /// Dispatch one intent, such as a timer tick, then wait for idle.
+    pub async fn intent(&mut self, intent: AppIntent) {
+        self.dispatch(intent);
+        self.wait_idle().await;
+    }
+
     /// Apply `intent` as the loop does, running any hand-off it asks for
     /// to the end before going on.
     fn dispatch(&mut self, intent: AppIntent) {
@@ -101,13 +107,6 @@ impl Harness {
             let intent = handoff::execute(job, self.runner.as_ref(), &workdir);
             jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
-    }
-
-    /// Apply `intent` as if a task had sent it, then wait for idle. For
-    /// what no key can reach in a test, such as a recent list on disk.
-    pub async fn apply(&mut self, intent: AppIntent) {
-        self.dispatch(intent);
-        self.wait_idle().await;
     }
 
     /// Wait until the app is idle.
@@ -215,15 +214,16 @@ impl Harness {
 }
 
 /// Whether nothing more will change without input: no status load or Git
-/// operation in flight, and the diff settled. Diff streams stay out of
-/// `busy`, so the Diff pane is read directly.
+/// operation in flight, no background load pending, and the diff settled.
+/// Diff streams and background loads stay out of `busy`, so they are read
+/// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
     let diff = &state.diff;
     // A stream that has sent all it was asked for is paused until the model
     // demands more, so nothing arrives on its own.
     let diff_settled =
         diff.seq.is_none() || (!diff.pending && (diff.done || diff.lines.len() >= diff.requested));
-    state.busy == 0 && state.op_seq.is_none() && diff_settled
+    state.busy == 0 && state.op_seq.is_none() && !state.watch.is_pending() && diff_settled
 }
 
 #[cfg(test)]
@@ -260,6 +260,13 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         state.op_seq = Some(3);
+        assert!(!is_idle(&state));
+    }
+
+    #[test]
+    fn a_pending_background_load_is_not_idle() {
+        let mut state = AppState::new(Context::Workspace);
+        state.watch.status_pending = true;
         assert!(!is_idle(&state));
     }
 

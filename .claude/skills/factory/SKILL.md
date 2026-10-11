@@ -77,14 +77,14 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
 
 ### Continuous run
 
-`/factory next` does not stop after one job. It keeps up to **3 active jobs** (stage not
-`merged` or `needs-human`) running in parallel, each in its own worktree (see Parallel
-jobs). Whenever a slot is free, pick the next free issue and start it. When a job reaches
-`merged`, give the user a one-line note (job id, PR link) and fill the slot.
-Stop starting new jobs only when:
-- a job ends in `needs-human` (escalation, or CHANGES after 2 resumes): report it and wait
-  for the user; let the other active jobs finish but start no new ones;
-- no free issue is left: say so, and list what is blocked and by what.
+`/factory next` does not stop after one job. It keeps **3 active jobs** running in parallel
+whenever enough free issues exist, each in its own worktree (see Parallel jobs). Active
+means any stage except `merged` and `needs-human`: a job waiting on the user does not hold
+a slot. After **every** event (an agent finishing, a merge, an escalation, a user answer),
+count active jobs and immediately start new ones until there are 3 or no free issue is left.
+When a job reaches `merged`, give the user a one-line note (job id, PR link).
+When a job reaches `needs-human`, report it and its questions, then keep filling slots.
+Stop only when no free issue is left: say so, and list what is blocked and by what.
 
 `/factory <issue-number>` runs that one issue only and does not continue.
 
