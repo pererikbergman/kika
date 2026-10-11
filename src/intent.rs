@@ -1,6 +1,8 @@
 use crossterm::event::{Event, KeyEventKind};
 
+use crate::ansi::StyledRow;
 use crate::effect::Tag;
+use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
@@ -196,6 +198,16 @@ pub enum AppIntent {
     ScrollCommit(Scroll),
     /// Back from the blame to the Files panel.
     CloseBlame,
+    /// Show the diff through the next configured renderer, or the
+    /// built-in view after the last.
+    CycleRenderer,
+    /// The renderers configured for this session, found at boot.
+    RenderersFound(Vec<ExternalRenderer>),
+    /// A renderer's rows for the shown diff; `tag` says which render.
+    DiffRendered {
+        tag: Tag,
+        result: Result<Vec<StyledRow>, String>,
+    },
 }
 
 /// How far to scroll the diff pane.

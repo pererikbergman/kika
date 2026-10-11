@@ -4,7 +4,9 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::ansi;
 use crate::diff_stream::DiffStreamer;
+use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
@@ -89,6 +91,16 @@ pub enum Effect {
     LoadCommit {
         tag: Tag,
         oid: String,
+    },
+    /// Find the configured diff renderers; answered by one `RenderersFound`.
+    FindRenderers,
+    /// Run `renderer` on the diff for `request` at `cols` columns; always
+    /// answered by one `DiffRendered`.
+    RenderDiff {
+        tag: Tag,
+        request: DiffRequest,
+        renderer: ExternalRenderer,
+        cols: u16,
     },
     /// Hand the terminal to another process. Run by the loop, which owns
     /// the terminal, never by [`Runtime`].
@@ -203,6 +215,38 @@ impl Runtime {
                                 Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
                             });
                     let _ = tx.send(AppIntent::CommitLoaded { tag, result });
+                });
+            }
+            Effect::FindRenderers => {
+                tokio::spawn(async move {
+                    let env = std::env::var("KIKA_DIFF_PAGER").ok();
+                    // A panic finds nothing; the built-in view still works.
+                    let found = tokio::task::spawn_blocking(move || discover(runner.as_ref(), env))
+                        .await
+                        .unwrap_or_default();
+                    let _ = tx.send(AppIntent::RenderersFound(found));
+                });
+            }
+            Effect::RenderDiff {
+                tag,
+                request,
+                renderer,
+                cols,
+            } => {
+                // Where git runs now, inside an entered submodule too.
+                let workdir = self.runner.workdir();
+                let label = renderer.label.clone();
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
+                        run_renderer(&renderer, &workdir, &diff, cols).map(|out| ansi::parse(&out))
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("{label} crashed: {e}").as_bytes()))
+                    });
+                    let _ = tx.send(AppIntent::DiffRendered { tag, result });
                 });
             }
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
@@ -889,6 +933,75 @@ mod tests {
                 assert!(chunk.done);
             }
             other => panic!("expected a diff chunk, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn render_diff_feeds_the_plain_diff_to_the_renderer_and_parses_it() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"],
+            ok(b"\x1b[31m-a\x1b[0m\n+b\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 8,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RenderDiff {
+            tag,
+            request: DiffRequest {
+                path: "a.rs".into(),
+                orig_path: None,
+                side: DiffSide::Worktree,
+                options: Default::default(),
+            },
+            renderer: ExternalRenderer {
+                label: "cat".into(),
+                argv: vec!["cat".into()],
+            },
+            cols: 40,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::DiffRendered {
+                tag: got,
+                result: Ok(rows),
+            }) => {
+                assert_eq!(got, tag);
+                let texts: Vec<String> = rows.iter().map(|r| r.text()).collect();
+                assert_eq!(texts, ["-a", "+b"]);
+            }
+            other => panic!("expected rendered rows, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn find_renderers_reads_the_global_pagers() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["config", "--global", "--get", "pager.diff"],
+                    ok(b"delta\n"),
+                )
+                .expect(&["config", "--global", "--get", "core.pager"], ok(b"")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::FindRenderers);
+
+        match rx.recv().await {
+            // The host's `KIKA_DIFF_PAGER`, if set, comes first.
+            Some(AppIntent::RenderersFound(found)) => {
+                assert_eq!(found.last().map(|r| r.label.as_str()), Some("delta"));
+            }
+            other => panic!("expected renderers, got {other:?}"),
         }
         runner.assert_done();
     }

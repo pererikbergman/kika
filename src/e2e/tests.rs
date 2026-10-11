@@ -1021,3 +1021,39 @@ async fn a_submodule_is_listed_updated_entered_and_left() {
     let screen = app.screen().join("\n");
     assert!(!screen.contains("Status · sub"), "{screen}");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_line_is_staged_through_a_renderer_view() {
+    use crate::external_diff::ExternalRenderer;
+
+    let repo = TestRepo::new()
+        .write("a.txt", "one\n")
+        .commit("init")
+        .write("a.txt", "one\ntwo\nthree\n");
+    let mut app = Harness::start(&repo).await;
+    app.use_renderers(vec![ExternalRenderer {
+        label: "cat".into(),
+        argv: vec!["cat".into()],
+    }])
+    .await;
+
+    app.press_with(KeyCode::Char('R'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains(" Diff · cat ");
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('v')).await;
+    app.assert_screen_contains(" Unstaged · lines · cat ");
+    let shown = app
+        .state()
+        .rendered_shown()
+        .expect("the rendered rows are shown");
+    assert!(shown.map.iter().any(Option::is_some));
+    app.press(KeyCode::Char(' ')).await;
+
+    let staged = String::from_utf8(repo.git(["diff", "--cached"])).unwrap();
+    assert!(staged.contains("+two\n"), "{staged}");
+    assert!(!staged.contains("+three"), "{staged}");
+    app.assert_screen_contains(" Unstaged · lines · cat ");
+    app.assert_screen_contains("+three");
+}

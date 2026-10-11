@@ -11,6 +11,7 @@ use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
 use crate::keymap::{KeyPattern, available, registry};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
+use crate::rendered_view::RenderedDiff;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -26,12 +27,29 @@ pub fn render(state: &AppState, frame: &mut Frame) {
             let areas = workspace_layout(main);
             render_status_panel(state, frame, areas.status);
             render_files_panel(state, frame, areas.files);
-            match &state.focus {
-                Focus::Files => {
+            let label = state.active_renderer().map(|r| r.label.as_str());
+            match (&state.focus, state.rendered_shown(), label) {
+                (Focus::Files, Some(rendered), Some(label)) => {
+                    let title = format!(" Diff{} · {label} ", options_note(state.diff_options));
+                    let block = Block::bordered().title(title);
+                    render_rendered(rendered, block, None, frame, areas.diff);
+                }
+                (Focus::Files, ..) => {
                     render_diff_pane(&state.diff, state.diff_options, frame, areas.diff)
                 }
-                Focus::Diff(view) => render_hunk_view(view, state.diff_options, frame, areas.diff),
-                Focus::Blame(view) => match &view.commit {
+                (Focus::Diff(view), Some(rendered), Some(label)) => {
+                    let title = format!(" {} · {label} ", hunk_title(view, state.diff_options));
+                    let block = focused_block(title);
+                    render_rendered(rendered, block, Some(view), frame, areas.diff);
+                }
+                (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
+                    let suffix = format!("{label} (unmapped, built-in shown)");
+                    render_hunk_view(view, state.diff_options, &suffix, frame, areas.diff)
+                }
+                (Focus::Diff(view), ..) => {
+                    render_hunk_view(view, state.diff_options, "", frame, areas.diff)
+                }
+                (Focus::Blame(view), ..) => match &view.commit {
                     Some(commit) => render_commit_view(commit, frame, areas.diff),
                     None => render_blame(view, frame, areas.diff),
                 },
@@ -658,7 +676,7 @@ fn file_lines(files: &[FileEntry], selected: Option<usize>, area: Rect) -> Vec<L
 }
 
 /// Highlight a whole row, not just its text, by padding it to `width`.
-fn reversed(mut line: Line<'static>, width: usize) -> Line<'static> {
+fn reversed(mut line: Line<'_>, width: usize) -> Line<'_> {
     let pad = width.saturating_sub(line.width());
     line.spans.push(Span::raw(" ".repeat(pad)));
     line.style(Style::new().add_modifier(Modifier::REVERSED))
@@ -705,17 +723,20 @@ fn render_diff_pane(diff: &DiffPane, options: DiffOptions, frame: &mut Frame, ar
 /// The focused Diff pane: one side of the file as hunks, the selected one
 /// marked by a reversed `@@` row and a `▌` gutter, so it reads without colour.
 /// In line mode the picked lines are marked that way instead.
-fn render_hunk_view(view: &HunkView, options: DiffOptions, frame: &mut Frame, area: Rect) {
-    let side = match view.side {
-        DiffSide::Index => "Staged",
-        DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
-    };
-    // The mode is in words too, for when the bar is cut off.
-    let mode = match view.lines {
-        Some(_) => " · lines",
-        None => "",
-    };
-    let block = focused_block(format!(" {side}{mode}{} ", options_note(options)));
+/// `suffix`, when set, follows the title after a `·`.
+fn render_hunk_view(
+    view: &HunkView,
+    options: DiffOptions,
+    suffix: &str,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let title = hunk_title(view, options);
+    let block = focused_block(if suffix.is_empty() {
+        format!(" {title} ")
+    } else {
+        format!(" {title} · {suffix} ")
+    });
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = match &view.patch {
@@ -769,6 +790,80 @@ fn render_hunk_view(view: &HunkView, options: DiffOptions, frame: &mut Frame, ar
                 .collect::<Vec<_>>();
             Paragraph::new(lines)
         }
+    };
+    frame.render_widget(pane.block(block), area);
+}
+
+/// The focused pane's title: the side, the mode and the options.
+fn hunk_title(view: &HunkView, options: DiffOptions) -> String {
+    let side = match view.side {
+        DiffSide::Index => "Staged",
+        DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
+    };
+    // The mode is in words too, for when the bar is cut off.
+    let mode = match view.lines {
+        Some(_) => " · lines",
+        None => "",
+    };
+    format!("{side}{mode}{}", options_note(options))
+}
+
+/// A renderer's rows, from the scroll, behind a one-column gutter. With
+/// the Diff pane focused (`view`), the selection's rows get a `▌`, and in
+/// line mode are reversed too, like the built-in view's.
+fn render_rendered(
+    rendered: &RenderedDiff,
+    block: Block<'static>,
+    view: Option<&HunkView>,
+    frame: &mut Frame,
+    area: Rect,
+) {
+    let inner = block.inner(area);
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    let pane = if let Some(error) = &rendered.error {
+        let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
+        lines.push(Line::from(""));
+        lines.push(Line::from("Press R for the built-in diff"));
+        Paragraph::new(lines).wrap(Wrap { trim: false })
+    } else if rendered.rendering() {
+        Paragraph::new("Rendering…")
+    } else if rendered.rows.is_empty() {
+        Paragraph::new("No diff")
+    } else {
+        let selected = view.map(|view| {
+            let picked = view.picked();
+            (
+                rendered.mapped_rows(view.hunk, picked.as_deref()),
+                view.lines.is_some(),
+            )
+        });
+        let lines = rendered
+            .rows
+            .iter()
+            .enumerate()
+            .skip(rendered.scroll)
+            .take(rows)
+            .map(|(at, row)| {
+                let marked = selected
+                    .as_ref()
+                    .is_some_and(|(rows, _)| rows.contains(&at));
+                let gutter = if marked { "▌" } else { " " };
+                let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
+                spans.extend(
+                    row.runs
+                        .iter()
+                        .map(|(style, text)| Span::styled(text.as_str(), *style)),
+                );
+                let line = Line::from(spans);
+                let lines_mode = selected.as_ref().is_some_and(|(_, lines)| *lines);
+                if marked && lines_mode {
+                    reversed(line, width)
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>();
+        Paragraph::new(lines)
     };
     frame.render_widget(pane.block(block), area);
 }
@@ -2562,5 +2657,131 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (5, 3), (20, 4)] {
             draw(&state, w, h);
         }
+    }
+
+    /// Show `text` as renderer `delta` drew the shown diff, mapped to the
+    /// focused view's patch when there is one.
+    fn through_renderer(state: &mut AppState, text: &str) {
+        use crate::external_diff::{ExternalRenderer, map_rows};
+        use crate::rendered_view::RenderedDiff;
+
+        state.renderers = vec![ExternalRenderer {
+            label: "delta".into(),
+            argv: vec!["delta".into()],
+        }];
+        state.renderer = Some(0);
+        let side = match &state.focus {
+            Focus::Diff(view) => view.side,
+            _ => DiffSide::Worktree,
+        };
+        let mut rendered = RenderedDiff::new(1, "a.rs".into(), side);
+        rendered.apply(1, Ok(crate::ansi::parse(text.as_bytes())));
+        if let Focus::Diff(HunkView {
+            patch: Some(patch), ..
+        }) = &state.focus
+        {
+            rendered.map = map_rows(patch, &rendered.rows);
+        }
+        state.rendered = Some(rendered);
+    }
+
+    /// The view's `TWO_HUNKS`, decorated, with old line numbers in a gutter.
+    const DECORATED: &str = "══ a.rs ══\n@1\n\x1b[31m1 │old one\x1b[0m\n\
+        \x1b[32m  │new one\x1b[0m\n2 │same\n@9\n9 │old nine\n  │new nine\n";
+
+    #[test]
+    fn rendered_rows_replace_the_diff_until_cycled_back() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
+        through_renderer(&mut state, DECORATED);
+        let buffer = draw_buffer(&state, 100, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, " Diff · delta "), "{rows:#?}");
+        assert!(contains(&rows, "│ 1 │old one"), "{rows:#?}");
+        assert!(!contains(&rows, "built in"), "{rows:#?}");
+        let (x, y) = find(&buffer, "1 │old one");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Red));
+
+        state.update(crate::intent::AppIntent::CycleRenderer);
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "+built in"), "{rows:#?}");
+        assert!(contains(&rows, " Diff "), "{rows:#?}");
+        assert!(!contains(&rows, "delta"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_line_cursor_marks_only_the_rendered_row_of_its_line() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        if let Focus::Diff(view) = &mut state.focus {
+            view.enter_lines();
+            view.next_line(false);
+        }
+        through_renderer(&mut state, DECORATED);
+        let buffer = draw_buffer(&state, 100, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, " Unstaged · lines · delta "), "{rows:#?}");
+        let marked: Vec<&String> = rows.iter().filter(|r| r.contains('▌')).collect();
+        assert_eq!(marked.len(), 1, "{rows:#?}");
+        assert!(marked[0].contains("▌  │new one"), "{rows:#?}");
+        let (x, y) = find(&buffer, "│new one");
+        assert!(
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn in_hunk_mode_the_hunks_rendered_rows_get_the_gutter() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        through_renderer(&mut state, DECORATED);
+        let rows = draw(&state, 100, 20);
+        for marked in ["▌1 │old one", "▌  │new one", "▌2 │same"] {
+            assert!(contains(&rows, marked), "{marked}: {rows:#?}");
+        }
+        assert!(contains(&rows, " 9 │old nine"), "{rows:#?}");
+        assert!(contains(&rows, " @1"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_side_by_side_rendering_falls_back_to_the_built_in_view() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        if let Focus::Diff(view) = &mut state.focus {
+            view.enter_lines();
+        }
+        // Each row ends with the new side, so `-old one` has no row.
+        through_renderer(&mut state, "old one │ new one\nsame │ same\n");
+        let rows = draw(&state, 100, 20);
+        assert!(
+            contains(
+                &rows,
+                " Unstaged · lines · delta (unmapped, built-in shown) "
+            ),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "▌-old one"), "{rows:#?}");
+        assert!(!contains(&rows, "old one │ new one"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_renderer_error_or_a_render_in_flight_says_so() {
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
+        through_renderer(&mut state, "");
+        if let Some(rendered) = &mut state.rendered {
+            rendered.error = Some("delta: bad \u{FFFD} flag".into());
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "delta: bad \u{FFFD} flag"), "{rows:#?}");
+        assert!(
+            contains(&rows, "Press R for the built-in diff"),
+            "{rows:#?}"
+        );
+
+        if let Some(rendered) = &mut state.rendered {
+            rendered.error = None;
+            rendered.seq = Some(2);
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "Rendering…"), "{rows:#?}");
     }
 }

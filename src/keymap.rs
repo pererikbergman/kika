@@ -3,6 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::{EntryKind, Head};
@@ -329,6 +330,12 @@ fn least_context(state: &AppState) -> Option<&'static str> {
     })
 }
 
+/// The renderer draws the Diff pane, which a blame hides; with none
+/// configured there is nothing to cycle.
+fn renderer_disabled(state: &AppState) -> Option<&'static str> {
+    blame_open(state).or_else(|| state.renderers.is_empty().then_some(NO_RENDERER))
+}
+
 /// Why `b` cannot blame the selected file. An untracked or deleted file
 /// has no lines git can blame.
 pub(crate) fn blame_disabled(state: &AppState) -> Option<&'static str> {
@@ -650,6 +657,15 @@ static REGISTRY: &[Binding] = &[
         label: "whitespace",
         bar: false,
         disabled: blame_open,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CycleRenderer,
+        description: "Cycle diff renderer",
+        label: "renderer",
+        bar: false,
+        disabled: renderer_disabled,
     },
     Binding {
         keys: &[

@@ -66,6 +66,9 @@ pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
     // Start the first load before the first draw, so the frame shows "Loading…"
     // instead of waiting on git.
     dispatch(state, runtime, AppIntent::RefreshStatus);
+    // Renderers only matter once the user cycles to one, so the first
+    // frame never waits on them.
+    runtime.spawn(Effect::FindRenderers);
 }
 
 /// Apply one intent and spawn the effects it asks for, except hand-offs:
