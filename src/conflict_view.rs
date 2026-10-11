@@ -10,12 +10,38 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::conflict::{ConflictView, Row, RowKind};
 use crate::git::diff::sanitize_body;
+use crate::keymap::{KeyPattern, Keymap, registry};
 use crate::view::{PanelLook, clip, reversed};
 
-/// What to do when a file cannot be resolved here.
-pub const ELSEWHERE: &str = "Resolve it in your editor (o) or the merge tool (M).";
+/// What to do when a file cannot be resolved here, with the keys that do
+/// it from where the hint is shown: the merge tool from this view, the
+/// editor from the file list, since `o` here picks a side.
+pub fn elsewhere(keymap: &Keymap) -> String {
+    let key = |id: &str| {
+        registry()
+            .iter()
+            .find(|b| b.id == id)
+            .and_then(|binding| keymap.keys(binding).first())
+            .map(KeyPattern::label)
+    };
+    let tool = match key("conflict.mergetool") {
+        Some(key) => format!("Press {key} to resolve it in your merge tool"),
+        None => "Resolve it in your merge tool".to_string(),
+    };
+    let editor = match (key("conflict.back"), key("files.open")) {
+        (Some(back), Some(open)) => format!(", or {back} then {open} to edit it in your editor."),
+        _ => ", or edit it in your editor from the file list.".to_string(),
+    };
+    tool + &editor
+}
 
-pub fn render(view: &ConflictView, look: &PanelLook, frame: &mut Frame, area: Rect) {
+pub fn render(
+    view: &ConflictView,
+    keymap: &Keymap,
+    look: &PanelLook,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let path = view.path.display();
     let block = match view.loaded {
         Some(_) => {
@@ -29,7 +55,7 @@ pub fn render(view: &ConflictView, look: &PanelLook, frame: &mut Frame, area: Re
     let pane = if let Some(error) = &view.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from(""));
-        lines.push(Line::from(ELSEWHERE));
+        lines.push(Line::from(elsewhere(keymap)));
         Paragraph::new(lines).wrap(Wrap { trim: false })
     } else if view.loaded.is_none() {
         Paragraph::new("Loading…")
@@ -183,7 +209,29 @@ mod tests {
             screen.contains("No conflict markers were found"),
             "{screen}"
         );
-        assert!(screen.contains("Resolve it in your editor (o)"), "{screen}");
+        assert!(
+            screen.contains("Press M to resolve it in your merge"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_hint_names_the_keys_that_work_where_it_is_shown() {
+        use crate::keymap::{Keymap, remap};
+        assert_eq!(
+            super::elsewhere(&Keymap::default()),
+            "Press M to resolve it in your merge tool, or esc then o to edit it in your editor."
+        );
+        let remapped = remap(&[("conflict.mergetool", &["T"]), ("files.open", &["e"])]);
+        assert_eq!(
+            super::elsewhere(&remapped),
+            "Press T to resolve it in your merge tool, or esc then e to edit it in your editor."
+        );
+        let unbound = remap(&[("conflict.mergetool", &[]), ("files.open", &[])]);
+        assert_eq!(
+            super::elsewhere(&unbound),
+            "Resolve it in your merge tool, or edit it in your editor from the file list."
+        );
     }
 
     #[test]

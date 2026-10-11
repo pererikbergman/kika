@@ -353,10 +353,10 @@ global file.
 ## Binding reference
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
-then its enclosing scopes: the status, file list, branch list, commits, diff,
-blame and conflict panels fall back to Workspace, and Workspace falls back to Global. Popups,
-menus and the commit editor do not fall back, so `q` and `?` do not quit or
-open help there; each popup that can stay open has its own `ctrl-c` to quit.
+then its enclosing scopes: the status, file list, branch list, commits, commit
+files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
+back to Global. Popups, menus and the commit editor do not fall back, so `q` and
+`?` do not quit or open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
 `(none)` means a binding has no default keys. `locked` in the last column
 means a repository's `.kika.toml` cannot change it.
@@ -450,6 +450,20 @@ and changes nothing.
 |---|---|---|---|
 | `commits.next` | `j`, `down` | Select the next commit | |
 | `commits.prev` | `k`, `up` | Select the previous commit | |
+| `commits.open` | `enter` | Show the files the selected commit changed | |
+
+### Commit files (a commit opened from the Commits panel)
+
+The diff pane shows the selected file's change in that commit, against its
+first parent. `J`, `K`, `pgdn` and `pgup` scroll it, and `+`, `-` and `w`
+change its context and whitespace as for any diff. Focusing another panel
+goes back to the log.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `commit_files.next` | `j`, `down` | Select the next file and show its change | |
+| `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
 
 ### Diff (hunks)
 

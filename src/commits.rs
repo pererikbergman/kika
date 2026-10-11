@@ -2,6 +2,7 @@
 //! graph, the cursor and the push/merge markers. Pure; `AppState` turns
 //! its answers into effects.
 
+use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
 use crate::git::log::{CommitRow, LogPage, Markers};
 
@@ -50,6 +51,9 @@ pub struct CommitsPanel {
     pub markers_seq: Option<u64>,
     /// Unix time page 0 loaded, which relative dates count from.
     pub loaded_at: i64,
+    /// A commit opened to its files, shown in place of the log. `selected`
+    /// stays where it was, so closing it returns to the same commit.
+    pub open: Option<CommitFilesList>,
 }
 
 impl CommitsPanel {

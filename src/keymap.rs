@@ -198,6 +198,8 @@ pub enum KeyScope {
     Branches,
     /// The Commits panel, with a cursor on the log.
     Commits,
+    /// The Commits panel showing one commit's files.
+    CommitFiles,
     /// The Status panel with focus: controls for the operation in progress.
     Status,
     /// The Diff pane with focus, working on hunks.
@@ -250,6 +252,7 @@ impl KeyScope {
             KeyScope::Files
             | KeyScope::Branches
             | KeyScope::Commits
+            | KeyScope::CommitFiles
             | KeyScope::Status
             | KeyScope::Diff
             | KeyScope::Blame
@@ -282,6 +285,7 @@ impl KeyScope {
             KeyScope::Files => "Files",
             KeyScope::Branches => "Branches",
             KeyScope::Commits => "Commits",
+            KeyScope::CommitFiles => "Commit files",
             KeyScope::Status => "Status",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
@@ -718,6 +722,11 @@ fn least_context(state: &AppState) -> Option<&'static str> {
     diff_hidden(state).or_else(|| {
         (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
     })
+}
+
+/// Enter has no commit to open before the log has rows.
+fn no_commit(state: &AppState) -> Option<&'static str> {
+    state.commits.rows.is_empty().then_some("No commits")
 }
 
 /// With no renderer configured there is nothing to cycle.
@@ -1354,6 +1363,56 @@ static REGISTRY: &[Binding] = &[
         description: "Select the previous commit",
         label: "",
         bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.open",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenCommitFiles,
+        description: "Show the files the selected commit changed",
+        label: "files",
+        bar: true,
+        disabled: no_commit,
+    },
+    Binding {
+        id: "commit_files.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CommitFileNext,
+        description: "Select the next file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commit_files.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CommitFilePrev,
+        description: "Select the previous file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commit_files.back",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('h'), NONE),
+            KeyPattern::any(KeyCode::Left),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CloseCommitFiles,
+        description: "Back to the log, at the same commit",
+        label: "back",
+        bar: true,
         disabled: never,
     },
     Binding {
@@ -2739,7 +2798,8 @@ mod tests {
     }
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
-        // Every binding is enabled on a workspace with a stageable file selected.
+        // Every binding is enabled on a workspace with a stageable file
+        // selected and a commit in the log.
         let mut state = AppState::new(Context::Workspace);
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
@@ -2749,6 +2809,14 @@ mod tests {
             kind: EntryKind::Changed,
         }];
         state.selected = Some(0);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc".into(),
+            short_oid: "abc".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        }];
         match resolve(registry(), &Keymap::default(), focus, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
@@ -2769,6 +2837,32 @@ mod tests {
         assert_eq!(commits(key(KeyCode::Up, none)), Some(CommitPrev));
         assert_eq!(commits(plain('r')), Some(RefreshStatus));
         assert_eq!(commits(plain('q')), Some(Quit));
+    }
+
+    #[test]
+    fn enter_opens_a_commits_files_where_esc_goes_back_instead_of_quitting() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            from(KeyScope::Commits, key(KeyCode::Enter, none)),
+            Some(OpenCommitFiles)
+        );
+        assert_eq!(KeyScope::CommitFiles.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::CommitFiles.title(), "Commit files");
+        let files = |k| from(KeyScope::CommitFiles, k);
+        for k in [
+            key(KeyCode::Esc, none),
+            plain('h'),
+            key(KeyCode::Left, none),
+        ] {
+            assert_eq!(files(k), Some(CloseCommitFiles), "{k:?}");
+        }
+        assert_eq!(files(plain('j')), Some(CommitFileNext));
+        assert_eq!(files(key(KeyCode::Down, none)), Some(CommitFileNext));
+        assert_eq!(files(plain('k')), Some(CommitFilePrev));
+        assert_eq!(files(key(KeyCode::Up, none)), Some(CommitFilePrev));
+        assert_eq!(files(plain('q')), Some(Quit));
+        assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
     }
 
     #[test]
@@ -3836,6 +3930,7 @@ mod tests {
             KeyScope::Files => "files",
             KeyScope::Branches => "branches",
             KeyScope::Commits => "commits",
+            KeyScope::CommitFiles => "commit_files",
             KeyScope::Status => "status",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",

@@ -413,6 +413,7 @@ mod tests {
             orig_path: None,
             side,
             options: Default::default(),
+            commit: None,
         };
         let tracked = request(DiffSide::Worktree);
         let staged = request(DiffSide::Index);

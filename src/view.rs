@@ -87,6 +87,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
     match (&state.focus, state.rendered_shown(), label) {
         // What the selected branch holds, before acting on it.
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
+        // A commit's file, streamed like a working-tree diff; never rendered.
+        (Focus::Commits, ..) if state.commits.open.is_some() => {
+            render_diff_pane(&state.diff, options, &look, frame, area)
+        }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
             render_rendered(rendered, block, Some(view), hint, frame, area);
@@ -97,7 +101,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             render_hunk_view(view, options, &suffix, &look, frame, area)
         }
         (Focus::Diff(view), ..) => render_hunk_view(view, options, "", &look, frame, area),
-        (Focus::Conflict(view), ..) => conflict_view::render(view, &look, frame, area),
+        (Focus::Conflict(view), ..) => {
+            conflict_view::render(view, &state.keymap, &look, frame, area)
+        }
         (Focus::Blame(view), ..) => match &view.commit {
             Some(commit) => render_commit_view(commit, &look, frame, area),
             None => render_blame(view, &look, frame, area),
@@ -3973,6 +3979,29 @@ mod tests {
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "+built in"), "{rows:#?}");
         assert!(contains(&rows, " Diff "), "{rows:#?}");
+        assert!(!contains(&rows, "delta"), "{rows:#?}");
+    }
+
+    #[test]
+    fn an_open_commits_file_shows_its_streamed_diff_not_a_stale_render() {
+        use crate::commit_files::CommitFilesList;
+        use crate::git::commit_files::{CommitId, CommitRange};
+
+        // A commit's file of the same name as the rendered worktree file.
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+in the commit")]);
+        through_renderer(&mut state, DECORATED);
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: None,
+        };
+        state.commits.open = Some(CommitFilesList::begin(range, "abc".into(), 1));
+
+        let rows = draw(&state, 100, 20);
+
+        assert!(contains(&rows, "+in the commit"), "{rows:#?}");
+        assert!(!contains(&rows, "old one"), "{rows:#?}");
         assert!(!contains(&rows, "delta"), "{rows:#?}");
     }
 
