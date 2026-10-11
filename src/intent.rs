@@ -5,11 +5,13 @@ use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
+use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
+use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,6 +157,18 @@ pub enum AppIntent {
     HunkEdited {
         result: Result<Option<Vec<u8>>, String>,
     },
+    /// Time to look for changes made outside Kika.
+    Watch(WatchEvent),
+    /// A refs snapshot finished; `tag` says which one.
+    RefsLoaded {
+        tag: Tag,
+        result: Result<RefsSnapshot, String>,
+    },
+    /// A background fetch finished.
+    FetchFinished {
+        tag: Tag,
+        result: Result<(), String>,
+    },
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.
@@ -215,6 +229,7 @@ impl AppIntent {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => Some(Self::Key(key.into())),
             Event::Resize(width, height) => Some(Self::Resize { width, height }),
+            Event::FocusGained => Some(Self::Watch(WatchEvent::FocusGained)),
             _ => None,
         }
     }
@@ -257,5 +272,14 @@ mod tests {
                 height: 24
             })
         );
+    }
+
+    #[test]
+    fn focus_gained_asks_the_watch_to_look_again() {
+        assert_eq!(
+            AppIntent::from_event(Event::FocusGained),
+            Some(AppIntent::Watch(WatchEvent::FocusGained))
+        );
+        assert_eq!(AppIntent::from_event(Event::FocusLost), None);
     }
 }
