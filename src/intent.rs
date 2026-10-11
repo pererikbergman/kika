@@ -1,7 +1,8 @@
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::effect::Tag;
-use crate::git::diff::DiffChunk;
+use crate::git::blame::BlameLine;
+use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
 use crate::git::status::RepoStatus;
@@ -153,6 +154,30 @@ pub enum AppIntent {
     HunkEdited {
         result: Result<Option<Vec<u8>>, String>,
     },
+    /// Blame the selected file: who last changed each line, and when.
+    OpenBlame,
+    /// A blame load finished; `tag` says which one.
+    BlameLoaded {
+        tag: Tag,
+        result: Result<Vec<BlameLine>, String>,
+    },
+    /// Move the blame cursor a line or a page down or up.
+    BlameNext,
+    BlamePrev,
+    BlamePageDown,
+    BlamePageUp,
+    /// Show the commit that last changed the line under the blame cursor.
+    OpenBlameCommit,
+    /// A commit load finished; `tag` says which one.
+    CommitLoaded {
+        tag: Tag,
+        result: Result<Vec<DiffLine>, String>,
+    },
+    /// Back from the commit to the blame, at the same line.
+    CloseBlameCommit,
+    ScrollCommit(Scroll),
+    /// Back from the blame to the Files panel.
+    CloseBlame,
 }
 
 /// How far to scroll the diff pane.
