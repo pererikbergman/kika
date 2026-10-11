@@ -8,7 +8,7 @@ You review one round of a factory job for terminal UI design. The orchestrator g
 you the job folder, branch and round folder.
 
 Read `factory/project.md`, `<job>/spec.md`, `<job>/build.md`, and the change:
-`git diff main...<branch>` (read-only git commands only; do not switch branches).
+`git diff origin/main...origin/<branch>` (after `git fetch origin`) (read-only git commands only; do not switch branches).
 
 Check the ratatui views:
 - Layout holds at small sizes (80×24) and large ones; nothing overflows or panics

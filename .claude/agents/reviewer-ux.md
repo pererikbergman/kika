@@ -8,7 +8,7 @@ You review one round of a factory job for user experience. The orchestrator give
 the job folder, branch and round folder.
 
 Read `factory/project.md`, `<job>/spec.md`, `<job>/build.md`, and the change:
-`git diff main...<branch>` (read-only git commands only; do not switch branches).
+`git diff origin/main...origin/<branch>` (after `git fetch origin`) (read-only git commands only; do not switch branches).
 
 Kika is keyboard-driven. Check:
 - Key bindings are consistent with existing ones, don't clash, and appear in the

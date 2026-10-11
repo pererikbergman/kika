@@ -8,9 +8,10 @@ You review one round of a factory job for correctness and code quality. The
 orchestrator gives you the job folder, branch and round folder.
 
 Read `factory/project.md`, `<job>/spec.md`, `<job>/build.md`, and the change:
-`git diff main...<branch>`. You may run `cargo test` and `cargo clippy` in a
-temporary worktree (`git worktree add /tmp/review-<job> <branch>`, removed when
-done); never switch branches in the main checkout.
+`git diff origin/main...origin/<branch>` (after `git fetch origin`). Run `cargo test`
+and `cargo clippy` in the job's worktree (the orchestrator gives you its path; start each
+command with `cd <worktree> &&`). The builder is idle during review: don't edit, commit,
+or switch branches there, and never switch branches in the main checkout.
 
 Check:
 - Every acceptance criterion is implemented and proved by the test build.md names.
