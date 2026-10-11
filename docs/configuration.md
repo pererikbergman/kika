@@ -67,8 +67,8 @@ Key names:
 
 - one printable character, such as `a`, `A`, `?` or `+`. Letters are
   case-sensitive: `J` is Shift+J;
-- or one of `space`, `esc`, `enter`, `tab`, `bksp`, `up`, `down`, `left`,
-  `right`, `pgup`, `pgdn`, `home`, `end`;
+- or one of `space`, `esc`, `enter`, `tab`, `shift-tab`, `bksp`, `up`, `down`,
+  `left`, `right`, `pgup`, `pgdn`, `home`, `end`;
 - either with an optional `ctrl-` prefix, written in lower case: `ctrl-s`.
 
 Key changes are picked up when Kika regains focus and when you switch
@@ -225,16 +225,38 @@ command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
 
 The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 
+In csh and tcsh the words after the script start at `$1`, so the name after
+the script becomes `$1` and the first value is `$2`:
+
+```toml
+[[commands]]
+context = "files"
+keys = ["ctrl-l"]
+description = "Page the file's history"
+command = ["tcsh", "-c", "git log --follow -- $2:q | less", "tcsh", "{path}"]
+```
+
+The name is still required, and it must not start with `-`: csh and tcsh keep
+reading options after the script until the first word that is not one, so a
+value in that slot could turn into an option such as `-c`. Kika rejects a
+placeholder there, as it does for every shell. Read the values as `$2:q`,
+`$3:q` and so on, not as `"$2"`, which fails with `Unmatched '"'.` on a value
+that contains a newline. `$2:q` passes the value as one word, with no glob,
+`$` or backtick expansion; an empty prompt answer becomes no word at all. In
+csh and tcsh `-c` takes the very next argument as the script, so put any
+other options before it: `["csh", "-f", "-c", "…", "csh", "{path}"]`.
+
 **Never put a placeholder inside the script text.** The shell would read a
 file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
 `bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
 `pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
 such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
-placeholder in the script, in any argument before it, or in the `$0` slot
-right after it.
+placeholder in the script, in any argument before it, or in the slot right
+after it (`$0`, or `$1` in csh and tcsh).
 The check is cautious: it assumes the last option before the first
-placeholder takes a value, so write the script, then a name for `$0`, then
-the values. Options work in either order around `-c`:
+placeholder takes a value, so write the script, then a name for that slot,
+then the values. In the POSIX-style shells, options work in either order
+around `-c`:
 
 - `["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`
 - `["bash", "-c", "-o", "pipefail", "… \"$1\" …", "bash", "{path}"]`
@@ -303,7 +325,7 @@ means a repository's `.kika.toml` cannot change it.
 | `global.help` | `?` | Show the keys for this panel | |
 | `global.quit` | `q`, `esc`, `ctrl-c` | Quit Kika | locked |
 
-### Workspace (file list, diff and blame)
+### Workspace (every panel: Status, Files, Branches, Commits, Stash, diff and blame)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -317,6 +339,15 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
+| `workspace.focus_status` | `1` | Focus the Status panel | |
+| `workspace.focus_files` | `2` | Focus the Files panel | |
+| `workspace.focus_branches` | `3` | Focus the Branches panel | |
+| `workspace.focus_commits` | `4` | Focus the Commits panel | |
+| `workspace.focus_stash` | `5` | Focus the Stash panel | |
+| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks | |
+| `workspace.next_panel` | `tab` | Focus the next panel | |
+| `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
+| `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
 
 ### File list
 
@@ -427,6 +458,10 @@ means a repository's `.kika.toml` cannot change it.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `help.close` | `?`, `esc` | Close this menu | |
+| `help.down` | `j`, `down` | Scroll the list down | |
+| `help.up` | `k`, `up` | Scroll the list up | |
+| `help.page_down` | `pgdn` | Scroll the list down a page | |
+| `help.page_up` | `pgup` | Scroll the list up a page | |
 
 ### Menus
 

@@ -304,6 +304,8 @@ fn placeholder_named(name: &str) -> Option<Part> {
 /// taken as the script. With no option, the first operand is the script.
 /// The placeholder must come after it. This can refuse a safe command,
 /// never accept one that runs a value as code.
+/// The slot right after the script stays closed for csh/tcsh too, though
+/// their values start at `$1`: they read options there (`-c`, `-n`).
 fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     if !is_shell(&command[0]) {
         return Ok(());
@@ -538,6 +540,13 @@ mod tests {
             &["bash", "-c", "x {{a}} \"$1\"", "{path}"],
             &["mksh", "-c", "x {path}"],
             &["tcsh", "-c", "x {path}"],
+            // tcsh reads options after the script too, until the first word
+            // that is not one, so the slot after the script stays closed.
+            &["tcsh", "-c", "x $1:q", "{path}"],
+            &["csh", "-c", "x $1:q", "{path}"],
+            &["tcsh", "-c", "x $2:q", "-x", "{path}"],
+            &["tcsh", "-f", "{path}"],
+            &["tcsh6", "-c", "x {path}"],
             &["sh", "-{path}"],
             // Versioned names, as distributions install them.
             &["bash5", "-c", "x {path}"],
@@ -575,6 +584,19 @@ mod tests {
         assert!(parse(Panel::Files, &["shellcheck", "{path}"], &[]).is_ok());
         let versioned = ["bash5", "-c", "x \"$1\"", "bash5", "{path}"];
         assert!(parse(Panel::Files, &versioned, &[]).is_ok());
+        // csh/tcsh: a name that is not an option, then the values from `$2`.
+        let filler = ["tcsh", "-c", "x $2:q", "tcsh", "{path}"];
+        assert!(parse(Panel::Files, &filler, &[]).is_ok());
+        let with_prompt = [
+            "csh",
+            "-f",
+            "-c",
+            "x $2:q $3:q",
+            "csh",
+            "{path}",
+            "{prompt1}",
+        ];
+        assert!(parse(Panel::Files, &with_prompt, &["Q"]).is_ok());
     }
 
     #[test]
