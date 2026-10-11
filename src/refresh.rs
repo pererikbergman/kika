@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use crate::git::ops::GitOp;
+use crate::git::remote::RemoteOp;
 
 /// A piece of loaded data that can go stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -93,6 +94,22 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
         selection,
+    }
+}
+
+/// What a fetch, pull or push makes stale. Each moves remote refs, so
+/// ahead/behind and the log's markers; a pull also moves `HEAD` and
+/// changes the worktree.
+pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
+    let scopes: &[Scope] = match op {
+        RemoteOp::Pull => &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits],
+        RemoteOp::Fetch | RemoteOp::Push { .. } => {
+            &[Scope::Branch, Scope::Branches, Scope::Commits]
+        }
+    };
+    RefreshPlan {
+        scopes: expand(scopes.iter().copied().collect()),
+        selection: Selection::KeepPath,
     }
 }
 
@@ -283,6 +300,30 @@ mod tests {
             force: true,
         };
         assert_eq!(plan(&delete).scopes, set(&[Scope::Branches]));
+    }
+
+    #[test]
+    fn remote_ops_reload_the_branch_the_lists_and_a_pull_the_files_too() {
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        for op in [RemoteOp::Fetch, push] {
+            assert_eq!(
+                remote_plan(op).scopes,
+                set(&[Scope::Branch, Scope::Branches, Scope::Commits]),
+                "{op:?}"
+            );
+        }
+        assert_eq!(
+            remote_plan(RemoteOp::Pull).scopes,
+            set(&[
+                Scope::Files,
+                Scope::Branch,
+                Scope::Diff,
+                Scope::Branches,
+                Scope::Commits
+            ])
+        );
     }
 
     #[test]

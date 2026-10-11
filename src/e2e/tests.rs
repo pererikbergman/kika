@@ -1,10 +1,13 @@
 //! Example end-to-end tests: each one drives the real app over a real repo.
 
+use std::ffi::OsStr;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::e2e::harness::Harness;
 use crate::e2e::repo::TestRepo;
 use crate::git::CliRunner;
+use crate::git::fake::{TempDir, git};
 use crate::git::repo_root::resolve_workdir;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
@@ -1329,6 +1332,101 @@ async fn d_then_shift_d_force_deletes_an_unmerged_branch() {
         "{}",
         screen.join("\n")
     );
+}
+
+/// `on_main` with `origin`, a bare repository on disk, as its upstream,
+/// and another clone of it to push from as someone else would.
+fn with_origin() -> (TestRepo, TempDir) {
+    let repo = on_main();
+    let remote = TempDir::new("origin");
+    let bare = remote.path().join("origin.git");
+    let other = remote.path().join("other");
+    git(remote.path(), &["init", "-q", "--bare", "origin.git"]);
+    repo.git([
+        OsStr::new("remote"),
+        OsStr::new("add"),
+        OsStr::new("origin"),
+        bare.as_os_str(),
+    ]);
+    repo.git(["push", "-q", "-u", "origin", "main"]);
+    let clone = [
+        OsStr::new("clone"),
+        OsStr::new("-q"),
+        OsStr::new("-b"),
+        OsStr::new("main"),
+    ];
+    let paths = [bare.as_os_str(), other.as_os_str()];
+    git(remote.path(), &[&clone[..], &paths[..]].concat());
+    for (key, value) in [("user.name", "Other"), ("user.email", "o@example.com")] {
+        git(&other, &["config", key, value]);
+    }
+    (repo, remote)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_p_pushes_and_f_then_p_fetch_and_pull_over_a_file_path() {
+    let (repo, remote) = with_origin();
+    let repo = repo.write("a.txt", "two\n").commit("ahead");
+    let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃origin/main ↑1 ↓0 ");
+
+    app.press_with(KeyCode::Char('P'), KeyModifiers::SHIFT)
+        .await;
+
+    app.assert_screen_contains("┃origin/main ↑0 ↓0 ");
+    let pushed = git(
+        remote.path().join("origin.git").as_path(),
+        &["rev-parse", "main"],
+    );
+    assert_eq!(
+        String::from_utf8(pushed).unwrap().trim(),
+        repo.head().trim()
+    );
+
+    // Someone else pushes; a fetch sees it, a pull brings it in.
+    let other = remote.path().join("other");
+    git(&other, &["pull", "-q"]);
+    std::fs::write(other.join("b.txt"), "theirs\n").unwrap();
+    git(&other, &["add", "b.txt"]);
+    git(&other, &["commit", "-q", "-m", "theirs"]);
+    git(&other, &["push", "-q"]);
+
+    app.press(KeyCode::Char('f')).await;
+    app.assert_screen_contains("┃origin/main ↑0 ↓1 ");
+    assert!(!repo.exists("b.txt"));
+
+    app.press(KeyCode::Char('p')).await;
+    app.assert_screen_contains("┃origin/main ↑0 ↓0 ");
+    assert_eq!(repo.read("b.txt"), "theirs\n");
+    assert_eq!(app.state().popups, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_behind_the_remote_offers_a_lease_and_y_forces_it() {
+    let (repo, remote) = with_origin();
+    let other = remote.path().join("other");
+    std::fs::write(other.join("b.txt"), "theirs\n").unwrap();
+    git(&other, &["add", "b.txt"]);
+    git(&other, &["commit", "-q", "-m", "theirs"]);
+    git(&other, &["push", "-q"]);
+    // Fetched, so the lease knows what it replaces.
+    repo.git(["fetch", "-q"]);
+    let repo = repo.write("a.txt", "mine\n").commit("mine");
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('P'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains("The remote has commits this branch does not.");
+    app.press(KeyCode::Char('y')).await;
+
+    let bare = remote.path().join("origin.git");
+    let pushed = git(bare.as_path(), &["rev-parse", "main"]);
+    assert_eq!(
+        String::from_utf8(pushed).unwrap().trim(),
+        repo.head().trim()
+    );
+    assert_eq!(app.state().popups, []);
 }
 
 /// What `git status` says, branch line included, to compare before and after.

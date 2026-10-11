@@ -35,6 +35,7 @@ mod popup_view;
 mod recent;
 mod recent_list;
 mod refresh;
+mod remote_run;
 mod rendered_view;
 mod sequence_editor;
 mod submodule_list;
@@ -57,7 +58,24 @@ use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
 
 fn main() -> color_eyre::Result<ExitCode> {
-    // Kika as its own rebase's sequence editor: no UI, no git, no config.
+    // Hidden modes, each keyed on its own env var and run before anything
+    // else. Kika sets each only on the one git command that needs it, and
+    // strips both from every other (`CliRunner`), so one never reaches the
+    // other's child.
+    // Run by git or ssh as their askpass program, with the prompt as the
+    // only argument, which `Cli::parse` would reject.
+    #[cfg(unix)]
+    if let Some(socket) = std::env::var_os(git::askpass::SOCKET_ENV) {
+        let prompt = std::env::args_os().nth(1).unwrap_or_default();
+        let kind = std::env::var_os("SSH_ASKPASS_PROMPT");
+        return Ok(git::askpass::client(
+            std::path::Path::new(&socket),
+            &prompt,
+            kind.as_deref(),
+            &mut std::io::stdout().lock(),
+        ));
+    }
+    // Run by git as the sequence editor of Kika's own interactive rebase.
     if let Some(code) = sequence_editor::dispatch() {
         return Ok(code);
     }

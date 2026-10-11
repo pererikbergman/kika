@@ -44,7 +44,8 @@ pub async fn run(
     // Before the first hand-off, whose guard keeps this as the action to restore.
     #[cfg(unix)]
     spawn_interrupt_listener(tx.clone())?;
-    spawn_input_listener(tx, Arc::clone(&input));
+    spawn_input_listener(tx.clone(), Arc::clone(&input));
+    let mut spinner = Spinner::default();
     state.watch.fetch_enabled = config.watch.fetch.is_some();
     // Read by `main` for this repository, so it always applies.
     let loaded = AppIntent::ConfigLoaded {
@@ -58,6 +59,7 @@ pub async fn run(
     boot(&mut state, &runtime, size.width, size.height);
 
     while !state.should_quit {
+        spinner.follow(state.remote.is_some(), &tx);
         terminal.draw(|frame| view::render(&state, frame))?;
         let Some(intent) = rx.recv().await else { break };
         let mut jobs = VecDeque::from(dispatch(&mut state, &runtime, intent));
@@ -285,6 +287,52 @@ impl Drop for Paused<'_> {
     }
 }
 
+/// How often the spinner of a running fetch, pull or push turns.
+pub const SPINNER_TICK: Duration = Duration::from_millis(100);
+
+/// The ticker that turns the spinner, running only while a remote
+/// operation does, so an idle Kika wakes for nothing. `update` stays pure:
+/// it only counts the ticks.
+#[derive(Default)]
+struct Spinner {
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Spinner {
+    /// Start ticking when `running` and not yet ticking; stop otherwise.
+    fn follow(&mut self, running: bool, tx: &UnboundedSender<AppIntent>) {
+        match (&self.task, running) {
+            (None, true) => {
+                let tx = tx.clone();
+                self.task = Some(tokio::spawn(async move {
+                    let mut ticks = tokio::time::interval(SPINNER_TICK);
+                    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+                    ticks.tick().await;
+                    loop {
+                        ticks.tick().await;
+                        if tx.send(AppIntent::SpinnerTick).is_err() {
+                            break;
+                        }
+                    }
+                }));
+            }
+            (Some(task), false) => {
+                task.abort();
+                self.task = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 /// Send a `Watch` intent per interval in `config`, one task each, until
 /// the loop goes away. The first tick is skipped: startup loads already.
 /// Ticks missed while the loop was busy are dropped, not caught up.
@@ -447,6 +495,27 @@ mod tests {
         })
         .await
         .expect("every timer task ends");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_spinner_ticks_only_while_a_remote_operation_runs() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut spinner = Spinner::default();
+
+        spinner.follow(true, &tx);
+        // Following again while running starts no second ticker.
+        spinner.follow(true, &tx);
+        tokio::time::sleep(SPINNER_TICK * 3 + SPINNER_TICK / 2).await;
+        let mut ticks = 0;
+        while let Ok(intent) = rx.try_recv() {
+            assert_eq!(intent, AppIntent::SpinnerTick);
+            ticks += 1;
+        }
+        assert_eq!(ticks, 3);
+
+        spinner.follow(false, &tx);
+        tokio::time::sleep(SPINNER_TICK * 5).await;
+        assert!(rx.try_recv().is_err());
     }
 
     /// Signal actions belong to the whole process; tests that change them
