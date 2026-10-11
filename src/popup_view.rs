@@ -296,7 +296,7 @@ fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(2)).max(1);
     let rows = wrap(&error.message, text_width);
-    let next = wrap(error.next, text_width);
+    let next = wrap(&error.next, text_width);
     let height = u16::try_from(rows.len() + next.len() + 3).unwrap_or(u16::MAX);
     let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
@@ -462,6 +462,28 @@ mod tests {
         let (x, y) = find(&rows, " Could not stage ");
         assert_eq!(buffer[(x - 1, y)].style().fg, Some(Color::Red));
         assert!(rows[23].starts_with(" esc close  ctrl-c quit"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_rejected_edit_draws_the_advice_git_message_and_the_key() {
+        let mut state = workspace(&["a.rs"]);
+        let error = state.edited_hunk_error("error: patch with only garbage at <stdin>:4");
+        state.popups = vec![Popup::Error(error)];
+        let (buffer, rows) = draw(&state, 80, 24);
+        assert!(
+            contains(&rows, " Could not stage the edited hunk "),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "The edited hunk is not a patch git can apply."),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "error: patch with only garbage at <stdin>:4"),
+            "{rows:#?}"
+        );
+        let (x, y) = find(&rows, "Press e to edit the hunk again.");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
 
     #[test]
