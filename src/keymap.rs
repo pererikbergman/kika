@@ -76,7 +76,7 @@ impl KeyPattern {
     }
 
     /// Whether some key press matches both patterns, so one shadows the other.
-    fn overlaps(&self, other: &KeyPattern) -> bool {
+    pub(crate) fn overlaps(&self, other: &KeyPattern) -> bool {
         self.code == other.code
             && match (self.mods, other.mods) {
                 (Mods::Exact(a), Mods::Exact(b)) => a == b,

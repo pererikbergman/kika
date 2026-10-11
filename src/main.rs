@@ -3,6 +3,8 @@ mod blame_view;
 mod cli;
 mod commit_editor;
 mod config;
+#[cfg(test)]
+mod config_docs;
 mod diff_pane;
 mod diff_stream;
 #[cfg(test)]
