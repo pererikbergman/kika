@@ -25,6 +25,8 @@ pub enum AppIntent {
     Quit,
     OpenHelp,
     CloseHelp,
+    /// Scroll the help list, which can be taller than the screen.
+    ScrollHelp(Scroll),
     Resize {
         width: u16,
         height: u16,

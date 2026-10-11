@@ -123,7 +123,10 @@ const COLLAPSED: u16 = 3;
 const EXPANDED_MIN: u16 = 5;
 
 /// A left column beside the diff. `focused` decides the split in Half and
-/// Full; `expanded` is the side panel that fills the column.
+/// Full; `expanded` is the side panel that fills the column. In Normal and
+/// Half the expanded panel always has a rect, zero rows tall when the
+/// column has none. In Full only the focused panel does: with the diff
+/// focused, the expanded side panel is `None` too, as the mode asks.
 pub fn workspace_layout(
     main: Rect,
     focused: Panel,
@@ -166,16 +169,18 @@ pub fn workspace_layout(
 
 /// Rows for each side panel in a column `height` rows tall; 0 is hidden.
 /// The expanded panel takes what the others leave. They collapse to 3 rows
-/// (border and a line), then to 1 (the title on the top border), then the
-/// ones farthest from the expanded panel go. The expanded one never goes.
+/// (border and a line), then 2 (title and a line), then 1 (the title on the
+/// top border), then the ones farthest from the expanded panel go. The
+/// expanded one never goes.
 pub fn left_heights(height: u16, expanded: SidePanel) -> [u16; 5] {
     let others = SidePanel::ALL.len() as u16 - 1;
     let mut heights = [0; 5];
-    let collapsed = if height >= others * COLLAPSED + EXPANDED_MIN {
-        COLLAPSED
-    } else {
-        1
-    };
+    // Shrinking a row at a time would be smoother, but a collapsed panel
+    // has three useful sizes: border and line, title and line, title.
+    let collapsed = (1..=COLLAPSED)
+        .rev()
+        .find(|&rows| height >= others * rows + EXPANDED_MIN)
+        .unwrap_or(1);
     // Nearest first; on a tie the one above stays, so Status outlasts the
     // panels below Files.
     let mut nearest: Vec<SidePanel> = SidePanel::ALL
@@ -227,9 +232,10 @@ mod tests {
     }
 
     #[test]
-    fn a_short_column_collapses_the_others_to_their_title_row() {
+    fn a_short_column_collapses_the_others_to_a_title_and_a_line_then_a_title() {
         assert_eq!(left_heights(12, SidePanel::Files), [1, 8, 1, 1, 1]);
-        assert_eq!(left_heights(16, SidePanel::Status), [12, 1, 1, 1, 1]);
+        assert_eq!(left_heights(16, SidePanel::Status), [8, 2, 2, 2, 2]);
+        assert_eq!(left_heights(13, SidePanel::Files), [2, 5, 2, 2, 2]);
     }
 
     #[test]

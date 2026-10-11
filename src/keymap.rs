@@ -1639,6 +1639,53 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // Out of the bar; the help popup's border says how to scroll.
+    Binding {
+        id: "help.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::LineDown),
+        description: "Scroll the list down",
+        label: "scroll",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::LineUp),
+        description: "Scroll the list up",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::PageDown),
+        description: "Scroll the list down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "help.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::Help,
+        intent: AppIntent::ScrollHelp(Scroll::PageUp),
+        description: "Scroll the list up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
     Binding {
         id: "menu.next",
         keys: &[
@@ -2114,7 +2161,17 @@ mod tests {
         let help = available(registry(), &Keymap::default(), KeyScope::Help, &state);
         let intents: Vec<&AppIntent> = help.iter().map(|(b, _)| &b.intent).collect();
         // Esc is taken by CloseHelp, but q still quits; `?` to open is gone.
-        assert_eq!(intents, [&AppIntent::CloseHelp, &AppIntent::Quit]);
+        assert_eq!(
+            intents,
+            [
+                &AppIntent::CloseHelp,
+                &AppIntent::ScrollHelp(Scroll::LineDown),
+                &AppIntent::ScrollHelp(Scroll::LineUp),
+                &AppIntent::ScrollHelp(Scroll::PageDown),
+                &AppIntent::ScrollHelp(Scroll::PageUp),
+                &AppIntent::Quit
+            ]
+        );
     }
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {

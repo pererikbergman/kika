@@ -267,7 +267,7 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
     // Collapsed, the panel shows only the branch; expanded, the rest.
     app.assert_screen_contains("│work ");
     app.press(KeyCode::Char('1')).await;
-    app.assert_screen_contains("│base ↑2 ↓1 ");
+    app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -276,7 +276,7 @@ async fn a_branch_without_upstream_says_so() {
     let mut app = Harness::start(&repo).await;
     app.assert_screen_contains("│main ");
     app.press(KeyCode::Char('1')).await;
-    app.assert_screen_contains("│no upstream ");
+    app.assert_screen_contains("┃no upstream ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -301,7 +301,7 @@ async fn a_conflicting_merge_shows_merging() {
     let mut app = Harness::start(&repo).await;
     app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│merging ");
+    app.assert_screen_contains("┃merging ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -315,7 +315,7 @@ async fn a_conflicting_rebase_shows_rebasing() {
     let mut app = Harness::start(&repo).await;
     app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│rebasing ");
+    app.assert_screen_contains("┃rebasing ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -326,7 +326,7 @@ async fn committing_in_the_app_updates_the_ahead_count() {
     let repo = repo.write("a.txt", "two\n").stage("a.txt");
     let mut app = Harness::start(&repo).await;
     app.press(KeyCode::Char('1')).await;
-    app.assert_screen_contains("│base ↑0 ↓0 ");
+    app.assert_screen_contains("┃base ↑0 ↓0 ");
 
     app.press(KeyCode::Char('2')).await;
     app.press(KeyCode::Char('c')).await;
@@ -335,7 +335,7 @@ async fn committing_in_the_app_updates_the_ahead_count() {
         .await;
 
     app.press(KeyCode::Char('1')).await;
-    app.assert_screen_contains("│base ↑1 ↓0 ");
+    app.assert_screen_contains("┃base ↑1 ↓0 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]

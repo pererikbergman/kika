@@ -67,9 +67,9 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 }
 
 /// A box of items with the `cursor` row reversed, scrolled so that row is
-/// in view on a short screen, with `▲`/`▼` on the border where rows are cut. A menu below the top has no cursor. A
-/// disabled item is dimmed and italic, not only grey, and says why after
-/// its label.
+/// in view on a short screen, with `▲`/`▼` on the border where rows are
+/// cut. A menu below the top has no cursor. A disabled item is dimmed and
+/// italic, not only grey, and says why after its label.
 fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
     let rows: Vec<(String, bool)> = menu::items(id)

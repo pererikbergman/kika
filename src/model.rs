@@ -19,7 +19,7 @@ use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
-use crate::intent::AppIntent;
+use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{self, KeyScope, Keymap, Resolution};
 use crate::layout::{Panel, ScreenMode, SidePanel};
 use crate::menu;
@@ -171,6 +171,8 @@ pub struct AppState {
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
     pub help_open: bool,
+    /// The first help row shown, for a list taller than the screen.
+    pub help_scroll: usize,
     pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
     pub notice: Option<&'static str>,
@@ -223,6 +225,7 @@ impl AppState {
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
+            help_scroll: 0,
             commit: CommitFlow::Closed,
             notice: None,
             popups: Vec::new(),
@@ -278,7 +281,11 @@ impl AppState {
                     return vec![Effect::InterruptGit];
                 }
             }
-            AppIntent::OpenHelp => self.help_open = true,
+            AppIntent::OpenHelp => {
+                self.help_open = true;
+                self.help_scroll = 0;
+            }
+            AppIntent::ScrollHelp(by) => self.scroll_help(by),
             AppIntent::CloseHelp => self.help_open = false,
             AppIntent::Resize { width, height } => {
                 self.size = (width, height);
@@ -558,6 +565,21 @@ impl AppState {
             ));
             self.config_error = Some(text);
         }
+    }
+
+    /// Move the help list by a line or a page, never past its last screenful.
+    /// The popup's inside is as tall as the diff pane's.
+    fn scroll_help(&mut self, by: Scroll) {
+        let rows = self.pane_rows();
+        let total =
+            keymap::available(keymap::registry(), &self.keymap, self.panel_focus(), self).len();
+        let scroll = match by {
+            Scroll::LineDown => self.help_scroll.saturating_add(1),
+            Scroll::LineUp => self.help_scroll.saturating_sub(1),
+            Scroll::PageDown => self.help_scroll.saturating_add(rows),
+            Scroll::PageUp => self.help_scroll.saturating_sub(rows),
+        };
+        self.help_scroll = scroll.min(total.saturating_sub(rows));
     }
 
     /// The panel keys go to. Panels with no keys of their own yet use the
@@ -4953,6 +4975,32 @@ mod tests {
             }
             other => panic!("expected one LoadBlame, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn help_scrolls_within_its_list_and_opens_at_the_top() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('?'));
+        let total = keymap::available(
+            keymap::registry(),
+            &state.keymap,
+            state.panel_focus(),
+            &state,
+        )
+        .len();
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.help_scroll, 1);
+        press(&mut state, KeyCode::Char('k'));
+        press(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.help_scroll, 0);
+        for _ in 0..10 {
+            press(&mut state, KeyCode::PageDown);
+        }
+        assert_eq!(state.help_scroll, total - state.pane_rows());
+        press(&mut state, KeyCode::Esc);
+        press(&mut state, KeyCode::Char('?'));
+        assert_eq!(state.help_scroll, 0);
+        assert!(!state.should_quit);
     }
 
     #[test]

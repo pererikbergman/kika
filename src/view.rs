@@ -8,7 +8,7 @@ use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
-use crate::keymap::{KeyPattern, available, registry};
+use crate::keymap::{Binding, KeyPattern, KeyScope, available, registry};
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 pub(crate) use crate::layout::screen_layout;
 
@@ -52,7 +52,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         let look = PanelLook::of(state, Panel::Side(side), area);
         let expanded = side == state.expanded;
         match side {
-            SidePanel::Status => render_status_panel(state, &look, frame, area),
+            SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
             SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
             SidePanel::Branches | SidePanel::Commits | SidePanel::Stash => {
                 render_placeholder(side, &look, expanded, frame, area)
@@ -83,7 +83,9 @@ struct PanelLook {
     mode: String,
     /// Columns of title between the corners.
     title_width: usize,
-    /// Only the top border: the panel is one row tall.
+    /// Only the top border: no room for a bottom one.
+    top_only: bool,
+    /// One row: the title is all there is, so it carries the summary.
     title_only: bool,
 }
 
@@ -99,28 +101,52 @@ impl PanelLook {
             focused,
             mode,
             title_width: usize::from(area.width.saturating_sub(2)),
-            title_only: area.height < 3,
+            top_only: area.height < 3,
+            title_only: area.height < 2,
         }
     }
 
-    /// ` [n] <text><mode> `.
+    /// ` [n] <text><mode> `, fitted to the border: the padding goes
+    /// first, then `text` loses its end to `…`. The key and the mode stay.
     fn title(&self, text: &str) -> String {
-        format!(" [{}] {text}{} ", self.number, self.mode)
+        let key = format!("[{}]", self.number);
+        let full = format!(" {key} {text}{} ", self.mode);
+        if width_of(&full) <= self.title_width {
+            return full;
+        }
+        let bare = format!("{key} {text}{}", self.mode);
+        if width_of(&bare) <= self.title_width {
+            return bare;
+        }
+        let room = self
+            .title_width
+            .saturating_sub(width_of(&key) + 1 + width_of(&self.mode));
+        if room == 0 {
+            return elide_right(&key, self.title_width);
+        }
+        format!("{key} {}{}", elide_right(text, room), self.mode)
     }
 
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
     /// the rest of the title fits.
     fn path_title(&self, head: &str, path: &str, tail: &str) -> String {
-        let fixed = width_of(&self.title(&format!("{head} {tail}")));
+        let padded = width_of(&format!(" [{}] {head} {tail}{} ", self.number, self.mode));
+        // With no room for even `…` beside the padding, `title` drops the
+        // padding; give the path that room.
+        let fixed = if padded < self.title_width {
+            padded
+        } else {
+            padded.saturating_sub(2)
+        };
         let room = self.title_width.saturating_sub(fixed).max(1);
         self.title(&format!("{head} {}{tail}", elide_left(path, room)))
     }
 
-    /// The panel's frame with `title`. A one-row panel keeps only its top
-    /// border, so the title still shows.
+    /// The panel's frame with `title`. A panel too short for both borders
+    /// keeps only its top one, so the title still shows.
     fn block(&self, title: String) -> Block<'static> {
         let block = panel_block(title, self.focused);
-        if self.title_only {
+        if self.top_only {
             block.borders(Borders::TOP)
         } else {
             block
@@ -128,12 +154,14 @@ impl PanelLook {
     }
 }
 
-/// A panel's frame: focused, a coloured border and a bold title, so the
-/// panel with the keys stands out; else a dim border.
+/// A panel's frame: focused, a thick coloured border and a bold title, so
+/// the panel with the keys stands out without colour too; else a thin dim
+/// border.
 fn panel_block(title: String, focused: bool) -> Block<'static> {
     let block = Block::bordered().title(title);
     if focused {
         block
+            .border_type(BorderType::Thick)
             .title_style(Style::new().add_modifier(Modifier::BOLD))
             .border_style(Style::new().fg(FOCUSED))
     } else {
@@ -164,9 +192,16 @@ fn render_placeholder(
 /// progress. Names too wide for the panel lose their start to `…`, so the
 /// counts and markers after them stay visible. Blank when no load has
 /// succeeded yet, since the Files panel shows why; dimmed when the last
-/// refresh failed, since it may be out of date. Collapsed, the branch row
-/// is the one that shows.
-fn render_status_panel(state: &AppState, look: &PanelLook, frame: &mut Frame, area: Rect) {
+/// refresh failed, since it may be out of date. Collapsed, one row shows
+/// the branch and any operation in progress; with only a title row, the
+/// title does.
+fn render_status_panel(
+    state: &AppState,
+    look: &PanelLook,
+    expanded: bool,
+    frame: &mut Frame,
+    area: Rect,
+) {
     if area.is_empty() {
         return;
     }
@@ -175,7 +210,24 @@ fn render_status_panel(state: &AppState, look: &PanelLook, frame: &mut Frame, ar
     // Inside a submodule, say which one: the paths from the launch
     // repository. A long one loses its start, so the innermost name shows.
     let location: Vec<&str> = state.repo_stack.iter().map(|p| p.path.display()).collect();
-    let title = if location.is_empty() {
+    let operations: Vec<&str> = state
+        .branch
+        .iter()
+        .flat_map(|b| b.in_progress.iter().map(|&op| doing(op)))
+        .collect();
+    let operations = operations.join(", ");
+    let title = if let (true, Some(branch)) = (look.title_only, &state.branch) {
+        let ops = if operations.is_empty() {
+            String::new()
+        } else {
+            format!(" · {operations}")
+        };
+        look.path_title(
+            "Status ·",
+            &head_name(&branch.head),
+            &format!("{ops}{stale_note}"),
+        )
+    } else if location.is_empty() {
         look.title(&format!("Status{stale_note}"))
     } else {
         look.path_title("Status ·", &location.join("/"), stale_note)
@@ -192,26 +244,49 @@ fn render_status_panel(state: &AppState, look: &PanelLook, frame: &mut Frame, ar
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
-    let head = match &branch.head {
-        Head::Branch(name) => fit(name, "", width),
-        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
-        Head::Unborn(name) => fit(name, " (no commits)", width),
-    };
+    let marker = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    if !expanded {
+        // One row: the branch, and what the repository is in the middle of.
+        let ops = if operations.is_empty() {
+            String::new()
+        } else {
+            format!(" {operations}")
+        };
+        let ops = elide_right(&ops, width.saturating_sub(2));
+        let head = head_line(&branch.head, width.saturating_sub(width_of(&ops)));
+        let line = Line::from(vec![Span::raw(head), Span::styled(ops, marker)]);
+        frame.render_widget(Paragraph::new(line).block(block), area);
+        return;
+    }
+    let head = head_line(&branch.head, width);
     let upstream = match (&branch.upstream, branch.ahead_behind) {
         (None, _) => fit("no upstream", "", width),
         (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
         (Some(name), None) => fit(name, " (gone)", width),
     };
-    let operations: Vec<&str> = branch.in_progress.iter().map(|&op| doing(op)).collect();
     let lines = vec![
         Line::raw(head),
         Line::raw(upstream),
-        Line::styled(
-            elide_right(&operations.join(", "), width),
-            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
+        Line::styled(elide_right(&operations, width), marker),
     ];
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The branch row, fitted to `width` columns.
+fn head_line(head: &Head, width: usize) -> String {
+    match head {
+        Head::Branch(name) => fit(name, "", width),
+        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
+        Head::Unborn(name) => fit(name, " (no commits)", width),
+    }
+}
+
+/// The branch in a few words, for a title.
+fn head_name(head: &Head) -> String {
+    match head {
+        Head::Branch(name) | Head::Unborn(name) => name.clone(),
+        Head::Detached(oid) => format!("detached {}", short_hash(oid)),
+    }
 }
 
 /// `name` then `suffix` in `width` columns. The name gives way first, so
@@ -584,18 +659,64 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
                 Style::new().fg(Color::DarkGray),
             ));
         }
-        let hints = available(registry(), &state.keymap, focus, state)
+        let room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
+        let hints: Vec<(String, bool, bool)> = available(registry(), &state.keymap, focus, state)
             .into_iter()
-            .filter(|(binding, _)| binding.bar);
-        for (i, (binding, disabled)) in hints.enumerate() {
+            .filter(|(binding, _)| binding.bar)
+            .map(|(binding, disabled)| {
+                let key = state.keymap.keys(binding).first().map(KeyPattern::label);
+                let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
+                (hint, disabled.is_some(), pinned(binding))
+            })
+            .collect();
+        for (i, (hint, disabled)) in fit_hints(&hints, room).into_iter().enumerate() {
             let first = i == 0 && note.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
-            let key = state.keymap.keys(binding).first().map(KeyPattern::label);
-            let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
-            spans.push(Span::styled(hint, dimmed_if(disabled.is_some())));
+            spans.push(Span::styled(hint, dimmed_if(disabled)));
         }
     }
     Line::from(spans)
+}
+
+/// Help and quit: the hints that must stay in the bar, however narrow.
+fn pinned(binding: &Binding) -> bool {
+    use crate::intent::AppIntent::{CloseHelp, OpenHelp, Quit};
+    matches!(binding.intent, OpenHelp | CloseHelp | Quit)
+}
+
+/// The hints that fit in `room` columns, each whole. Pinned ones stay;
+/// others go from the end, and a `…` says some went. Each hint takes its
+/// width plus two columns before it.
+fn fit_hints(hints: &[(String, bool, bool)], room: usize) -> Vec<(String, bool)> {
+    let cost = |text: &str| width_of(text) + 2;
+    let all = |h: &(String, bool, bool)| (h.0.clone(), h.1);
+    if hints.iter().map(|h| cost(&h.0)).sum::<usize>() <= room {
+        return hints.iter().map(all).collect();
+    }
+    let mut used = cost("…")
+        + hints
+            .iter()
+            .filter(|h| h.2)
+            .map(|h| cost(&h.0))
+            .sum::<usize>();
+    let mut kept: Vec<(String, bool)> = Vec::new();
+    for hint in hints.iter().filter(|h| !h.2) {
+        if used + cost(&hint.0) > room {
+            break;
+        }
+        used += cost(&hint.0);
+        kept.push(all(hint));
+    }
+    kept.push(("…".to_string(), true));
+    kept.extend(hints.iter().filter(|h| h.2).map(all));
+    // Too narrow even for those: drop from the end, never mid-hint.
+    while used > room {
+        match kept.pop() {
+            Some((text, _)) => used -= cost(&text),
+            None => break,
+        }
+    }
+    kept
 }
 
 fn dimmed_if(disabled: bool) -> Style {
@@ -607,7 +728,8 @@ fn dimmed_if(disabled: bool) -> Style {
 }
 
 /// A popup over `area` listing every key the focused panel answers to.
-/// Rows that do not fit are clipped.
+/// A list taller than the screen scrolls; `▲`/`▼` on the border say rows
+/// are cut, and the bottom one says which key scrolls.
 fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     let focus = state.panel_focus();
     let entries: Vec<(String, &str, bool)> = available(registry(), &state.keymap, focus, state)
@@ -637,7 +759,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             )
         })
         .collect();
-    let title = format!(" Keys: {} ", focus.title());
+    let title = format!(" Keys: {} ", help_name(state));
     let content_width = lines
         .iter()
         .map(Line::width)
@@ -649,11 +771,38 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
         u16::try_from(content_width + 2).unwrap_or(u16::MAX),
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
     );
+    let rows = usize::from(popup.height.saturating_sub(2));
+    let total = lines.len();
+    let first = state.help_scroll.min(total.saturating_sub(rows));
+    let mut block = Block::bordered().title(title);
+    if first > 0 {
+        block = block.title(Line::raw("▲").right_aligned());
+    }
+    if first + rows < total {
+        let down = registry()
+            .iter()
+            .find(|b| b.id == "help.down")
+            .map(|b| {
+                let keys: Vec<String> =
+                    state.keymap.keys(b).iter().map(KeyPattern::label).collect();
+                keys.join("/")
+            })
+            .unwrap_or_default();
+        block = block.title_bottom(Line::raw(format!(" {down} more ▼")).right_aligned());
+    }
     frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
-        popup,
-    );
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
+}
+
+/// What the help list is titled with: the focused panel's name, also for
+/// panels that only have the workspace's keys.
+fn help_name(state: &AppState) -> &'static str {
+    let scope = state.panel_focus();
+    match (scope, state.focus.panel()) {
+        (KeyScope::Workspace, Panel::Side(side)) => side.title(),
+        _ => scope.title(),
+    }
 }
 
 /// A `width` x `height` rectangle centred in `area`, shrunk to fit it.
@@ -677,7 +826,16 @@ fn render_files_panel(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let block = look.block(look.title("Files"));
+    let count = match state.files.len() {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
+    };
+    let title = if look.title_only && state.files_loaded && state.status_error.is_none() {
+        look.title(&format!("Files · {count}"))
+    } else {
+        look.title("Files")
+    };
+    let block = look.block(title);
     let inner = block.inner(area);
     let panel = if let Some(error) = &state.status_error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
@@ -688,10 +846,7 @@ fn render_files_panel(
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
     } else if !expanded {
-        Paragraph::new(match state.files.len() {
-            1 => "1 file".to_string(),
-            n => format!("{n} files"),
-        })
+        Paragraph::new(count)
     } else {
         Paragraph::new(file_lines(&state.files, state.selected, inner))
     };
@@ -1101,7 +1256,7 @@ mod tests {
                 layout.rect(Panel::Side(SidePanel::Files)).map(|r| r.width) == Some(panel)
             })
             .expect("a total width for this panel width");
-        draw(state, width, height)
+        thin(draw(state, width, height))
             .into_iter()
             .map(|row| {
                 let mut used = 0;
@@ -1109,6 +1264,26 @@ mod tests {
                     .take_while(|c| {
                         used += width_of(c.encode_utf8(&mut [0; 4])).max(1);
                         used <= usize::from(panel)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `rows` with the focused panel's thick border drawn thin, for tests
+    /// about what a panel shows rather than how it is framed.
+    fn thin(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .map(|row| {
+                row.chars()
+                    .map(|c| match c {
+                        '┃' => '│',
+                        '━' => '─',
+                        '┏' => '┌',
+                        '┓' => '┐',
+                        '┗' => '└',
+                        '┛' => '┘',
+                        c => c,
                     })
                     .collect()
             })
@@ -1174,7 +1349,7 @@ mod tests {
 
     /// The three text rows inside the expanded Status panel on an 80x24 screen.
     fn panel_rows(state: &AppState) -> Vec<String> {
-        let rows = draw(&status_focused(state), 80, 24);
+        let rows = thin(draw(&status_focused(state), 80, 24));
         assert!(rows[0].contains(" [1] Status "), "{rows:#?}");
         rows[1..4].to_vec()
     }
@@ -1238,7 +1413,7 @@ mod tests {
             Operation::CherryPick,
             Operation::Bisect,
         ];
-        let rows = draw(&status_focused(&on(main)), 200, 24);
+        let rows = thin(draw(&status_focused(&on(main)), 200, 24));
         assert!(
             contains(&rows, "│rebasing, merging, cherry-picking, bisecting"),
             "{rows:#?}"
@@ -1372,7 +1547,7 @@ mod tests {
         state.selected = Some(0);
 
         // 80x24: the others keep a border and a line each.
-        let rows = draw(&state, 80, 24);
+        let rows = thin(draw(&state, 80, 24));
         assert!(rows[0].starts_with("┌ [1] Status "), "{rows:#?}");
         assert!(rows[1].starts_with("│main "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
@@ -1380,8 +1555,9 @@ mod tests {
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
 
         // 80x12: only their titles, on a top border.
-        let rows = draw(&state, 80, 12);
-        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        // A title row carries the branch, the panel's one line.
+        let rows = thin(draw(&state, 80, 12));
+        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
         let (title, first) = files_rows(&rows);
         assert_eq!(title, 1, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
@@ -1391,8 +1567,8 @@ mod tests {
         }
 
         // 80x7: the farthest go first; Files keeps its rows.
-        let rows = draw(&state, 80, 7);
-        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        let rows = thin(draw(&state, 80, 7));
+        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
         assert!(!contains(&rows, "[3] Branches"), "{rows:#?}");
         assert!(!contains(&rows, "[5] Stash"), "{rows:#?}");
         let (title, first) = files_rows(&rows);
@@ -1407,12 +1583,12 @@ mod tests {
         main.ahead_behind = Some((0, 3));
         let mut state = on(main);
         state.files = vec![file("a.rs")];
-        let rows = draw(&state, 80, 24);
+        let rows = thin(draw(&state, 80, 24));
         assert!(rows[1].starts_with("│main "), "{rows:#?}");
         assert!(!contains(&rows, "origin/main"), "{rows:#?}");
 
         // Height 10: 9 rows over the bar; four title rows leave Status five.
-        let rows = draw(&status_focused(&state), 80, 10);
+        let rows = thin(draw(&status_focused(&state), 80, 10));
         assert!(rows[1].starts_with("│main "), "{rows:#?}");
         assert!(rows[2].starts_with("│origin/main ↑0 ↓3 "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
@@ -1652,7 +1828,7 @@ mod tests {
     fn workspace_shows_loading_before_status_arrives() {
         let mut state = AppState::new(Context::Workspace);
         state.busy = 1;
-        let rows = draw(&state, 40, 13);
+        let rows = thin(draw(&state, 40, 13));
         assert!(rows[1].contains(" Files "), "{rows:#?}");
         assert!(rows[2].starts_with("│Loading…"), "{rows:#?}");
         assert!(rows[12].contains("loading…"), "{rows:#?}");
@@ -1668,13 +1844,13 @@ mod tests {
             worktree: '?',
             kind: EntryKind::Untracked,
         });
-        let rows = draw(&state, 80, 24);
+        let rows = thin(draw(&state, 80, 24));
         assert!(contains(&rows, "│R  old.txt → new.txt "), "{rows:#?}");
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
             rows[23].starts_with(
-                " space stage  a all  c commit  d discard  m menu  r refresh  bksp parent  ? keys"
+                " space stage  a all  c commit  d discard  m menu  r refresh  …  ? keys  q quit"
             ),
             "{rows:#?}"
         );
@@ -2664,6 +2840,11 @@ mod tests {
         let (border, title) = frame_style(&buffer, "[2] Files");
         assert_eq!(border.fg, Some(FOCUSED));
         assert!(title.add_modifier.contains(Modifier::BOLD));
+        // Without colour too: the focused frame is thick, the others thin.
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "┏ [2] Files ━"), "{rows:#?}");
+        assert!(contains(&rows, "┌ [1] Status ─"), "{rows:#?}");
+        assert!(contains(&rows, "┌ [0] Diff "), "{rows:#?}");
         for other in ["[1] Status", "[3] Branches", "[5] Stash", "[0] Diff"] {
             let (border, title) = frame_style(&buffer, other);
             assert_eq!(border.fg, Some(Color::DarkGray), "{other}");
@@ -2778,11 +2959,11 @@ mod tests {
             80,
             24,
         );
-        assert!(contains(&rows, "┌ [2] Files · half ─"), "{rows:#?}");
+        assert!(contains(&rows, "┏ [2] Files · half ━"), "{rows:#?}");
         assert!(contains(&rows, "┌ [0] Diff a.rs · 1/1 ─"), "{rows:#?}");
         let rows = draw(&focused_on(Panel::Diff, ScreenMode::Full), 80, 24);
         assert!(
-            rows[0].starts_with("┌ [0] Unstaged a.rs · full ─"),
+            rows[0].starts_with("┏ [0] Unstaged a.rs · full ━"),
             "{rows:#?}"
         );
         assert!(!contains(&rows, "[2] Files"), "{rows:#?}");
@@ -2821,7 +3002,7 @@ mod tests {
     fn a_line_cut_at_the_pane_edge_ends_in_a_marker() {
         let long = format!("+{}", "x".repeat(300));
         let state = with_diff(vec![diff_line(LineKind::Added, &long)]);
-        let rows = draw(&state, 80, 12);
+        let rows = thin(draw(&state, 80, 12));
         // The diff pane is 53 wide: 51 columns inside.
         assert!(
             contains(&rows, &format!("│+{}…│", "x".repeat(49))),
@@ -2830,14 +3011,14 @@ mod tests {
 
         let bytes =
             format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n{long}\n");
-        let rows = draw(&hunks(DiffSide::Worktree, bytes.as_bytes()), 80, 12);
+        let rows = thin(draw(&hunks(DiffSide::Worktree, bytes.as_bytes()), 80, 12));
         assert!(contains(&rows, "x…│"), "{rows:#?}");
 
-        let rows = draw(
+        let rows = thin(draw(
             &blamed(vec![blame_line(OID, "Ann", 1, &"y".repeat(300))], 0),
             80,
             12,
-        );
+        ));
         assert!(contains(&rows, "y…│"), "{rows:#?}");
     }
 
@@ -2891,6 +3072,151 @@ mod tests {
         );
         assert!(row("Zoom the focused panel").contains(" z "), "{rows:#?}");
         assert!(row("Open the actions menu").contains(" m "), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_scrolls_at_80_by_24_and_says_more_is_below() {
+        use crate::intent::{AppIntent, Scroll};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 24,
+        });
+        state.update(AppIntent::OpenHelp);
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, " j/↓ more ▼"), "{rows:#?}");
+        assert!(!contains(&rows, "▲"), "{rows:#?}");
+        assert!(!contains(&rows, "Focus the next panel"), "{rows:#?}");
+
+        state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "▲"), "{rows:#?}");
+        assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+        for needle in [
+            "Focus the next panel",
+            "Zoom the focused panel",
+            "Quit Kika",
+        ] {
+            assert!(contains(&rows, needle), "{needle}: {rows:#?}");
+        }
+        // The bar still says how to close it and quit.
+        assert!(rows[23].starts_with(" ? close  q quit"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_from_a_side_panel_is_titled_with_its_name() {
+        let mut state = loaded(vec![]);
+        state.help_open = true;
+        for side in [SidePanel::Status, SidePanel::Branches, SidePanel::Stash] {
+            state.focus = Focus::side(side);
+            let rows = draw(&state, 80, 24);
+            let title = format!(" Keys: {} ", side.title());
+            assert!(contains(&rows, &title), "{rows:#?}");
+        }
+    }
+
+    #[test]
+    fn the_bar_drops_whole_hints_and_keeps_help_and_quit() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let all = [
+            "space stage",
+            "a all",
+            "c commit",
+            "d discard",
+            "m menu",
+            "r refresh",
+            "bksp parent",
+            "? keys",
+            "q quit",
+            "…",
+        ];
+        for width in [100, 80, 60, 40, 24] {
+            let rows = draw(&state, width, 10);
+            let bar = rows[9].trim();
+            assert!(bar.ends_with("? keys  q quit"), "{width}: {bar:?}");
+            for hint in bar.split("  ") {
+                assert!(all.contains(&hint), "{width}: {hint:?} in {bar:?}");
+            }
+            assert_eq!(bar.contains('…'), width < 87, "{width}: {bar:?}");
+        }
+        // Narrower than help and quit together: whole hints only, still.
+        let rows = draw(&state, 10, 10);
+        assert_eq!(rows[9].trim(), "…", "{rows:#?}");
+    }
+
+    #[test]
+    fn titles_fit_their_panel_below_80_by_24() {
+        use crate::layout::ScreenMode;
+        for (w, h, focus, mode) in [
+            (60, 20, Panel::Diff, ScreenMode::Half),
+            (40, 12, Panel::Side(SidePanel::Files), ScreenMode::Normal),
+            (40, 12, Panel::Side(SidePanel::Branches), ScreenMode::Half),
+            (30, 24, Panel::Side(SidePanel::Commits), ScreenMode::Normal),
+        ] {
+            let state = focused_on(focus, mode);
+            let buffer = draw_buffer(&state, w, h);
+            let [main, _] = screen_layout(Rect::new(0, 0, w, h));
+            let layout = workspace_layout(main, focus, state.expanded, mode);
+            for panel in PANELS {
+                let Some(rect) = layout.rect(panel) else {
+                    continue;
+                };
+                let row = row_text(&buffer, rect.y, rect.x..rect.x + rect.width);
+                let key = format!("[{}]", panel.number());
+                assert!(row.contains(&key), "{w}x{h} {focus:?}: {row:?}");
+                // Whole, or cut on purpose with `…`, the mode note kept.
+                let name = match panel {
+                    Panel::Side(side) => side.title(),
+                    Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
+                    Panel::Diff => "Diff",
+                };
+                assert!(
+                    row.contains(name) || row.contains('…'),
+                    "{w}x{h} {focus:?}: {row:?}"
+                );
+                if state.focus.panel() == panel && mode == ScreenMode::Half {
+                    assert!(row.contains("· half"), "{w}x{h}: {row:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_title_row_carries_the_panels_one_line() {
+        let mut state = status_focused(&loaded((0..12).map(|i| file(&format!("f{i}"))).collect()));
+        let rows = draw(&state, 80, 12);
+        assert!(contains(&rows, " [2] Files · 12 files ─"), "{rows:#?}");
+        let mut merging = branch(Head::Branch("topic".into()));
+        merging.in_progress = vec![Operation::Merge];
+        state.branch = Some(merging);
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = draw(&state, 100, 12);
+        assert!(
+            rows[0].starts_with(" [1] Status · topic · merging ─"),
+            "{rows:#?}"
+        );
+        // Narrower, the branch name gives way first.
+        let rows = draw(&state, 80, 12);
+        assert!(
+            rows[0].starts_with("[1] Status · …c · merging"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_collapsed_status_still_shows_an_operation_in_progress() {
+        let mut main = branch(Head::Branch("main".into()));
+        main.in_progress = vec![Operation::Rebase];
+        let state = on(main);
+        let buffer = draw_buffer(&state, 80, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
+        let (x, y) = find(&buffer, "rebasing");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
 
     const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
