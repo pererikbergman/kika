@@ -2921,7 +2921,12 @@ mod tests {
             };
             run(mark, &head, false);
             steps += 1;
-            assert!(steps < 8, "the bisect never ended");
+            assert!(
+                steps < 8,
+                "the bisect never ended; {}:\n{}",
+                String::from_utf8_lossy(&git(dir, &["--version"])),
+                String::from_utf8_lossy(&std::fs::read(git_dir.join("BISECT_LOG")).unwrap())
+            );
         };
         assert_eq!(found.commit, commits[4]);
         assert_eq!(found.subject, "commit 5");

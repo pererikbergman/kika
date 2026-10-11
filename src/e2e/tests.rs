@@ -1837,7 +1837,12 @@ async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
         let mark = if repo.exists("bug") { 'b' } else { 'g' };
         app.press(KeyCode::Char(mark)).await;
         steps += 1;
-        assert!(steps < 8, "the bisect never ended");
+        assert!(
+            steps < 8,
+            "the bisect never ended; {}:\n{}",
+            repo.read(".git/BISECT_LOG"),
+            app.screen().join("\n")
+        );
     }
     app.assert_screen_contains(&format!("Bisect found {}: commit 5", &fifth[..7]));
     app.assert_screen_contains(&format!("Found: {} commit 5", &fifth[..7]));
