@@ -182,6 +182,8 @@ pub struct AppState {
     /// Sequence of the Git operation in flight. Operations run one at a
     /// time so two quick presses never race for `index.lock`.
     pub op_seq: Option<u64>,
+    /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
+    pub commit_on_terminal: bool,
     /// The last operation's failure, or why one was refused.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
@@ -250,6 +252,7 @@ impl AppState {
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
             op_seq: None,
+            commit_on_terminal: false,
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
@@ -1830,6 +1833,7 @@ impl AppState {
             return vec![];
         }
         if needs_terminal(&op, facts.as_ref()) {
+            self.commit_on_terminal = true;
             vec![Effect::HandOff(HandOff::Commit { tag, op })]
         } else {
             vec![Effect::RunOp { tag, op }]
@@ -1929,6 +1933,7 @@ impl AppState {
     /// Leave `Running`: closed on success, `Failed` with the output on
     /// failure, back to `Editing` when there is no result to show.
     fn end_commit(&mut self, result: Option<Result<(), String>>) {
+        self.commit_on_terminal = false;
         let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
         let CommitFlow::Running(editor) = commit else {
             self.commit = commit;
@@ -3820,6 +3825,20 @@ mod tests {
             assert_eq!(state.op_seq, Some(tag.seq));
             assert!(matches!(state.commit, CommitFlow::Running(_)));
         }
+    }
+
+    #[test]
+    fn only_a_handed_over_commit_is_marked_as_on_the_terminal_until_it_ends() {
+        let (mut state, tag, op) = submitted();
+        assert!(!state.commit_on_terminal);
+        state.update(probed(tag, &op, signing()));
+        assert!(state.commit_on_terminal);
+        state.update(finished(tag, op, Err("no".into())));
+        assert!(!state.commit_on_terminal);
+
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, Some(PromptFacts::default())));
+        assert!(!state.commit_on_terminal);
     }
 
     #[test]

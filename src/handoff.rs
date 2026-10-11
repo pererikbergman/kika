@@ -166,7 +166,10 @@ fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> R
         }
         None => None,
     };
-    let cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    let mut cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    if let Some(tty) = gpg_tty(std::env::var_os("GPG_TTY"), stdin_tty()) {
+        cmd = cmd.env("GPG_TTY", tty);
+    }
     let exit = runner
         .run_attached(&cmd)
         .map_err(|e| io_error("Could not start git commit", &e))?;
@@ -178,6 +181,39 @@ fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> R
         "git commit exited with {}; its output was shown in the terminal",
         exit.status
     ))
+}
+
+/// The `GPG_TTY` to give an attached commit: Kika's terminal, `tty`, unless
+/// the user already set one (an empty value counts as unset). Git pipes
+/// gpg's stdin, so a terminal pinentry cannot find the terminal by itself;
+/// without this, signing fails with "Operation cancelled".
+fn gpg_tty(existing: Option<OsString>, tty: Option<OsString>) -> Option<OsString> {
+    match existing {
+        Some(value) if !value.is_empty() => None,
+        _ => tty,
+    }
+}
+
+/// The name of the terminal on Kika's stdin, such as `/dev/ttys003`; `None`
+/// when stdin is not a terminal.
+#[cfg(unix)]
+fn stdin_tty() -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is valid for `buf.len()` bytes, and `ttyname_r` writes
+    // a NUL-terminated name within it or returns an error.
+    let failed = unsafe { libc::ttyname_r(0, buf.as_mut_ptr().cast(), buf.len()) };
+    if failed != 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0)?;
+    Some(std::ffi::OsStr::from_bytes(&buf[..len]).to_os_string())
+}
+
+#[cfg(not(unix))]
+fn stdin_tty() -> Option<OsString> {
+    None
 }
 
 /// Keep the terminal as git left it until the user presses Enter.
@@ -675,6 +711,24 @@ mod tests {
         assert!(!dir.exists(), "{dir:?} was left behind");
         // Stdin is the terminal's, never bytes from Kika.
         assert_eq!(runner.inputs(), [None]);
+    }
+
+    #[test]
+    fn gpg_tty_is_kikas_terminal_unless_the_user_set_one() {
+        let tty = || Some(OsString::from("/dev/ttys003"));
+        assert_eq!(gpg_tty(None, tty()), tty());
+        assert_eq!(gpg_tty(Some("".into()), tty()), tty());
+        assert_eq!(gpg_tty(Some("/dev/pts/7".into()), tty()), None);
+        assert_eq!(gpg_tty(None, None), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_tty_names_a_device_or_nothing() {
+        // Under a test runner stdin may or may not be a terminal.
+        if let Some(name) = stdin_tty() {
+            assert!(name.to_string_lossy().starts_with("/dev/"), "{name:?}");
+        }
     }
 
     #[test]
