@@ -63,6 +63,7 @@ pub fn runs_attached(op: &GitOp) -> bool {
         GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
         | GitOp::Revert(_)
+        | GitOp::CherryPick(_)
         | GitOp::Continue(_)
         | GitOp::Skip(_) => true,
         // The merge tool is the user's own program on the terminal.
@@ -172,6 +173,7 @@ mod tests {
             GitOp::Skip(Operation::CherryPick),
             GitOp::MergeTool("a.txt".into()),
             GitOp::Revert(oid()),
+            GitOp::CherryPick(vec![oid()]),
             GitOp::Continue(Operation::Revert),
             GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
         ];
