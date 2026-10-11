@@ -24,8 +24,9 @@ pub struct ExternalRenderer {
     pub argv: Vec<OsString>,
 }
 
-/// What `R` says when there is nothing to cycle through.
-pub const NO_RENDERER: &str = "No diff renderer configured";
+/// What `R` says when there is nothing to cycle through, and where
+/// renderers are found.
+pub const NO_RENDERER: &str = "No renderer: set KIKA_DIFF_PAGER or global pager.diff/core.pager";
 
 /// The most diff fed to a renderer, and the most output taken back.
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -286,7 +287,8 @@ fn drain(
     rx
 }
 
-/// Stop the renderer and everything it started, then reap it.
+/// Stop the renderer and everything it started, then reap it. `child.kill`
+/// alone would leave the renderer's own children holding the pipes.
 fn kill(child: &mut Child) {
     #[cfg(unix)]
     {

@@ -23,12 +23,20 @@ impl StyledRow {
 const ESC: u8 = 0x1b;
 const BEL: u8 = 0x07;
 
+/// The most rows kept. Output of mostly newlines would otherwise cost a
+/// row, and a map entry, per byte.
+pub const MAX_ROWS: usize = 200_000;
+
 /// Split `bytes` into rows on `\n`, dropping a trailing `\r`, and keep only
-/// the styles of SGR sequences.
+/// the styles of SGR sequences. Rows past [`MAX_ROWS`] are dropped.
 pub fn parse(bytes: &[u8]) -> Vec<StyledRow> {
+    parse_capped(bytes, MAX_ROWS)
+}
+
+fn parse_capped(bytes: &[u8], max_rows: usize) -> Vec<StyledRow> {
     let mut parser = Parser::default();
     let mut at = 0;
-    while at < bytes.len() {
+    while at < bytes.len() && parser.rows.len() < max_rows {
         match bytes[at] {
             ESC => at = parser.escape(bytes, at),
             b'\n' => {
@@ -41,7 +49,7 @@ pub fn parse(bytes: &[u8]) -> Vec<StyledRow> {
             }
         }
     }
-    if !parser.text.is_empty() || !parser.row.runs.is_empty() {
+    if parser.rows.len() < max_rows && (!parser.text.is_empty() || !parser.row.runs.is_empty()) {
         parser.end_row();
     }
     parser.rows
@@ -332,6 +340,13 @@ mod tests {
         let rows = parse(b"a\x1b[12\nb\x1b]unterminated\nc");
         no_controls(&rows);
         assert_eq!(texts(&rows), ["a", "b"]);
+    }
+
+    #[test]
+    fn rows_past_the_cap_are_dropped() {
+        assert_eq!(texts(&parse_capped(b"a\nb\nc\nd", 2)), ["a", "b"]);
+        assert_eq!(texts(&parse_capped(b"a\nb", 2)), ["a", "b"]);
+        assert_eq!(parse(&vec![b'\n'; MAX_ROWS + 10]).len(), MAX_ROWS);
     }
 
     #[test]

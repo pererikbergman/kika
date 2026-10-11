@@ -28,11 +28,20 @@ pub fn render(state: &AppState, frame: &mut Frame) {
             render_status_panel(state, frame, areas.status);
             render_files_panel(state, frame, areas.files);
             let label = state.active_renderer().map(|r| r.label.as_str());
+            // R steps to the next renderer before it gets back to built-in.
+            let last = state
+                .renderer
+                .is_some_and(|i| i + 1 >= state.renderers.len());
+            let hint = if last {
+                "Press R for the built-in diff"
+            } else {
+                "Press R for the next renderer"
+            };
             match (&state.focus, state.rendered_shown(), label) {
                 (Focus::Files, Some(rendered), Some(label)) => {
                     let title = format!(" Diff{} · {label} ", options_note(state.diff_options));
                     let block = Block::bordered().title(title);
-                    render_rendered(rendered, block, None, frame, areas.diff);
+                    render_rendered(rendered, block, None, hint, frame, areas.diff);
                 }
                 (Focus::Files, ..) => {
                     render_diff_pane(&state.diff, state.diff_options, frame, areas.diff)
@@ -40,10 +49,11 @@ pub fn render(state: &AppState, frame: &mut Frame) {
                 (Focus::Diff(view), Some(rendered), Some(label)) => {
                     let title = format!(" {} · {label} ", hunk_title(view, state.diff_options));
                     let block = focused_block(title);
-                    render_rendered(rendered, block, Some(view), frame, areas.diff);
+                    render_rendered(rendered, block, Some(view), hint, frame, areas.diff);
                 }
                 (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
-                    let suffix = format!("{label} (unmapped, built-in shown)");
+                    // Short, so it fits the pane's title at 80 columns.
+                    let suffix = format!("{label} (unmapped)");
                     render_hunk_view(view, state.diff_options, &suffix, frame, areas.diff)
                 }
                 (Focus::Diff(view), ..) => {
@@ -815,15 +825,16 @@ fn render_rendered(
     rendered: &RenderedDiff,
     block: Block<'static>,
     view: Option<&HunkView>,
+    hint: &str,
     frame: &mut Frame,
     area: Rect,
 ) {
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = if let Some(error) = &rendered.error {
-        let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
-        lines.push(Line::from(""));
-        lines.push(Line::from("Press R for the built-in diff"));
+        // The way out first, so a long stderr cannot push it off the pane.
+        let mut lines = vec![Line::from(hint.to_string()), Line::from("")];
+        lines.extend(error.lines().map(Line::from));
         Paragraph::new(lines).wrap(Wrap { trim: false })
     } else if rendered.rendering() {
         Paragraph::new("Rendering…")
@@ -849,11 +860,7 @@ fn render_rendered(
                     .is_some_and(|(rows, _)| rows.contains(&at));
                 let gutter = if marked { "▌" } else { " " };
                 let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
-                spans.extend(
-                    row.runs
-                        .iter()
-                        .map(|(style, text)| Span::styled(text.as_str(), *style)),
-                );
+                spans.extend(elide_runs(&row.runs, width.saturating_sub(1)));
                 let line = Line::from(spans);
                 let lines_mode = selected.as_ref().is_some_and(|(_, lines)| *lines);
                 if marked && lines_mode {
@@ -866,6 +873,44 @@ fn render_rendered(
         Paragraph::new(lines)
     };
     frame.render_widget(pane.block(block), area);
+}
+
+/// `runs` fitted to `max` columns: a row too wide (a renderer that
+/// ignores the width, or a pane that shrank) ends in `…`, never half a
+/// wide glyph.
+fn elide_runs(runs: &[(Style, String)], max: usize) -> Vec<Span<'_>> {
+    let total: usize = runs.iter().map(|(_, text)| width_of(text)).sum();
+    if total <= max {
+        return runs
+            .iter()
+            .map(|(style, text)| Span::styled(text.as_str(), *style))
+            .collect();
+    }
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (style, text) in runs {
+        let room = max.saturating_sub(used);
+        if width_of(text) < room {
+            used += width_of(text);
+            spans.push(Span::styled(text.as_str(), *style));
+            continue;
+        }
+        // The row goes on past this run, so it ends here, in `…`.
+        let mut kept = 0;
+        let cut: String = text
+            .chars()
+            .take_while(|c| {
+                kept += width_of(c.encode_utf8(&mut [0; 4]));
+                kept < room
+            })
+            .chain(std::iter::once('…'))
+            .collect();
+        if max > 0 {
+            spans.push(Span::styled(cut, *style));
+        }
+        break;
+    }
+    spans
 }
 
 /// Columns the author takes in a blame row; longer names are elided.
@@ -2753,10 +2798,7 @@ mod tests {
         through_renderer(&mut state, "old one │ new one\nsame │ same\n");
         let rows = draw(&state, 100, 20);
         assert!(
-            contains(
-                &rows,
-                " Unstaged · lines · delta (unmapped, built-in shown) "
-            ),
+            contains(&rows, " Unstaged · lines · delta (unmapped) "),
             "{rows:#?}"
         );
         assert!(contains(&rows, "▌-old one"), "{rows:#?}");
@@ -2783,5 +2825,90 @@ mod tests {
         }
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "Rendering…"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_row_wider_than_the_pane_ends_in_an_ellipsis() {
+        let mut state = with_diff(vec![]);
+        let wide = format!(
+            "\x1b[31m{}\x1b[0m{}\n日本語日本語日本語日本語日本語\n",
+            "a".repeat(20),
+            "b".repeat(20)
+        );
+        through_renderer(&mut state, &wide);
+        // 40 columns: the Diff pane's inside is 26 wide, 25 after the gutter.
+        let rows = draw(&state, 40, 10);
+        let expected = format!("│ {}{}…│", "a".repeat(20), "b".repeat(4));
+        assert!(contains(&rows, &expected), "{rows:#?}");
+        // No half glyph at the edge: 12 two-column glyphs, then `…`.
+        assert!(contains(&rows, "│ 日本語日本語日本語日本語…"), "{rows:#?}");
+        let wider = draw(&state, 100, 10);
+        let whole = format!("{}{}", "a".repeat(20), "b".repeat(20));
+        assert!(contains(&wider, &whole), "{wider:#?}");
+    }
+
+    #[test]
+    fn the_way_out_of_an_error_stays_on_screen_and_names_the_next_step() {
+        let mut state = with_diff(vec![]);
+        through_renderer(&mut state, "");
+        let long: Vec<String> = (0..60).map(|i| format!("stderr line {i}")).collect();
+        if let Some(rendered) = &mut state.rendered {
+            rendered.error = Some(long.join("\n"));
+        }
+        let rows = draw(&state, 80, 24);
+        assert!(
+            contains(&rows, "Press R for the built-in diff"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "stderr line 0"), "{rows:#?}");
+
+        state
+            .renderers
+            .push(crate::external_diff::ExternalRenderer {
+                label: "riff".into(),
+                argv: vec!["riff".into()],
+            });
+        let rows = draw(&state, 80, 24);
+        assert!(
+            contains(&rows, "Press R for the next renderer"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_a_renderer_active() {
+        let text: String = (0..50)
+            .map(|i| format!("\x1b[32m{i} │日本 one {}\x1b[0m\n", "x".repeat(i)))
+            .collect();
+        let mut files = with_diff(vec![]);
+        through_renderer(&mut files, &text);
+        let mut hunk = hunks(DiffSide::Worktree, TWO_HUNKS);
+        through_renderer(&mut hunk, DECORATED);
+        let mut lines = hunk.clone();
+        if let Focus::Diff(view) = &mut lines.focus {
+            view.enter_lines();
+        }
+        through_renderer(&mut lines, DECORATED);
+        let mut fallback = lines.clone();
+        through_renderer(&mut fallback, "old one │ new one\n");
+        let mut error = files.clone();
+        if let Some(rendered) = &mut error.rendered {
+            rendered.error = Some("bad\nnews".into());
+        }
+        let mut rendering = files.clone();
+        if let Some(rendered) = &mut rendering.rendered {
+            rendered.rows.clear();
+            rendered.seq = Some(9);
+        }
+        for mut state in [files, hunk, lines, fallback, error, rendering] {
+            for scroll in [0, 3, 500] {
+                if let Some(rendered) = &mut state.rendered {
+                    rendered.scroll = scroll;
+                }
+                for (w, h) in [(0, 0), (1, 1), (10, 3), (2, 10), (3, 3), (7, 5), (80, 24)] {
+                    draw(&state, w, h);
+                }
+            }
+        }
     }
 }
