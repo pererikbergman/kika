@@ -392,15 +392,17 @@ mod tests {
     fn a_name_is_refused_exactly_when_git_refuses_it_plus_a_few_more() {
         // Kika also refuses these, which git accepts in this position.
         const KIKA_ONLY: &[&str] = &["-a", "@", "foo."];
-        let mut names = vec![
+        // Control characters do not survive every platform's argv.
+        #[cfg(unix)]
+        const CONTROL: &[&str] = &["a\x01", "a\x7f", "a\tb"];
+        #[cfg(not(unix))]
+        const CONTROL: &[&str] = &[];
+        let names = [
             "origin", "my.fork", "a/b", "é", "a@b", "@a", "lock", "a.lockx", "-a", "@", "foo.", "",
             "a.lock", "a.lock/b", ".a", "a/.b", "a..b", "a@{b", "a b", "a~", "a^", "a:b", "a?",
             "a*", "a[", "a\\b", "a//b", "/a", "a/", ".lock",
         ];
-        // Control characters do not survive every platform's argv.
-        #[cfg(unix)]
-        names.extend(["a\x01", "a\x7f", "a\tb"]);
-        for name in names {
+        for name in names.into_iter().chain(CONTROL.iter().copied()) {
             let ours = validate_remote_name(name).is_ok();
             let theirs = !name.is_empty()
                 && crate::git::fake::try_git(
