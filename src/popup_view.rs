@@ -33,6 +33,11 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             }
             Popup::Prompt { kind, input } => render_prompt(*kind, input, top, frame, area),
             Popup::Error(error) => render_error(error, frame, area),
+            Popup::Discard(confirm) => {
+                let what = confirm.what;
+                let text = format!("{}\n{}", what.question(), confirm.path);
+                render_question(&format!(" {} ", what.title()), &text, frame, area)
+            }
         }
     }
 }
@@ -173,9 +178,10 @@ mod tests {
 
     use super::*;
     use crate::git::FileEntry;
+    use crate::git::ops::GitOp;
     use crate::git::status::EntryKind;
     use crate::model::Context;
-    use crate::popup::ConfirmKind;
+    use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat};
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -326,6 +332,34 @@ mod tests {
         assert!(contains(&rows, " Quit "), "{rows:#?}");
         assert!(contains(&rows, "Quit Kika? (y/n)"), "{rows:#?}");
         assert!(rows[11].starts_with(" y yes  n no"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_discard_question_names_the_file_and_only_y_discards() {
+        let mut state = workspace(&["src/a.rs"]);
+        state.popups = vec![Popup::Discard(DiscardConfirm {
+            what: DiscardWhat::File,
+            path: "src/a.rs".into(),
+            op: GitOp::DiscardWorktree(vec!["src/a.rs".into()]),
+        })];
+        let (_, rows) = draw(&state, 80, 12);
+        assert!(contains(&rows, " Discard file "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Discard all unstaged changes to this file? (y/n)"),
+            "{rows:#?}"
+        );
+        // The path sits on the row below the question, lined up with it.
+        let (x, y) = find(&rows, "Discard all unstaged");
+        let below: String = rows[usize::from(y) + 1]
+            .chars()
+            .skip(usize::from(x))
+            .take("src/a.rs".len())
+            .collect();
+        assert_eq!(below, "src/a.rs", "{rows:#?}");
+        assert!(
+            rows[11].starts_with(" y discard  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
     }
 
     #[test]

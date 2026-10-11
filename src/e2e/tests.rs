@@ -538,6 +538,73 @@ async fn a_range_of_lines_stages_exactly_those_lines() {
     assert!(app.state().popups.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn d_then_y_discards_a_modified_file_and_n_keeps_it() {
+    let repo = TestRepo::new()
+        .write("a.txt", "one\n")
+        .write("b.txt", "keep\n")
+        .commit("init")
+        .write("a.txt", "one\ntwo\n")
+        .write("b.txt", "keep\nmore\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains(" Discard file ");
+    app.press(KeyCode::Char('n')).await;
+    assert_eq!(repo.read("a.txt"), "one\ntwo\n");
+    assert!(repo.entry("a.txt").is_some());
+    assert!(app.state().popups.is_empty());
+
+    app.press(KeyCode::Char('d')).await;
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(repo.entry("a.txt"), None);
+    assert_eq!(listed(&app), ["b.txt"]);
+    // Only the selected file went back.
+    assert_eq!(repo.read("b.txt"), "keep\nmore\n");
+    assert!(app.state().popups.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn d_then_y_in_line_mode_discards_one_added_line_and_leaves_the_index() {
+    let repo = three_line_repo();
+    let index_before = repo.git(["show", ":a.txt"]);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('v')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains(" Discard lines ");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(
+        changes(&diff_text(&repo, false)),
+        ["-line 10", "+ten b", "+ten c"]
+    );
+    assert!(diff_text(&repo, true).is_empty());
+    assert_eq!(repo.git(["show", ":a.txt"]), index_before);
+    assert!(app.state().popups.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn d_then_y_on_an_untracked_file_deletes_it_from_disk() {
+    let repo = TestRepo::new()
+        .write("a.txt", "one\n")
+        .commit("init")
+        .write("new.txt", "fresh\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains(" Delete file ");
+    app.press(KeyCode::Char('y')).await;
+
+    assert!(!repo.exists("new.txt"));
+    assert!(repo.exists("a.txt"));
+    app.assert_screen_contains("No changes");
+}
+
 /// `a.txt` and `d/a.txt`, each 20 committed lines with lines 1 and 20 then
 /// changed in the worktree, so both have two hunks, but with different text
 /// (`line` at the root, `sub` below `d/`). `d/e/` exists, holding only a

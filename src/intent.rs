@@ -73,6 +73,9 @@ pub enum AppIntent {
     ToggleStage,
     /// Stage everything, or unstage everything when nothing is left to stage.
     ToggleStageAll,
+    /// Ask to throw away the unstaged work under the cursor: the selected
+    /// file, hunk or lines, by focus. The answer is `ConfirmYes`/`ConfirmNo`.
+    Discard,
     /// Open the commit popup from the Files panel.
     OpenCommit,
     /// Nothing was staged: yes, stage everything and commit.
