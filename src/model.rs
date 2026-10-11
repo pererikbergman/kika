@@ -20,7 +20,7 @@ use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::AppIntent;
-use crate::keymap::{self, KeyScope, Keymap, Resolution};
+use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
 use crate::menu;
 use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
@@ -1312,16 +1312,40 @@ impl AppState {
             // A failed git command gets a popup; `op_error` is for refusals.
             self.op_error = None;
             if let Err(message) = result {
-                self.push_error(ErrorPopup::new(
-                    failure_title(&op),
-                    &message,
-                    "The file list was reloaded. Fix the cause above, then try again.",
-                ));
+                let error = if matches!(op, GitOp::ApplyEdited { .. }) {
+                    self.edited_hunk_error(&message)
+                } else {
+                    ErrorPopup::new(
+                        failure_title(&op),
+                        &message,
+                        "The file list was reloaded. Fix the cause above, then try again.",
+                    )
+                };
+                self.push_error(error);
             }
         }
         // Refresh even after a failure: a failed `add` of several paths can
         // still have changed the index.
         self.apply_plan(refresh::plan(&op))
+    }
+
+    /// Git's words alone do not say what was wrong with the user's edit or
+    /// how to retry, so lead with that and name the key from their keymap.
+    pub(crate) fn edited_hunk_error(&self, message: &str) -> ErrorPopup {
+        let key = keymap::registry()
+            .iter()
+            .find(|b| b.id == "diff.edit_hunk")
+            .and_then(|binding| self.keymap.keys(binding).first())
+            .map(KeyPattern::label);
+        let next = match key {
+            Some(key) => format!("Press {key} to edit the hunk again."),
+            None => "Edit the hunk again to retry.".to_string(),
+        };
+        ErrorPopup::new(
+            failure_title(&GitOp::ApplyEdited { patch: vec![] }),
+            &format!("{EDITED_HUNK_INVALID}\n{message}"),
+            next,
+        )
     }
 
     /// Leave `Running`: closed on success, `Failed` with the output on
@@ -1859,6 +1883,10 @@ impl AppState {
             && self.branch.as_ref() == Some(&status.branch)
     }
 }
+
+/// The first line of a rejected edited hunk's error, above git's message.
+pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
+Keep the @@ line as it was and start each line with a space, + or -.";
 
 /// What the error popup calls a failed operation.
 fn failure_title(op: &GitOp) -> &'static str {
@@ -4495,6 +4523,69 @@ mod tests {
             }
         );
         assert_eq!(state.op_seq, Some(tag.seq));
+    }
+
+    const GARBAGE: &str = "error: patch with only garbage at <stdin>:4";
+
+    /// Stage an edited hunk with `keymap` in force, let git reject it, and
+    /// return the one popup that leaves.
+    fn rejected_edit(keymap: Keymap) -> ErrorPopup {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        state.keymap = keymap;
+        let effects = state.update(AppIntent::HunkEdited {
+            result: Ok(Some(b"edited".to_vec())),
+        });
+        let (tag, op) = op_of(&effects);
+        state.update(finished(tag, op, Err(GARBAGE.into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => error.clone(),
+            other => panic!("expected one error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rejected_edit_explains_itself_above_git_message() {
+        let error = rejected_edit(Keymap::default());
+        assert_eq!(error.title, "Could not stage the edited hunk");
+        let (first, rest) = error.message.split_once('\n').expect("two parts");
+        assert_eq!(first, EDITED_HUNK_INVALID);
+        assert_eq!(rest, GARBAGE);
+    }
+
+    #[test]
+    fn a_rejected_edit_names_the_key_to_edit_again() {
+        let error = rejected_edit(Keymap::default());
+        assert_eq!(error.next, "Press e to edit the hunk again.");
+        let error = rejected_edit(keymap::remap(&[("diff.edit_hunk", &["E"])]));
+        assert_eq!(error.next, "Press E to edit the hunk again.");
+        let error = rejected_edit(keymap::remap(&[("diff.edit_hunk", &[])]));
+        assert_eq!(error.next, "Edit the hunk again to retry.");
+    }
+
+    #[test]
+    fn other_failed_ops_keep_the_plain_message_and_hint() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let tag = Tag {
+            generation: state.generation,
+            seq: 1,
+            user: true,
+        };
+        let op = GitOp::ApplyCached {
+            patch: vec![],
+            reverse: false,
+        };
+        state.update(finished(tag, op, Err(GARBAGE.into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not stage the change");
+                assert_eq!(error.message, GARBAGE);
+                assert_eq!(
+                    error.next,
+                    "The file list was reloaded. Fix the cause above, then try again."
+                );
+            }
+            other => panic!("expected one error popup, got {other:?}"),
+        }
     }
 
     #[test]
