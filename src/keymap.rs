@@ -250,6 +250,10 @@ pub enum KeyScope {
     Recent,
     /// Git or ssh asking for a username, password or passphrase.
     Credential,
+    /// The Commits panel showing `HEAD`'s reflog.
+    Reflog,
+    /// "Undo this?" or "Redo this?" on top of the popup stack.
+    Travel,
 }
 
 impl KeyScope {
@@ -268,7 +272,8 @@ impl KeyScope {
             | KeyScope::Diff
             | KeyScope::Blame
             | KeyScope::BlameCommit
-            | KeyScope::Conflict => Some(KeyScope::Workspace),
+            | KeyScope::Conflict
+            | KeyScope::Reflog => Some(KeyScope::Workspace),
             KeyScope::Lines => Some(KeyScope::Diff),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
@@ -287,7 +292,8 @@ impl KeyScope {
             | KeyScope::ResetHard
             | KeyScope::Submodules
             | KeyScope::Recent
-            | KeyScope::Credential => None,
+            | KeyScope::Credential
+            | KeyScope::Travel => None,
         }
     }
 
@@ -325,6 +331,8 @@ impl KeyScope {
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
             KeyScope::Credential => "Git is asking",
+            KeyScope::Reflog => "Reflog",
+            KeyScope::Travel => "Undo or redo",
         }
     }
 
@@ -449,6 +457,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "commits.fixup",
     "commits.drop",
     "commits.reword",
+    "workspace.undo",
+    "workspace.redo",
+    "travel.yes",
+    "travel.no",
+    "travel.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -1205,6 +1218,25 @@ pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
 
+/// Why undo and redo cannot start now: git one operation at a time, a
+/// repository to act on, and no operation half done, a bisect included,
+/// whose own state a moved `HEAD` would confuse.
+pub(crate) fn undo_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if state.repo.is_none() {
+        Some("Not in a repository")
+    } else if state
+        .branch
+        .as_ref()
+        .is_some_and(|b| !b.in_progress.is_empty())
+    {
+        Some("Finish or abort the operation in progress")
+    } else {
+        None
+    }
+}
+
 /// The delete question on top, if one is.
 fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
     match state.popups.last() {
@@ -1522,6 +1554,31 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: no_command_running,
     },
+    // Raw mode turns off the terminal's own meaning of Ctrl+Z (suspend)
+    // and Ctrl+R (reprint), so both reach Kika as keys on every platform.
+    // Redo is not Ctrl+Y: the custom-command example in the docs, and so
+    // perhaps the user's own config, binds it in the blame view, where a
+    // locked redo would make that config fail to load.
+    Binding {
+        id: "workspace.undo",
+        keys: &[KeyPattern::exact(KeyCode::Char('z'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Undo,
+        description: "Undo the last commit, checkout, reset or rebase, saying first what moves",
+        label: "undo",
+        bar: false,
+        disabled: undo_disabled,
+    },
+    Binding {
+        id: "workspace.redo",
+        keys: &[KeyPattern::exact(KeyCode::Char('r'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Redo,
+        description: "Redo what the last undo reversed, saying first what moves",
+        label: "redo",
+        bar: false,
+        disabled: undo_disabled,
+    },
     Binding {
         id: "files.next",
         keys: &[
@@ -1655,6 +1712,58 @@ static REGISTRY: &[Binding] = &[
         label: "reword",
         bar: true,
         disabled: reword_disabled,
+    },
+    Binding {
+        id: "commits.switch_tab",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('['), NONE),
+            KeyPattern::exact(KeyCode::Char(']'), NONE),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::SwitchCommitsTab,
+        description: "Show HEAD's reflog: everywhere HEAD has been",
+        label: "reflog",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "reflog.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::ReflogNext,
+        description: "Select the next reflog entry",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "reflog.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::ReflogPrev,
+        description: "Select the previous reflog entry",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "reflog.switch_tab",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('['), NONE),
+            KeyPattern::exact(KeyCode::Char(']'), NONE),
+        ],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::SwitchCommitsTab,
+        description: "Show the log",
+        label: "log",
+        bar: true,
+        disabled: never,
     },
     Binding {
         id: "commit_files.next",
@@ -2966,6 +3075,41 @@ static REGISTRY: &[Binding] = &[
         id: "reset_hard.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::ResetHard,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Enter is left unbound here too: an undo can move a branch away from
+    // commits, so only a deliberate y answers.
+    Binding {
+        id: "travel.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::Travel,
+        intent: AppIntent::ConfirmTravel,
+        description: "Yes, do what the question says",
+        label: "yes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "travel.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::Travel,
+        intent: AppIntent::ConfirmNo,
+        description: "No, leave everything where it is",
+        label: "no",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "travel.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Travel,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -4512,6 +4656,143 @@ mod tests {
     }
 
     #[test]
+    fn the_travel_question_has_no_enter_and_n_or_esc_leave_everything() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Travel,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmTravel));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::Travel.parent(), None);
+        assert_eq!(KeyScope::Travel.title(), "Undo or redo");
+    }
+
+    #[test]
+    fn undo_redo_and_the_travel_answers_are_locked() {
+        for id in [
+            "workspace.undo",
+            "workspace.redo",
+            "travel.yes",
+            "travel.no",
+            "travel.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+            assert!(build(&[(id, &["ctrl-u"])], Trust::Global).is_ok(), "{id}");
+        }
+        // Nor can a repository file hide them behind a nearer key.
+        assert!(build(&[("files.stage", &["ctrl-z"])], Trust::Repo).is_err());
+        assert!(build(&[("blame.next", &["ctrl-r"])], Trust::Repo).is_err());
+    }
+
+    #[test]
+    fn ctrl_z_and_ctrl_r_undo_and_redo_from_every_workspace_panel() {
+        let mut state = AppState::new(Context::Workspace);
+        state.repo = Some("/repo".into());
+        let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
+        for scope in [
+            KeyScope::Workspace,
+            KeyScope::Files,
+            KeyScope::Branches,
+            KeyScope::Remotes,
+            KeyScope::Commits,
+            KeyScope::CommitFiles,
+            KeyScope::Reflog,
+            KeyScope::Status,
+            KeyScope::Diff,
+            KeyScope::Lines,
+            KeyScope::Blame,
+            KeyScope::BlameCommit,
+            KeyScope::Conflict,
+        ] {
+            let run = |k| match resolve(registry(), &Keymap::default(), scope, &state, k) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                other => panic!("{scope:?} {k:?}: {other:?}"),
+            };
+            assert_eq!(run(ctrl('z')), Some(AppIntent::Undo), "{scope:?}");
+            assert_eq!(run(ctrl('r')), Some(AppIntent::Redo), "{scope:?}");
+        }
+        // Plain `z` still zooms and plain `r` still refreshes.
+        assert_eq!(
+            from(KeyScope::Files, plain('z')),
+            Some(AppIntent::CycleScreenMode)
+        );
+        assert_eq!(
+            from(KeyScope::Files, plain('r')),
+            Some(AppIntent::RefreshStatus)
+        );
+        // The bar keeps its room; help lists them.
+        assert!(!binding("workspace.undo").bar && !binding("workspace.redo").bar);
+        assert_eq!(binding("workspace.undo").keys[0].label(), "ctrl-z");
+        assert_eq!(binding("workspace.redo").keys[0].label(), "ctrl-r");
+    }
+
+    #[test]
+    fn brackets_switch_the_commits_panel_between_log_and_reflog() {
+        use AppIntent::*;
+        for c in ['[', ']'] {
+            assert_eq!(from(KeyScope::Commits, plain(c)), Some(SwitchCommitsTab));
+            assert_eq!(from(KeyScope::Reflog, plain(c)), Some(SwitchCommitsTab));
+        }
+        let none = KeyModifiers::NONE;
+        assert_eq!(from(KeyScope::Reflog, plain('j')), Some(ReflogNext));
+        assert_eq!(
+            from(KeyScope::Reflog, key(KeyCode::Down, none)),
+            Some(ReflogNext)
+        );
+        assert_eq!(from(KeyScope::Reflog, plain('k')), Some(ReflogPrev));
+        assert_eq!(
+            from(KeyScope::Reflog, key(KeyCode::Up, none)),
+            Some(ReflogPrev)
+        );
+        // The log's actions do not reach the reflog's rows.
+        for c in [' ', 's', 'd', 'e'] {
+            assert_eq!(from(KeyScope::Reflog, plain(c)), None, "{c:?}");
+        }
+        assert_eq!(KeyScope::Reflog.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Reflog.title(), "Reflog");
+    }
+
+    #[test]
+    fn undo_waits_for_a_repository_an_op_and_any_operation_in_progress() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(undo_disabled(&state), Some("Not in a repository"));
+        state.repo = Some("/repo".into());
+        assert_eq!(undo_disabled(&state), None);
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+        });
+        assert_eq!(
+            undo_disabled(&state),
+            Some("Finish or abort the operation in progress")
+        );
+        state.op_seq = Some(1);
+        assert_eq!(undo_disabled(&state), Some(OP_RUNNING));
+    }
+
+    #[test]
     fn revert_reset_and_the_hard_reset_answers_are_locked_but_checkout_is_not() {
         for id in [
             "commits.revert",
@@ -4772,6 +5053,8 @@ mod tests {
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
             KeyScope::Credential => "credential",
+            KeyScope::Reflog => "reflog",
+            KeyScope::Travel => "travel",
         }
     }
 
@@ -5018,6 +5301,9 @@ mod tests {
                     | RemoveRemote
                     | ConfirmRemoveRemote
                     | RewriteCommit(_)
+                    | Undo
+                    | Redo
+                    | ConfirmTravel
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

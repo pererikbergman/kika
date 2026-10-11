@@ -19,6 +19,7 @@ use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
 use crate::git::rebase_plan::Edit;
+use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
@@ -471,6 +472,22 @@ pub enum AppIntent {
     ConfirmResetHard,
     /// Rewrite the selected commit with git's interactive rebase.
     RewriteCommit(Edit),
+    /// Show the Commits panel's other tab: the log or the reflog.
+    SwitchCommitsTab,
+    /// Move the Reflog tab's selection down or up.
+    ReflogNext,
+    ReflogPrev,
+    /// `HEAD`'s reflog was read; `tag` says which load.
+    ReflogLoaded {
+        tag: Tag,
+        result: Result<Reflog, String>,
+    },
+    /// Reverse the last action, or reapply the last one undone. Each reads
+    /// the reflog afresh, then asks before anything moves.
+    Undo,
+    Redo,
+    /// Run the undo or redo the open question describes.
+    ConfirmTravel,
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

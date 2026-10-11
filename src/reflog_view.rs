@@ -1,0 +1,191 @@
+//! Draws the Commits panel's Reflog tab: one row per entry, newest first.
+//! Every message is repository data, so it is drawn only through its
+//! sanitised display.
+
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+
+use crate::git::reflog::ReflogEntry;
+use crate::reflog::ReflogList;
+use crate::view::{elide_right, reversed, width_of};
+
+/// The tab's lines for an inside of `height` by `width`: a placeholder
+/// until the first read, then the rows around the cursor, any error first.
+pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Vec<Line<'static>> {
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(error) = &list.error {
+        lines.extend(error.lines().map(|l| Line::from(format!("! {l}"))));
+        lines.push(Line::from("Press r to retry"));
+    }
+    let Some(reflog) = &list.data else {
+        if list.error.is_none() {
+            lines.push(Line::from("Loading…"));
+        }
+        return lines;
+    };
+    if reflog.entries.is_empty() {
+        lines.push(Line::styled("No reflog yet", dim));
+        return lines;
+    }
+    let room = height.saturating_sub(lines.len()).max(1);
+    let start = (list.selected + 1).saturating_sub(room);
+    let end = (start + room).min(reflog.entries.len());
+    lines.extend((start..end).map(|i| {
+        let line = entry_line(&reflog.entries[i], width);
+        if i == list.selected {
+            reversed(line, width)
+        } else {
+            line
+        }
+    }));
+    lines
+}
+
+/// `<short id> <label> <rest of the message>`, cut to `width`. An id that
+/// is not hex shows as `?`.
+fn entry_line(entry: &ReflogEntry, width: usize) -> Line<'static> {
+    let short = entry.oid.as_ref().map_or_else(
+        || "?".to_string(),
+        |id| id.as_str().chars().take(7).collect(),
+    );
+    let label = entry.label();
+    let display = entry.display();
+    let rest = display
+        .strip_prefix(&label)
+        .map(|r| r.trim_start_matches(':').trim_start())
+        .unwrap_or(&display);
+    let short = elide_right(&short, width);
+    let label = elide_right(&label, width.saturating_sub(width_of(&short) + 1));
+    let used = width_of(&short) + 1 + width_of(&label) + 1;
+    let rest = elide_right(rest, width.saturating_sub(used));
+    Line::from(vec![
+        Span::styled(short, Style::new().fg(Color::Yellow)),
+        Span::raw(" "),
+        Span::styled(label, Style::new().fg(Color::Cyan)),
+        Span::raw(" "),
+        Span::raw(rest),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
+
+    use crate::commits::CommitsTab;
+    use crate::git::reflog::{Reflog, parse_records};
+    use crate::layout::{ScreenMode, SidePanel};
+    use crate::model::{AppState, Context, Focus};
+    use crate::view::{buffer_rows, render};
+
+    fn showing(bytes: &[u8]) -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.screen_mode = ScreenMode::Full;
+        state.commits.tab = CommitsTab::Reflog;
+        state.commits.reflog.data = Some(Reflog {
+            head: None,
+            entries: parse_records(bytes),
+        });
+        state
+    }
+
+    fn draw(state: &AppState, width: u16, height: u16) -> Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn line_with<'a>(rows: &'a [String], needle: &str) -> &'a str {
+        rows.iter()
+            .find(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")))
+    }
+
+    #[test]
+    fn the_tab_lists_each_entry_with_its_id_label_and_message() {
+        let state = showing(include_bytes!("git/fixtures/reflog/checkout.bin"));
+        let rows = buffer_rows(&draw(&state, 100, 20));
+        line_with(&rows, "ccccccc checkout moving from main to side");
+        line_with(&rows, "ccccccc commit second");
+        line_with(&rows, "bbbbbbb commit first");
+        line_with(&rows, "aaaaaaa commit (initial) root");
+        line_with(&rows, "Commits · Log [Reflog]");
+    }
+
+    #[test]
+    fn the_selected_row_is_reversed_and_follows_the_cursor() {
+        let mut state = showing(include_bytes!("git/fixtures/reflog/commit.bin"));
+        state.commits.reflog.selected = 1;
+        let buffer = draw(&state, 100, 20);
+        let rows = buffer_rows(&buffer);
+        let y = rows
+            .iter()
+            .position(|r| r.contains("commit first"))
+            .unwrap();
+        let x = rows[y].find("bbbbbbb").unwrap();
+        assert!(
+            buffer[(x as u16, y as u16)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        let other = rows
+            .iter()
+            .position(|r| r.contains("commit second"))
+            .unwrap();
+        let x = rows[other].find("ccccccc").unwrap();
+        assert!(
+            !buffer[(x as u16, other as u16)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn a_hostile_message_draws_sanitised_and_a_bad_id_as_a_question_mark() {
+        let mut bytes = b"zz 11 commit: \x1b[2J\r\xe2\x80\xaeevil\0".to_vec();
+        bytes.extend_from_slice(include_bytes!("git/fixtures/reflog/hostile.bin"));
+        let state = showing(&bytes);
+        let rows = buffer_rows(&draw(&state, 100, 20));
+        line_with(&rows, "? commit \u{FFFD}[2J");
+        line_with(&rows, "commit \u{FFFD}[2J clear screen");
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn placeholders_say_loading_empty_or_the_error() {
+        let mut state = showing(b"");
+        state.commits.reflog.data = None;
+        line_with(&buffer_rows(&draw(&state, 100, 20)), "Loading…");
+        state.commits.reflog.data = Some(Reflog::default());
+        line_with(&buffer_rows(&draw(&state, 100, 20)), "No reflog yet");
+        state.commits.reflog.data = None;
+        state.commits.reflog.error = Some("Could not read the reflog: fatal: x".into());
+        let rows = buffer_rows(&draw(&state, 100, 20));
+        line_with(&rows, "! Could not read the reflog: fatal: x");
+        line_with(&rows, "Press r to retry");
+    }
+
+    #[test]
+    fn the_title_marks_the_log_tab_when_it_is_shown() {
+        let mut state = showing(b"");
+        state.commits.tab = CommitsTab::Log;
+        state.commits.loaded = true;
+        line_with(
+            &buffer_rows(&draw(&state, 100, 20)),
+            "Commits · [Log] Reflog",
+        );
+    }
+}

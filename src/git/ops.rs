@@ -14,6 +14,7 @@ use super::remotes::{RemoteBranch, RemoteName};
 use super::repo_state::Operation;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
+use super::undo::{Direction, Step};
 use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
@@ -158,6 +159,13 @@ pub enum GitOp {
     /// Remove a remote, its remote-tracking branches and the upstreams
     /// that name it.
     RemoveRemote(RemoteName),
+    /// Undo or redo the last action, as the undo planner chose (see
+    /// `git::undo`). Git writes `direction`'s marker into the reflog, which
+    /// is how the next plan knows this step happened.
+    Travel {
+        direction: Direction,
+        step: Step,
+    },
 }
 
 /// How a merge records the other branch's commits.
@@ -305,21 +313,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             std::slice::from_ref(path),
         )
         .env("GIT_TERMINAL_PROMPT", "0"),
-        // A short name, since a full ref would detach `HEAD`; `--` keeps
-        // it from being read as a path. A ref made outside git's porcelain
-        // can be named like an option, such as `-f`, which would force the
-        // checkout and lose the worktree's changes; `--end-of-options`
-        // keeps it a name. Only then: it needs git 2.24, newer than Kika
-        // requires, and an older git fails on it without touching anything.
-        GitOp::Checkout(name) => {
-            let cmd = GitCommand::new("checkout").arg("-q");
-            let cmd = if name.0.starts_with(b"-") {
-                cmd.arg("--end-of-options")
-            } else {
-                cmd
-            };
-            cmd.arg(name.as_os_string()).arg("--")
-        }
+        GitOp::Checkout(name) => checkout_command(name),
         // The start point as a full ref, so a tag of the same name, or a
         // name like an option, cannot stand in for it.
         GitOp::CreateBranch { name, from } => GitCommand::new("checkout")
@@ -328,13 +322,23 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(name)
             .arg(from.full_ref())
             .arg("--"),
+        // `--keep` makes git itself refuse to move when a local change, or
+        // an untracked file, is in the way. The marker in
+        // `GIT_REFLOG_ACTION` is all `checkout` logs, and `reset` logs it as
+        // `<marker>: updating HEAD`, as far back as git 2.15.
+        GitOp::Travel { direction, step } => match step {
+            Step::MoveTo(oid) => GitCommand::new("reset")
+                .arg("-q")
+                .arg("--keep")
+                .arg(oid.as_str())
+                .arg("--"),
+            Step::CheckoutBranch(name) => checkout_command(name),
+            Step::CheckoutDetached(oid) => detached_checkout(oid),
+        }
+        .env("GIT_REFLOG_ACTION", direction.marker()),
         // The id is hex digits only, so it cannot be read as an option;
         // `--` keeps it from being read as a path.
-        GitOp::CheckoutCommit(oid) => GitCommand::new("checkout")
-            .arg("-q")
-            .arg("--detach")
-            .arg(oid.as_str())
-            .arg("--"),
+        GitOp::CheckoutCommit(oid) => detached_checkout(oid),
         GitOp::Reset { to, mode } => GitCommand::new("reset")
             .arg("-q")
             .arg(mode.flag())
@@ -450,6 +454,33 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
     };
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
+}
+
+/// Switch to the local branch `name`. A short name, since a full ref
+/// would detach `HEAD`; `--` keeps it from being read as a path. A ref
+/// made outside git's porcelain can be named like an option, such as
+/// `-f`, which would force the checkout and lose the worktree's changes;
+/// `--end-of-options` keeps it a name. Only then: it needs git 2.24, newer
+/// than Kika requires, and an older git fails on it without touching
+/// anything.
+fn checkout_command(name: &BranchName) -> GitCommand {
+    let cmd = GitCommand::new("checkout").arg("-q");
+    let cmd = if name.0.starts_with(b"-") {
+        cmd.arg("--end-of-options")
+    } else {
+        cmd
+    };
+    cmd.arg(name.as_os_string()).arg("--")
+}
+
+/// Check out `oid` with no branch. The id is hex digits only, so it cannot
+/// be read as an option; `--` keeps it from being read as a path.
+fn detached_checkout(oid: &CommitId) -> GitCommand {
+    GitCommand::new("checkout")
+        .arg("-q")
+        .arg("--detach")
+        .arg(oid.as_str())
+        .arg("--")
 }
 
 /// `git commit` taking its message from `message_file` (`-` is stdin), or
@@ -2259,5 +2290,114 @@ mod tests {
         run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
         assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
         assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
+    }
+
+    fn travel(direction: Direction, step: Step) -> GitOp {
+        GitOp::Travel { direction, step }
+    }
+
+    #[test]
+    fn travel_names_only_ids_and_loaded_branches_and_marks_the_reflog() {
+        let cases: [(GitOp, &[&str], &str); 4] = [
+            (
+                travel(Direction::Undo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika redo",
+            ),
+            (
+                travel(Direction::Undo, Step::CheckoutBranch("main".into())),
+                &["checkout", "-q", "main", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::CheckoutDetached(oid("abc123"))),
+                &["checkout", "-q", "--detach", "abc123", "--"],
+                "kika redo",
+            ),
+        ];
+        for (op, expected, marker) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            let envs: Vec<_> = cmd
+                .envs()
+                .iter()
+                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                envs,
+                [
+                    ("GIT_REFLOG_ACTION", marker),
+                    ("GIT_LITERAL_PATHSPECS", "1"),
+                    ("LC_ALL", "C"),
+                ],
+                "{op:?}"
+            );
+        }
+        let checkout = op_command(&GitOp::Checkout("main".into()));
+        assert_eq!(argv(&checkout), ["checkout", "-q", "main", "--"]);
+    }
+
+    #[test]
+    fn an_undo_leaves_a_marker_the_next_plan_reads_back_in_real_git() {
+        use crate::git::reflog::{Action, read_reflog};
+        use crate::git::undo::{Context, plan};
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let second = rev_parse(dir, "HEAD");
+        let runner = crate::git::CliRunner::isolated(dir);
+        let ctx = Context {
+            branch: Some("main"),
+            branches: &[],
+            dirty: false,
+        };
+
+        let undo = plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(first.clone()));
+        run_op(&runner, &travel(Direction::Undo, undo.step)).unwrap();
+
+        assert_eq!(rev_parse(dir, "HEAD"), first);
+        let reflog = read_reflog(&runner).unwrap();
+        assert_eq!(reflog.entries[0].action, Action::Undo);
+        assert_eq!(reflog.entries[0].message, b"kika undo: updating HEAD");
+        let redo = plan(Direction::Redo, &reflog, &ctx).unwrap();
+        assert_eq!(redo.step, Step::MoveTo(second));
+    }
+
+    #[test]
+    fn reset_keep_refuses_to_clobber_a_local_change_or_an_untracked_file_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("a.txt"), "mine\n").unwrap();
+        let undo = travel(Direction::Undo, Step::MoveTo(first.clone()));
+        assert!(run_op(&runner, &undo).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+
+        // The commit after `first` adds `b.txt`; an untracked one is in
+        // the way of going back to it.
+        git(dir, &["checkout", "-q", "--", "a.txt"]);
+        std::fs::write(dir.join("b.txt"), "theirs\n").unwrap();
+        git(dir, &["add", "b.txt"]);
+        git(dir, &["commit", "-q", "-m", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        run_op(&runner, &travel(Direction::Undo, Step::MoveTo(first))).unwrap();
+        std::fs::write(dir.join("b.txt"), "untracked\n").unwrap();
+        let redo = travel(Direction::Redo, Step::MoveTo(third));
+        assert!(run_op(&runner, &redo).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "untracked\n"
+        );
     }
 }

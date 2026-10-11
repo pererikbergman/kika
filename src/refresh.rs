@@ -76,7 +76,8 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::Reset { .. }
         | GitOp::Continue(_)
         | GitOp::Skip(_)
-        | GitOp::Abort(_) => (
+        | GitOp::Abort(_)
+        | GitOp::Travel { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
@@ -240,6 +241,14 @@ mod tests {
                 mode: ResetMode::Hard,
             },
             GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Undo,
+                step: crate::git::undo::Step::MoveTo(oid()),
+            },
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Redo,
+                step: crate::git::undo::Step::CheckoutBranch("main".into()),
+            },
         ];
         for op in ops {
             assert_eq!(

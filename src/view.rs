@@ -3459,10 +3459,13 @@ mod tests {
             _ => String::new(),
         };
         match (panel, &state.focus) {
-            // Expanded, the Branches panel names its tabs; at 80 columns
-            // they take the place of its name.
+            // Expanded, the Branches and Commits panels name their tabs;
+            // at 80 columns they take the place of the panel's name.
             (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
                 format!("[Local] Remotes{mode} ")
+            }
+            (Panel::Side(SidePanel::Commits), _) if state.expanded == SidePanel::Commits => {
+                format!("[Log] Reflog{mode} ")
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),

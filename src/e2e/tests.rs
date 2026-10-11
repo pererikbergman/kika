@@ -1591,3 +1591,92 @@ async fn a_hard_reset_from_the_menu_asks_then_leaves_a_clean_worktree_at_the_tar
         format!("# branch.oid {first}\n# branch.head main\n")
     );
 }
+
+/// The newest message in `HEAD`'s reflog.
+fn last_reflog_message(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["reflog", "show", "-n", "1", "--format=%gs", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_z_undoes_a_commit_ctrl_r_redoes_it_and_a_checkout_is_undone_too() {
+    let (repo, first) = two_commits();
+    let second = repo.head().trim().to_string();
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Undo: commit: second");
+    app.assert_screen_contains(&format!(
+        "Branch main moves from {} to {}.",
+        &second[..7],
+        &first[..7]
+    ));
+    // Enter does not answer; nothing has moved yet.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(repo.head().trim(), second);
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.head().trim(), first);
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(last_reflog_message(&repo), "kika undo: updating HEAD");
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.assert_screen_contains("[4] Log [Reflog]");
+    app.assert_screen_contains(&format!("{} kika undo updat", &first[..7]));
+
+    app.press_with(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Redo: commit: second");
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(repo.head().trim(), second);
+    assert_eq!(repo.read("a.txt"), "two\n");
+    assert_eq!(last_reflog_message(&repo), "kika redo: updating HEAD");
+
+    repo.git(["checkout", "-q", "-b", "side"]);
+    app.press(KeyCode::Char('r')).await;
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("HEAD switches from side to main. No branch moves.");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.head().trim(), second);
+    assert_eq!(last_reflog_message(&repo), "kika undo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_z_undoes_a_whole_completed_rebase() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "topic"]);
+    let repo = repo
+        .write("t.txt", "one\n")
+        .commit("topic one")
+        .write("t.txt", "two\n")
+        .commit("topic two");
+    let before = repo.head().trim().to_string();
+    repo.git(["checkout", "-q", "main"]);
+    let repo = repo.write("m.txt", "main\n").commit("on main");
+    repo.git(["checkout", "-q", "topic"]);
+    repo.git(["rebase", "-q", "main"]);
+    let after = repo.head().trim().to_string();
+    assert_ne!(before, after);
+
+    let mut app = Harness::start(&repo).await;
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains(&format!(
+        "Branch topic moves from {} to {}.",
+        &after[..7],
+        &before[..7]
+    ));
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(current_branch(&repo), "topic");
+    assert_eq!(repo.head().trim(), before);
+    assert!(!repo.exists("m.txt"));
+    assert_eq!(repo.read("t.txt"), "two\n");
+}
