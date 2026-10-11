@@ -77,8 +77,14 @@ pub struct RebasePlan {
 }
 
 /// The most steps a plan may have. It travels in one env var, which this
-/// keeps far under the OS limit for a single string.
-pub const MAX_STEPS: usize = 1000;
+/// keeps under the OS limit for a single string: at most 72 bytes a step,
+/// against 128 KiB on Linux and 32,767 characters for one Windows env
+/// var.
+pub const MAX_STEPS: usize = if cfg!(windows) { 400 } else { 1000 };
+
+/// Why a fold of the last loaded commit cannot be planned: moving the
+/// cursor down to the end of the log loads the next page.
+pub const LOAD_MORE: &str = "Move down to load the commit below first";
 
 /// The plan for `edit` on `rows[selected]`, where `rows` is the log from
 /// `HEAD`, newest first. Squash and fixup fold the commit into its parent,
@@ -96,7 +102,7 @@ pub fn plan(rows: &[CommitRow], selected: usize, edit: Edit) -> Result<RebasePla
         return Err("Too many commits above it");
     }
     let Some(range) = rows.get(..=last) else {
-        return Err("Load more commits first");
+        return Err(LOAD_MORE);
     };
     for (i, row) in range.iter().enumerate() {
         match row.parents.as_slice() {
@@ -345,8 +351,8 @@ mod tests {
     fn the_last_loaded_commit_can_be_dropped_but_not_folded() {
         let rows = linear();
         assert_eq!(plan(&rows, 3, Edit::Drop).unwrap().base, cid('e'));
-        assert_eq!(plan(&rows, 3, Edit::Squash), Err("Load more commits first"));
-        assert_eq!(plan(&rows, 3, Edit::Fixup), Err("Load more commits first"));
+        assert_eq!(plan(&rows, 3, Edit::Squash), Err(LOAD_MORE));
+        assert_eq!(plan(&rows, 3, Edit::Fixup), Err(LOAD_MORE));
     }
 
     #[test]
@@ -406,19 +412,33 @@ mod tests {
     }
 
     #[test]
-    fn more_than_a_thousand_steps_are_refused() {
-        let ids: Vec<String> = (0..=1002).map(|i| format!("{i:040x}")).collect();
-        let rows: Vec<CommitRow> = (0..1002).map(|i| row(&ids[i], &[&ids[i + 1]])).collect();
-        assert_eq!(plan(&rows, 999, Edit::Drop).unwrap().steps.len(), 1000);
+    fn more_than_max_steps_are_refused() {
+        let n = MAX_STEPS;
+        let ids: Vec<String> = (0..=n + 2).map(|i| format!("{i:040x}")).collect();
+        let rows: Vec<CommitRow> = (0..n + 2).map(|i| row(&ids[i], &[&ids[i + 1]])).collect();
+        assert_eq!(plan(&rows, n - 1, Edit::Drop).unwrap().steps.len(), n);
+        assert_eq!(plan(&rows, n, Edit::Drop), Err("Too many commits above it"));
+        assert_eq!(plan(&rows, n - 2, Edit::Squash).unwrap().steps.len(), n);
         assert_eq!(
-            plan(&rows, 1000, Edit::Drop),
+            plan(&rows, n - 1, Edit::Squash),
             Err("Too many commits above it")
         );
-        assert_eq!(plan(&rows, 998, Edit::Squash).unwrap().steps.len(), 1000);
-        assert_eq!(
-            plan(&rows, 999, Edit::Squash),
-            Err("Too many commits above it")
-        );
+    }
+
+    #[test]
+    fn the_largest_plan_fits_in_one_env_var() {
+        let ids: Vec<String> = (0..=MAX_STEPS).map(|i| format!("{i:064x}")).collect();
+        let rows: Vec<CommitRow> = (0..MAX_STEPS)
+            .map(|i| row(&ids[i], &[&ids[i + 1]]))
+            .collect();
+        let mut steps = plan(&rows, MAX_STEPS - 1, Edit::Reword).unwrap().steps;
+        // The longest word on every line.
+        for step in &mut steps {
+            step.action = TodoAction::Reword;
+        }
+        let len = "KIKA_REBASE_PLAN=".len() + encode(&steps).len();
+        let limit = if cfg!(windows) { 32_767 } else { 128 * 1024 };
+        assert!(len < limit, "{len} >= {limit}");
     }
 
     #[test]

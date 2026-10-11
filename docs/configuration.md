@@ -505,8 +505,9 @@ the command line. Squash and fixup fold the selected commit into the one below
 it. Kika acts as the rebase's sequence editor and checks git's todo list
 against what you asked for; on any difference git aborts and nothing changes.
 The commits from `HEAD` down to the one rewritten must be one line of history:
-no merges, not the first commit, at most 1000 commits, and for squash and
-fixup the commit below must be loaded. A rebase that stops on conflicts can be
+no merges, not the first commit, at most 1000 commits (400 on Windows), and
+for squash and fixup the commit below must be loaded: moving down to the end of
+the log loads it. A rebase that stops on conflicts can be
 continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
 
