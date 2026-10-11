@@ -7,12 +7,21 @@ use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use super::runner::{ChildHandle, GitChild, GitCommand, GitOutput, GitRunner};
+use super::runner::{AttachedExit, ChildHandle, GitChild, GitCommand, GitOutput, GitRunner};
+
+/// Looks at an attached run's command while it "runs".
+type AttachedProbe = Box<dyn Fn(&GitCommand) + Send + Sync>;
+
+/// In an `expect_attached` argv, matches any one argument, such as a temp
+/// file's name.
+pub const ANY_ARG: &str = "<any>";
 
 #[derive(Default)]
 pub struct FakeRunner {
     expected: Mutex<VecDeque<(Vec<String>, GitOutput)>>,
     spawns: Mutex<VecDeque<(Vec<String>, FakeChild)>>,
+    attached: Mutex<VecDeque<(Vec<String>, bool)>>,
+    on_attached: Option<AttachedProbe>,
     envs: Mutex<Vec<Vec<(OsString, OsString)>>>,
     inputs: Mutex<Vec<Option<Vec<u8>>>>,
     interrupts: AtomicUsize,
@@ -35,6 +44,22 @@ impl FakeRunner {
     pub fn expect_spawn(self, argv: &[&str], child: FakeChild) -> Self {
         let argv = argv.iter().map(|s| s.to_string()).collect();
         self.spawns.lock().unwrap().push_back((argv, child));
+        self
+    }
+
+    /// Expect an attached run with `argv`, where [`ANY_ARG`] matches any
+    /// one argument; it exits with `success`. Matched in order, separately
+    /// from runs and spawns. Any attached run not expected panics.
+    pub fn expect_attached(self, argv: &[&str], success: bool) -> Self {
+        let argv = argv.iter().map(|s| s.to_string()).collect();
+        self.attached.lock().unwrap().push_back((argv, success));
+        self
+    }
+
+    /// Call `probe` with each attached run's command while it runs, to see
+    /// files that only exist until it returns.
+    pub fn on_attached(mut self, probe: impl Fn(&GitCommand) + Send + Sync + 'static) -> Self {
+        self.on_attached = Some(Box::new(probe));
         self
     }
 
@@ -70,6 +95,11 @@ impl FakeRunner {
             spawns.is_empty(),
             "{} expected spawns never made",
             spawns.len()
+        );
+        let attached = self.attached.lock().unwrap();
+        assert!(
+            attached.is_empty(),
+            "expected attached runs never made: {attached:?}"
         );
     }
 }
@@ -117,6 +147,33 @@ impl GitRunner for FakeRunner {
         assert_eq!(actual, expected, "git argv mismatch");
         self.record(cmd);
         Ok(output)
+    }
+
+    fn run_attached(&self, cmd: &GitCommand) -> io::Result<AttachedExit> {
+        let actual = argv_of(cmd);
+        let (expected, success) = self
+            .attached
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| panic!("unexpected attached git run: {actual:?}"));
+        let matches = actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, e)| e == ANY_ARG || a == e);
+        assert!(
+            matches,
+            "attached git argv mismatch: {actual:?} vs {expected:?}"
+        );
+        self.record(cmd);
+        if let Some(probe) = &self.on_attached {
+            probe(cmd);
+        }
+        Ok(AttachedExit {
+            success,
+            status: if success { "status 0" } else { "status 1" }.into(),
+        })
     }
 
     fn interrupt(&self) {

@@ -8,6 +8,7 @@ use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
 use crate::git::patch::FilePatch;
+use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
@@ -121,6 +122,13 @@ pub enum AppIntent {
     /// to commit, `None` if the user emptied it.
     CommitMessageEdited {
         result: Result<Option<String>, String>,
+    },
+    /// The config and hooks a commit depends on were read; `facts` is
+    /// `None` when they could not be. Decides where the commit runs.
+    CommitProbed {
+        tag: Tag,
+        op: GitOp,
+        facts: Option<PromptFacts>,
     },
     /// A Git operation finished, successfully or not.
     OpFinished {

@@ -14,6 +14,7 @@ use crate::git::diff::{
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
+use crate::git::prompts::{PromptFacts, needs_terminal};
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
@@ -373,6 +374,9 @@ impl AppState {
                     CommitFlow::Failed { editor, .. } => CommitFlow::Editing(editor),
                     other => other,
                 };
+            }
+            AppIntent::CommitProbed { tag, op, facts } => {
+                return self.commit_probed(tag, op, facts);
             }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
             AppIntent::OpenMenu(id) => {
@@ -1139,6 +1143,16 @@ impl AppState {
     /// Run the operation a stage key chose. Only one runs at a time, and
     /// only on the local workspace.
     fn start_op(&mut self, op: Result<Option<GitOp>, String>) -> Vec<Effect> {
+        self.start_op_as(op, |tag, op| Effect::RunOp { tag, op })
+    }
+
+    /// [`Self::start_op`], with `effect` saying what work starts it: a
+    /// commit is probed first, everything else runs at once.
+    fn start_op_as(
+        &mut self,
+        op: Result<Option<GitOp>, String>,
+        effect: fn(Tag, GitOp) -> Effect,
+    ) -> Vec<Effect> {
         if self.context != Context::Workspace || self.op_seq.is_some() {
             return vec![];
         }
@@ -1159,7 +1173,7 @@ impl AppState {
             seq,
             user: true,
         };
-        vec![Effect::RunOp { tag, op }]
+        vec![effect(tag, op)]
     }
 
     /// Open the commit popup: straight to the editor when something is
@@ -1241,11 +1255,34 @@ impl AppState {
             amend: editor.amend.is_some(),
             no_verify: editor.no_verify,
         };
-        let effects = self.start_op(Ok(Some(op)));
+        // Whether it needs the terminal is read first; see `commit_probed`.
+        let effects = self.start_op_as(Ok(Some(op)), |tag, op| Effect::ProbeCommit { tag, op });
         if !effects.is_empty() {
             self.commit = CommitFlow::Running(editor);
         }
         effects
+    }
+
+    /// Run the probed commit on the terminal when it may ask something,
+    /// else detached. `busy` and `op_seq` stay as they are until
+    /// `OpFinished`; a probe for another repository or op ends the commit
+    /// here, giving the message back.
+    fn commit_probed(&mut self, tag: Tag, op: GitOp, facts: Option<PromptFacts>) -> Vec<Effect> {
+        if tag.generation != self.generation || self.op_seq != Some(tag.seq) {
+            if tag.user {
+                self.busy = self.busy.saturating_sub(1);
+            }
+            if self.op_seq == Some(tag.seq) {
+                self.op_seq = None;
+            }
+            self.end_commit(None);
+            return vec![];
+        }
+        if needs_terminal(&op, facts.as_ref()) {
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        } else {
+            vec![Effect::RunOp { tag, op }]
+        }
     }
 
     /// Back from writing the message in the editor: commit it as written,
@@ -2612,6 +2649,14 @@ mod tests {
         }
     }
 
+    /// The commit a submit asked to probe before running it.
+    fn probe_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [Effect::ProbeCommit { tag, op }] => (*tag, op.clone()),
+            other => panic!("expected one ProbeCommit, got {other:?}"),
+        }
+    }
+
     fn select_path(state: &mut AppState, path: &str) {
         while state.files[state.selected.unwrap()].path != path.into() {
             state.update(AppIntent::SelectNext);
@@ -2857,7 +2902,7 @@ mod tests {
         let busy = state.busy;
         type_text(&mut state, "subj\nline 1\nline 2");
 
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
 
         assert_eq!(
             op,
@@ -2895,7 +2940,7 @@ mod tests {
         press(&mut state, KeyCode::Char('y'));
         assert!(editor(&state).stage_all);
         type_text(&mut state, "all");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3028,7 +3073,7 @@ mod tests {
     fn submitted() -> (AppState, Tag, GitOp) {
         let mut state = editing();
         type_text(&mut state, "subj\nbody");
-        let (tag, op) = op_of(&ctrl(&mut state, 's'));
+        let (tag, op) = probe_of(&ctrl(&mut state, 's'));
         (state, tag, op)
     }
 
@@ -3104,6 +3149,114 @@ mod tests {
         assert_eq!(editor(&state).subject, "subj");
     }
 
+    fn probed(tag: Tag, op: &GitOp, facts: Option<PromptFacts>) -> AppIntent {
+        AppIntent::CommitProbed {
+            tag,
+            op: op.clone(),
+            facts,
+        }
+    }
+
+    fn signing() -> Option<PromptFacts> {
+        Some(PromptFacts {
+            signs: true,
+            hooks: vec![],
+        })
+    }
+
+    /// Commits as each way of submitting makes them: typed, amended with
+    /// HEAD's message, with hooks skipped, and from the editor.
+    fn submissions() -> Vec<(AppState, Tag, GitOp)> {
+        let mut amend = amending();
+        let (tag, op) = probe_of(&ctrl(&mut amend, 's'));
+        let amended = (amend, tag, op);
+
+        let mut skip = editing();
+        ctrl(&mut skip, 'n');
+        type_text(&mut skip, "subj");
+        let (tag, op) = probe_of(&ctrl(&mut skip, 's'));
+        let skipped = (skip, tag, op);
+
+        let mut edited = editing();
+        let effects = edited.update(AppIntent::CommitMessageEdited {
+            result: Ok(Some("x\n".into())),
+        });
+        let (tag, op) = probe_of(&effects);
+        let from_editor = (edited, tag, op);
+
+        vec![submitted(), amended, skipped, from_editor]
+    }
+
+    #[test]
+    fn a_submitted_commit_is_probed_once_and_counts_as_running() {
+        for (state, tag, op) in submissions() {
+            assert!(matches!(op, GitOp::Commit { .. }), "{op:?}");
+            assert!(tag.user);
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn a_commit_that_signs_is_handed_the_terminal() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(
+                effects,
+                vec![Effect::HandOff(HandOff::Commit {
+                    tag,
+                    op: op.clone()
+                })]
+            );
+            assert_eq!(state.busy, busy, "OpFinished still settles busy");
+            assert_eq!(state.op_seq, Some(tag.seq));
+            assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    #[test]
+    fn a_commit_with_no_signing_and_no_hooks_runs_detached() {
+        for (mut state, tag, op) in submissions() {
+            let busy = state.busy;
+            let effects = state.update(probed(tag, &op, Some(PromptFacts::default())));
+            assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
+            assert_eq!(state.busy, busy);
+            assert_eq!(state.op_seq, Some(tag.seq));
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_hands_the_terminal_over() {
+        let (mut state, tag, op) = submitted();
+        assert_eq!(
+            state.update(probed(tag, &op, None)),
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        );
+    }
+
+    #[test]
+    fn a_handed_over_commit_ends_like_a_detached_one() {
+        let (mut state, tag, op) = submitted();
+        state.update(probed(tag, &op, signing()));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.op_seq, None);
+        assert!(!effects.is_empty(), "the status is reloaded");
+    }
+
+    #[test]
+    fn a_stale_probe_gives_the_message_back_and_frees_the_slot() {
+        for (mut state, tag, op) in submissions() {
+            state.generation += 1;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.busy, 0);
+            assert_eq!(state.op_seq, None);
+            editor(&state);
+        }
+    }
+
     fn head_load(effects: &[Effect]) -> Tag {
         match effects {
             [Effect::LoadHeadMessage { tag }] => *tag,
@@ -3153,7 +3306,7 @@ mod tests {
     #[test]
     fn an_untouched_amend_keeps_heads_message() {
         let mut state = amending();
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3170,7 +3323,7 @@ mod tests {
     fn an_edited_amend_commits_the_new_message() {
         let mut state = amending();
         type_text(&mut state, "!");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert_eq!(
             op,
             GitOp::Commit {
@@ -3275,7 +3428,7 @@ mod tests {
         assert!(!editor(&state).no_verify);
         ctrl(&mut state, 'n');
         type_text(&mut state, "subj");
-        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        let (_, op) = probe_of(&ctrl(&mut state, 's'));
         assert!(
             matches!(
                 op,
@@ -3322,7 +3475,7 @@ mod tests {
         let effects = state.update(AppIntent::CommitMessageEdited {
             result: Ok(Some("x\n\ny\n".into())),
         });
-        let (tag, op) = op_of(&effects);
+        let (tag, op) = probe_of(&effects);
         assert_eq!(
             op,
             GitOp::Commit {

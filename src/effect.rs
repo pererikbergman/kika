@@ -13,6 +13,7 @@ use crate::git::fetch::run_fetch;
 use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
+use crate::git::prompts::read_prompt_facts;
 use crate::git::refs::read_refs;
 use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
@@ -71,6 +72,12 @@ pub enum Effect {
     },
     /// Run a Git operation; always answered by one `OpFinished`.
     RunOp {
+        tag: Tag,
+        op: GitOp,
+    },
+    /// Read what decides whether the commit `op` needs the terminal;
+    /// always answered by one `CommitProbed`.
+    ProbeCommit {
         tag: Tag,
         op: GitOp,
     },
@@ -294,6 +301,17 @@ impl Runtime {
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
+            Effect::ProbeCommit { tag, op } => {
+                tokio::spawn(async move {
+                    // Errors and panics both report `None`, which hands over.
+                    let facts =
+                        tokio::task::spawn_blocking(move || read_prompt_facts(runner.as_ref()))
+                            .await
+                            .ok()
+                            .and_then(Result::ok);
+                    let _ = tx.send(AppIntent::CommitProbed { tag, op, facts });
+                });
+            }
             Effect::SnapshotRefs { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the watch would never poll again.
@@ -371,7 +389,7 @@ mod tests {
     use super::*;
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
-    use crate::git::fake::{FakeChild, FakeRunner, ok};
+    use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
@@ -548,6 +566,111 @@ mod tests {
                 assert!(message.starts_with("git crashed: "), "{message}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
+        }
+    }
+
+    fn commit_op() -> GitOp {
+        GitOp::Commit {
+            message: Some("m\n".into()),
+            stage_all: false,
+            amend: false,
+            no_verify: false,
+        }
+    }
+
+    /// A commit run as an effect stays detached: the fake has no attached
+    /// run expected, so it would panic on one.
+    #[tokio::test]
+    async fn a_commit_run_as_an_effect_never_takes_the_terminal() {
+        let runner = Arc::new(FakeRunner::new().expect(&["commit", "-F", "-"], ok(b"")));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::RunOp {
+            tag,
+            op: commit_op(),
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::OpFinished {
+                tag,
+                op: commit_op(),
+                result: Ok(()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn probe_commit_reports_the_facts_with_the_same_tag_and_op() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["config", "--type=bool", "--get", "commit.gpgsign"],
+                    ok(b"true\n"),
+                )
+                .expect(&["rev-parse", "--git-path", "hooks"], ok(b"/nowhere\n")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: true,
+        };
+
+        runtime.spawn(Effect::ProbeCommit {
+            tag,
+            op: commit_op(),
+        });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitProbed {
+                tag,
+                op: commit_op(),
+                facts: Some(crate::git::prompts::PromptFacts {
+                    signs: true,
+                    hooks: vec![],
+                }),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_panicking_probe_reports_no_facts() {
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        let failing = FakeRunner::new().expect(
+            &["config", "--type=bool", "--get", "commit.gpgsign"],
+            fail("fatal: bad config\n"),
+        );
+        // No expectations at all: the fake panics on the first read.
+        for runner in [failing, FakeRunner::new()] {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let runtime = Runtime::new(Arc::new(runner), tx);
+            runtime.spawn(Effect::ProbeCommit {
+                tag,
+                op: commit_op(),
+            });
+            assert_eq!(
+                rx.recv().await,
+                Some(AppIntent::CommitProbed {
+                    tag,
+                    op: commit_op(),
+                    facts: None,
+                })
+            );
         }
     }
 

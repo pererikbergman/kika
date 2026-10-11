@@ -1,7 +1,8 @@
 //! Runs the app headless: the real model, effect runtime and git runner over
 //! a [`TestRepo`], drawn on a `TestBackend`, with keys injected the way the
 //! terminal would send them. Hand-offs run as the loop runs them, minus the
-//! terminal, so a scripted editor can stand in for the user's.
+//! terminal, so a scripted editor can stand in for the user's; a failed
+//! commit on the terminal does not wait for Enter.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -83,9 +84,8 @@ impl Harness {
         self.wait_idle().await;
     }
 
-    /// Send a key without waiting, as a user does while git is still busy.
-    /// Follow with [`Harness::settle`].
-    pub fn send(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+    /// Send a key without waiting for idle.
+    fn send(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         let event = Event::Key(KeyEvent::new(code, modifiers));
         if let Some(intent) = AppIntent::from_event(event) {
             self.dispatch(intent);
@@ -104,14 +104,9 @@ impl Harness {
         let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
         while let Some(job) = jobs.pop_front() {
             let workdir = self.runner.workdir();
-            let intent = handoff::execute(job, self.runner.as_ref(), &workdir);
+            let intent = handoff::execute_with(job, self.runner.as_ref(), &workdir, &|| {});
             jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
-    }
-
-    /// Wait until the app is idle.
-    pub async fn settle(&mut self) {
-        self.wait_idle().await;
     }
 
     /// Type `text` key by key, as a terminal sends it: uppercase with
