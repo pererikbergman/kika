@@ -14,6 +14,18 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 * **`crossterm`**: Terminal backend for cross-platform raw mode management and input event capturing.
 * **`syntect`**: High-performance syntax highlighting for the diff viewer, parsing large hunks in real time.
 
+#### Displaying repository text
+* **Strict by default:** names, paths, refs, authors, headers and git's messages are drawn through `sanitize`. Control characters become `U+FFFD`, and bidi controls and invisible characters become a visible `<U+XXXX>` escape.
+* **File content is a little more lenient:** diff and blame body lines and the external renderer's output go through `sanitize_body`. It keeps a ZWJ/ZWNJ only where it changes what is drawn. The rules follow UTS #39 "Unicode Security Mechanisms", section 3.1.1.1 "Limited Contexts for Joining Controls" (A1, A2 and B, the same rules IDNA uses):
+  * a ZWNJ that breaks a cursive join between two Arabic-script, Syriac, N'Ko or Mongolian letters of the same script (dual-joining before it, dual- or right-joining after it);
+  * a joiner after an Indic virama or Myanmar asat.
+
+  Every other joiner is escaped, including those in Latin, Greek, Cyrillic and CJK text. There are two documented deviations from the standard:
+  * **Extension:** a ZWJ between a consonant and a virama is kept, but only in Devanagari, Bengali and Sinhala, where common fonts draw it distinctly (eyelash ra, ya-phala, touching letters).
+  * **Tighter, as the standard allows:** after a virama, only a consonant of the same script may follow. Myanmar asat and Sinhala al-lakuna act only with a ZWJ. Myanmar's invisible stacker (U+1039) does not count as a virama. A ZWNJ next to a transparent mark or a join-causing character such as tatweel is escaped.
+* **Known limit:** a terminal that does not shape these scripts draws a kept joiner as nothing. There, two words that differ only by it look the same. Kika cannot detect shaping support.
+* **Emoji ZWJ sequences stay escaped:** a terminal without grapheme clustering draws each part, wider than the two columns the layout reserves.
+
 ### Repository and Version Control
 Kika uses a hybrid model: `git2` for fast reads, the `git` executable for everything that mutates the repository or talks to the network.
 
