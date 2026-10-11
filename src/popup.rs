@@ -37,6 +37,7 @@ pub enum Popup {
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
     RemoveRemote(RemoveRemoteConfirm),
+    DeleteTag(DeleteTagConfirm),
     Submodules(SubmoduleList),
     Worktrees(WorktreeList),
     RemoveWorktree(RemoveWorktreeConfirm),
@@ -225,6 +226,29 @@ impl RemoveRemoteConfirm {
     }
 }
 
+/// "Delete this tag?" Like [`DeleteBranchConfirm`], it carries the op
+/// chosen when it was asked, so a reload before the answer cannot change
+/// the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTagConfirm {
+    /// The tag's display name, already terminal-safe.
+    pub name: String,
+    pub op: GitOp,
+}
+
+impl DeleteTagConfirm {
+    pub fn title(&self) -> &'static str {
+        "Delete tag"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Delete tag {}? It is not deleted on any remote. (y/n)",
+            self.name
+        )
+    }
+}
+
 /// "Remove this worktree?" It carries the path taken when it was asked,
 /// so a reload before the answer cannot change what is removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -364,6 +388,10 @@ pub enum PromptKind {
     SetUpstream,
     /// Where to add a worktree for the branch `a` was pressed on.
     WorktreePath,
+    /// A new tag's name.
+    TagName,
+    /// An annotated tag's message, asked after its name.
+    TagMessage,
 }
 
 impl PromptKind {
@@ -379,6 +407,8 @@ impl PromptKind {
             PromptKind::RenameRemote => "Rename remote",
             PromptKind::SetUpstream => "Set upstream",
             PromptKind::WorktreePath => "New worktree",
+            PromptKind::TagName => "New tag",
+            PromptKind::TagMessage => "Tag message",
         }
     }
 
@@ -394,6 +424,8 @@ impl PromptKind {
             PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
             PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
             PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
+            PromptKind::TagName => AppIntent::TagNamed(text),
+            PromptKind::TagMessage => AppIntent::TagMessaged(text),
         }
     }
 }
@@ -647,6 +679,28 @@ mod tests {
             PromptKind::SetUpstream.submit(t()),
             AppIntent::SetUpstreamTo(t())
         );
+    }
+
+    #[test]
+    fn tag_prompts_answer_with_their_intents_and_delete_asks_plainly() {
+        let t = || "t".to_string();
+        assert_eq!(PromptKind::TagName.submit(t()), AppIntent::TagNamed(t()));
+        assert_eq!(
+            PromptKind::TagMessage.submit(t()),
+            AppIntent::TagMessaged(t())
+        );
+        let ask = DeleteTagConfirm {
+            name: "v1".into(),
+            op: GitOp::DeleteTag {
+                name: "v1".into(),
+                oid: "1".repeat(40),
+            },
+        };
+        assert_eq!(
+            ask.question(),
+            "Delete tag v1? It is not deleted on any remote. (y/n)"
+        );
+        assert_eq!(ask.title(), "Delete tag");
     }
 
     #[test]

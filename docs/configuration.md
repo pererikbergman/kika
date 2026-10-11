@@ -454,7 +454,8 @@ means a repository's `.kika.toml` cannot change it.
 | `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
 | `branches.set_upstream` | `u` | Set the remote branch the selected branch tracks | |
 | `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
-| `branches.switch_tab` | `[`, `]` | Show the remotes and their branches | |
+| `branches.switch_tab` | `]` | Show the remotes and their branches | |
+| `branches.prev_tab` | `[` | Show the tags | |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -471,7 +472,11 @@ remote branch Kika has listed; fetch first if it is new.
 
 ### Remotes
 
-`[` or `]` in the Branches panel shows the Remotes tab: each remote with its
+The Branches panel has three tabs: Local, Remotes and Tags. `]` shows the
+next one and `[` the one before, wrapping round. A `switch_tab` key you
+remapped still goes forward.
+
+`]` from the Local tab shows the Remotes tab: each remote with its
 URL (any user name and password in it left out), and its remote-tracking
 branches below it.
 
@@ -483,7 +488,8 @@ branches below it.
 | `remotes.add` | `a` | Add a remote; fetch to see its branches | |
 | `remotes.rename` | `R` | Rename the selected remote | |
 | `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
-| `remotes.switch_tab` | `[`, `]` | Show the local branches | |
+| `remotes.switch_tab` | `]` | Show the tags | |
+| `remotes.prev_tab` | `[` | Show the local branches | |
 
 None of these reaches the network. A remote you add shows no branches until
 you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
@@ -491,6 +497,27 @@ transport (`ext::…`, `ext://…`, `fd::…`, `fd://…`), since those run a co
 or use a file descriptor on every fetch; add such a remote with git directly. A remote named like an option
 (starting with `-`), or refs left under a name no remote has, cannot be
 renamed or removed from Kika.
+
+### Tags
+
+The Tags tab lists every tag on a commit, newest first: its name, the commit
+it points at, its date and subject, with `◆` before an annotated tag. The
+diff pane shows the selected tag's commits.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `tags.next` | `j`, `down` | Select the next tag | |
+| `tags.prev` | `k`, `up` | Select the previous tag | |
+| `tags.delete` | `d` | Delete the selected tag here, not on any remote, asking first | locked |
+| `tags.push` | `P` | Push the selected tag to the upstream's remote, or the only remote | locked |
+| `tags.switch_tab` | `]` | Show the local branches | |
+| `tags.prev_tab` | `[` | Show the remotes and their branches | |
+
+`d` deletes only the local tag, and only if it still points where it did when
+it was listed. `P` pushes the one tag, never forced, to the current branch's
+upstream remote, or to the only remote there is; with several remotes and no
+upstream it does nothing and says so. On this tab `P` pushes the tag, not the
+branch. Pushing is the only key here that reaches the network.
 
 ### Status
 
@@ -518,6 +545,8 @@ an older git refuses them and changes nothing.
 | `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
 | `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
 | `commits.reword` | `e` | Write a new message for the selected commit | locked |
+| `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
+| `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -527,6 +556,11 @@ merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
 the worktree, mixed keeps the worktree and resets the index, and hard throws
 away every uncommitted change, so it asks first. Revert and reset wait until
 an operation in progress is finished or aborted.
+
+`t` asks for a tag name and tags the selected commit; `T` then asks for a
+one-line message too and makes an annotated tag. The commit is the one
+selected when you pressed the key. A name git would refuse, one starting with
+`-`, or `@` or `HEAD`, is refused before git runs, and the prompt stays open.
 
 `s`, `F`, `d` and `e` rewrite history with `git rebase -i --autostash` on the
 terminal: uncommitted changes are stashed and put back (as git's autostash
@@ -739,6 +773,9 @@ not answer it.
 | `remove_remote.yes` | `y` | Yes, remove the remote and its remote-tracking branches | locked |
 | `remove_remote.no` | `n`, `esc` | No, keep the remote | locked |
 | `remove_remote.quit` | `ctrl-c` | Quit Kika | locked |
+| `delete_tag.yes` | `y` | Yes, delete the tag here | locked |
+| `delete_tag.no` | `n`, `esc` | No, keep the tag | locked |
+| `delete_tag.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Reset hard?
 

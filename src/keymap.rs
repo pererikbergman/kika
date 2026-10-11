@@ -8,9 +8,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::conflict::Choice;
 use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
+use crate::git::commit_files::CommitId;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::rebase_plan::{self, Edit};
+use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
@@ -202,6 +204,8 @@ pub enum KeyScope {
     Branches,
     /// The Branches panel with focus, showing remotes and their branches.
     Remotes,
+    /// The Branches panel with focus, showing tags.
+    Tags,
     /// The Commits panel, with a cursor on the log.
     Commits,
     /// The Commits panel showing one commit's files.
@@ -244,6 +248,8 @@ pub enum KeyScope {
     DeleteBranch,
     /// "Remove this remote?" on top of the popup stack.
     RemoveRemote,
+    /// "Delete this tag?" on top of the popup stack.
+    DeleteTag,
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
@@ -269,6 +275,7 @@ impl KeyScope {
             KeyScope::Files
             | KeyScope::Branches
             | KeyScope::Remotes
+            | KeyScope::Tags
             | KeyScope::Commits
             | KeyScope::CommitFiles
             | KeyScope::Status
@@ -291,6 +298,7 @@ impl KeyScope {
             | KeyScope::DiscardConfirm
             | KeyScope::DeleteBranch
             | KeyScope::RemoveRemote
+            | KeyScope::DeleteTag
             | KeyScope::ResetHard
             | KeyScope::Submodules
             | KeyScope::Worktrees
@@ -308,6 +316,7 @@ impl KeyScope {
             KeyScope::Files => "Files",
             KeyScope::Branches => "Branches",
             KeyScope::Remotes => "Remotes",
+            KeyScope::Tags => "Tags",
             KeyScope::Commits => "Commits",
             KeyScope::CommitFiles => "Commit files",
             KeyScope::Status => "Status",
@@ -330,6 +339,7 @@ impl KeyScope {
             KeyScope::DiscardConfirm => "Discard",
             KeyScope::DeleteBranch => "Delete branch",
             KeyScope::RemoveRemote => "Remove remote",
+            KeyScope::DeleteTag => "Delete tag",
             KeyScope::ResetHard => "Reset hard",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
@@ -456,6 +466,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "remove_remote.yes",
     "remove_remote.no",
     "remove_remote.quit",
+    "tags.delete",
+    "tags.push",
+    "delete_tag.yes",
+    "delete_tag.no",
+    "delete_tag.quit",
     "commits.squash",
     "commits.fixup",
     "commits.drop",
@@ -1116,6 +1131,75 @@ pub(crate) fn change_remote_disabled(state: &AppState) -> Option<&'static str> {
             Some("Change a remote named like an option with git directly")
         }
         Some(_) => None,
+    }
+}
+
+/// Why the selected commit cannot be tagged: the log needs a commit with
+/// an id git can use. Not refused while an operation runs, since the
+/// prompt comes first; the answer waits for it instead.
+pub(crate) fn tag_commit_disabled(state: &AppState) -> Option<&'static str> {
+    let row = state.commits.rows.get(state.commits.selected);
+    let valid = row.is_some_and(|r| CommitId::parse(&r.oid).is_some());
+    (!valid).then_some("No commit")
+}
+
+/// Why the Tags tab has nothing to act on.
+pub(crate) fn tag_selected_disabled(state: &AppState) -> Option<&'static str> {
+    state
+        .branches
+        .tags
+        .selected_tag()
+        .is_none()
+        .then_some("No tag")
+}
+
+/// Why the selected tag cannot be deleted now: git one operation at a
+/// time.
+pub(crate) fn delete_tag_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else {
+        tag_selected_disabled(state)
+    }
+}
+
+/// Why the selected tag cannot be pushed: a push needs the slot, a tag,
+/// and a remote Kika can choose without asking.
+pub(crate) fn push_tag_disabled(state: &AppState) -> Option<&'static str> {
+    remote_disabled(state)
+        .or_else(|| tag_selected_disabled(state))
+        .or_else(|| push_tag_remote(state).err())
+}
+
+/// The remote a tag is pushed to: the current branch's upstream's, else
+/// the only configured one. Never a picker; the status bar names it.
+pub(crate) fn push_tag_remote(state: &AppState) -> Result<RemoteName, &'static str> {
+    let configured: Vec<&RemoteName> = state
+        .branches
+        .remotes
+        .remotes
+        .iter()
+        .filter(|r| r.configured)
+        .map(|r| &r.name)
+        .collect();
+    let upstream = state.branches.current().and_then(|b| b.upstream.as_deref());
+    // A remote's name may hold `/`, so the longest one the upstream
+    // starts with owns it.
+    let owner = upstream.and_then(|upstream| {
+        configured
+            .iter()
+            .filter(|name| {
+                upstream
+                    .strip_prefix(name.display().as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+            })
+            .max_by_key(|name| name.0.len())
+    });
+    match (owner, configured.as_slice()) {
+        (Some(name), _) => Ok((*name).clone()),
+        (None, [only]) => Ok((*only).clone()),
+        (None, []) => Err("No remote"),
+        (None, _) => Err("Several remotes and no upstream to choose from"),
     }
 }
 
@@ -2765,15 +2849,22 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "branches.switch_tab",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('['), NONE),
-            KeyPattern::exact(KeyCode::Char(']'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
         scope: KeyScope::Branches,
         intent: AppIntent::SwitchBranchesTab,
         description: "Show the remotes and their branches",
         label: "remotes",
         bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.prev_tab",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::PrevBranchesTab,
+        description: "Show the tags",
+        label: "tags",
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -2845,16 +2936,110 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "remotes.switch_tab",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('['), NONE),
-            KeyPattern::exact(KeyCode::Char(']'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
         scope: KeyScope::Remotes,
+        intent: AppIntent::SwitchBranchesTab,
+        description: "Show the tags",
+        label: "tags",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.prev_tab",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::PrevBranchesTab,
+        description: "Show the local branches",
+        label: "local",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Tags,
+        intent: AppIntent::TagNext,
+        description: "Select the next tag",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Tags,
+        intent: AppIntent::TagPrev,
+        description: "Select the previous tag",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.delete",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Tags,
+        intent: AppIntent::DeleteTag,
+        description: "Delete the selected tag here, not on any remote, asking first",
+        label: "delete",
+        bar: true,
+        disabled: delete_tag_disabled,
+    },
+    // Shadows `workspace.push` on purpose: here `P` pushes the tag.
+    Binding {
+        id: "tags.push",
+        keys: &[KeyPattern::any(KeyCode::Char('P'))],
+        scope: KeyScope::Tags,
+        intent: AppIntent::PushTag,
+        description: "Push the selected tag to the upstream's remote, or the only remote",
+        label: "push tag",
+        bar: true,
+        disabled: push_tag_disabled,
+    },
+    Binding {
+        id: "tags.switch_tab",
+        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
+        scope: KeyScope::Tags,
         intent: AppIntent::SwitchBranchesTab,
         description: "Show the local branches",
         label: "local",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "tags.prev_tab",
+        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
+        scope: KeyScope::Tags,
+        intent: AppIntent::PrevBranchesTab,
+        description: "Show the remotes and their branches",
+        label: "remotes",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.tag",
+        keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::NewTag,
+        description: "Tag the selected commit with a lightweight tag",
+        label: "tag",
+        bar: true,
+        disabled: tag_commit_disabled,
+    },
+    Binding {
+        id: "commits.tag_annotated",
+        keys: &[KeyPattern::any(KeyCode::Char('T'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::NewAnnotatedTag,
+        description: "Tag the selected commit with an annotated tag and a message",
+        label: "annotated tag",
+        bar: false,
+        disabled: tag_commit_disabled,
     },
     Binding {
         id: "status.continue",
@@ -2924,6 +3109,41 @@ static REGISTRY: &[Binding] = &[
         id: "delete_branch.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DeleteBranch,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // As with deleting a branch, Enter is left unbound: a deleted tag
+    // cannot be listed again to undo it.
+    Binding {
+        id: "delete_tag.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DeleteTag,
+        intent: AppIntent::ConfirmDeleteTag,
+        description: "Yes, delete the tag here",
+        label: "delete",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "delete_tag.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DeleteTag,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the tag",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "delete_tag.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DeleteTag,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -4482,7 +4702,7 @@ mod tests {
         assert_eq!(run(&state, plain('a')), AppIntent::AddRemote);
         assert_eq!(run(&state, shift('R')), AppIntent::RenameRemote);
         assert_eq!(run(&state, plain('d')), AppIntent::RemoveRemote);
-        assert_eq!(run(&state, plain('[')), AppIntent::SwitchBranchesTab);
+        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
         assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
         assert_eq!(run(&state, plain('r')), AppIntent::RefreshStatus);
         assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
@@ -4506,11 +4726,227 @@ mod tests {
             Resolution::Disabled(_) => None,
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(branches(plain('[')), Some(AppIntent::SwitchBranchesTab));
+        assert_eq!(branches(plain('[')), Some(AppIntent::PrevBranchesTab));
         assert_eq!(branches(plain(']')), Some(AppIntent::SwitchBranchesTab));
         // No branch is selected, so both are refused.
         assert_eq!(branches(plain('u')), None);
         assert_eq!(branches(shift('U')), None);
+    }
+
+    fn tag_ref(name: &str) -> crate::git::tags::TagRef {
+        let oid = "1".repeat(40);
+        crate::git::tags::TagRef {
+            name: name.into(),
+            target: CommitId::parse(&oid).unwrap(),
+            target_short: oid[..7].into(),
+            ref_oid: oid,
+            annotated: false,
+            date: "d".into(),
+            subject: "s".into(),
+        }
+    }
+
+    fn remote_named(name: &str, configured: bool) -> crate::git::remotes::Remote {
+        crate::git::remotes::Remote {
+            name: name.into(),
+            url: configured.then(|| "/srv".into()),
+            configured,
+            branches: vec![],
+        }
+    }
+
+    #[test]
+    fn the_tags_tab_moves_deletes_pushes_and_switches_tabs() {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some("/r".into()), "/r".into());
+        let resolve_in = |state: &AppState, key| {
+            resolve(registry(), &Keymap::default(), KeyScope::Tags, state, key)
+        };
+        let shift_p = key(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        let disabled = |state: &AppState, key| match resolve_in(state, key) {
+            Resolution::Disabled(reason) => reason,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(disabled(&state, plain('d')), "No tag");
+        assert_eq!(disabled(&state, shift_p), "No tag");
+
+        state.branches.tags.loaded(Ok(vec![tag_ref("v1")]));
+        let run = |state: &AppState, key| match resolve_in(state, key) {
+            Resolution::Run(binding) => binding.intent.clone(),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(run(&state, plain('j')), AppIntent::TagNext);
+        assert_eq!(
+            run(&state, key(KeyCode::Down, KeyModifiers::NONE)),
+            AppIntent::TagNext
+        );
+        assert_eq!(run(&state, plain('k')), AppIntent::TagPrev);
+        assert_eq!(
+            run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
+            AppIntent::TagPrev
+        );
+        assert_eq!(run(&state, plain('d')), AppIntent::DeleteTag);
+        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
+        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
+        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        assert_eq!(KeyScope::Tags.parent(), Some(KeyScope::Workspace));
+
+        // `P` is the tag's push here, never the branch's.
+        assert_eq!(disabled(&state, shift_p), "No remote");
+        state.branches.remotes.loaded(Ok(vec![
+            remote_named("fork", true),
+            remote_named("origin", true),
+            remote_named("stray", false),
+        ]));
+        assert_eq!(
+            disabled(&state, shift_p),
+            "Several remotes and no upstream to choose from"
+        );
+        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
+            name: "main".into(),
+            head: true,
+            upstream: Some("origin/main".into()),
+            track: crate::git::branches::Track::None,
+            merged: true,
+        }]));
+        assert_eq!(run(&state, shift_p), AppIntent::PushTag);
+        assert_eq!(push_tag_remote(&state), Ok("origin".into()));
+        state.remote = Some(crate::remote_run::RemoteRun::new(
+            crate::git::remote::RemoteOp::Fetch,
+            1,
+            None,
+        ));
+        assert_eq!(disabled(&state, shift_p), REMOTE_BUSY);
+    }
+
+    #[test]
+    fn a_tag_goes_to_the_upstreams_remote_or_the_only_one() {
+        let mut state = AppState::new(Context::Workspace);
+        let branch = |upstream: Option<&str>| crate::git::branches::Branch {
+            name: "main".into(),
+            head: true,
+            upstream: upstream.map(Into::into),
+            track: crate::git::branches::Track::None,
+            merged: true,
+        };
+        state.branches.remotes.loaded(Ok(vec![
+            remote_named("a", true),
+            remote_named("a/b", true),
+            remote_named("only-group", false),
+        ]));
+        // A name with `/` owns the upstream it is the longest prefix of.
+        state.branches.loaded(Ok(vec![branch(Some("a/b/main"))]));
+        assert_eq!(push_tag_remote(&state), Ok("a/b".into()));
+        state.branches.loaded(Ok(vec![branch(Some("a/main"))]));
+        assert_eq!(push_tag_remote(&state), Ok("a".into()));
+        // An upstream no remote owns, such as a local branch, chooses none.
+        state.branches.loaded(Ok(vec![branch(Some("main2"))]));
+        assert!(push_tag_remote(&state).is_err());
+        state
+            .branches
+            .remotes
+            .loaded(Ok(vec![remote_named("solo", true)]));
+        assert_eq!(push_tag_remote(&state), Ok("solo".into()));
+    }
+
+    #[test]
+    fn t_and_shift_t_tag_the_selected_commit_and_need_a_usable_id() {
+        let row = |oid: &str| crate::git::log::CommitRow {
+            oid: oid.into(),
+            short_oid: "abc".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        };
+        let mut state = AppState::new(Context::Workspace);
+        let resolve_in = |state: &AppState, key| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Commits,
+                state,
+                key,
+            )
+        };
+        let shift_t = key(KeyCode::Char('T'), KeyModifiers::SHIFT);
+        for key in [plain('t'), shift_t] {
+            assert!(matches!(
+                resolve_in(&state, key),
+                Resolution::Disabled("No commit")
+            ));
+        }
+        state.commits.rows = vec![row("not hex")];
+        assert_eq!(tag_commit_disabled(&state), Some("No commit"));
+        state.commits.rows = vec![row(&"a".repeat(40))];
+        // An operation running does not refuse the prompt; the answer waits.
+        state.op_seq = Some(1);
+        let ran = |key| match resolve_in(&state, key) {
+            Resolution::Run(binding) => binding.intent.clone(),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(ran(plain('t')), AppIntent::NewTag);
+        assert_eq!(ran(shift_t), AppIntent::NewAnnotatedTag);
+        assert!(!REPO_LOCKED.contains(&"commits.tag"));
+        assert!(!REPO_LOCKED.contains(&"commits.tag_annotated"));
+    }
+
+    #[test]
+    fn the_delete_tag_question_answers_only_to_y_n_and_esc() {
+        let mut state = AppState::new(Context::Workspace);
+        state.popups = vec![Popup::DeleteTag(crate::popup::DeleteTagConfirm {
+            name: "v1".into(),
+            op: crate::git::ops::GitOp::DeleteTag {
+                name: "v1".into(),
+                oid: "1".repeat(40),
+            },
+        })];
+        let resolve_in = |key| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::DeleteTag,
+                &state,
+                key,
+            )
+        };
+        let ran = |key| match resolve_in(key) {
+            Resolution::Run(binding) => binding.intent.clone(),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(ran(plain('y')), AppIntent::ConfirmDeleteTag);
+        assert_eq!(ran(plain('n')), AppIntent::ConfirmNo);
+        assert_eq!(
+            ran(key(KeyCode::Esc, KeyModifiers::NONE)),
+            AppIntent::ConfirmNo
+        );
+        assert_eq!(
+            ran(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppIntent::Quit
+        );
+        for unbound in [key(KeyCode::Enter, KeyModifiers::NONE), plain('q')] {
+            assert!(
+                matches!(resolve_in(unbound), Resolution::Unbound),
+                "{unbound:?}"
+            );
+        }
+        assert_eq!(KeyScope::DeleteTag.parent(), None);
+        // No binding in the scope has Enter among its keys.
+        let enter = KeyPattern::any(KeyCode::Enter);
+        for b in registry().iter().filter(|b| b.scope == KeyScope::DeleteTag) {
+            assert!(!b.keys.iter().any(|k| k.code == enter.code), "{}", b.id);
+        }
+        for id in [
+            "tags.delete",
+            "tags.push",
+            "delete_tag.yes",
+            "delete_tag.no",
+            "delete_tag.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+        assert!(build(&[("tags.next", &["F"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -4986,6 +5422,7 @@ mod tests {
             KeyScope::Files => "files",
             KeyScope::Branches => "branches",
             KeyScope::Remotes => "remotes",
+            KeyScope::Tags => "tags",
             KeyScope::Commits => "commits",
             KeyScope::CommitFiles => "commit_files",
             KeyScope::Status => "status",
@@ -5008,6 +5445,7 @@ mod tests {
             KeyScope::DiscardConfirm => "discard_confirm",
             KeyScope::DeleteBranch => "delete_branch",
             KeyScope::RemoveRemote => "remove_remote",
+            KeyScope::DeleteTag => "delete_tag",
             KeyScope::ResetHard => "reset_hard",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
@@ -5259,6 +5697,9 @@ mod tests {
                     | ConfirmResetHard
                     | RemoveRemote
                     | ConfirmRemoveRemote
+                    | DeleteTag
+                    | ConfirmDeleteTag
+                    | PushTag
                     | RewriteCommit(_)
                     | OpenWorktree
                     | AddWorktree
