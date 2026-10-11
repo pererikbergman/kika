@@ -634,6 +634,91 @@ fn listed(app: &Harness) -> Vec<String> {
 }
 
 /// Move the Files selection down until `name` is highlighted.
+/// `a.txt` committed as `one`, then `two` and `three` added, with `body`
+/// as the editor. The editor writes the file it was given to
+/// `.git/edited-path` first, so a test can check it is gone afterwards.
+#[cfg(unix)]
+fn edit_repo(body: &str) -> TestRepo {
+    TestRepo::new()
+        .write("a.txt", "one\n")
+        .commit("init")
+        .write("a.txt", "one\ntwo\nthree\n")
+        .editor(&format!("echo \"$1\" > .git/edited-path\n{body}"))
+}
+
+/// The hunk file the editor was given no longer exists.
+#[cfg(unix)]
+fn assert_hunk_file_removed(repo: &TestRepo) {
+    let path = repo.read(".git/edited-path");
+    let path = std::path::Path::new(path.trim_end());
+    assert!(path.starts_with(std::env::temp_dir()), "{path:?}");
+    assert!(!path.exists(), "{path:?} was left behind");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn e_stages_the_hunk_as_edited_in_the_editor() {
+    let repo = edit_repo("grep -v '^+three$' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('e')).await;
+
+    assert_eq!(repo.git(["show", ":a.txt"]), b"one\ntwo\n");
+    assert_eq!(repo.read("a.txt"), "one\ntwo\nthree\n");
+    assert_eq!(app.state().popups, []);
+    assert_hunk_file_removed(&repo);
+    // The view reloaded: only `three` is left to stage.
+    app.assert_screen_contains("+three");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_garbage_edit_shows_an_error_and_stages_nothing() {
+    let repo = edit_repo("printf 'garbage\\n' > \"$1\"");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('e')).await;
+
+    app.assert_screen_contains("Could not stage the edited hunk");
+    assert!(repo.staged().is_empty());
+    assert_eq!(repo.git(["diff", "--cached"]), b"");
+    assert_hunk_file_removed(&repo);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn emptying_the_hunk_file_cancels_the_edit() {
+    let repo = edit_repo(": > \"$1\"");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('e')).await;
+
+    assert!(repo.staged().is_empty());
+    assert_eq!(app.state().notice, Some("Edit cancelled"));
+    assert_eq!(app.state().popups, []);
+    assert_hunk_file_removed(&repo);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn o_opens_the_file_and_its_change_shows_after_the_editor_closes() {
+    let repo = edit_repo("echo appended >> \"$1\"");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('o')).await;
+
+    assert_eq!(repo.read("a.txt"), "one\ntwo\nthree\nappended\n");
+    assert_eq!(
+        repo.read(".git/edited-path").trim_end(),
+        repo.path().join("a.txt").display().to_string()
+    );
+    app.assert_screen_contains("+appended");
+    assert_eq!(app.state().popups, []);
+}
+
 async fn select_file(app: &mut Harness, name: &str) {
     for _ in 0..listed(app).len() {
         if app.selected_line().is_some_and(|line| line.ends_with(name)) {

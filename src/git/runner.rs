@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -98,6 +98,8 @@ pub struct CliRunner {
     workdir: PathBuf,
     /// Added to every command; lets tests shut out the host's git config.
     env: Vec<(OsString, OsString)>,
+    /// Removed from every command's environment, for the same reason.
+    env_remove: Vec<OsString>,
     /// Processes started by `run` and not yet reaped, for `interrupt`.
     running: Mutex<Vec<(u64, Arc<Mutex<Child>>)>>,
     next_id: AtomicU64,
@@ -108,23 +110,35 @@ impl CliRunner {
         Self {
             workdir: workdir.into(),
             env: Vec::new(),
+            env_remove: Vec::new(),
             running: Mutex::new(Vec::new()),
             next_id: AtomicU64::new(0),
         }
     }
 
-    /// A runner that ignores the global and system git config, so tests
-    /// behave the same on every machine.
+    /// A runner that ignores the global and system git config and the
+    /// host's editor settings, so tests behave the same on every machine.
     #[cfg(test)]
     pub fn isolated(workdir: impl Into<PathBuf>) -> Self {
         Self {
             env: isolation_env(),
+            env_remove: ["GIT_EDITOR", "VISUAL", "EDITOR"]
+                .map(OsString::from)
+                .into(),
             ..Self::new(workdir)
         }
     }
 
+    /// The directory every command runs in: the repository's top level.
+    pub fn workdir(&self) -> &Path {
+        &self.workdir
+    }
+
     fn command(&self, cmd: &GitCommand) -> Command {
         let mut command = Command::new("git");
+        for key in &self.env_remove {
+            command.env_remove(key);
+        }
         command
             .current_dir(&self.workdir)
             .envs(self.env.iter().map(|(k, v)| (k, v)))
@@ -351,6 +365,9 @@ mod tests {
                 message: "msg".into(),
                 stage_all: false,
             },
+            GitOp::ApplyEdited {
+                patch: b"patch".to_vec(),
+            },
         ];
         let commands = [
             status_command(),
@@ -371,6 +388,26 @@ mod tests {
             let argv: Vec<_> = process.get_args().collect();
             assert_eq!(argv, cmd.args(), "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn an_isolated_runner_hides_the_hosts_editor_settings() {
+        use std::ffi::OsStr;
+
+        let tmp = crate::git::fake::TempDir::new("editor-env");
+        crate::git::fake::git(tmp.path(), &["init", "-q"]);
+        crate::git::fake::git(tmp.path(), &["config", "core.editor", "repo-editor"]);
+        let runner = CliRunner::isolated(tmp.path());
+        assert_eq!(runner.workdir(), tmp.path());
+        let process = runner.command(&GitCommand::new("var").arg("GIT_EDITOR"));
+        let envs: Vec<_> = process.get_envs().collect();
+        for key in ["GIT_EDITOR", "VISUAL", "EDITOR"] {
+            assert!(envs.contains(&(OsStr::new(key), None)), "{key}: {envs:?}");
+        }
+        let output = runner
+            .run(&GitCommand::new("var").arg("GIT_EDITOR"))
+            .unwrap();
+        assert_eq!(output.stdout, b"repo-editor\n");
     }
 
     #[test]

@@ -45,7 +45,8 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::ApplyCached { .. }
         | GitOp::DiscardWorktree(_)
         | GitOp::DeleteUntracked(_)
-        | GitOp::ApplyWorktree { .. } => (&[Scope::Files][..], Selection::KeepPath),
+        | GitOp::ApplyWorktree { .. }
+        | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
         GitOp::Commit { .. } => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
     };
     RefreshPlan {
@@ -91,6 +92,9 @@ mod tests {
             GitOp::DiscardWorktree(vec!["a".into()]),
             GitOp::DeleteUntracked(vec!["a".into()]),
             GitOp::ApplyWorktree {
+                patch: b"p".to_vec(),
+            },
+            GitOp::ApplyEdited {
                 patch: b"p".to_vec(),
             },
         ];

@@ -7,6 +7,7 @@ mod diff_stream;
 mod e2e;
 mod effect;
 mod git;
+mod handoff;
 mod hunk_view;
 mod intent;
 mod keymap;
@@ -35,10 +36,17 @@ fn main() -> color_eyre::Result<()> {
     let launch = std::env::current_dir()?;
     let workdir = repo_root::resolve_workdir(&CliRunner::new(&launch), launch);
     let runner = Arc::new(CliRunner::new(workdir));
+    // Editors run where git does, so relative names mean the same to both.
+    let workdir = runner.workdir().to_path_buf();
     let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();
-    let result = runtime.block_on(app::run(terminal, AppState::new(cli.context()), runner));
+    let result = runtime.block_on(app::run(
+        terminal,
+        AppState::new(cli.context()),
+        runner,
+        workdir,
+    ));
     ratatui::restore();
     // Quitting interrupts git, but a process that ignores it must not keep
     // Kika from exiting: dropping the runtime would wait for it forever.

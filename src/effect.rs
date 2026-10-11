@@ -8,6 +8,7 @@ use crate::git::GitRunner;
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::status::read_status;
+use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
@@ -58,6 +59,9 @@ pub enum Effect {
         tag: Tag,
         op: GitOp,
     },
+    /// Hand the terminal to another process. Run by the loop, which owns
+    /// the terminal, never by [`Runtime`].
+    HandOff(HandOff),
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -134,6 +138,9 @@ impl Runtime {
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
+            // The loop takes these out before spawning; without a terminal
+            // there is nothing to hand over, so one that slips through is dropped.
+            Effect::HandOff(_) => {}
         }
     }
 }
@@ -404,6 +411,22 @@ mod tests {
             }
             other => panic!("expected a failed PatchLoaded, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_hand_off_is_never_run_by_the_runtime() {
+        // No expectations queued, so any git call would panic.
+        let runner = Arc::new(FakeRunner::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::HandOff(crate::handoff::HandOff::OpenFile {
+            path: "a.rs".into(),
+            line: None,
+        }));
+
+        drop(runtime);
+        assert_eq!(rx.recv().await, None);
     }
 
     #[tokio::test]
