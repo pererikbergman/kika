@@ -296,4 +296,34 @@ mod tests {
         row_of(&rows, "+put aside");
         row_of(&rows, "stash@{1}");
     }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_the_stash_list_or_an_open_stash() {
+        let list = showing(vec![entry(0, "a1", "first"), entry(1, "a2", "second")]);
+        let open = opened(Some(Ok(vec![stash_file('M', "src/lib.rs", false)])));
+        for state in [&list, &open] {
+            for (w, h) in [(0, 0), (1, 1), (20, 5), (5, 20), (80, 2)] {
+                rows(state, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_subject_is_cut_on_a_character_boundary_within_the_panel() {
+        let mut state = showing(vec![entry(0, "a1", "日本語の変更を一時的に退避した作業")]);
+        state.screen_mode = ScreenMode::Normal;
+        let (_, rows) = rows(&state, 60, 24);
+        let row = rows[row_of(&rows, "stash@{0}")].clone();
+        assert!(row.contains("stash@{0}  日"), "{row:?}");
+        assert!(row.contains('…'), "{row:?}");
+        assert!(!row.contains('\u{FFFD}'), "{row:?}");
+        // The cut row fills the panel exactly: its right border stays put.
+        let title = &rows[row_of(&rows, "[5] Stash")];
+        let panel = |line: &str, left: char, right: char| {
+            let from = line.find(left).unwrap();
+            let to = line[from + left.len_utf8()..].find(right).unwrap() + from;
+            width_of(&line[from..to])
+        };
+        assert_eq!(panel(&row, '┃', '┃'), panel(title, '┏', '┓'), "{row:?}");
+    }
 }

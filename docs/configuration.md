@@ -550,7 +550,9 @@ goes back to the log.
 | `stash.rename` | `R` | Give the selected stash a new message; it moves to stash@{0} | locked |
 
 Git has no rename for a stash, so `R` stores the entry again with the new
-message, as `stash@{0}`, and drops it from its old place. Each action checks
+message, as `stash@{0}`, and drops it from its old place. A stash that is a
+copy of `stash@{0}` (the same commit) cannot be renamed that way; rename or
+drop `stash@{0}` instead. Each action checks
 the entry is still where it was when the key was pressed; if the list changed
 under Kika, it is refused and the list reloads.
 

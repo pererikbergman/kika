@@ -174,6 +174,11 @@ const STASH_STAGED_GIT: GitVersion = GitVersion {
 /// Why a stash action is refused when its entry moved since it was chosen.
 pub const STASH_LIST_CHANGED: &str = "The stash list changed; refresh and try again";
 
+/// Why a rename is refused when `stash@{0}` holds the same commit: git
+/// cannot store it on top again, so there is nothing to rename it to.
+pub const STASH_COPY_ON_TOP: &str =
+    "stash@{0} is a copy of this stash; rename or drop stash@{0} instead";
+
 /// How a merge records the other branch's commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeStrategy {
@@ -642,10 +647,11 @@ fn staged_stash_supported(runner: &dyn GitRunner) -> Result<(), String> {
 /// copy, never a loss.
 ///
 /// Git does not log a ref update that leaves the ref where it was, so
-/// storing the entry `refs/stash` already points at (`stash@{0}`) adds
-/// nothing, and dropping `stash@{1}` then would drop another stash. That
-/// entry is dropped first instead; if the store then fails, the error
-/// names its id so it can be stored by hand.
+/// storing the commit `refs/stash` already points at adds nothing. For
+/// `stash@{0}` itself, the entry is dropped first instead; if the store
+/// then fails, the error names its id so it can be stored by hand. A
+/// deeper entry whose commit is also at `stash@{0}` (a copy) is refused:
+/// the store would add nothing, and the drop would only lose the entry.
 fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Result<(), String> {
     let store = store_command(stash, message);
     let at = |index| StashRef {
@@ -653,8 +659,9 @@ fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Resu
         oid: stash.oid.clone(),
     };
     let drop = |index| op_command(&GitOp::StashDrop(at(index)));
-    if stash_is(runner, &at(0))? {
-        run_checked(runner, &drop(stash.index))?;
+    // `run_op` has checked that `stash@{index}` is still this commit.
+    if stash.index == 0 {
+        run_checked(runner, &drop(0))?;
         return run_checked(runner, &store).map(|_| ()).map_err(|message| {
             format!(
                 "{message}\nThe stash was dropped but not stored again; \
@@ -662,6 +669,9 @@ fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Resu
                 stash.oid.as_str()
             )
         });
+    }
+    if stash_is(runner, &at(0))? {
+        return Err(STASH_COPY_ON_TOP.into());
     }
     run_checked(runner, &store)?;
     verify_stash(runner, &at(stash.index + 1))?;
@@ -2386,16 +2396,14 @@ mod tests {
             message: "m".into(),
         };
         let store = ["stash", "store", "-m", "m", STASH_OID];
-        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
-        let runner = expect_verify(runner, 0, STASH_OID)
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
             .expect(&["stash", "drop", "stash@{0}"], ok(b""))
             .expect(&store, ok(b""));
         assert_eq!(run_op(&runner, &op), Ok(()));
         runner.assert_done();
 
         // A failed store says how to bring the entry back.
-        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
-        let runner = expect_verify(runner, 0, STASH_OID)
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
             .expect(&["stash", "drop", "stash@{0}"], ok(b""))
             .expect(&store, fail("fatal: no space"));
         let error = run_op(&runner, &op).unwrap_err();
@@ -2404,6 +2412,18 @@ mod tests {
             error.contains(&format!("git stash store {STASH_OID}")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn renaming_a_deeper_copy_of_the_top_entry_is_refused_without_dropping() {
+        let op = GitOp::StashRename {
+            stash: at(2),
+            message: "m".into(),
+        };
+        let runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
+        let runner = expect_verify(runner, 0, STASH_OID);
+        assert_eq!(run_op(&runner, &op), Err(STASH_COPY_ON_TOP.into()));
+        runner.assert_done();
     }
 
     #[test]
@@ -2687,5 +2707,41 @@ mod tests {
             };
             assert_eq!(others(&after), others(&before));
         }
+    }
+
+    #[test]
+    fn renaming_a_copy_of_the_top_stash_keeps_every_entry_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+        run_op(&runner, &push(StashMode::All, Some("one"), &[])).unwrap();
+        std::fs::write(dir.join("a.txt"), "y\n").unwrap();
+        run_op(&runner, &push(StashMode::All, Some("two"), &[])).unwrap();
+        // The copy a failed rename can leave: X again on top.
+        let x = real_entries(dir)[1].oid.clone();
+        git(dir, &["stash", "store", "-m", "dup", x.as_str()]);
+        let before = real_entries(dir);
+        let subjects = |entries: &[crate::git::stash::StashEntry]| {
+            entries
+                .iter()
+                .map(|e| (e.oid.clone(), e.subject.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(before.len(), 3);
+        assert_eq!((&before[0].oid, &before[2].oid), (&x, &x));
+
+        let result = run_op(
+            &runner,
+            &GitOp::StashRename {
+                stash: before[2].stash_ref(),
+                message: "renamed".into(),
+            },
+        );
+
+        assert_eq!(result, Err(STASH_COPY_ON_TOP.into()));
+        assert_eq!(subjects(&real_entries(dir)), subjects(&before));
     }
 }
