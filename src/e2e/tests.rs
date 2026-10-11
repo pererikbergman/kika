@@ -481,6 +481,63 @@ async fn t_switches_between_the_unstaged_and_staged_changes() {
     app.assert_screen_contains(" Diff ");
 }
 
+/// `a.txt` of 20 committed lines, then line 10 replaced by three in the
+/// worktree: one hunk of `-line 10`, `+ten a`, `+ten b`, `+ten c`.
+fn three_line_repo() -> TestRepo {
+    let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    let changed = lines.replace("line 10\n", "ten a\nten b\nten c\n");
+    TestRepo::new()
+        .write("a.txt", &lines)
+        .commit("init")
+        .write("a.txt", &changed)
+}
+
+/// The `+`/`-` lines of a diff, without the file headers.
+fn changes(diff: &str) -> Vec<&str> {
+    diff.lines()
+        .filter(|l| l.starts_with(['+', '-']) && !l.starts_with("+++") && !l.starts_with("---"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn space_in_line_mode_stages_a_single_added_line() {
+    let repo = three_line_repo();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('v')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+
+    assert_eq!(changes(&diff_text(&repo, true)), ["+ten a"]);
+    assert_eq!(
+        changes(&diff_text(&repo, false)),
+        ["-line 10", "+ten b", "+ten c"]
+    );
+    assert!(app.state().popups.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_of_lines_stages_exactly_those_lines() {
+    let repo = three_line_repo();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('v')).await;
+    app.press_with(KeyCode::Char('J'), KeyModifiers::SHIFT)
+        .await;
+    app.press_with(KeyCode::Char('J'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char(' ')).await;
+
+    assert_eq!(
+        changes(&diff_text(&repo, true)),
+        ["-line 10", "+ten a", "+ten b"]
+    );
+    assert_eq!(changes(&diff_text(&repo, false)), ["+ten c"]);
+    assert!(app.state().popups.is_empty());
+}
+
 /// `a.txt` and `d/a.txt`, each 20 committed lines with lines 1 and 20 then
 /// changed in the worktree, so both have two hunks, but with different text
 /// (`line` at the root, `sub` below `d/`). `d/e/` exists, holding only a

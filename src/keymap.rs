@@ -111,6 +111,8 @@ pub enum KeyScope {
     Files,
     /// The Diff pane with focus, working on hunks.
     Diff,
+    /// The Diff pane picking changed lines inside a hunk.
+    Lines,
     Review,
     Help,
     /// "Stage everything and commit?"
@@ -139,6 +141,7 @@ impl KeyScope {
     pub fn parent(self) -> Option<KeyScope> {
         match self {
             KeyScope::Files | KeyScope::Diff => Some(KeyScope::Workspace),
+            KeyScope::Lines => Some(KeyScope::Diff),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
             | KeyScope::CommitConfirm
@@ -159,6 +162,7 @@ impl KeyScope {
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
             KeyScope::Diff => "Diff",
+            KeyScope::Lines => "Lines",
             KeyScope::Review => "Review",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
@@ -521,6 +525,15 @@ static REGISTRY: &[Binding] = &[
         disabled: hunk_disabled,
     },
     Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::EnterLineMode,
+        description: "Pick changed lines inside the selected hunk",
+        label: "lines",
+        bar: true,
+        disabled: hunk_disabled,
+    },
+    Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::ToggleDiffSide,
@@ -539,6 +552,75 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::FocusFiles,
         description: "Back to the file list",
         label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::exact(KeyCode::Down, NONE),
+        ],
+        scope: KeyScope::Lines,
+        intent: AppIntent::NextLine { extend: false },
+        description: "Move to the next changed line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::exact(KeyCode::Up, NONE),
+        ],
+        scope: KeyScope::Lines,
+        intent: AppIntent::PrevLine { extend: false },
+        description: "Move to the previous changed line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Char('J')),
+            KeyPattern::exact(KeyCode::Down, KeyModifiers::SHIFT),
+        ],
+        scope: KeyScope::Lines,
+        intent: AppIntent::NextLine { extend: true },
+        description: "Grow the selection down a changed line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Char('K')),
+            KeyPattern::exact(KeyCode::Up, KeyModifiers::SHIFT),
+        ],
+        scope: KeyScope::Lines,
+        intent: AppIntent::PrevLine { extend: true },
+        description: "Grow the selection up a changed line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Lines,
+        intent: AppIntent::ToggleLinesStage,
+        description: "Stage the selected lines, or unstage them in the staged view",
+        label: "lines",
+        bar: true,
+        disabled: hunk_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('v'), NONE),
+        ],
+        scope: KeyScope::Lines,
+        intent: AppIntent::ExitLineMode,
+        description: "Back to whole hunks",
+        label: "hunks",
         bar: true,
         disabled: never,
     },
@@ -1016,6 +1098,65 @@ mod tests {
         // File keys do not.
         assert_eq!(diff(plain('a')), None);
         assert_eq!(diff(plain('c')), None);
+    }
+
+    #[test]
+    fn line_mode_has_its_own_keys_and_falls_through_to_the_diff() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        let shift = KeyModifiers::SHIFT;
+        assert_eq!(KeyScope::Lines.parent(), Some(KeyScope::Diff));
+        assert_eq!(KeyScope::Lines.title(), "Lines");
+        let lines = |k| from(KeyScope::Lines, k);
+        let next = NextLine { extend: false };
+        let prev = PrevLine { extend: false };
+        assert_eq!(lines(plain('j')), Some(next.clone()));
+        assert_eq!(lines(key(KeyCode::Down, none)), Some(next));
+        assert_eq!(lines(plain('k')), Some(prev.clone()));
+        assert_eq!(lines(key(KeyCode::Up, none)), Some(prev));
+        for mods in [none, shift] {
+            assert_eq!(
+                lines(key(KeyCode::Char('J'), mods)),
+                Some(NextLine { extend: true })
+            );
+            assert_eq!(
+                lines(key(KeyCode::Char('K'), mods)),
+                Some(PrevLine { extend: true })
+            );
+        }
+        assert_eq!(
+            lines(key(KeyCode::Down, shift)),
+            Some(NextLine { extend: true })
+        );
+        assert_eq!(
+            lines(key(KeyCode::Up, shift)),
+            Some(PrevLine { extend: true })
+        );
+        assert_eq!(lines(key(KeyCode::Esc, none)), Some(ExitLineMode));
+        assert_eq!(lines(plain('v')), Some(ExitLineMode));
+        // Other Diff keys, and workspace and global ones, reach through.
+        assert_eq!(lines(plain('t')), Some(ToggleDiffSide));
+        assert_eq!(lines(plain('h')), Some(FocusFiles));
+        assert_eq!(lines(plain('r')), Some(RefreshStatus));
+        assert_eq!(lines(plain('q')), Some(Quit));
+
+        // Space and `v` share the hunk key's refusals; with no hunks here,
+        // that is the same reason.
+        let state = AppState::new(Context::Workspace);
+        for (scope, k) in [(KeyScope::Lines, plain(' ')), (KeyScope::Diff, plain('v'))] {
+            assert!(matches!(
+                resolve(registry(), scope, &state, k),
+                Resolution::Disabled(NO_CHANGES)
+            ));
+        }
+        let bound = |scope, k| {
+            registry()
+                .iter()
+                .find(|b| b.scope == scope && b.matches(k))
+                .map(|b| b.intent.clone())
+        };
+        assert_eq!(bound(KeyScope::Lines, plain(' ')), Some(ToggleLinesStage));
+        assert_eq!(bound(KeyScope::Diff, plain('v')), Some(EnterLineMode));
     }
 
     #[test]
