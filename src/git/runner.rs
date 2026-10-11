@@ -669,6 +669,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "kill stops git.exe but not the process it starts, which keeps writing; process-group kill is Unix-only"
+    )]
     fn kill_unblocks_a_reader_of_a_large_diff() {
         let tmp = crate::git::fake::TempDir::new("kill");
         let dir = tmp.path();

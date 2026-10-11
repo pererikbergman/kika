@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR replaces the run in flight; runs on main always finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Draft PRs run Linux only to keep billed macOS/Windows minutes low.
+        os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Check out with LF line endings
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      # The default temp dir is an 8.3 short name; git reports the long form,
+      # so temp repo paths would not compare equal in tests.
+      - name: Use a long-form temp directory
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          echo "TMP=${{ runner.temp }}" >> "$GITHUB_ENV"
+          echo "TEMP=${{ runner.temp }}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --locked
