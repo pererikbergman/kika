@@ -1,11 +1,12 @@
 //! Turns a diff renderer's ANSI output into styled rows that are safe to
 //! draw. Only SGR colour and attribute sequences are honoured; every other
 //! escape is consumed and dropped, and the text left over goes through the
-//! same sanitiser as diff lines, so renderer bytes never drive the terminal.
+//! same body-text sanitiser as diff lines, so renderer bytes never drive the
+//! terminal. Headers and body cannot be told apart here, so all of it is body.
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::git::diff::sanitize;
+use crate::git::diff::sanitize_body;
 
 /// One line of renderer output: styled runs of terminal-safe text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,7 +68,7 @@ struct Parser {
 impl Parser {
     fn flush(&mut self) {
         if !self.text.is_empty() {
-            let text = sanitize(&std::mem::take(&mut self.text));
+            let text = sanitize_body(&std::mem::take(&mut self.text));
             match self.row.runs.last_mut() {
                 Some((style, run)) if *style == self.style => run.push_str(&text),
                 _ => self.row.runs.push((self.style, text)),
@@ -354,5 +355,11 @@ mod tests {
         let rows = parse(b"\ta\x00b\x9b");
         no_controls(&rows);
         assert_eq!(texts(&rows), ["    a\u{FFFD}b\u{FFFD}"]);
+    }
+
+    #[test]
+    fn body_text_keeps_a_joined_word_and_escapes_bidi_and_emoji_joiners() {
+        let rows = parse("\x1b[32m+می\u{200C}خواهم é\u{202E}ü 👨\u{200D}👩\x1b[0m".as_bytes());
+        assert_eq!(texts(&rows), ["+می\u{200C}خواهم é<U+202E>ü 👨<U+200D>👩"]);
     }
 }

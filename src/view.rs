@@ -5,7 +5,7 @@ use crate::commits_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
-use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
@@ -1102,7 +1102,14 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&sanitize(&row.text), 0, width.saturating_sub(1));
+                    let text = match row.kind {
+                        RowKind::Header | RowKind::HunkHeader => sanitize(&row.text),
+                        RowKind::Context
+                        | RowKind::Added
+                        | RowKind::Removed
+                        | RowKind::NoNewline => sanitize_body(&row.text),
+                    };
+                    let text = clip(&text, 0, width.saturating_sub(1));
                     let line = Line::from(vec![
                         Span::styled(gutter, Style::new().fg(FOCUSED)),
                         Span::styled(text, style),
@@ -2890,6 +2897,71 @@ mod tests {
         assert!(contains(&rows, "▌+new nine"), "{rows:#?}");
     }
 
+    /// A diff of a file whose name holds a ZWNJ, adding a ZWNJ word, an emoji
+    /// ZWJ sequence and a Devanagari conjunct, each followed by `X`.
+    const JOINED: &str = "diff --git a/می\u{200C}خواهم.rs b/می\u{200C}خواهم.rs\n\
+        --- a/می\u{200C}خواهم.rs\n+++ b/می\u{200C}خواهم.rs\n\
+        @@ -1 +1,3 @@\n-old\n+می\u{200C}خواهمX\n+👨\u{200D}👩\u{200D}👧X\n+क्\u{200D}षX\n";
+
+    #[test]
+    fn a_hunk_body_keeps_script_joiners_and_its_file_header_escapes_them() {
+        let rows = draw(&hunks(DiffSide::Worktree, JOINED.as_bytes()), 100, 20);
+        assert!(contains(&rows, "+می\u{200C}خواهمX"), "{rows:#?}");
+        assert!(contains(&rows, "+क्\u{200D}षX"), "{rows:#?}");
+        assert!(contains(&rows, "+++ b/می<U+200C>خواهم.rs"), "{rows:#?}");
+        // Emoji sequences stay escaped: their width depends on the terminal.
+        assert!(contains(&rows, "+👨<U+200D>👩<U+200D>👧X"), "{rows:#?}");
+    }
+
+    /// Where the `+` of the added row starting with `first` is drawn.
+    fn added_row(buffer: &ratatui::buffer::Buffer, first: char) -> (u16, u16) {
+        let area = buffer.area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width.saturating_sub(1)).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buffer[(x, y)].symbol() == "+" && buffer[(x + 1, y)].symbol().starts_with(first)
+            })
+            .unwrap_or_else(|| panic!("no added row starting with {first:?}"))
+    }
+
+    #[test]
+    fn text_after_a_joined_word_lands_where_a_terminal_draws_it() {
+        // Columns as a terminal counts them, one per letter, two per emoji,
+        // none for a joiner or virama: not `width_of`, which the layout uses.
+        let width = 100;
+        let buffer = draw_buffer(&hunks(DiffSide::Worktree, JOINED.as_bytes()), width, 20);
+        for (first, columns) in [('م', 1 + 7), ('👨', 1 + 2 + 8 + 2 + 8 + 2), ('क', 1 + 2)] {
+            let (x, y) = added_row(&buffer, first);
+            assert_eq!(buffer[(x + columns, y)].symbol(), "X", "{first:?}");
+            // The focused Diff pane's border is drawn thick.
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{first:?}");
+        }
+    }
+
+    #[test]
+    fn a_clipped_joined_row_keeps_its_border_and_never_splits_a_cluster() {
+        let long = "می\u{200C}خواهم क्\u{200D}ष 👨\u{200D}👩 ".repeat(8);
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{long}\n");
+        // Every width from 30 to 60 clips the row at a different point of it;
+        // the tiny sizes only show that nothing splits or panics.
+        let sizes = (30..=60).map(|w| (w, 12)).chain([(24, 8), (12, 5)]);
+        for (width, height) in sizes {
+            let buffer = draw_buffer(&hunks(DiffSide::Worktree, diff.as_bytes()), width, height);
+            if height == 12 {
+                let (_, y) = added_row(&buffer, 'م');
+                assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{width}x{height}");
+            }
+            for cell in buffer.content() {
+                let lead = cell.symbol().chars().next();
+                assert!(
+                    !matches!(lead, Some('\u{200C}' | '\u{200D}' | '\u{094D}')),
+                    "{width}x{height}: a cell starts with {lead:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn in_line_mode_the_picked_lines_are_reversed_and_the_header_is_not() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
@@ -3703,6 +3775,19 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn a_blamed_word_keeps_its_zwnj() {
+        let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهمX\n");
+        let lines = crate::git::blame::parse_blame(out.as_bytes()).unwrap();
+        let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "می\u{200C}خواهمX"), "{rows:#?}");
+        assert!(!contains(&rows, "<U+200C>"), "{rows:#?}");
+        // Seven letters, one column each; the ZWNJ takes none.
+        let (x, y) = find(&buffer, "م");
+        assert_eq!(buffer[(x + 7, y)].symbol(), "X");
     }
 
     #[test]

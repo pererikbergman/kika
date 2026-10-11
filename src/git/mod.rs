@@ -8,6 +8,7 @@ pub mod diff;
 pub mod fake;
 pub mod fetch;
 pub mod head;
+mod joiner;
 pub mod log;
 pub mod ops;
 pub mod patch;
