@@ -17,6 +17,7 @@ mod config;
 mod config_docs;
 mod conflict;
 mod conflict_view;
+mod copied;
 mod custom_command;
 mod diff_pane;
 mod diff_stream;
