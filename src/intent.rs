@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
+use crate::ansi::StyledRow;
 use crate::config::ConfigError;
+use crate::custom_command::OutputMode;
 use crate::effect::Tag;
+use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::ops::GitOp;
@@ -221,6 +224,16 @@ pub enum AppIntent {
     ScrollCommit(Scroll),
     /// Back from the blame to the Files panel.
     CloseBlame,
+    /// Show the diff through the next configured renderer, or the
+    /// built-in view after the last.
+    CycleRenderer,
+    /// The renderers configured for this session, found at boot.
+    RenderersFound(Vec<ExternalRenderer>),
+    /// A renderer's rows for the shown diff; `tag` says which render.
+    DiffRendered {
+        tag: Tag,
+        result: Result<Vec<StyledRow>, String>,
+    },
     /// The first intent: record the repository Kika started in and load
     /// it, or, outside one, welcome the user with the recent list.
     Start,
@@ -242,9 +255,22 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<PathBuf, String>,
     },
+    /// The answer to a custom command's current prompt.
+    CommandPromptAnswered(String),
+    /// A custom command finished. `Ok` holds the captured output, empty
+    /// unless `output` is `Popup`; `Err` why it could not start, or its
+    /// exit status followed by its output. Both are terminal-safe.
+    CommandFinished {
+        title: String,
+        output: OutputMode,
+        result: Result<String, String>,
+    },
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {
+        /// The top level the files were read for, so a result that
+        /// arrives after a repository switch can be told apart.
+        repo: Option<PathBuf>,
         keymap: Keymap,
         errors: Vec<ConfigError>,
     },

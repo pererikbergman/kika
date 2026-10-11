@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
-use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+use crate::popup::{ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::submodule_list::SubmoduleList;
 use crate::view::{
@@ -38,7 +38,9 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             Popup::Confirm(kind) => {
                 render_question(&format!(" {} ", kind.title()), kind.question(), frame, area)
             }
-            Popup::Prompt { kind, input } => render_prompt(*kind, input, top, frame, area),
+            Popup::Prompt { kind, input } => {
+                render_prompt(&state.prompt_title(*kind), input, top, frame, area)
+            }
             Popup::Error(error) => render_error(error, frame, area),
             Popup::Discard(confirm) => {
                 let what = confirm.what;
@@ -266,10 +268,10 @@ fn render_recent(state: &AppState, list: &RecentList, top: bool, frame: &mut Fra
 /// A one-line box holding the typed text, and the terminal cursor when it
 /// is the `top` popup. Long text scrolls to keep the cursor inside, with
 /// `…` where it is cut.
-fn render_prompt(kind: PromptKind, input: &LineInput, top: bool, frame: &mut Frame, area: Rect) {
+fn render_prompt(title: &str, input: &LineInput, top: bool, frame: &mut Frame, area: Rect) {
     let popup = centered(area, PROMPT_WIDTH, 3);
     frame.render_widget(Clear, popup);
-    let block = Block::bordered().title(format!(" {} ", kind.title()));
+    let block = Block::bordered().title(format!(" {title} "));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
     if inner.is_empty() {
@@ -294,7 +296,7 @@ fn render_error(error: &ErrorPopup, frame: &mut Frame, area: Rect) {
     let width = COMMIT_WIDTH.min(area.width);
     let text_width = usize::from(width.saturating_sub(2)).max(1);
     let rows = wrap(&error.message, text_width);
-    let next = wrap(error.next, text_width);
+    let next = wrap(&error.next, text_width);
     let height = u16::try_from(rows.len() + next.len() + 3).unwrap_or(u16::MAX);
     let popup = centered(area, width, height);
     frame.render_widget(Clear, popup);
@@ -335,6 +337,7 @@ mod tests {
     use crate::git::status::EntryKind;
     use crate::git::submodule::{Submodule, SubmoduleState};
     use crate::model::Context;
+    use crate::popup::PromptKind;
     use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat};
     use crate::view::{buffer_rows, render};
 
@@ -462,6 +465,28 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_edit_draws_the_advice_git_message_and_the_key() {
+        let mut state = workspace(&["a.rs"]);
+        let error = state.edited_hunk_error("error: patch with only garbage at <stdin>:4");
+        state.popups = vec![Popup::Error(error)];
+        let (buffer, rows) = draw(&state, 80, 24);
+        assert!(
+            contains(&rows, " Could not stage the edited hunk "),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "The edited hunk is not a patch git can apply."),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "error: patch with only garbage at <stdin>:4"),
+            "{rows:#?}"
+        );
+        let (x, y) = find(&rows, "Press e to edit the hunk again.");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
+    }
+
+    #[test]
     fn a_long_error_shows_its_tail_and_keeps_the_next_step() {
         let message: Vec<String> = (0..100).map(|i| format!("error {i}")).collect();
         let mut state = workspace(&["a.rs"]);
@@ -538,6 +563,36 @@ mod tests {
             rows[23].starts_with(" enter ok  esc cancel  ctrl-c quit"),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn a_command_prompt_is_titled_by_the_command() {
+        use crate::custom_command::{CustomCommand, OutputMode, Panel, test_table};
+        use crate::model::PendingCommand;
+        let table = test_table(
+            Panel::Files,
+            &["ctrl-t"],
+            &["cp", "{path}", "{prompt1}", "{prompt2}"],
+            &["Copy to", "Mode \x1b[2J"],
+            OutputMode::None,
+        );
+        let mut state = workspace(&["a.rs"]);
+        state.pending_command = Some(PendingCommand {
+            command: CustomCommand::parse(&table, 1).unwrap(),
+            target: crate::custom_command::Target {
+                path: "a.rs".into(),
+                line: None,
+                commit: None,
+            },
+            answers: vec!["x".into()],
+        });
+        state.popups = vec![Popup::Prompt {
+            kind: PromptKind::Command,
+            input: LineInput::default(),
+        }];
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " Mode \u{FFFD}[2J "), "{rows:#?}");
+        assert!(!contains(&rows, "Copy to"), "{rows:#?}");
     }
 
     #[test]

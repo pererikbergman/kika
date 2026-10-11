@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::custom_command::{CommandTable, CustomCommand};
+use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::{EntryKind, Head};
@@ -76,7 +78,7 @@ impl KeyPattern {
     }
 
     /// Whether some key press matches both patterns, so one shadows the other.
-    fn overlaps(&self, other: &KeyPattern) -> bool {
+    pub(crate) fn overlaps(&self, other: &KeyPattern) -> bool {
         self.code == other.code
             && match (self.mods, other.mods) {
                 (Mods::Exact(a), Mods::Exact(b)) => a == b,
@@ -331,7 +333,7 @@ pub enum Trust {
 }
 
 /// Bindings a repository file may not change: they quit, start other
-/// programs, reach the network, destroy work, answer a question, create a
+/// programs (an editor, a diff renderer), reach the network, destroy work, answer a question, create a
 /// repository or switch to another one. Moving
 /// one onto an innocent key, taking quit away, or letting the key that
 /// asks also answer, would let a cloned repository trap or trick the user.
@@ -348,6 +350,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "diff.open",
     "lines.open",
     "diff.edit_hunk",
+    "diff.renderer",
     "commit_editor.edit_externally",
     "submodules.init",
     "submodules.update",
@@ -365,11 +368,28 @@ pub const REPO_LOCKED: &[&str] = &[
 ];
 
 /// The keys in force: the registry's, except where the user's config
-/// changed them. Only the changes are stored, so the state stays cheap to
-/// clone and compare.
+/// changed them, plus the user's own commands. Only the changes are stored,
+/// so the state stays cheap to clone and compare.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Keymap {
     overrides: BTreeMap<&'static str, Vec<KeyPattern>>,
+    /// From the global file only; a repository layer copies them unchanged.
+    pub commands: Vec<CustomCommand>,
+}
+
+/// Who a key belongs to, for messages.
+enum Owner<'a> {
+    Binding(&'a Binding),
+    Command(usize),
+}
+
+impl std::fmt::Display for Owner<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Owner::Binding(b) => write!(f, "\"{}\"", b.id),
+            Owner::Command(i) => write!(f, "command {}", i + 1),
+        }
+    }
 }
 
 impl Keymap {
@@ -410,20 +430,63 @@ impl Keymap {
         Ok(keymap)
     }
 
-    /// No key press may match two bindings of one scope.
-    fn check_scopes(&self) -> Result<(), String> {
-        let patterns: Vec<(&Binding, &KeyPattern)> = REGISTRY
+    /// `self` with the global file's `[[commands]]`, in place of any it
+    /// had. Fails on a table that does not parse, a command key that
+    /// clashes with another key of its scope, or one that would hide a
+    /// locked binding in an enclosing scope, such as `q` hiding quit.
+    pub fn with_commands(self, tables: &[CommandTable]) -> Result<Keymap, String> {
+        let commands = tables
             .iter()
-            .flat_map(|b| self.keys(b).iter().map(move |k| (b, k)))
-            .collect();
-        for (i, (a, ka)) in patterns.iter().enumerate() {
-            for (b, kb) in &patterns[i + 1..] {
-                if a.scope == b.scope && ka.overlaps(kb) {
+            .enumerate()
+            .map(|(i, table)| CustomCommand::parse(table, i + 1))
+            .collect::<Result<Vec<_>, _>>()?;
+        let keymap = Keymap { commands, ..self };
+        keymap.check_scopes()?;
+        for (i, command) in keymap.commands.iter().enumerate() {
+            let locked = REGISTRY.iter().filter(|b| REPO_LOCKED.contains(&b.id));
+            for binding in locked.filter(|b| command.scope.chain().any(|s| s == b.scope)) {
+                let hidden = keymap
+                    .keys(binding)
+                    .iter()
+                    .find(|k| command.keys.iter().any(|key| key.overlaps(k)));
+                if let Some(key) = hidden {
                     return Err(format!(
-                        "key \"{}\" is bound to both \"{}\" and \"{}\"",
+                        "command {}: key \"{}\" would hide \"{}\"",
+                        i + 1,
+                        key.label(),
+                        binding.id
+                    ));
+                }
+            }
+        }
+        Ok(keymap)
+    }
+
+    /// Every key in force with its owner and scope: the registry's, then
+    /// the commands'.
+    fn owned_keys(&self) -> Vec<(Owner<'_>, KeyScope, &KeyPattern)> {
+        let builtin = REGISTRY.iter().flat_map(|b| {
+            self.keys(b)
+                .iter()
+                .map(move |k| (Owner::Binding(b), b.scope, k))
+        });
+        let commands = self
+            .commands
+            .iter()
+            .enumerate()
+            .flat_map(|(i, c)| c.keys.iter().map(move |k| (Owner::Command(i), c.scope, k)));
+        builtin.chain(commands).collect()
+    }
+
+    /// No key press may match two bindings or commands of one scope.
+    fn check_scopes(&self) -> Result<(), String> {
+        let patterns = self.owned_keys();
+        for (i, (a, scope_a, ka)) in patterns.iter().enumerate() {
+            for (b, scope_b, kb) in &patterns[i + 1..] {
+                if scope_a == scope_b && ka.overlaps(kb) {
+                    return Err(format!(
+                        "key \"{}\" is bound to both {a} and {b}",
                         kb.label(),
-                        a.id,
-                        b.id
                     ));
                 }
             }
@@ -473,12 +536,16 @@ pub(crate) fn remap(entries: &[(&str, &[&str])]) -> Keymap {
 #[derive(Debug)]
 pub enum Resolution<'a> {
     Run(&'a Binding),
+    /// The user's command at this index in [`Keymap::commands`].
+    Command(usize),
     /// The key is bound but cannot run; the reason is shown to the user.
     Disabled(&'static str),
     Unbound,
 }
 
 /// Find the binding for `key`: the focused scope first, then each parent.
+/// Within a scope the built-in bindings come before the user's commands,
+/// though a valid keymap never lets the two share a key.
 /// A bound but disabled key stops the search, so a panel's refusal is never
 /// silently replaced by a global binding of the same key.
 pub fn resolve<'a>(
@@ -497,6 +564,13 @@ pub fn resolve<'a>(
                 Some(reason) => Resolution::Disabled(reason),
                 None => Resolution::Run(binding),
             };
+        }
+        let command = keymap
+            .commands
+            .iter()
+            .position(|c| c.scope == scope && c.keys.iter().any(|p| p.matches(key)));
+        if let Some(index) = command {
+            return Resolution::Command(index);
         }
     }
     Resolution::Unbound
@@ -526,8 +600,36 @@ pub fn available<'a>(
             }
         }
         claimed.extend(in_scope.iter().flat_map(|b| keymap.keys(b).iter().copied()));
+        claimed.extend(commands_in(keymap, scope).flat_map(|c| c.keys.iter().copied()));
     }
     out
+}
+
+/// The user's commands reachable from `focus`, nearest scope first and in
+/// file order within a scope. Like [`available`], it leaves out a command
+/// whose keys are all taken by a nearer scope.
+pub fn available_commands(keymap: &Keymap, focus: KeyScope) -> Vec<&CustomCommand> {
+    let mut claimed: Vec<KeyPattern> = Vec::new();
+    let mut out = Vec::new();
+    for scope in focus.chain() {
+        for command in commands_in(keymap, scope) {
+            let shadowed = command
+                .keys
+                .iter()
+                .all(|key| claimed.iter().any(|c| c.overlaps(key)));
+            if !shadowed {
+                out.push(command);
+            }
+        }
+        let builtin = REGISTRY.iter().filter(|b| b.scope == scope);
+        claimed.extend(builtin.flat_map(|b| keymap.keys(b).iter().copied()));
+        claimed.extend(commands_in(keymap, scope).flat_map(|c| c.keys.iter().copied()));
+    }
+    out
+}
+
+fn commands_in(keymap: &Keymap, scope: KeyScope) -> impl Iterator<Item = &CustomCommand> {
+    keymap.commands.iter().filter(move |c| c.scope == scope)
 }
 
 /// For bindings and menu items that always run.
@@ -565,6 +667,11 @@ fn least_context(state: &AppState) -> Option<&'static str> {
     blame_open(state).or_else(|| {
         (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
     })
+}
+
+/// With no renderer configured there is nothing to cycle.
+fn renderer_disabled(state: &AppState) -> Option<&'static str> {
+    state.renderers.is_empty().then_some(NO_RENDERER)
 }
 
 /// Why `b` cannot blame the selected file. An untracked or deleted file
@@ -1130,6 +1237,16 @@ static REGISTRY: &[Binding] = &[
         // Left out of the bar until the layout review (#10).
         bar: false,
         disabled: edit_hunk_disabled,
+    },
+    Binding {
+        id: "diff.renderer",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::CycleRenderer,
+        description: "Cycle diff renderer",
+        label: "renderer",
+        bar: false,
+        disabled: renderer_disabled,
     },
     Binding {
         id: "diff.back",
@@ -1867,6 +1984,7 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custom_command::{OutputMode, Panel, test_table};
     use crate::model::Context;
 
     fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyPress {
@@ -2031,7 +2149,7 @@ mod tests {
         match resolve(registry(), &Keymap::default(), focus, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
-            Resolution::Unbound => None,
+            Resolution::Unbound | Resolution::Command(_) => None,
         }
     }
 
@@ -2255,7 +2373,7 @@ mod tests {
         ) {
             Resolution::Run(binding) => Ok(binding.intent.clone()),
             Resolution::Disabled(reason) => Err(reason),
-            Resolution::Unbound => panic!("c is unbound"),
+            Resolution::Unbound | Resolution::Command(_) => panic!("c is unbound"),
         };
         let mut state = AppState::new(Context::Workspace);
         state.op_seq = Some(1);
@@ -2287,7 +2405,7 @@ mod tests {
             match resolve(registry(), &Keymap::default(), KeyScope::Files, state, k) {
                 Resolution::Run(binding) => Ok(binding.intent.clone()),
                 Resolution::Disabled(reason) => Err(reason),
-                Resolution::Unbound => panic!("A is unbound"),
+                Resolution::Unbound | Resolution::Command(_) => panic!("A is unbound"),
             }
         };
         let branch = |head| BranchStatus {
@@ -2448,7 +2566,7 @@ mod tests {
         ) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
-            Resolution::Unbound => None,
+            Resolution::Unbound | Resolution::Command(_) => None,
         };
         assert_eq!(run(plain('j')), Some(SubmoduleNext));
         assert_eq!(run(key(KeyCode::Down, none)), Some(SubmoduleNext));
@@ -2653,7 +2771,7 @@ mod tests {
         ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
-            Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
         };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(
@@ -2698,7 +2816,7 @@ mod tests {
         ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
-            Resolution::Unbound => panic!("d is unbound"),
+            Resolution::Unbound | Resolution::Command(_) => panic!("d is unbound"),
         };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(d(&state), Some("No file selected"));
@@ -2809,7 +2927,7 @@ mod tests {
         ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
-            Resolution::Unbound => panic!("{c} is unbound"),
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound"),
         };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(reason(&state, '+'), None);
@@ -2847,7 +2965,7 @@ mod tests {
         ) {
             Resolution::Disabled(reason) => Some(reason),
             Resolution::Run(_) => None,
-            Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
         };
         // Whole-file keys are unaffected.
         assert_eq!(reason(&state, KeyScope::Files, ' '), None);
@@ -3118,6 +3236,7 @@ mod tests {
                 b.intent,
                 Quit | OpenInEditor
                     | EditHunk
+                    | CycleRenderer
                     | EditCommitExternally
                     | InitSubmodule
                     | UpdateSubmodule
@@ -3209,5 +3328,98 @@ mod tests {
             ),
             Resolution::Disabled("Already in a repository")
         ));
+    }
+
+    fn commands(tables: &[CommandTable]) -> Result<Keymap, String> {
+        Keymap::default().with_commands(tables)
+    }
+
+    fn files_command(keys: &[&str]) -> CommandTable {
+        test_table(Panel::Files, keys, &["true"], &[], OutputMode::None)
+    }
+
+    #[test]
+    fn a_command_key_cannot_clash_in_its_scope() {
+        assert_eq!(
+            commands(&[files_command(&["c"])]).unwrap_err(),
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        assert_eq!(
+            commands(&[files_command(&["X"]), files_command(&["ctrl-x", "X"])]).unwrap_err(),
+            r#"key "X" is bound to both command 1 and command 2"#
+        );
+        // The same key in another panel is another scope.
+        let diff = test_table(Panel::Diff, &["X"], &["true"], &[], OutputMode::None);
+        assert!(commands(&[files_command(&["X"]), diff]).is_ok());
+        // A key the global file moved away is free for a command.
+        let moved = remap(&[("files.commit", &["C"])]);
+        assert!(moved.with_commands(&[files_command(&["c"])]).is_ok());
+    }
+
+    #[test]
+    fn a_command_key_cannot_hide_a_locked_binding() {
+        assert_eq!(
+            commands(&[files_command(&["q"])]).unwrap_err(),
+            r#"command 1: key "q" would hide "global.quit""#
+        );
+        assert_eq!(
+            commands(&[files_command(&["ctrl-c"])]).unwrap_err(),
+            r#"command 1: key "ctrl-c" would hide "global.quit""#
+        );
+        // An unlocked enclosing binding may be shadowed, as a remap may.
+        assert!(commands(&[files_command(&["r"])]).is_ok());
+    }
+
+    #[test]
+    fn a_bad_command_table_names_its_entry() {
+        let e = commands(&[files_command(&["X"]), files_command(&[])]).unwrap_err();
+        assert_eq!(e, "command 2: needs at least one key");
+    }
+
+    #[test]
+    fn a_repository_layer_keeps_the_commands_and_cannot_move_a_key_onto_one() {
+        let global = commands(&[files_command(&["X"])]).unwrap();
+        let repo = Keymap::build(&global, &layer(&[("files.commit", &["C"])]), Trust::Repo);
+        assert_eq!(repo.unwrap().commands, global.commands);
+        assert_eq!(
+            Keymap::build(&global, &layer(&[("files.stage", &["X"])]), Trust::Repo).unwrap_err(),
+            r#"key "X" is bound to both "files.stage" and command 1"#
+        );
+    }
+
+    #[test]
+    fn a_command_key_resolves_in_its_panel_and_the_ones_below_it() {
+        let diff = test_table(Panel::Diff, &["X"], &["true"], &[], OutputMode::None);
+        let keymap = commands(&[files_command(&["ctrl-t"]), diff]).unwrap();
+        let state = AppState::new(Context::Workspace);
+        let at = |focus, key| resolve(registry(), &keymap, focus, &state, key);
+        let ctrl_t = key(KeyCode::Char('t'), KeyModifiers::CONTROL);
+        let x = key(KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            at(KeyScope::Files, ctrl_t),
+            Resolution::Command(0)
+        ));
+        assert!(matches!(at(KeyScope::Diff, ctrl_t), Resolution::Unbound));
+        assert!(matches!(at(KeyScope::Diff, x), Resolution::Command(1)));
+        assert!(matches!(at(KeyScope::Lines, x), Resolution::Command(1)));
+        assert!(matches!(at(KeyScope::Files, x), Resolution::Unbound));
+        assert!(matches!(at(KeyScope::Help, ctrl_t), Resolution::Unbound));
+    }
+
+    #[test]
+    fn available_commands_are_those_reachable_and_not_shadowed() {
+        let diff = |keys: &[&str]| test_table(Panel::Diff, keys, &["true"], &[], OutputMode::None);
+        // `J` is lines.extend_down, so in line mode this one is unreachable.
+        let keymap = commands(&[files_command(&["X"]), diff(&["J"]), diff(&["Z"])]).unwrap();
+        let listed = |focus| -> Vec<usize> {
+            available_commands(&keymap, focus)
+                .into_iter()
+                .map(|c| keymap.commands.iter().position(|k| k == c).unwrap())
+                .collect()
+        };
+        assert_eq!(listed(KeyScope::Files), [0]);
+        assert_eq!(listed(KeyScope::Diff), [1, 2]);
+        assert_eq!(listed(KeyScope::Lines), [2]);
+        assert!(listed(KeyScope::Blame).is_empty());
     }
 }
