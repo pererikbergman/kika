@@ -17,6 +17,7 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
+use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
@@ -34,6 +35,7 @@ use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
+use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::recent;
@@ -101,6 +103,23 @@ pub enum Effect {
     /// List the submodules; always answered by one `SubmodulesLoaded`.
     LoadSubmodules {
         tag: Tag,
+    },
+    /// List the worktrees; always answered by one `WorktreesLoaded`.
+    LoadWorktrees {
+        tag: Tag,
+    },
+    /// Check the typed `path`, then add a worktree for `branch` there;
+    /// always answered by one `WorktreeAdded`.
+    AddWorktree {
+        tag: Tag,
+        path: String,
+        branch: BranchName,
+    },
+    /// Remove the linked worktree at `path`, never forced; always
+    /// answered by one `WorktreeRemoved`.
+    RemoveWorktree {
+        tag: Tag,
+        path: RepoPath,
     },
     /// Point git at the repository `nested` names: each path is a
     /// submodule of the one before, starting from the top-level `root`,
@@ -345,6 +364,50 @@ impl Runtime {
                                 ))
                             });
                     let _ = tx.send(AppIntent::SubmodulesLoaded { tag, result });
+                });
+            }
+            Effect::LoadWorktrees { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_worktrees(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git worktree list crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::WorktreesLoaded { tag, result });
+                });
+            }
+            Effect::AddWorktree { tag, path, branch } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        add_worktree(runner.as_ref(), &path, &branch)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git worktree add crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::WorktreeAdded { tag, result });
+                });
+            }
+            Effect::RemoveWorktree { tag, path } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        remove_worktree(runner.as_ref(), &path)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git worktree remove crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::WorktreeRemoved { tag, result });
                 });
             }
             Effect::LoadBranches { tag } => {
@@ -1796,6 +1859,82 @@ mod tests {
                 list: vec![repo]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn worktree_effects_report_back_with_the_same_tag() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["worktree", "list", "--porcelain", "-z"],
+                    ok(b"worktree /r\0bare\0\0"),
+                )
+                .expect(
+                    &["worktree", "remove", "--", "/r/x"],
+                    fail("fatal: '/r/x' is locked\n"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadWorktrees { tag });
+        match rx.recv().await {
+            Some(AppIntent::WorktreesLoaded {
+                tag: got,
+                result: Ok(list),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(list[0].path.display(), "/r");
+            }
+            other => panic!("expected WorktreesLoaded, got {other:?}"),
+        }
+        runtime.spawn(Effect::RemoveWorktree {
+            tag,
+            path: "/r/x".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::WorktreeRemoved {
+                tag,
+                result: Err("fatal: '/r/x' is locked".into()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_failing_worktree_add_still_reports_back() {
+        // No workdir and no answers: the git-dir read fails, which must
+        // still answer once.
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["rev-parse", "--git-dir", "--git-common-dir"],
+            fail("fatal: not a git repository\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        runtime.spawn(Effect::AddWorktree {
+            tag,
+            path: "../x".into(),
+            branch: "feature".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::WorktreeAdded {
+                tag,
+                result: Err("fatal: not a git repository".into()),
+            })
+        );
+        runner.assert_done();
     }
 
     #[tokio::test]
