@@ -22,6 +22,7 @@ use crate::git::repo_root::find_toplevel;
 use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
+use crate::layout::{self, Panel, SidePanel};
 use crate::model::{AppState, Context};
 use crate::view;
 
@@ -157,8 +158,12 @@ impl Harness {
         self.draw();
         let buffer = self.terminal.backend().buffer();
         // The same split `view::render` makes, down to the panel's inside.
-        let [main, _] = view::screen_layout(buffer.area);
-        let inner = Block::bordered().inner(view::workspace_layout(main).files);
+        let [main, _] = layout::screen_layout(buffer.area);
+        let state = &self.state;
+        let files =
+            layout::workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode)
+                .rect(Panel::Side(SidePanel::Files))?;
+        let inner = Block::bordered().inner(files);
         (inner.top()..inner.bottom())
             .find(|&y| {
                 buffer[(inner.x, y)]

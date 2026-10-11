@@ -183,7 +183,11 @@ async fn cancelling_the_commit_leaves_the_index_untouched() {
     app.assert_screen_contains("Discard the typed message? (y/n)");
     app.press(KeyCode::Char('y')).await;
 
-    assert!(!app.screen().iter().any(|row| row.contains("Commit")));
+    assert!(
+        !app.screen()
+            .iter()
+            .any(|row| row.contains("Commit message"))
+    );
     assert!(repo.staged().is_empty());
     assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
     assert!(!app.state().should_quit);
@@ -260,8 +264,10 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 
     let mut app = Harness::start(&repo).await;
 
+    // Collapsed, the panel shows only the branch; expanded, the rest.
     app.assert_screen_contains("│work ");
-    app.assert_screen_contains("│base ↑2 ↓1 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -269,7 +275,8 @@ async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
     app.assert_screen_contains("│main ");
-    app.assert_screen_contains("│no upstream ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃no upstream ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -292,8 +299,9 @@ async fn a_conflicting_merge_shows_merging() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│merging ");
+    app.assert_screen_contains("┃merging ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -305,8 +313,9 @@ async fn a_conflicting_rebase_shows_rebasing() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
-    app.assert_screen_contains("│rebasing ");
+    app.assert_screen_contains("┃rebasing ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -316,14 +325,17 @@ async fn committing_in_the_app_updates_the_ahead_count() {
     repo.git(["branch", "-q", "--set-upstream-to=base"]);
     let repo = repo.write("a.txt", "two\n").stage("a.txt");
     let mut app = Harness::start(&repo).await;
-    app.assert_screen_contains("│base ↑0 ↓0 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑0 ↓0 ");
 
+    app.press(KeyCode::Char('2')).await;
     app.press(KeyCode::Char('c')).await;
     app.type_text("Ahead").await;
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
-    app.assert_screen_contains("│base ↑1 ↓0 ");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃base ↑1 ↓0 ");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1123,9 +1135,9 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.press(KeyCode::Enter).await;
     app.press_with(KeyCode::Char('R'), KeyModifiers::SHIFT)
         .await;
-    app.assert_screen_contains(" Unstaged · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · cat ");
     app.press(KeyCode::Char('v')).await;
-    app.assert_screen_contains(" Unstaged · lines · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · lines · cat ");
     let shown = app
         .state()
         .rendered_shown()
@@ -1136,7 +1148,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     let staged = String::from_utf8(repo.git(["diff", "--cached"])).unwrap();
     assert!(staged.contains("+two\n"), "{staged}");
     assert!(!staged.contains("+three"), "{staged}");
-    app.assert_screen_contains(" Unstaged · lines · cat ");
+    app.assert_screen_contains(" Unstaged a.txt · lines · cat ");
     app.assert_screen_contains("+three");
 }
 
