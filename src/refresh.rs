@@ -70,6 +70,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // also changes what the Status panel says HEAD is.
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
+        | GitOp::InteractiveRebase(_)
         | GitOp::CheckoutCommit(_)
         | GitOp::Revert(_)
         | GitOp::Reset { .. }
@@ -215,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_revert_and_reset_of_a_commit_reload_everything_head_touches() {
+    fn commit_actions_and_history_rewrites_reload_everything_head_touches() {
         use crate::git::commit_files::CommitId;
         use crate::git::ops::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
@@ -226,6 +227,7 @@ mod tests {
                 to: oid(),
                 mode: ResetMode::Hard,
             },
+            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
         ];
         for op in ops {
             assert_eq!(

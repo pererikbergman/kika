@@ -26,6 +26,7 @@ use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
+use crate::git::rebase_plan::{self, Edit};
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::repo_state::Operation;
@@ -804,6 +805,7 @@ impl AppState {
             AppIntent::RevertCommit => return self.revert_commit(),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
+            AppIntent::RewriteCommit(edit) => return self.rewrite_commit(edit),
         }
         vec![]
     }
@@ -3173,6 +3175,26 @@ impl AppState {
         self.start_op(Ok(Some(op)))
     }
 
+    /// Rewrite the selected commit on the terminal: squash and reword open
+    /// git's editor, and hooks, signing and conflict stops work as on the
+    /// command line.
+    fn rewrite_commit(&mut self, edit: Edit) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::rewrite_disabled(self, edit) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        match rebase_plan::plan(&self.commits.rows, self.commits.selected, edit) {
+            Ok(plan) => self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan)),
+            Err(reason) => {
+                self.notice = Some(reason);
+                vec![]
+            }
+        }
+    }
+
     /// Reset hard as the open question asked, and only if one is open.
     fn confirm_reset_hard(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
@@ -3580,6 +3602,7 @@ fn failure_next(op: &GitOp) -> &'static str {
     match op {
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
+        | GitOp::InteractiveRebase(_)
         | GitOp::Revert(_)
         | GitOp::Continue(_)
         | GitOp::Skip(_) => {
@@ -3617,7 +3640,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::RenameBranch { .. } => "Could not rename the branch",
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
         GitOp::Merge { .. } => "Could not merge",
-        GitOp::Rebase { .. } => "Could not rebase",
+        GitOp::Rebase { .. } | GitOp::InteractiveRebase(_) => "Could not rebase",
         GitOp::CheckoutCommit(_) => "Could not check out the commit",
         GitOp::Revert(_) => "Could not revert",
         GitOp::Reset { .. } => "Could not reset",
@@ -11488,5 +11511,118 @@ mod tests {
         );
         assert_eq!(state.remote.as_ref().unwrap().notice, Some(text));
         assert_eq!(state.popups, []);
+    }
+
+    // --- Squash, fixup, drop and reword ---
+
+    /// `with_commits(3)` with full ids on one line, `aaa…` at `HEAD`, the
+    /// last loaded commit on `ddd…`, and `bbb…` selected.
+    fn on_linear_log() -> AppState {
+        let mut state = on_commit();
+        let ids = ['a', 'b', 'c', 'd'].map(|d| d.to_string().repeat(40));
+        for (i, row) in state.commits.rows.iter_mut().enumerate() {
+            row.oid = ids[i].clone();
+            row.parents = vec![ids[i + 1].clone()];
+        }
+        state
+    }
+
+    fn rebase_step(action: rebase_plan::TodoAction, digit: char) -> rebase_plan::Step {
+        rebase_plan::Step {
+            action,
+            commit: cid(&digit.to_string().repeat(40)),
+        }
+    }
+
+    #[test]
+    fn s_f_d_and_e_rewrite_the_selected_commit_on_the_terminal() {
+        use rebase_plan::{RebasePlan, TodoAction as A};
+        let fold = |action| RebasePlan {
+            base: cid(&"d".repeat(40)),
+            steps: vec![
+                rebase_step(A::Pick, 'c'),
+                rebase_step(action, 'b'),
+                rebase_step(A::Pick, 'a'),
+            ],
+        };
+        let alone = |action| RebasePlan {
+            base: cid(&"c".repeat(40)),
+            steps: vec![rebase_step(action, 'b'), rebase_step(A::Pick, 'a')],
+        };
+        let cases = [
+            ('s', fold(A::Squash)),
+            ('F', fold(A::Fixup)),
+            ('d', alone(A::Drop)),
+            ('e', alone(A::Reword)),
+        ];
+        for (key, plan) in cases {
+            let mut state = on_linear_log();
+            let (tag, op) = attached_of(&press_char(&mut state, key));
+            assert_eq!(op, GitOp::InteractiveRebase(plan), "{key}");
+            assert_eq!(state.op_seq, Some(tag.seq), "{key}");
+            assert_eq!(state.notice, None, "{key}");
+        }
+    }
+
+    /// Press each rewrite key on `state` and expect nothing to start, with
+    /// `notice` said.
+    fn no_rewrite(state: &AppState, notice: &'static str) {
+        for key in ['s', 'F', 'd', 'e'] {
+            let mut state = state.clone();
+            assert_eq!(press_char(&mut state, key), vec![], "{key}");
+            assert_eq!(state.notice, Some(notice), "{key}");
+            assert_eq!(state.op_seq, None, "{key}");
+            assert_eq!(state.popups, [], "{key}");
+        }
+    }
+
+    #[test]
+    fn no_rewrite_starts_across_a_merge() {
+        let mut state = on_linear_log();
+        state.commits.rows[0].parents.push("e".repeat(40));
+        no_rewrite(&state, "Cannot rewrite across a merge");
+    }
+
+    #[test]
+    fn the_root_commit_is_not_rewritten() {
+        let mut state = on_linear_log();
+        state.commits.rows[1].parents.clear();
+        no_rewrite(&state, "Cannot rewrite the first commit");
+    }
+
+    #[test]
+    fn no_rewrite_starts_while_an_op_runs_or_an_operation_is_in_progress() {
+        let mut running = on_linear_log();
+        running.op_seq = Some(9);
+        for key in ['s', 'F', 'd', 'e'] {
+            let mut state = running.clone();
+            assert_eq!(press_char(&mut state, key), vec![], "{key}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{key}");
+            assert_eq!(state.op_seq, Some(9), "{key}");
+        }
+
+        let mut rebasing = on_linear_log();
+        let mut branch = on_branch("main");
+        branch.in_progress = vec![Operation::Rebase];
+        rebasing.branch = Some(branch);
+        no_rewrite(&rebasing, "Finish or abort the operation in progress");
+    }
+
+    #[test]
+    fn the_intent_outside_the_workspace_starts_nothing() {
+        let mut state = on_linear_log();
+        state.context = Context::Review { number: 1 };
+        assert_eq!(state.update(AppIntent::RewriteCommit(Edit::Drop)), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_failed_interactive_rebase_points_at_the_status_panel() {
+        let op = GitOp::InteractiveRebase(rebase_plan::sample());
+        assert_eq!(failure_title(&op), "Could not rebase");
+        assert_eq!(
+            failure_next(&op),
+            "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
+        );
     }
 }

@@ -7,9 +7,11 @@ use super::branches::BranchName;
 use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
+use super::rebase_plan::{RebasePlan, encode};
 use super::repo_state::Operation;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
+use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
 /// in argv order.
@@ -81,6 +83,11 @@ pub enum GitOp {
     Rebase {
         onto: BranchName,
     },
+    /// Rewrite the commits above the plan's base with git's interactive
+    /// rebase, Kika acting as the sequence editor (see
+    /// `crate::sequence_editor`). Uncommitted changes are stashed and put
+    /// back.
+    InteractiveRebase(RebasePlan),
     /// Go on with the operation git stopped, once its conflicts are
     /// resolved and staged.
     Continue(Operation),
@@ -325,6 +332,23 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
         GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
         GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
+        // The plan goes to the sequence editor, which `handoff` names; the
+        // base is hex digits only. The two keys are newer config that an
+        // older git ignores; they keep the todo list to picks, which is all
+        // the sequence editor accepts.
+        GitOp::InteractiveRebase(plan) => {
+            return GitCommand::new("-c")
+                .arg("rebase.updateRefs=false")
+                .arg("-c")
+                .arg("rebase.rebaseMerges=false")
+                .arg("rebase")
+                .arg("-i")
+                .arg("--autostash")
+                .arg("--no-autosquash")
+                .arg("--keep-empty")
+                .arg(plan.base.as_str())
+                .env(PLAN_ENV, encode(&plan.steps));
+        }
         GitOp::Continue(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--continue");
         }
@@ -418,7 +442,7 @@ fn run_op_with(
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
-        let subcommand = cmd.args()[0].to_string_lossy();
+        let subcommand = cmd.subcommand().to_string_lossy();
         return Err(format!("git {subcommand} failed"));
     }
     Err(message)
@@ -741,6 +765,36 @@ mod tests {
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn an_interactive_rebase_passes_only_the_plan_in_its_env() {
+        let plan = crate::git::rebase_plan::sample();
+        let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
+        assert_eq!(
+            argv(&cmd),
+            [
+                "-c",
+                "rebase.updateRefs=false",
+                "-c",
+                "rebase.rebaseMerges=false",
+                "rebase",
+                "-i",
+                "--autostash",
+                "--no-autosquash",
+                "--keep-empty",
+                plan.base.as_str(),
+            ]
+        );
+        let envs: Vec<_> = cmd
+            .envs()
+            .iter()
+            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+            .collect();
+        let encoded = format!("drop {}\npick {}\n", "b".repeat(40), "a".repeat(40));
+        assert_eq!(envs, [("KIKA_REBASE_PLAN", encoded.as_str())]);
+        assert_eq!(cmd.input(), None);
+        assert_eq!(cmd.subcommand(), "rebase");
     }
 
     #[test]

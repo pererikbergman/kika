@@ -483,6 +483,10 @@ an older git refuses them and changes nothing.
 | `commits.checkout` | `space` | Check out the selected commit as a detached HEAD, asking first | |
 | `commits.revert` | `R` | Make a commit that undoes the selected one | locked |
 | `commits.reset` | `X` | Reset the current branch to the selected commit: soft, mixed or hard | locked |
+| `commits.squash` | `s` | Squash the selected commit into the one below, combining their messages | locked |
+| `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
+| `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
+| `commits.reword` | `e` | Write a new message for the selected commit | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -492,6 +496,20 @@ merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
 the worktree, mixed keeps the worktree and resets the index, and hard throws
 away every uncommitted change, so it asks first. Revert and reset wait until
 an operation in progress is finished or aborted.
+
+`s`, `F`, `d` and `e` rewrite history with `git rebase -i --autostash` on the
+terminal: uncommitted changes are stashed and put back (as git's autostash
+does, a staged change to a tracked file comes back unstaged), git's editor opens for
+a squash's combined message or a new message, and hooks and signing work as on
+the command line. Squash and fixup fold the selected commit into the one below
+it. Kika acts as the rebase's sequence editor and checks git's todo list
+against what you asked for; on any difference git aborts and nothing changes.
+The commits from `HEAD` down to the one rewritten must be one line of history:
+no merges, not the first commit, at most 1000 commits (400 on Windows), and
+for squash and fixup the commit below must be loaded: moving down to the end of
+the log loads it. A rebase that stops on conflicts can be
+continued, skipped or aborted from the Status panel. Drop does not ask first;
+the dropped commit stays in git's reflog.
 
 ### Commit files (a commit opened from the Commits panel)
 
