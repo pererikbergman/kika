@@ -373,6 +373,12 @@ impl AppState {
                     Resolution::Disabled(reason) => self.notice = Some(reason),
                     Resolution::Unbound if focus == KeyScope::Input => {
                         if let Some(input) = &mut self.input {
+                            // A long paste would only slow every frame down.
+                            let full = input.line.text.chars().count() >= list_filter::MAX_INPUT;
+                            if full && matches!(key.code, crossterm::event::KeyCode::Char(_)) {
+                                self.notice = Some(list_filter::INPUT_FULL);
+                                return vec![];
+                            }
                             input.line.edit(key);
                         }
                         return self.apply_input();
@@ -521,7 +527,10 @@ impl AppState {
                 self.patch_loaded(tag, result);
                 self.remap();
             }
-            AppIntent::ToggleStage if self.files_anchor.is_some() => return self.stage_range(),
+            // Only where the range shows; elsewhere Stage is the one file's.
+            AppIntent::ToggleStage if self.focus == Focus::Files && self.files_anchor.is_some() => {
+                return self.stage_range();
+            }
             AppIntent::ToggleStage => {
                 let op = self
                     .selected
@@ -4780,6 +4789,9 @@ impl AppState {
 }
 
 /// The first line of a rejected edited hunk's error, above git's message.
+/// Said when a changed filter drops the range made over the old rows.
+const SELECTION_CLEARED: &str = "Selection cleared";
+
 /// List filters, range selections and the diff search.
 impl AppState {
     /// The indexes of the files the filter shows, in order.
@@ -4837,18 +4849,22 @@ impl AppState {
             InputTarget::FilesFilter => {
                 if text != self.files_filter {
                     self.files_filter = text;
-                    self.files_anchor = None;
+                    if self.files_anchor.take().is_some() {
+                        self.notice = Some(SELECTION_CLEARED);
+                    }
                 }
-                let visible = self.files_visible();
-                match visible.first() {
-                    Some(&first) if self.files_selected_hidden() => return self.select(first),
-                    _ => {}
+                if self.files_selected_hidden()
+                    && let Some(&first) = self.files_visible().first()
+                {
+                    return self.select(first);
                 }
             }
             InputTarget::CommitsFilter => {
                 if text != self.commits.filter {
                     self.commits.filter = text;
-                    self.commits.range_anchor = None;
+                    if self.commits.range_anchor.take().is_some() {
+                        self.notice = Some(SELECTION_CLEARED);
+                    }
                 }
                 self.commits.reconcile();
             }
@@ -15614,5 +15630,42 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.focus, Focus::Files);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn the_input_stops_at_its_limit_but_still_edits() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(state.files_filter.chars().count(), list_filter::MAX_INPUT);
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL));
+        press(&mut state, KeyCode::Backspace);
+        assert_eq!(
+            state.files_filter.chars().count(),
+            list_filter::MAX_INPUT - 1
+        );
+    }
+
+    #[test]
+    fn stage_from_another_panel_stages_the_one_file_not_the_range() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Branches,
+        )));
+        let (_, op) = op_of(&state.update(AppIntent::ToggleStage));
+        assert_eq!(op, GitOp::toggle_for(&state.files[1]).unwrap());
+    }
+
+    #[test]
+    fn a_changed_filter_says_it_cleared_the_selection() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        type_text(&mut state, "/a");
+        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.notice, Some("Selection cleared"));
     }
 }

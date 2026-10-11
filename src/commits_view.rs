@@ -15,7 +15,7 @@ use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
-use crate::view::{PanelLook, elide_right, filter_title, reversed, width_of};
+use crate::view::{PanelLook, elide_right, filter_title, range_row, reversed, width_of};
 
 /// Authors longer than this lose their end, so the subject keeps room.
 const AUTHOR_WIDTH: usize = 16;
@@ -280,11 +280,7 @@ fn commit_lines(
         .iter()
         .map(|&i| {
             let line = commit_line(panel, copied, i, &panel.graph[i], columns, width);
-            if Some(i) == selected || range.contains(&i) {
-                reversed(line, width)
-            } else {
-                line
-            }
+            range_row(line, i, selected, range, width)
         })
         .collect()
 }

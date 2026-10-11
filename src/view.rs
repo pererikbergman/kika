@@ -816,11 +816,23 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         .as_ref()
         .filter(|_| state.key_focus() == KeyScope::Input)
     {
-        // Typed text is drawn as it would be in a list: never raw.
+        // Typed text is drawn as it would be in a list: never raw. Text
+        // wider than the bar keeps the part around the cursor, so the
+        // cursor never leaves the screen.
         let before: String = input.line.text.chars().take(input.line.col).collect();
+        let after: String = input.line.text.chars().skip(input.line.col).collect();
+        let (before, after) = (sanitize(before.as_bytes()), sanitize(after.as_bytes()));
+        // ` /`, then a cell for the cursor after the text.
+        let text_room = room.saturating_sub(3).max(1);
+        let before = if width_of(&before) + width_of(&after) <= text_room {
+            before
+        } else {
+            elide_left(&before, text_room)
+        };
+        let after = elide_right(&after, text_room.saturating_sub(width_of(&before)));
         let used = usize::from(width).saturating_sub(room);
-        cursor = Some(used + 2 + width_of(&sanitize(before.as_bytes())));
-        let typed = format!(" /{}", sanitize(input.line.text.as_bytes()));
+        cursor = Some(used + 2 + width_of(&before));
+        let typed = format!(" /{before}{after}");
         room = room.saturating_sub(width_of(&typed) + 1);
         spans.push(Span::styled(
             typed,
@@ -859,16 +871,41 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             room = room.saturating_sub(width_of(copied) + 1);
         }
         // While commits are copied, paste and clear lead the hints, so a
-        // narrow bar keeps them.
-        let leading: &[&str] = if copied.is_some() { COPIED_HINTS } else { &[] };
+        // narrow bar keeps them; so does Esc while it clears something.
+        // The filter, range and search keys come last, and go first on a
+        // narrow bar.
+        let mut leading: Vec<&str> = if copied.is_some() {
+            COPIED_HINTS.to_vec()
+        } else {
+            Vec::new()
+        };
+        let (more_leading, trailing) = list_hints(state, focus);
+        leading.extend(more_leading);
         let mut available = available(registry(), &state.keymap, focus, state);
-        available.retain(|(binding, _)| binding.bar || leading.contains(&binding.id));
-        available.sort_by_key(|(binding, _)| !leading.contains(&binding.id));
+        available.retain(|(binding, _)| {
+            binding.bar || leading.contains(&binding.id) || trailing.contains(&binding.id)
+        });
+        // Help and quit stay at the end, as `fit_hints` keeps them.
+        available.sort_by_key(|(binding, _)| {
+            if leading.contains(&binding.id) {
+                0
+            } else if pinned(binding) {
+                3
+            } else if trailing.contains(&binding.id) {
+                2
+            } else {
+                1
+            }
+        });
         let hints: Vec<(String, bool, bool)> = available
             .into_iter()
             .map(|(binding, disabled)| {
                 let key = state.keymap.keys(binding).first().map(KeyPattern::label);
-                let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
+                let label = match binding.id {
+                    "diff.escape" if searching(state) => "clear search",
+                    _ => binding.label,
+                };
+                let hint = format!("{} {label}", key.unwrap_or_default());
                 (hint, disabled.is_some(), pinned(binding))
             })
             .collect();
@@ -879,6 +916,40 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         }
     }
     (Line::from(spans), cursor)
+}
+
+/// The filter, range and search hints for `focus`: those that lead the
+/// bar, as Esc does while it has a range or filter to clear, and those
+/// that close it.
+fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'static str>) {
+    match focus {
+        KeyScope::Files => {
+            let clears = state.files_anchor.is_some() || !state.files_filter.is_empty();
+            let leading = if clears { vec!["files.escape"] } else { vec![] };
+            (leading, vec!["files.filter", "files.range"])
+        }
+        KeyScope::Commits => {
+            let panel = &state.commits;
+            let clears = panel.range_anchor.is_some() || !panel.filter.is_empty();
+            let leading = if clears {
+                vec!["commits.escape"]
+            } else {
+                vec![]
+            };
+            (leading, vec!["commits.filter", "commits.range"])
+        }
+        KeyScope::Diff if searching(state) => (
+            vec!["diff.search_next", "diff.search_prev", "diff.escape"],
+            vec!["diff.search"],
+        ),
+        KeyScope::Diff => (vec![], vec!["diff.search"]),
+        _ => (vec![], vec![]),
+    }
+}
+
+/// The focused Diff pane has a search, which Esc clears first.
+fn searching(state: &AppState) -> bool {
+    matches!(&state.focus, Focus::Diff(view) if view.search.is_some())
 }
 
 /// The bindings that lead the hints while commits are copied.
@@ -1122,14 +1193,7 @@ fn file_lines(
 ) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
-    let line = |&i: &usize| {
-        let line = file_line(&files[i], width);
-        if Some(i) == selected || range.contains(&i) {
-            reversed(line, width)
-        } else {
-            line
-        }
-    };
+    let line = |&i: &usize| range_row(file_line(&files[i], width), i, selected, range, width);
     if shown.len() <= rows {
         return shown.iter().map(line).collect();
     }
@@ -1156,13 +1220,30 @@ fn file_lines(
 /// made safe to draw and cut short so the counts still fit.
 pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &str) -> String {
     let query = sanitize(query.as_bytes());
-    let mut room = width_of(&query);
-    loop {
-        let text = format!("{name} · /{} {counts}", elide_right(&query, room));
-        if room <= 1 || look.fits(&text) {
-            return text;
-        }
-        room -= 1;
+    // Measured once, so the cost stays linear in the query's length.
+    let fixed = width_of(&format!(
+        " [{}] {name} · / {counts}{} ",
+        look.number, look.mode
+    ));
+    let room = look.title_width.saturating_sub(fixed).max(1);
+    format!("{name} · /{} {counts}", elide_right(&query, room))
+}
+
+/// Row `i` drawn as the cursor or a range row: both reversed, and within a
+/// range the cursor bold and underlined too, so the moving end shows.
+pub(crate) fn range_row<'a>(
+    line: Line<'a>,
+    i: usize,
+    selected: Option<usize>,
+    range: &[usize],
+    width: usize,
+) -> Line<'a> {
+    if Some(i) == selected && !range.is_empty() {
+        reversed(line, width).patch_style(Modifier::BOLD | Modifier::UNDERLINED)
+    } else if Some(i) == selected || range.contains(&i) {
+        reversed(line, width)
+    } else {
+        line
     }
 }
 
@@ -1311,12 +1392,13 @@ fn search_marks(view: &HunkView, at: usize) -> Vec<(usize, usize, Style)> {
     let Some(search) = &view.search else {
         return Vec::new();
     };
-    search
-        .matches
+    // Matches are in row order, so this row's are found by bisection.
+    let from = search.matches.partition_point(|m| m.row < at);
+    let to = search.matches.partition_point(|m| m.row <= at);
+    search.matches[from..to]
         .iter()
-        .enumerate()
-        .filter(|(_, m)| m.row == at)
-        .map(|(i, m)| {
+        .zip(from..)
+        .map(|(m, i)| {
             let style = if Some(i) == search.current {
                 CURRENT_MATCH
             } else {
@@ -1329,10 +1411,12 @@ fn search_marks(view: &HunkView, at: usize) -> Vec<(usize, usize, Style)> {
 
 /// A search match, and the one `n` and `N` step from.
 pub(crate) const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
+/// The current one is also bold and underlined, so it stands out without
+/// colour.
 pub(crate) const CURRENT_MATCH: Style = Style::new()
     .fg(Color::Black)
     .bg(Color::LightRed)
-    .add_modifier(Modifier::BOLD);
+    .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED));
 
 /// `text` in `style`, split so each char range in `marks` (in order, not
 /// overlapping) takes its own style on top. Ranges past the end of a
@@ -3910,18 +3994,20 @@ mod tests {
             "m menu",
             "r refresh",
             "bksp parent",
+            "/ filter",
+            "V range",
             "? keys",
             "q quit",
             "…",
         ];
-        for width in [100, 80, 60, 40, 24] {
+        for width in [110, 100, 80, 60, 40, 24] {
             let rows = draw(&state, width, 10);
             let bar = rows[9].trim();
             assert!(bar.ends_with("? keys  q quit"), "{width}: {bar:?}");
             for hint in bar.split("  ") {
                 assert!(all.contains(&hint), "{width}: {hint:?} in {bar:?}");
             }
-            assert_eq!(bar.contains('…'), width < 87, "{width}: {bar:?}");
+            assert_eq!(bar.contains('…'), width < 106, "{width}: {bar:?}");
         }
         // Narrower than help and quit together: whole hints only, still.
         let rows = draw(&state, 10, 10);
@@ -4486,6 +4572,10 @@ mod tests {
         assert!(reversed("c.rs"), "the anchor row");
         assert!(!reversed("a.rs"));
         assert!(contains(&buffer_rows(&buffer), "Files · 2 selected"));
+        // The cursor, the end that moves, stands out from the rest.
+        let bold = |needle| cell_at(&buffer, needle).modifier.contains(Modifier::BOLD);
+        assert!(bold("b.rs"), "the cursor row");
+        assert!(!bold("c.rs"), "the anchor row");
     }
 
     #[test]
@@ -4509,6 +4599,17 @@ mod tests {
             style("old one", 0).bg,
             Some(Color::Reset),
             "only the match is marked"
+        );
+        let underlined = |skip| {
+            style("old one", skip)
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        };
+        assert!(underlined(4), "the current match stands out without colour");
+        assert!(
+            !style("new one", 4)
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
         );
     }
 
@@ -4728,5 +4829,136 @@ mod tests {
         for hint in ["s skip", "a abort", "g good", "b bad"] {
             assert!(rows[23].contains(hint), "{hint}: {:?}", rows[23]);
         }
+    }
+
+    #[test]
+    fn a_huge_filter_title_is_elided_in_linear_time() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.files_filter = "a".repeat(10_000);
+        let start = std::time::Instant::now();
+        let rows = draw(&state, 100, 20);
+        // Quadratic elision took seconds at this length; linear takes far
+        // less than one.
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(contains(&rows, "… 0 of 1"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wide_query_is_elided_without_splitting_a_glyph() {
+        let mut state = loaded(vec![file("日本語.md"), file("a.rs")]);
+        state.selected = Some(0);
+        state.files_filter = "日本語".repeat(20);
+        let rows = draw(&state, 120, 20);
+        assert!(contains(&rows, "… 0 of 2"), "{rows:#?}");
+        state.files_filter = "日本".into();
+        let rows = draw(&state, 120, 20);
+        assert!(contains(&rows, "Files · /日本 1 of 2"), "{rows:#?}");
+        assert!(contains(&rows, "日本語.md"), "{rows:#?}");
+        assert!(!contains(&rows, "a.rs"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_long_input_keeps_the_cursor_on_the_bar() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        typing(
+            &mut state,
+            crate::list_filter::InputTarget::FilesFilter,
+            &"x".repeat(100),
+        );
+        for width in [80u16, 30, 12, 4] {
+            let (line, cursor) = status_bar(&state, width);
+            let cursor = cursor.expect("a cursor while typing");
+            assert!(cursor < usize::from(width), "{width}: cursor at {cursor}");
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let shown = if width > 4 { " /…x" } else { " /…" };
+            assert!(text.starts_with(shown), "{width}: {text:?}");
+        }
+        // Short text shows whole, the cursor after it.
+        typing(
+            &mut state,
+            crate::list_filter::InputTarget::FilesFilter,
+            "日x",
+        );
+        let (line, cursor) = status_bar(&state, 80);
+        assert!(line.spans[0].content.starts_with(" /日x"));
+        assert_eq!(
+            cursor,
+            Some(5),
+            "` /` then two columns for 日 and one for x"
+        );
+    }
+
+    #[test]
+    fn a_match_after_a_wide_glyph_is_marked_where_it_shows() {
+        let wide = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+日本x\n";
+        let mut state = hunks(DiffSide::Worktree, wide.as_bytes());
+        if let Focus::Diff(view) = &mut state.focus {
+            view.set_search("x");
+        }
+        let buffer = draw_buffer(&state, 100, 20);
+        let rows = buffer_rows(&buffer);
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.contains("+日本x"))
+            .unwrap();
+        // Columns, not chars: each wide glyph takes two.
+        let x = width_of(&row[..row.find("本x").unwrap()]) + 2;
+        assert_eq!(buffer[(x as u16, y as u16)].symbol(), "x");
+        assert_eq!(buffer[(x as u16, y as u16)].style().bg, CURRENT_MATCH.bg);
+    }
+
+    #[test]
+    fn filters_ranges_and_searches_draw_at_any_size() {
+        let mut files = loaded(vec![file("a.rs"), file("b.rs"), file("日本.md")]);
+        files.selected = Some(1);
+        files.files_filter = "rs".into();
+        files.files_anchor = Some("a.rs".into());
+        let mut typing_files = files.clone();
+        typing(
+            &mut typing_files,
+            crate::list_filter::InputTarget::FilesFilter,
+            "rs\u{202E}日",
+        );
+        let mut search = hunks(DiffSide::Worktree, TWO_HUNKS);
+        if let Focus::Diff(view) = &mut search.focus {
+            view.set_search("one");
+        }
+        for state in [&files, &typing_files, &search] {
+            for (w, h) in [(80, 24), (40, 10), (10, 3), (2, 2), (1, 1), (0, 0)] {
+                draw(state, w, h);
+            }
+        }
+    }
+
+    #[test]
+    fn esc_clear_leads_the_bar_while_there_is_something_to_clear() {
+        let mut state = loaded(vec![file("a.rs"), file("b.rs")]);
+        state.selected = Some(0);
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].contains("/ filter  V range"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+        state.files_filter = "a".into();
+        let rows = draw(&state, 120, 10);
+        assert!(
+            rows[9].starts_with(" esc clear  space stage"),
+            "{:?}",
+            rows[9]
+        );
+
+        let mut search = hunks(DiffSide::Worktree, TWO_HUNKS);
+        let rows = draw(&search, 120, 20);
+        assert!(rows[19].contains("/ search"), "{:?}", rows[19]);
+        if let Focus::Diff(view) = &mut search.focus {
+            view.set_search("one");
+        }
+        let rows = draw(&search, 120, 20);
+        assert!(
+            rows[19].starts_with(" n next match  N previous match  esc clear search"),
+            "{:?}",
+            rows[19]
+        );
     }
 }

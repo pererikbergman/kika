@@ -5,6 +5,13 @@
 
 use crate::popup::LineInput;
 
+/// The most chars a filter or search takes. Plenty to type, and it keeps
+/// each frame cheap whatever is pasted.
+pub const MAX_INPUT: usize = 256;
+
+/// Why a key typed into a full input does nothing.
+pub const INPUT_FULL: &str = "The filter is full (256 characters)";
+
 /// What the one text input on the bottom bar is typing into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputTarget {
