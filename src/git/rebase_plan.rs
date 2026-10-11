@@ -305,6 +305,11 @@ pub enum TodoEntry {
 /// `exec`, `label`, `reset`, `merge` and any unknown word are errors,
 /// since Kika neither writes nor edits them.
 pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
+    // Git reads no further than a NUL, so a line past one would be kept
+    // here and dropped by git. Such a list is not Kika's to edit.
+    if todo.contains(&0) {
+        return Err("The todo list has a NUL byte".into());
+    }
     command_lines(todo).map(parse_line).collect()
 }
 
@@ -312,8 +317,11 @@ pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
 /// and tabs git skips before a command taken off. Git skips them too, so
 /// an indented line is a command, never a comment. The comment char is
 /// configurable and unknown here; a command always starts with a letter.
+/// Like git, it reads no further than the first NUL.
 pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
-    todo.split(|&b| b == b'\n')
+    let end = todo.iter().position(|&b| b == 0).unwrap_or(todo.len());
+    todo[..end]
+        .split(|&b| b == b'\n')
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
         .map(|line| {
             let indent = line
@@ -918,6 +926,15 @@ mod tests {
             ])
         );
         assert_eq!(parse_todo(b"# only comments\n\n"), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_nul_byte_ends_the_lines_git_reads_and_makes_the_list_unparsed() {
+        let todo = b"pick 1111 one\npick 2222 two\0x\npick 3333 three\n";
+        assert!(parse_todo(todo).is_err());
+        assert!(parse_todo(b"\0").is_err());
+        let lines: Vec<&[u8]> = command_lines(todo).collect();
+        assert_eq!(lines, [&b"pick 1111 one"[..], b"pick 2222 two"]);
     }
 
     #[test]

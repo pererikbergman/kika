@@ -269,6 +269,17 @@ mod tests {
     }
 
     #[test]
+    fn a_todo_with_a_nul_is_read_only_and_shows_only_what_git_reads() {
+        let todo = RebaseTodo::load(file(
+            b"pick 1111 one\npick 2222 two\0x\npick 3333 c\n",
+            Some(b""),
+        ));
+        assert_eq!(todo.editable, Err(NOT_EDITABLE));
+        assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"pick 2222 two"]);
+        assert!(nothing_done(b"\0pick 1111 one\n"));
+    }
+
+    #[test]
     fn done_is_empty_only_when_it_was_read_and_has_no_commands() {
         let load = |done| RebaseTodo::load(file(b"pick 1234 a\n", done)).done_empty;
         assert!(load(Some(&b""[..])));

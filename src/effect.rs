@@ -2505,6 +2505,13 @@ mod tests {
             assert!(write_rebase_todo(&path, TODO, bad).is_err(), "{bad:?}");
             assert_eq!(std::fs::read(&path).unwrap(), TODO);
         }
+        // Git stops at a NUL; a list holding one is not edited.
+        let nul = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\0\n";
+        std::fs::write(&path, nul).unwrap();
+        let moved = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\n";
+        assert!(write_rebase_todo(&path, nul, moved).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), nul);
+        std::fs::write(&path, TODO).unwrap();
         let other = tmp.path().join("git-rebase-todo");
         std::fs::write(&other, TODO).unwrap();
         let edit = b"pick 1111 one\nbreak\nupdate-ref refs/heads/x\ndrop 2222 two\n";
