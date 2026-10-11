@@ -15,6 +15,7 @@ pub mod ops;
 pub mod patch;
 pub mod path;
 pub mod prompts;
+pub mod rebase_plan;
 pub mod refs;
 pub mod repo_root;
 pub mod repo_state;

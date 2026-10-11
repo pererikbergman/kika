@@ -15,6 +15,7 @@ use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
 use crate::git::prompts::PromptFacts;
+use crate::git::rebase_plan::Edit;
 use crate::git::refs::RefsSnapshot;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
@@ -369,6 +370,8 @@ pub enum AppIntent {
     ResetTo(ResetMode),
     /// Reset hard, as the question asked.
     ConfirmResetHard,
+    /// Rewrite the selected commit with git's interactive rebase.
+    RewriteCommit(Edit),
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

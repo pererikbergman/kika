@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -43,6 +43,18 @@ impl GitCommand {
 
     pub fn args(&self) -> &[OsString] {
         &self.args
+    }
+
+    /// The git subcommand, past any leading `-c key=value` pairs, for
+    /// messages such as "git rebase failed".
+    pub fn subcommand(&self) -> &OsStr {
+        let mut args = self.args.as_slice();
+        while let [first, _, rest @ ..] = args
+            && first == "-c"
+        {
+            args = rest;
+        }
+        args.first().unwrap_or(&self.args[0])
     }
 
     pub fn envs(&self) -> &[(OsString, OsString)] {

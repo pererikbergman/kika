@@ -34,6 +34,7 @@ mod recent;
 mod recent_list;
 mod refresh;
 mod rendered_view;
+mod sequence_editor;
 mod submodule_list;
 mod view;
 mod watch;
@@ -53,6 +54,10 @@ use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
 
 fn main() -> color_eyre::Result<ExitCode> {
+    // Kika as its own rebase's sequence editor: no UI, no git, no config.
+    if let Some(code) = sequence_editor::dispatch() {
+        return Ok(code);
+    }
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
