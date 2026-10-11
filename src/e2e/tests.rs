@@ -810,3 +810,39 @@ async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
     assert!(!app.state().should_quit);
     app.assert_screen_contains("not a git repository");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn w_hides_a_change_that_only_touches_indentation_and_shows_it_again() {
+    let repo = TestRepo::new()
+        .write("a.txt", "fn main() {\nindent me\n}\n")
+        .commit("init")
+        .write("a.txt", "fn main() {\n    indent me\n}\nadded\n");
+    let mut app = Harness::start(&repo).await;
+    app.assert_screen_contains("-indent me");
+    app.assert_screen_contains("+    indent me");
+    app.assert_screen_contains("+added");
+
+    app.press(KeyCode::Char('w')).await;
+
+    app.assert_screen_contains("whitespace hidden");
+    app.assert_screen_contains("+added");
+    let screen = app.screen();
+    assert!(
+        !screen
+            .iter()
+            .any(|row| row.contains("-indent me") || row.contains("+    indent me")),
+        "the indentation change is still shown:\n{}",
+        screen.join("\n")
+    );
+
+    app.press(KeyCode::Char('w')).await;
+
+    app.assert_screen_contains("-indent me");
+    app.assert_screen_contains("+    indent me");
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("whitespace hidden")),
+        "{}",
+        screen.join("\n")
+    );
+}

@@ -343,6 +343,7 @@ mod tests {
             path: RepoPath::from("a.txt"),
             orig_path: None,
             side,
+            options: Default::default(),
         };
         let tracked = request(DiffSide::Worktree);
         let staged = request(DiffSide::Index);

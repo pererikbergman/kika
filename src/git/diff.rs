@@ -14,18 +14,54 @@ pub enum DiffSide {
     Untracked,
 }
 
+/// The fewest context lines a diff can show. Not 0: a `-U0` patch only
+/// applies with `--unidiff-zero`, and hunk staging uses the same setting.
+pub const MIN_CONTEXT: u32 = 1;
+/// The most context lines a diff can show.
+pub const MAX_CONTEXT: u32 = 100;
+
+/// How diffs are drawn: chosen by the user for the session, and passed to
+/// both the streamed diff and the patch so they always agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiffOptions {
+    /// Unchanged lines shown around each change (`-U<n>`).
+    pub context: u32,
+    /// Hide changes that only touch whitespace (`-w`). Such a diff cannot be
+    /// applied back safely, so staging from it is refused.
+    pub ignore_whitespace: bool,
+}
+
+impl Default for DiffOptions {
+    /// Git's own default context, with every change shown.
+    fn default() -> Self {
+        Self {
+            context: 3,
+            ignore_whitespace: false,
+        }
+    }
+}
+
+impl DiffOptions {
+    /// The flags these options add to `git diff`, which go before `--`.
+    fn args(self) -> impl Iterator<Item = String> {
+        let whitespace = self.ignore_whitespace.then(|| "-w".to_string());
+        std::iter::once(format!("-U{}", self.context)).chain(whitespace)
+    }
+}
+
 /// One diff to load. Built from a status entry so the model never spells argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffRequest {
     pub path: RepoPath,
     pub orig_path: Option<RepoPath>,
     pub side: DiffSide,
+    pub options: DiffOptions,
 }
 
 impl DiffRequest {
     /// Unstaged changes win when a file has both, since that is what the user
     /// is most likely editing; otherwise the staged diff is shown.
-    pub fn for_entry(entry: &FileEntry) -> Self {
+    pub fn for_entry(entry: &FileEntry, options: DiffOptions) -> Self {
         let side = if entry.kind == EntryKind::Untracked {
             DiffSide::Untracked
         } else if entry.worktree != '.' {
@@ -37,6 +73,7 @@ impl DiffRequest {
             path: entry.path.clone(),
             orig_path: entry.orig_path.clone(),
             side,
+            options,
         }
     }
 }
@@ -47,6 +84,9 @@ pub fn diff_command(request: &DiffRequest) -> GitCommand {
     let mut cmd = GitCommand::new("diff")
         .arg("--no-color")
         .arg("--no-ext-diff");
+    for arg in request.options.args() {
+        cmd = cmd.arg(arg);
+    }
     match request.side {
         DiffSide::Worktree => cmd = cmd.arg("--").arg(request.path.as_os_str()),
         DiffSide::Index => {
@@ -79,10 +119,11 @@ pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
         .arg("--no-color")
         .arg("--no-ext-diff")
         .arg("--no-textconv")
-        .arg("--no-renames")
-        .arg("-U3")
-        .arg("--src-prefix=a/")
-        .arg("--dst-prefix=b/");
+        .arg("--no-renames");
+    for arg in request.options.args() {
+        cmd = cmd.arg(arg);
+    }
+    cmd = cmd.arg("--src-prefix=a/").arg("--dst-prefix=b/");
     cmd = match request.side {
         DiffSide::Worktree => cmd.arg("--"),
         DiffSide::Index => cmd.arg("--cached").arg("--"),
@@ -243,13 +284,79 @@ mod tests {
             path: "new name.rs".into(),
             orig_path: orig.map(Into::into),
             side,
+            options: DiffOptions::default(),
+        }
+    }
+
+    fn with_options(side: DiffSide, context: u32, ignore_whitespace: bool) -> DiffRequest {
+        DiffRequest {
+            options: DiffOptions {
+                context,
+                ignore_whitespace,
+            },
+            ..request(side, None)
+        }
+    }
+
+    /// The flags between `diff` and `--`, which is where the options go.
+    fn before_dashdash(cmd: &GitCommand) -> Vec<String> {
+        argv(cmd).into_iter().take_while(|a| a != "--").collect()
+    }
+
+    const SIDES: [DiffSide; 3] = [DiffSide::Worktree, DiffSide::Index, DiffSide::Untracked];
+
+    #[test]
+    fn default_options_are_three_lines_with_whitespace_shown() {
+        assert_eq!(
+            DiffOptions::default(),
+            DiffOptions {
+                context: 3,
+                ignore_whitespace: false
+            }
+        );
+    }
+
+    #[test]
+    fn diff_command_carries_the_options_before_the_paths_on_every_side() {
+        for side in SIDES {
+            let flags = before_dashdash(&diff_command(&with_options(side, 5, false)));
+            assert!(flags.contains(&"-U5".into()), "{side:?} {flags:?}");
+            assert!(!flags.contains(&"-w".into()), "{side:?} {flags:?}");
+
+            let flags = before_dashdash(&diff_command(&with_options(side, 5, true)));
+            assert!(flags.contains(&"-U5".into()), "{side:?} {flags:?}");
+            assert!(flags.contains(&"-w".into()), "{side:?} {flags:?}");
+
+            let all = argv(&diff_command(&request(side, None)));
+            let flags = before_dashdash(&diff_command(&request(side, None)));
+            assert!(flags.contains(&"-U3".into()), "{side:?} {flags:?}");
+            assert!(!all.contains(&"-w".into()), "{side:?} {all:?}");
+        }
+    }
+
+    #[test]
+    fn patch_diff_command_carries_the_options_before_the_paths_on_every_side() {
+        for side in SIDES {
+            let flags = before_dashdash(&patch_diff_command(&with_options(side, 5, true)));
+            assert!(flags.contains(&"-U5".into()), "{side:?} {flags:?}");
+            assert!(!flags.contains(&"-U3".into()), "{side:?} {flags:?}");
+            assert!(flags.contains(&"-w".into()), "{side:?} {flags:?}");
+
+            let flags = before_dashdash(&patch_diff_command(&with_options(side, 5, false)));
+            assert!(flags.contains(&"-U5".into()), "{side:?} {flags:?}");
+            assert!(!flags.contains(&"-w".into()), "{side:?} {flags:?}");
+
+            let all = argv(&patch_diff_command(&request(side, None)));
+            assert!(all.contains(&"-U3".into()), "{side:?} {all:?}");
+            assert!(!all.contains(&"-w".into()), "{side:?} {all:?}");
         }
     }
 
     #[test]
     fn worktree_changes_give_the_worktree_side() {
         for (x, y) in [('.', 'M'), ('M', 'M')] {
-            let req = DiffRequest::for_entry(&entry(x, y, EntryKind::Changed));
+            let req =
+                DiffRequest::for_entry(&entry(x, y, EntryKind::Changed), DiffOptions::default());
             assert_eq!(req.side, DiffSide::Worktree, "{x}{y}");
             assert_eq!(req.path, "src/a.rs".into());
         }
@@ -257,7 +364,8 @@ mod tests {
 
     #[test]
     fn staged_only_changes_give_the_index_side() {
-        let req = DiffRequest::for_entry(&entry('M', '.', EntryKind::Changed));
+        let req =
+            DiffRequest::for_entry(&entry('M', '.', EntryKind::Changed), DiffOptions::default());
         assert_eq!(req.side, DiffSide::Index);
     }
 
@@ -266,18 +374,22 @@ mod tests {
         let mut e = entry('R', '.', EntryKind::Renamed);
         e.orig_path = Some("src/old.rs".into());
         assert_eq!(
-            DiffRequest::for_entry(&e),
+            DiffRequest::for_entry(&e, DiffOptions::default()),
             DiffRequest {
                 path: "src/a.rs".into(),
                 orig_path: Some("src/old.rs".into()),
                 side: DiffSide::Index,
+                options: DiffOptions::default(),
             }
         );
     }
 
     #[test]
     fn untracked_file_gives_the_untracked_side() {
-        let req = DiffRequest::for_entry(&entry('?', '?', EntryKind::Untracked));
+        let req = DiffRequest::for_entry(
+            &entry('?', '?', EntryKind::Untracked),
+            DiffOptions::default(),
+        );
         assert_eq!(req.side, DiffSide::Untracked);
     }
 
@@ -286,7 +398,14 @@ mod tests {
         let cmd = diff_command(&request(DiffSide::Worktree, None));
         assert_eq!(
             argv(&cmd),
-            ["diff", "--no-color", "--no-ext-diff", "--", "new name.rs"]
+            [
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "-U3",
+                "--",
+                "new name.rs"
+            ]
         );
     }
 
@@ -299,6 +418,7 @@ mod tests {
                 "diff",
                 "--no-color",
                 "--no-ext-diff",
+                "-U3",
                 "--cached",
                 "-M",
                 "--",
@@ -313,6 +433,7 @@ mod tests {
                 "diff",
                 "--no-color",
                 "--no-ext-diff",
+                "-U3",
                 "--cached",
                 "-M",
                 "--",
@@ -330,6 +451,7 @@ mod tests {
                 "diff",
                 "--no-color",
                 "--no-ext-diff",
+                "-U3",
                 "--no-index",
                 "--",
                 "/dev/null",
@@ -362,6 +484,7 @@ mod tests {
                     path: name.into(),
                     orig_path: None,
                     side,
+                    options: DiffOptions::default(),
                 };
                 let cmd = diff_command(&req);
                 assert_eq!(argv(&cmd).last().map(String::as_str), Some(name));
@@ -395,6 +518,7 @@ mod tests {
                 path: name.into(),
                 orig_path: None,
                 side: DiffSide::Worktree,
+                options: DiffOptions::default(),
             };
             let out = crate::git::GitRunner::run(&runner, &diff_command(&request)).unwrap();
             let text = String::from_utf8_lossy(&out.stdout);
@@ -423,7 +547,10 @@ mod tests {
         std::fs::write(dir.join(LOOK_ALIKE), "look-alike newer\n").unwrap();
         let runner = crate::git::CliRunner::new(dir);
         let diff_of_raw = |side| {
-            let request = DiffRequest::for_entry(&entry_named(&runner, RAW_NAME).unwrap());
+            let request = DiffRequest::for_entry(
+                &entry_named(&runner, RAW_NAME).unwrap(),
+                DiffOptions::default(),
+            );
             assert_eq!(request.side, side);
             let out = crate::git::GitRunner::run(&runner, &diff_command(&request)).unwrap();
             assert!(out.success, "{}", String::from_utf8_lossy(&out.stderr));
@@ -498,6 +625,7 @@ mod tests {
             path: path.into(),
             orig_path: None,
             side,
+            options: DiffOptions::default(),
         }
     }
 

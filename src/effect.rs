@@ -338,6 +338,7 @@ mod tests {
             path: "a.rs".into(),
             orig_path: None,
             side: DiffSide::Index,
+            options: Default::default(),
         }
     }
 
@@ -460,7 +461,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn load_diff_streams_through_the_diff_streamer() {
         let runner = Arc::new(FakeRunner::new().expect_spawn(
-            &["diff", "--no-color", "--no-ext-diff", "--", "a.rs"],
+            &["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"],
             FakeChild::lines(2),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -477,6 +478,7 @@ mod tests {
                 path: "a.rs".into(),
                 orig_path: None,
                 side: DiffSide::Worktree,
+                options: Default::default(),
             },
             want: 100,
         });

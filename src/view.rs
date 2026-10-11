@@ -1,7 +1,7 @@
 use crate::commit_editor::{CommitEditor, Field};
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
-use crate::git::diff::{DiffLine, DiffSide, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
@@ -25,8 +25,10 @@ pub fn render(state: &AppState, frame: &mut Frame) {
             render_status_panel(state, frame, areas.status);
             render_files_panel(state, frame, areas.files);
             match &state.focus {
-                Focus::Files => render_diff_pane(&state.diff, frame, areas.diff),
-                Focus::Diff(view) => render_hunk_view(view, frame, areas.diff),
+                Focus::Files => {
+                    render_diff_pane(&state.diff, state.diff_options, frame, areas.diff)
+                }
+                Focus::Diff(view) => render_hunk_view(view, state.diff_options, frame, areas.diff),
             }
         }
         Context::Review { number } => {
@@ -634,9 +636,23 @@ fn reversed(mut line: Line<'static>, width: usize) -> Line<'static> {
     line.style(Style::new().add_modifier(Modifier::REVERSED))
 }
 
+/// The diff options that differ from the defaults, for the pane title, so
+/// a changed setting is never mistaken for the file's real diff.
+fn options_note(options: DiffOptions) -> String {
+    let default = DiffOptions::default();
+    let mut note = String::new();
+    if options.context != default.context {
+        note.push_str(&format!(" · {} lines context", options.context));
+    }
+    if options.ignore_whitespace {
+        note.push_str(" · whitespace hidden");
+    }
+    note
+}
+
 /// The Diff pane: an error, a delayed "Loading…", "No diff", or the visible lines.
-fn render_diff_pane(diff: &DiffPane, frame: &mut Frame, area: Rect) {
-    let block = Block::bordered().title(" Diff ");
+fn render_diff_pane(diff: &DiffPane, options: DiffOptions, frame: &mut Frame, area: Rect) {
+    let block = Block::bordered().title(format!(" Diff{} ", options_note(options)));
     let rows = usize::from(block.inner(area).height);
     let pane = if let Some(error) = &diff.error {
         Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
@@ -661,16 +677,17 @@ fn render_diff_pane(diff: &DiffPane, frame: &mut Frame, area: Rect) {
 /// The focused Diff pane: one side of the file as hunks, the selected one
 /// marked by a reversed `@@` row and a `▌` gutter, so it reads without colour.
 /// In line mode the picked lines are marked that way instead.
-fn render_hunk_view(view: &HunkView, frame: &mut Frame, area: Rect) {
+fn render_hunk_view(view: &HunkView, options: DiffOptions, frame: &mut Frame, area: Rect) {
     let side = match view.side {
         DiffSide::Index => "Staged",
         DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
     };
     // The mode is in words too, for when the bar is cut off.
-    let title = match view.lines {
-        Some(_) => format!(" {side} · lines "),
-        None => format!(" {side} "),
+    let mode = match view.lines {
+        Some(_) => " · lines",
+        None => "",
     };
+    let title = format!(" {side}{mode}{} ", options_note(options));
     let block = Block::bordered()
         .title(title)
         .title_style(Style::new().add_modifier(Modifier::BOLD))
@@ -2094,6 +2111,71 @@ mod tests {
         let state = hunks(DiffSide::Worktree, TWO_HUNKS);
         for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {
             draw(&state, w, h);
+        }
+    }
+
+    #[test]
+    fn the_diff_title_names_the_diff_options_that_differ_from_the_defaults() {
+        use crate::git::diff::DiffOptions;
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+new")]);
+        let rows = draw(&state, 80, 12);
+        assert!(contains(&rows, "┌ Diff ─"), "{rows:#?}");
+        assert!(!contains(&rows, "context"), "{rows:#?}");
+
+        state.diff_options = DiffOptions {
+            context: 5,
+            ignore_whitespace: false,
+        };
+        let rows = draw(&state, 80, 12);
+        assert!(contains(&rows, "┌ Diff · 5 lines context ─"), "{rows:#?}");
+
+        state.diff_options.ignore_whitespace = true;
+        let rows = draw(&state, 80, 12);
+        assert!(
+            contains(&rows, "┌ Diff · 5 lines context · whitespace hidden ─"),
+            "{rows:#?}"
+        );
+
+        state.diff_options.context = 3;
+        let rows = draw(&state, 80, 12);
+        assert!(contains(&rows, "┌ Diff · whitespace hidden ─"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_focused_title_names_the_diff_options_too() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        state.diff_options.context = 7;
+        state.diff_options.ignore_whitespace = true;
+        let rows = draw(&state, 100, 20);
+        assert!(
+            contains(&rows, " Unstaged · 7 lines context · whitespace hidden "),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn help_lists_the_diff_option_keys_from_files_and_diff() {
+        let mut files = loaded(vec![file("a.rs")]);
+        files.selected = Some(0);
+        let mut diff = hunks(DiffSide::Worktree, TWO_HUNKS);
+        for state in [&mut files, &mut diff] {
+            state.help_open = true;
+            let rows = draw(state, 100, 40);
+            let row = |needle: &str| {
+                rows.iter()
+                    .find(|row| row.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle:?} not in {rows:#?}"))
+                    .clone()
+            };
+            assert!(
+                row("Show more context lines").contains(" +/= "),
+                "{rows:#?}"
+            );
+            assert!(row("Show fewer context lines").contains(" - "), "{rows:#?}");
+            assert!(
+                row("Hide or show whitespace-only").contains(" w "),
+                "{rows:#?}"
+            );
         }
     }
 }

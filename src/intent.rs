@@ -64,6 +64,12 @@ pub enum AppIntent {
     ToggleLinesStage,
     /// Switch the focused Diff pane between unstaged and staged changes.
     ToggleDiffSide,
+    /// Show one more unchanged line around each change in the diff.
+    MoreContext,
+    /// Show one fewer unchanged line around each change in the diff.
+    LessContext,
+    /// Hide or show changes that only touch whitespace.
+    ToggleWhitespace,
     /// A whole-file patch load finished; `tag` says which one.
     PatchLoaded {
         tag: Tag,
