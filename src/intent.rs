@@ -15,6 +15,7 @@ use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::keymap::{KeyPress, Keymap};
+use crate::layout::Panel;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::watch::WatchEvent;
@@ -27,6 +28,8 @@ pub enum AppIntent {
     Quit,
     OpenHelp,
     CloseHelp,
+    /// Scroll the help list, which can be taller than the screen.
+    ScrollHelp(Scroll),
     Resize {
         width: u16,
         height: u16,
@@ -53,8 +56,16 @@ pub enum AppIntent {
     },
     /// Give the Diff pane focus, to work on the selected file's hunks.
     FocusDiff,
-    /// Back to the Files panel.
-    FocusFiles,
+    /// Back to the side panel last focused, which stayed expanded.
+    FocusLeft,
+    /// Give a panel focus: a side panel expands; the diff works on hunks.
+    FocusPanel(Panel),
+    /// Focus the next panel in screen order, or the previous with `back`.
+    CycleFocus {
+        back: bool,
+    },
+    /// Zoom the focused panel: normal, half, full, normal again.
+    CycleScreenMode,
     /// Move the hunk cursor down or up.
     NextHunk,
     PrevHunk,
@@ -105,6 +116,9 @@ pub enum AppIntent {
     ResumeCommit,
     /// Commit with the typed message.
     SubmitCommit,
+    /// Ctrl+C in the commit popup: cancel while typing (asking before a
+    /// typed message is lost), quit while git runs.
+    InterruptCommit,
     /// Move the cursor between the subject and the body.
     ToggleCommitField,
     /// Close the commit error and go back to the kept message.

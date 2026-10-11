@@ -69,9 +69,9 @@ fn nudge(area: Rect, depth: usize) -> Rect {
 }
 
 /// A box of items with the `cursor` row reversed, scrolled so that row is
-/// in view on a short screen. A menu below the top has no cursor. A
-/// disabled item is dimmed and italic, not only grey, and says why after
-/// its label.
+/// in view on a short screen, with `▲`/`▼` on the border where rows are
+/// cut. A menu below the top has no cursor. A disabled item is dimmed and
+/// italic, not only grey, and says why after its label.
 fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut Frame, area: Rect) {
     let title = format!(" {} ", id.title());
     let rows: Vec<(String, bool)> = menu::items(id)
@@ -111,14 +111,18 @@ fn render_menu(state: &AppState, id: MenuId, cursor: Option<usize>, frame: &mut 
     );
     frame.render_widget(Clear, popup);
     let rows = usize::from(popup.height.saturating_sub(2)).max(1);
+    let total = lines.len();
     let first = cursor.map_or(0, |cursor| cursor.saturating_sub(rows - 1));
+    // Rows cut off are marked on the border they are hidden behind.
+    let mut block = Block::bordered().title(title);
+    if first > 0 {
+        block = block.title(Line::raw("▲").right_aligned());
+    }
+    if first + rows < total {
+        block = block.title_bottom(Line::raw("▼").right_aligned());
+    }
     let first = u16::try_from(first).unwrap_or(u16::MAX);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((first, 0))
-            .block(Block::bordered().title(title)),
-        popup,
-    );
+    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
 }
 
 /// Hex digits of a commit the list shows, enough to tell commits apart.
@@ -648,6 +652,37 @@ mod tests {
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_scrolled_menu_marks_the_rows_cut_above_and_below() {
+        let mut state = workspace(&["a.rs"]);
+        let menu = |cursor| {
+            vec![Popup::Menu {
+                id: MenuId::Actions,
+                cursor,
+            }]
+        };
+        // Three of the eight items show at a time.
+        state.popups = menu(0);
+        let (_, rows) = draw(&state, 30, 6);
+        let (_, top) = find(&rows, " Actions ");
+        assert!(!rows[usize::from(top)].contains('▲'), "{rows:#?}");
+        assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
+
+        state.popups = menu(4);
+        let (_, rows) = draw(&state, 30, 6);
+        assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
+        assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
+
+        state.popups = menu(7);
+        let (_, rows) = draw(&state, 30, 6);
+        assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
+        assert!(!rows[usize::from(top) + 4].contains('▼'), "{rows:#?}");
+
+        // Nothing cut, nothing marked.
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(!contains(&rows, "▲") && !contains(&rows, "▼"), "{rows:#?}");
     }
 
     #[test]
