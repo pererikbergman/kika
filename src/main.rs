@@ -37,6 +37,7 @@ mod recent_list;
 mod refresh;
 mod remote_run;
 mod rendered_view;
+mod sequence_editor;
 mod submodule_list;
 mod view;
 mod watch;
@@ -57,6 +58,10 @@ use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
 
 fn main() -> color_eyre::Result<ExitCode> {
+    // Hidden modes, each keyed on its own env var and run before anything
+    // else. Kika sets each only on the one git command that needs it, and
+    // strips both from every other (`CliRunner`), so one never reaches the
+    // other's child.
     // Run by git or ssh as their askpass program, with the prompt as the
     // only argument, which `Cli::parse` would reject.
     #[cfg(unix)]
@@ -69,6 +74,10 @@ fn main() -> color_eyre::Result<ExitCode> {
             kind.as_deref(),
             &mut std::io::stdout().lock(),
         ));
+    }
+    // Run by git as the sequence editor of Kika's own interactive rebase.
+    if let Some(code) = sequence_editor::dispatch() {
+        return Ok(code);
     }
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;

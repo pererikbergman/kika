@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
@@ -60,6 +60,18 @@ impl GitCommand {
 
     pub fn args(&self) -> &[OsString] {
         &self.args
+    }
+
+    /// The git subcommand, past any leading `-c key=value` pairs, for
+    /// messages such as "git rebase failed".
+    pub fn subcommand(&self) -> &OsStr {
+        let mut args = self.args.as_slice();
+        while let [first, _, rest @ ..] = args
+            && first == "-c"
+        {
+            args = rest;
+        }
+        args.first().unwrap_or(&self.args[0])
     }
 
     pub fn envs(&self) -> &[(OsString, OsString)] {
@@ -135,6 +147,13 @@ pub trait ChildHandle: Send + Sync {
     fn finish(&self) -> io::Result<GitOutput>;
 }
 
+/// The env vars that start Kika in a hidden mode instead of the UI. Never
+/// inherited by a git child: the one command that needs one sets it.
+const HIDDEN_MODE_ENV: [&str; 2] = [
+    crate::git::askpass::SOCKET_ENV,
+    crate::sequence_editor::PLAN_ENV,
+];
+
 /// The real runner: spawns the `git` binary in a working directory.
 pub struct CliRunner {
     /// Behind a lock so entering a submodule can move every later command.
@@ -182,7 +201,12 @@ impl CliRunner {
 
     fn command(&self, cmd: &GitCommand) -> Command {
         let mut command = Command::new("git");
-        for key in &self.env_remove {
+        // Each hidden mode's key reaches only the command that sets it.
+        for key in HIDDEN_MODE_ENV
+            .iter()
+            .map(OsStr::new)
+            .chain(self.env_remove.iter().map(|k| k.as_os_str()))
+        {
             command.env_remove(key);
         }
         command
@@ -431,6 +455,34 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `command` does with `key`: `None` if it leaves the parent's
+    /// value, `Some(None)` if it removes it, `Some(Some(v))` if it sets it.
+    fn env_of(command: &Command, key: &str) -> Option<Option<OsString>> {
+        command
+            .get_envs()
+            .filter(|(k, _)| *k == OsStr::new(key))
+            .last()
+            .map(|(_, v)| v.map(OsStr::to_os_string))
+    }
+
+    #[test]
+    fn a_hidden_mode_s_key_reaches_only_the_command_that_sets_it() {
+        use crate::git::askpass::SOCKET_ENV;
+        use crate::sequence_editor::PLAN_ENV;
+
+        let runner = CliRunner::new("/r");
+        let plain = runner.command(&GitCommand::new("status"));
+        let rebase = runner.command(&GitCommand::new("rebase").env(PLAN_ENV, "pick x\n"));
+        let fetch = runner.command(&GitCommand::new("fetch").env(SOCKET_ENV, "/s"));
+        for key in [PLAN_ENV, SOCKET_ENV] {
+            assert_eq!(env_of(&plain, key), Some(None), "{key}");
+        }
+        assert_eq!(env_of(&rebase, PLAN_ENV), Some(Some("pick x\n".into())));
+        assert_eq!(env_of(&rebase, SOCKET_ENV), Some(None));
+        assert_eq!(env_of(&fetch, SOCKET_ENV), Some(Some("/s".into())));
+        assert_eq!(env_of(&fetch, PLAN_ENV), Some(None));
+    }
 
     /// `run` and `spawn` both build their process here, so every command
     /// kind runs in the runner's workdir with its argv untouched.
