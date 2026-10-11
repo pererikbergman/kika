@@ -15,10 +15,22 @@ pub const MAX_SUBJECT: usize = 50;
 pub const REDACTED: &str = "<redacted>";
 
 /// Subcommands whose `-m` and `--message` carry a message, not a name.
-const MESSAGE_SUBCOMMANDS: [&str; 5] = ["commit", "tag", "merge", "stash", "notes"];
+const MESSAGE_SUBCOMMANDS: [&str; 6] = ["commit", "commit-tree", "tag", "merge", "stash", "notes"];
+
+/// Global options before the subcommand that take the next arg as a path
+/// or name.
+const GLOBAL_WITH_VALUE: [&str; 4] = ["-C", "--git-dir", "--work-tree", "--namespace"];
+
+/// Where a message's subject ends: every line break a terminal or a font
+/// may draw as one.
+const LINE_BREAKS: [char; 7] = [
+    '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+];
 
 /// `git` and the args of `cmd`, one space apart, with secrets left out.
-/// Env and stdin are never read.
+/// Env and stdin are never read. Forms Kika never builds today (joined
+/// `-ckey=value`, bundled `-am`, abbreviated `--mess=`) are still read the
+/// way git reads them, so a future caller cannot leak through them.
 pub fn display_line(cmd: &GitCommand) -> String {
     let args: Vec<String> = cmd
         .args()
@@ -26,49 +38,102 @@ pub fn display_line(cmd: &GitCommand) -> String {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     let mut words = vec!["git".to_string()];
-    let mut rest = args.as_slice();
-    while let [flag, pair, tail @ ..] = rest
-        && flag == "-c"
-    {
-        words.push("-c".to_string());
-        words.push(config_pair(pair));
-        rest = tail;
-    }
-    let messages = rest
-        .first()
-        .is_some_and(|sub| MESSAGE_SUBCOMMANDS.contains(&sub.as_str()));
-    let mut options = true;
-    let mut iter = rest.iter();
+    let mut iter = args.iter();
+    let mut subcommand = None;
     while let Some(arg) = iter.next() {
-        if !options || !messages {
-            options &= arg != "--";
+        if arg == "-c" || arg == "--config-env" {
+            words.push(arg.clone());
+            words.extend(iter.next().map(|pair| config_pair(pair)));
+        } else if let Some(pair) = arg.strip_prefix("--config-env=") {
+            words.push(format!("--config-env={}", config_pair(pair)));
+        } else if let Some(pair) = arg.strip_prefix("-c") {
+            words.push(format!("-c{}", config_pair(pair)));
+        } else if GLOBAL_WITH_VALUE.contains(&arg.as_str()) {
+            words.push(arg.clone());
+            words.extend(iter.next().map(|value| plain(value)));
+        } else if arg.starts_with('-') {
             words.push(plain(arg));
-            continue;
+        } else {
+            words.push(plain(arg));
+            subcommand = Some(arg.as_str());
+            break;
         }
-        if arg == "--" {
+    }
+    let messages = subcommand.is_some_and(|sub| MESSAGE_SUBCOMMANDS.contains(&sub));
+    let config = subcommand == Some("config");
+    let mut options = true;
+    let mut secret_value = false;
+    while let Some(arg) = iter.next() {
+        if secret_value {
+            words.push(REDACTED.to_string());
+        } else if !options || arg == "--" {
             options = false;
             words.push(plain(arg));
-        } else if arg == "-m" || arg == "--message" {
-            words.push(plain(arg));
-            if let Some(value) = iter.next() {
-                words.push(safe(&subject(value)));
-            }
-        } else if let Some(value) = arg.strip_prefix("--message=") {
-            words.push(safe(&format!("--message={}", subject(value))));
-        } else if let Some(value) = arg.strip_prefix("-m") {
-            words.push(safe(&format!("-m{}", subject(value))));
-        } else if arg == "-F" || arg == "--file" {
-            words.push(plain(arg));
-            if let Some(value) = iter.next() {
-                words.push(plain(value));
-            }
-        } else if let Some(value) = arg.strip_prefix("--file=") {
-            words.push(safe(&format!("--file={}", path(value))));
+        } else if messages && arg.starts_with('-') {
+            message_option(arg, &mut iter, &mut words);
         } else {
+            // `git config <key> <value>`: what follows a secret key goes.
+            secret_value = config && !arg.starts_with('-') && secret_key(arg);
             words.push(plain(arg));
         }
     }
     cut_line(words.join(" "))
+}
+
+/// An option of a message subcommand, and its value if it takes the next
+/// arg. Any unique prefix of `--message` or `--file` counts, as git
+/// accepts one, and so does `m` or `F` anywhere in a bundle of short
+/// flags such as `-am`: what follows it in the bundle, or else the next
+/// arg, is its value.
+fn message_option<'a>(
+    arg: &str,
+    rest: &mut impl Iterator<Item = &'a String>,
+    words: &mut Vec<String>,
+) {
+    if let Some(long) = arg.strip_prefix("--") {
+        let (name, value) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (long, None),
+        };
+        let message = !name.is_empty() && "message".starts_with(name);
+        let file = !name.is_empty() && "file".starts_with(name);
+        match (value, message, file) {
+            (Some(value), true, _) => words.push(safe(&format!("--{name}={}", subject(value)))),
+            (None, true, _) => {
+                words.push(plain(arg));
+                words.extend(rest.next().map(|value| safe(&subject(value))));
+            }
+            (None, _, true) => {
+                words.push(plain(arg));
+                words.extend(rest.next().map(|value| plain(value)));
+            }
+            _ => words.push(plain(arg)),
+        }
+        return;
+    }
+    let Some(at) = arg
+        .char_indices()
+        .skip(1)
+        .find(|&(_, c)| c == 'm' || c == 'F')
+        .map(|(i, _)| i)
+    else {
+        words.push(plain(arg));
+        return;
+    };
+    let (flags, value) = arg.split_at(at + 1);
+    let message = flags.ends_with('m');
+    match (value.is_empty(), message) {
+        (false, true) => words.push(safe(&format!("{flags}{}", subject(value)))),
+        (false, false) => words.push(safe(&format!("{flags}{}", path(value)))),
+        (true, true) => {
+            words.push(plain(flags));
+            words.extend(rest.next().map(|value| safe(&subject(value))));
+        }
+        (true, false) => {
+            words.push(plain(flags));
+            words.extend(rest.next().map(|value| plain(value)));
+        }
+    }
 }
 
 /// Terminal-safe, with the userinfo taken out of every URL in it.
@@ -76,8 +141,14 @@ fn safe(text: &str) -> String {
     redact_userinfo(&sanitize(text.as_bytes()))
 }
 
-/// An arg with no special meaning: safe, and short if it is a full path.
+/// An arg with no special meaning: safe, and short if it is a full path,
+/// or a `--name=` option whose value is one.
 fn plain(arg: &str) -> String {
+    if arg.starts_with("--")
+        && let Some((name, value)) = arg.split_once('=')
+    {
+        return safe(&format!("{name}={}", path(value)));
+    }
     safe(&path(arg))
 }
 
@@ -113,8 +184,7 @@ fn secret_key(key: &str) -> bool {
 /// A message's first line, cut to [`MAX_SUBJECT`] chars, with `…` when
 /// anything was left out, the body included.
 fn subject(message: &str) -> String {
-    let (first, body) = message.split_once('\n').unwrap_or((message, ""));
-    let first = first.strip_suffix('\r').unwrap_or(first);
+    let (first, body) = message.split_once(LINE_BREAKS).unwrap_or((message, ""));
     let kept: String = first.chars().take(MAX_SUBJECT).collect();
     let dropped = kept.len() < first.len() || !body.trim().is_empty();
     if dropped { format!("{kept}…") } else { kept }
@@ -270,6 +340,187 @@ mod tests {
         for (pair, want) in cases {
             let line = display_line(&cmd(&["-c", pair, "-c", "a.b=c", "status"]));
             assert_eq!(line, format!("git -c {want} -c a.b=c status"), "{pair}");
+        }
+    }
+
+    #[test]
+    fn every_global_option_form_is_read_before_the_subcommand() {
+        let cases: &[(&[&str], &str)] = &[
+            // Joined, as `-c` and `--config-env` may be written.
+            (
+                &["-ccredential.helper=store", "fetch"],
+                "git -ccredential.helper=<redacted> fetch",
+            ),
+            (
+                &["-crebase.updateRefs=false", "status"],
+                "git -crebase.updateRefs=false status",
+            ),
+            (
+                &["--config-env=http.extraHeader=AUTH_ENV", "fetch"],
+                "git --config-env=http.extraHeader=<redacted> fetch",
+            ),
+            (
+                &["--config-env", "remote.o.password=PW_ENV", "fetch"],
+                "git --config-env remote.o.password=<redacted> fetch",
+            ),
+            // `-C <dir>` first does not hide the `-c` pairs after it.
+            (
+                &[
+                    "-C",
+                    "/home/me/repo",
+                    "-c",
+                    "core.sshCommand=ssh -i k",
+                    "fetch",
+                ],
+                "git -C …/repo -c core.sshCommand=<redacted> fetch",
+            ),
+            (
+                &[
+                    "--git-dir",
+                    "/home/me/r/.git",
+                    "--work-tree=/home/me/r",
+                    "status",
+                ],
+                "git --git-dir …/.git --work-tree=…/r status",
+            ),
+            // And the subcommand is still found for the message rule.
+            (
+                &[
+                    "-C",
+                    "sub",
+                    "--no-pager",
+                    "-c",
+                    "a.b=c",
+                    "commit",
+                    "-m",
+                    "s\nbody secret",
+                ],
+                "git -C sub --no-pager -c a.b=c commit -m s…",
+            ),
+        ];
+        for (args, want) in cases {
+            let line = display_line(&cmd(args));
+            assert_eq!(line, *want, "{args:?}");
+            assert!(!line.contains("secret"), "{line}");
+        }
+    }
+
+    #[test]
+    fn bundled_and_abbreviated_message_options_are_cut_too() {
+        let cases: &[(&[&str], &str)] = &[
+            (&["commit", "-am", "s\nbody secret"], "git commit -am s…"),
+            (&["commit", "-qm", "s\nbody secret"], "git commit -qm s…"),
+            (&["commit", "-qams\nbody secret"], "git commit -qams…"),
+            (&["commit", "-aF", "/tmp/k/msg"], "git commit -aF …/msg"),
+            (&["commit", "-aF/tmp/k/msg"], "git commit -aF…/msg"),
+            (&["commit", "--mess=s\nbody secret"], "git commit --mess=s…"),
+            (&["commit", "--me", "s\nbody secret"], "git commit --me s…"),
+            (&["commit", "--fi", "/tmp/k/msg"], "git commit --fi …/msg"),
+            (&["commit", "--fil=/tmp/k/msg"], "git commit --fil=…/msg"),
+            (
+                &["commit-tree", "-p", "HEAD", "-m", "s\nbody secret", "abc"],
+                "git commit-tree -p HEAD -m s… abc",
+            ),
+            // Not message options.
+            (
+                &["commit", "--amend", "--no-edit"],
+                "git commit --amend --no-edit",
+            ),
+            (&["commit", "-a", "-q"], "git commit -a -q"),
+            (&["commit", "-F", "-"], "git commit -F -"),
+        ];
+        for (args, want) in cases {
+            let line = display_line(&cmd(args));
+            assert_eq!(line, *want, "{args:?}");
+            assert!(!line.contains("secret"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_subject_ends_at_any_line_break() {
+        for brk in [
+            "\n", "\r", "\r\n", "\u{2028}", "\u{2029}", "\u{85}", "\u{0B}", "\u{0C}",
+        ] {
+            let message = format!("subj{brk}body secret");
+            let line = display_line(&cmd(&["tag", "-a", "-m", &message, "v1"]));
+            assert_eq!(line, "git tag -a -m subj… v1", "{brk:?}");
+        }
+        // A break with nothing after it drops nothing.
+        let line = display_line(&cmd(&["commit", "-m", "subj\r\n"]));
+        assert_eq!(line, "git commit -m subj");
+    }
+
+    #[test]
+    fn a_config_command_hides_the_value_of_a_secret_key() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["config", "credential.helper", "store --file x"],
+                "git config credential.helper <redacted>",
+            ),
+            (
+                &["config", "set", "--local", "remote.o.password", "hunter2"],
+                "git config set --local remote.o.password <redacted>",
+            ),
+            (
+                &["config", "--get", "core.askPass"],
+                "git config --get core.askPass",
+            ),
+            (&["config", "user.name", "Ann"], "git config user.name Ann"),
+        ];
+        for (args, want) in cases {
+            assert_eq!(display_line(&cmd(args)), *want, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn whitespace_in_a_url_password_is_stripped_with_it() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["remote", "add", "--", "o", "https://u:my pass@h/r"],
+                "git remote add -- o https://h/r",
+            ),
+            (
+                &["remote", "add", "--", "o", "https://u:a\tb@h/r"],
+                "git remote add -- o https://h/r",
+            ),
+        ];
+        for (args, want) in cases {
+            assert_eq!(display_line(&cmd(args)), *want, "{args:?}");
+        }
+    }
+
+    /// Every message and URL Kika passes in argv today, with a secret in
+    /// the parts that must never show.
+    #[test]
+    fn no_command_kika_builds_shows_a_secret() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::{GitOp, op_command};
+
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let ops = [
+            GitOp::Commit {
+                message: Some("subj\n\nSECRET body".into()),
+                stage_all: true,
+                amend: false,
+                no_verify: false,
+            },
+            GitOp::CreateTag {
+                name: "v1".into(),
+                target: CommitId::parse(oid).unwrap(),
+                message: Some("subj\r\nSECRET body".into()),
+            },
+            GitOp::AddRemote {
+                name: "o".into(),
+                url: "https://u:SECRET pw@h/r".into(),
+            },
+            GitOp::ApplyCached {
+                patch: b"SECRET patch".to_vec(),
+                reverse: false,
+            },
+        ];
+        for op in &ops {
+            let line = display_line(&op_command(op));
+            assert!(!line.contains("SECRET"), "{op:?}: {line}");
         }
     }
 

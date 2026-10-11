@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::command_log::{CommandLog, CommandLogView, LogEntry};
 use crate::git::recording::CommandOutcome;
-use crate::view::clip;
+use crate::view::{clip, pad};
 
 /// Wide enough for `not started`, so the times line up.
 const STATE_WIDTH: usize = 11;
@@ -48,7 +48,8 @@ pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Fr
                 if top && i == cursor {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
-                Line::styled(clip(&row(entry), 0, room), style)
+                // Padded, so the cursor's reversed bar fills the row.
+                Line::styled(pad(&clip(&row(entry), 0, room), room), style)
             })
             .collect()
     };
@@ -107,6 +108,7 @@ mod tests {
     use crate::git::runner::GitCommand;
     use crate::intent::AppIntent;
     use crate::model::{AppState, Context};
+    use crate::popup::Popup;
     use crate::view::{buffer_rows, render as render_app};
 
     fn draw(state: &AppState, width: u16, height: u16) -> (ratatui::buffer::Buffer, Vec<String>) {
@@ -246,6 +248,102 @@ mod tests {
         let (_, rows) = draw(&state, 60, 12);
         line_with(&rows, " Command log 1/30 ");
         line_with(&rows, "git cmd00");
+    }
+
+    fn reversed(buffer: &ratatui::buffer::Buffer, x: u16, y: usize) -> bool {
+        buffer[(x, y as u16)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED)
+    }
+
+    /// The log open with `n` short commands, the last one the cursor's.
+    fn short_log(n: u64) -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        for id in 0..n {
+            log(&mut state, started(id, &format!("git cmd{id}"), false));
+            log(&mut state, finished(id, CommandOutcome::Ok, 1));
+        }
+        open(&mut state);
+        state
+    }
+
+    #[test]
+    fn the_cursor_bar_fills_the_row_and_other_rows_are_plain() {
+        let state = short_log(3);
+        let (buffer, rows) = draw(&state, 80, 24);
+        let last_inner = 78;
+        let (cursor_y, _) = line_with(&rows, "git cmd2");
+        assert!(reversed(&buffer, 1, cursor_y));
+        assert!(reversed(&buffer, last_inner, cursor_y), "{rows:#?}");
+        for other in ["git cmd0", "git cmd1"] {
+            let (y, _) = line_with(&rows, other);
+            assert!(
+                (1..=last_inner).all(|x| !reversed(&buffer, x, y)),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_log_under_another_popup_marks_no_row() {
+        let state = short_log(3);
+        let Some(Popup::CommandLog(view)) = state.popups.last() else {
+            panic!("the log is open");
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal
+            .draw(|frame| render(&state.command_log, view, false, frame, frame.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 {
+            for x in 0..60 {
+                assert!(!reversed(buffer, x, y), "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_line_at_80_by_24_keeps_its_columns_and_the_border() {
+        let mut state = AppState::new(Context::Workspace);
+        let long = format!("git add -- {}", "x".repeat(200));
+        log(&mut state, started(0, &long, false));
+        log(&mut state, finished(0, CommandOutcome::Ok, 12));
+        open(&mut state);
+        let (_, rows) = draw(&state, 80, 24);
+        let (_, row) = line_with(&rows, "git add");
+        assert!(
+            row.starts_with("│ ok           12ms git add -- xxx"),
+            "{row}"
+        );
+        assert!(row.ends_with("x…│"), "{row}");
+        assert_eq!(row.chars().count(), 80, "{row}");
+    }
+
+    #[test]
+    fn a_wide_glyph_at_the_edge_never_crosses_the_border() {
+        // Each offset puts a two-column glyph across the right edge once.
+        for offset in 0..2 {
+            let mut state = AppState::new(Context::Workspace);
+            let line = format!("git add -- {}{}", "a".repeat(offset), "漢字".repeat(40));
+            log(&mut state, started(0, &line, false));
+            open(&mut state);
+            let (buffer, rows) = draw(&state, 80, 24);
+            let (y, row) = line_with(&rows, "git add");
+            assert_eq!(buffer[(79, y as u16)].symbol(), "│", "{row}");
+            assert!(row.ends_with('│'), "{row}");
+            assert!(crate::view::width_of(row) == 80, "{row}");
+        }
+    }
+
+    #[test]
+    fn a_tiny_terminal_draws_without_panicking() {
+        for (width, height) in [(1, 1), (2, 2), (5, 3), (10, 2), (3, 10), (80, 1)] {
+            for n in [0, 3] {
+                let state = short_log(n);
+                draw(&state, width, height);
+            }
+        }
     }
 
     #[test]
