@@ -107,7 +107,10 @@ pub struct Target {
 }
 
 /// Programs that read their first operand as shell code.
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "fish"];
+const SHELLS: &[&str] = &[
+    "sh", "bash", "rbash", "zsh", "dash", "ash", "ksh", "ksh93", "mksh", "lksh", "oksh", "pdksh",
+    "yash", "posh", "fish", "csh", "tcsh",
+];
 
 impl CustomCommand {
     /// Check `table`, the `n`th entry counted from 1. Every error starts
@@ -294,10 +297,13 @@ fn placeholder_named(name: &str) -> Option<Part> {
 /// placed there would run as code too, so it must come after the script,
 /// where the script reads it as `"$1"`.
 ///
-/// Conservative, since some options take an argument (`-o pipefail`,
-/// `--rcfile f`) and `+x` is an option too: the last option before the
-/// first placeholder ends the options, and the first plain element after
-/// it is taken as the script. The placeholder must come after that.
+/// Conservative, since options may come in any order around `-c`, some
+/// take a value (`-o pipefail`, `-co pipefail`, `+O extglob`, `--rcfile f`)
+/// and none takes more than one: the last option before the first
+/// placeholder is assumed to take a value, and the element after that is
+/// taken as the script. With no option, the first operand is the script.
+/// The placeholder must come after it. This can refuse a safe command,
+/// never accept one that runs a value as code.
 fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     let program = command[0].rsplit(['/', '\\']).next().unwrap_or_default();
     let program = program.to_ascii_lowercase();
@@ -312,13 +318,8 @@ fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
         return Ok(());
     };
     let is_option = |element: &String| element.starts_with(['-', '+']);
-    let options_end = (1..first)
-        .rev()
-        .find(|&i| is_option(&command[i]))
-        .unwrap_or(0);
-    let script = (options_end + 1..command.len())
-        .find(|&i| !is_option(&command[i]))
-        .unwrap_or(command.len());
+    let options_end = (1..first).rev().find(|&i| is_option(&command[i]));
+    let script = options_end.map_or(1, |i| i + 2);
     if first <= script {
         return Err(format!(
             "\"{}\" is in the shell script or before it, where it would run as code; \
@@ -509,6 +510,19 @@ mod tests {
             &["bash", "--rcfile", "f", "-c", "x {path}"],
             &["bash", "--rcfile", "{path}", "-c", "x"],
             &["sh", "-c", "x", "sh", "-e", "{path}"],
+            // An option with a value after `-c`, which is only a flag.
+            &["bash", "-c", "-o", "pipefail", "x {path}"],
+            &["bash", "-co", "pipefail", "x {path}"],
+            &["bash", "-c", "-O", "extglob", "x {path}"],
+            &["bash", "-c", "+o", "posix", "x {path}"],
+            &["sh", "-c", "-o", "errexit", "x {path}"],
+            &["zsh", "-c", "-o", "errexit", "x {path}"],
+            // The file itself as the script.
+            &["bash", "-o", "pipefail", "{path}"],
+            // A value in $0 counts as the script's place too.
+            &["bash", "-c", "x {{a}} \"$1\"", "{path}"],
+            &["mksh", "-c", "x {path}"],
+            &["tcsh", "-c", "x {path}"],
             &["sh", "-{path}"],
         ] {
             let e = error(Panel::Files, command, &[]);
@@ -519,14 +533,10 @@ mod tests {
             );
         }
         assert!(parse(Panel::Files, &["sh", "-c", "x \"$1\"", "sh", "{path}"], &[]).is_ok());
-        assert!(
-            parse(
-                Panel::Files,
-                &["bash", "-c", "x {{a}} \"$1\"", "{path}"],
-                &[]
-            )
-            .is_ok()
-        );
+        let braces = ["bash", "-c", "x {{a}} \"$1\"", "bash", "{path}"];
+        assert!(parse(Panel::Files, &braces, &[]).is_ok());
+        let late_option = ["bash", "-c", "-o", "pipefail", "x \"$1\"", "bash", "{path}"];
+        assert!(parse(Panel::Files, &late_option, &[]).is_ok());
         let pipefail = [
             "bash",
             "-o",
@@ -541,6 +551,41 @@ mod tests {
         assert!(parse(Panel::Files, &["sh", "-c", "x", "sh", "--to={path}"], &[]).is_ok());
         // Not a shell: the value is an argument like any other.
         assert!(parse(Panel::Files, &["shellcheck", "{path}"], &[]).is_ok());
+    }
+
+    /// The forms the guard accepts, run by the real shells on a hostile
+    /// name: the name must arrive as data, never run.
+    #[cfg(unix)]
+    #[test]
+    fn accepted_shell_forms_never_run_the_value() {
+        let tmp = crate::git::fake::TempDir::new("shell-guard");
+        let hostile = target(RepoPath::from(
+            "a;touch pwned1;$(touch pwned2)`touch pwned3`",
+        ));
+        let print = "printf '%s' \"$1\" > out";
+        let forms: [&[&str]; 4] = [
+            &["sh", "-c", print, "sh", "{path}"],
+            &["bash", "-o", "pipefail", "-c", print, "bash", "{path}"],
+            &["bash", "-c", "-o", "pipefail", print, "bash", "{path}"],
+            &["sh", "-c", print, "sh", "--to={path}"],
+        ];
+        for form in forms {
+            let argv = expand(form, &hostile, &[]).unwrap();
+            let status = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(tmp.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "{form:?}");
+            let out = std::fs::read_to_string(tmp.path().join("out")).unwrap();
+            assert!(
+                out.ends_with("a;touch pwned1;$(touch pwned2)`touch pwned3`"),
+                "{out}"
+            );
+            for n in 1..=3 {
+                assert!(!tmp.path().join(format!("pwned{n}")).exists(), "{form:?}");
+            }
+        }
     }
 
     #[test]

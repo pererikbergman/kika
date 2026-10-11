@@ -226,11 +226,19 @@ command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
 The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 
 **Never put a placeholder inside the script text.** The shell would read a
-file name such as `$(rm -rf ~)` as code. When `command[0]` is `sh`, `bash`,
-`zsh`, `dash`, `ksh` or `fish`, Kika rejects a placeholder in the script or in
-any argument before it. Options with a value, such as
-`["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`, work the
-same way: the value goes after the script.
+file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
+`bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
+`pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`), Kika rejects a placeholder
+in the script, in any argument before it, or in the `$0` slot right after it.
+The check is cautious: it assumes the last option before the first
+placeholder takes a value, so write the script, then a name for `$0`, then
+the values. Options work in either order around `-c`:
+
+- `["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`
+- `["bash", "-c", "-o", "pipefail", "… \"$1\" …", "bash", "{path}"]`
+
+`["bash", "-o", "pipefail", "{path}"]` is rejected too: it would run the
+selected file as a script.
 
 That check looks only at the program name in `command[0]`. It does not see a
 shell started through another program, such as `env sh -c`, `busybox sh -c`,
