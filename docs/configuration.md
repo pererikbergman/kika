@@ -225,16 +225,38 @@ command = ["sh", "-c", "git log --follow -- \"$1\" | less", "sh", "{path}"]
 
 The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 
+In csh and tcsh the words after the script start at `$1`, so the name after
+the script becomes `$1` and the first value is `$2`:
+
+```toml
+[[commands]]
+context = "files"
+keys = ["ctrl-l"]
+description = "Page the file's history"
+command = ["tcsh", "-c", "git log --follow -- $2:q | less", "tcsh", "{path}"]
+```
+
+The name is still required, and it must not start with `-`: csh and tcsh keep
+reading options after the script until the first word that is not one, so a
+value in that slot could turn into an option such as `-c`. Kika rejects a
+placeholder there, as it does for every shell. Read the values as `$2:q`,
+`$3:q` and so on, not as `"$2"`, which fails with `Unmatched '"'.` on a value
+that contains a newline. `$2:q` passes the value as one word, with no glob,
+`$` or backtick expansion; an empty prompt answer becomes no word at all. In
+csh and tcsh `-c` takes the very next argument as the script, so put any
+other options before it: `["csh", "-f", "-c", "…", "csh", "{path}"]`.
+
 **Never put a placeholder inside the script text.** The shell would read a
 file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
 `bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
 `pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
 such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
-placeholder in the script, in any argument before it, or in the `$0` slot
-right after it.
+placeholder in the script, in any argument before it, or in the slot right
+after it (`$0`, or `$1` in csh and tcsh).
 The check is cautious: it assumes the last option before the first
-placeholder takes a value, so write the script, then a name for `$0`, then
-the values. Options work in either order around `-c`:
+placeholder takes a value, so write the script, then a name for that slot,
+then the values. In the POSIX-style shells, options work in either order
+around `-c`:
 
 - `["bash", "-o", "pipefail", "-c", "… \"$1\" …", "bash", "{path}"]`
 - `["bash", "-c", "-o", "pipefail", "… \"$1\" …", "bash", "{path}"]`
