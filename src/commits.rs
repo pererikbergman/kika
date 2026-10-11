@@ -6,6 +6,7 @@ use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, Markers};
+use crate::reflog::ReflogList;
 
 /// Commits per page.
 pub const PAGE: usize = 200;
@@ -58,6 +59,29 @@ pub struct CommitsPanel {
     /// The commit an open question is about, kept from when it was asked,
     /// since the question itself carries no data.
     pub pending: Option<CommitId>,
+    /// Which list the panel shows.
+    pub tab: CommitsTab,
+    /// `HEAD`'s reflog, read when its tab is first shown or an undo asks.
+    pub reflog: ReflogList,
+}
+
+/// The Commits panel's two lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommitsTab {
+    /// The history of `HEAD`.
+    #[default]
+    Log,
+    /// Everywhere `HEAD` has been, newest first.
+    Reflog,
+}
+
+impl CommitsTab {
+    pub fn other(self) -> Self {
+        match self {
+            CommitsTab::Log => CommitsTab::Reflog,
+            CommitsTab::Reflog => CommitsTab::Log,
+        }
+    }
 }
 
 impl CommitsPanel {
