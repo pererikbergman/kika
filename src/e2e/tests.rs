@@ -1787,6 +1787,84 @@ async fn shift_p_on_the_tags_tab_pushes_the_tag_to_the_upstreams_remote() {
     assert_eq!(app.state().popups, []);
 }
 
+/// `main` with eight commits, `commit 1` to `commit 8`; commit 5 adds a
+/// `bug` file that stays. Returns the repo and commit 5's id.
+fn buggy_main() -> (TestRepo, String) {
+    let mut repo = TestRepo::new();
+    repo.git(["checkout", "-q", "-b", "main"]);
+    let mut fifth = String::new();
+    for i in 1..=8 {
+        repo = repo.write("n.txt", &format!("{i}\n"));
+        if i == 5 {
+            repo = repo.write("bug", "bug\n");
+        }
+        repo = repo.commit(&format!("commit {i}"));
+        if i == 5 {
+            fifth = repo.head().trim().to_string();
+        }
+    }
+    (repo, fifth)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
+    let (repo, fifth) = buggy_main();
+    let tip = repo.head();
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+
+    // Commits: the tip is bad, the root is good.
+    app.press(KeyCode::Char('4')).await;
+    app.press_with(KeyCode::Char('B'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains("Mark selected bad (starts a bisect)");
+    app.press(KeyCode::Enter).await;
+    assert!(repo.exists(".git/BISECT_LOG"));
+    for _ in 0..7 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.assert_screen_contains("commit 1");
+    app.press_with(KeyCode::Char('B'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    assert!(!repo.try_git(["symbolic-ref", "-q", "HEAD"]), "not testing");
+
+    // Status: test each commit git checks out until it names one.
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("Bisect: 1 good · 1 bad · 0 skipped");
+    let mut steps = 0;
+    while app.state().notice_text.is_none() {
+        let mark = if repo.exists("bug") { 'b' } else { 'g' };
+        app.press(KeyCode::Char(mark)).await;
+        steps += 1;
+        assert!(
+            steps < 8,
+            "the bisect never ended; {}:\n{}",
+            repo.read(".git/BISECT_LOG"),
+            app.screen().join("\n")
+        );
+    }
+    app.assert_screen_contains(&format!(
+        "Bisect found {} (a resets): commit 5",
+        &fifth[..7]
+    ));
+    app.assert_screen_contains(&format!("◆ Found: {} commit 5", &fifth[..7]));
+
+    // Reset, asking first.
+    app.press(KeyCode::Char('a')).await;
+    app.assert_screen_contains("HEAD goes back to main;");
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.head(), tip);
+    assert!(!repo.exists(".git/BISECT_LOG"));
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("bisecting")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn c_copies_two_commits_on_a_branch_and_v_picks_them_onto_another_in_order() {
     let repo = on_main();

@@ -205,8 +205,10 @@ fn safe(bytes: &[u8]) -> String {
 /// `text` with the user part of every URL taken out: `scheme://user:pass@host`
 /// becomes `scheme://host`. Git quotes remote URLs in its errors, and a URL
 /// can carry a token. The authority ends at the path, query, fragment or
-/// whitespace, not at a quote, so a quote inside a password cannot cut the
-/// redaction short.
+/// a line break, and everything up to its last `@` goes. Not at a quote or
+/// a space, so neither inside a password can cut the redaction short; text
+/// after a URL with no path can lose words up to a later `@`, which is the
+/// safe way to be wrong.
 pub fn redact_userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -214,7 +216,7 @@ pub fn redact_userinfo(text: &str) -> String {
         let (before, after) = rest.split_at(at + 3);
         out.push_str(before);
         let end = after
-            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+            .find(['/', '?', '#', '\n', '\r'])
             .unwrap_or(after.len());
         let authority = &after[..end];
         let host = authority.rfind('@').map_or(0, |i| i + 1);
@@ -536,6 +538,15 @@ mod tests {
             "unable to access 'https://h/r/'"
         );
         assert_eq!(redact_userinfo("\"https://u:p\"w@h?x\""), "\"https://h?x\"");
+        // Whitespace inside a password, as typed or as a tab drawn as spaces.
+        assert_eq!(redact_userinfo("https://u:my pass@h/r"), "https://h/r");
+        assert_eq!(redact_userinfo("https://u:a\tb@h/r"), "https://h/r");
+        assert_eq!(redact_userinfo("https://u:a    b@h"), "https://h");
+        // A URL ends at a line break, so the next line keeps its `@`.
+        assert_eq!(
+            redact_userinfo("'https://h'\nhint: try git@x"),
+            "'https://h'\nhint: try git@x"
+        );
         // Nothing to take out.
         for text in ["git@github.com:a/b.git", "https://h/r", "no url", "a://"] {
             assert_eq!(redact_userinfo(text), text);

@@ -411,6 +411,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
 | `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
+| `workspace.command_log` | `@` | Show the git commands Kika ran | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
@@ -555,12 +556,23 @@ branch. Pushing is the only key here that reaches the network.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `status.continue` | `c` | Continue the merge, rebase, cherry-pick or revert once conflicts are resolved | locked |
-| `status.skip` | `s` | Skip the commit the rebase, cherry-pick or revert stopped on | locked |
-| `status.abort` | `a` | Abort the operation in progress, asking first | locked |
+| `status.skip` | `s` | Skip the commit the rebase, cherry-pick or revert stopped on, or the one a bisect is testing | locked |
+| `status.abort` | `a` | Abort the operation in progress, or reset the bisect, asking first | locked |
+| `status.bisect_good` | `g` | Mark the commit the bisect is testing good | locked |
+| `status.bisect_bad` | `b` | Mark the commit the bisect is testing bad | locked |
 
 These act on the merge, rebase, cherry-pick or revert the Status panel shows
 in progress. `cherry-pick --skip` and `revert --skip` need git 2.23 or newer;
 an older git refuses them and changes nothing.
+
+While only a bisect is in progress, the panel shows its good, bad and skipped
+counts, the commit being tested, where the bisect started and, once git names
+it, the first bad commit. `g`, `b` and `s` mark the commit being tested good,
+bad or skipped, and `a` asks, then resets the bisect: its marks are dropped and
+HEAD goes back to where it started. Only `y` answers that question, not Enter.
+A merge, rebase, cherry-pick or revert in progress still comes first for `s`
+and `a`. A bisect started on the command line with its own terms is shown and
+can be reset, but not marked from Kika.
 
 ### Commits
 
@@ -585,6 +597,7 @@ an older git refuses them and changes nothing.
 | `commits.filter` | `/` | Filter the loaded commits by typed text | |
 | `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
 | `commits.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+| `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -594,6 +607,13 @@ merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
 the worktree, mixed keeps the worktree and resets the index, and hard throws
 away every uncommitted change, so it asks first. Revert and reset wait until
 an operation in progress is finished or aborted.
+
+`B` opens the Bisect menu: mark the selected commit bad or good, skip it, or
+reset the bisect. With no bisect in progress, the first good or bad mark
+starts one; it moves nothing until there is both a good and a bad commit, then
+git checks out a commit to test and the Status panel takes over. A bisect
+does not start while tracked files have changes, or while a merge, rebase,
+cherry-pick or revert is in progress. Kika never runs `git bisect run`.
 
 `t` asks for a tag name and tags the selected commit; `T` then asks for a
 one-line message too and makes an annotated tag. The commit is the one
@@ -902,6 +922,22 @@ commits, so `enter` does not answer it.
 | `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
 | `worktrees.close` | `esc`, `q` | Close the list | |
 | `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Command log
+
+Every git command Kika ran this session, oldest first, with how it ended and
+how long it took. Lines never show env, stdin, credentials in URLs, secret
+config values or message bodies. `@` opens it with any modifiers, since
+layouts type it with Shift, AltGr or Option.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `command_log.next` | `j`, `down` | Select the next command | |
+| `command_log.prev` | `k`, `up` | Select the previous command | |
+| `command_log.page_down` | `pgdn` | Move a page down | |
+| `command_log.page_up` | `pgup` | Move a page up | |
+| `command_log.close` | `esc`, `q` | Close the log | |
+| `command_log.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Remove this worktree?
 

@@ -1,10 +1,12 @@
 use crate::ansi::StyledRow;
+use crate::bisect;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::command_log::{CommandLog, CommandLogView};
 use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
@@ -17,6 +19,7 @@ use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
+use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -28,6 +31,7 @@ use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::rebase_plan::{self, Edit};
+use crate::git::recording::CommandEvent;
 use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
@@ -270,6 +274,8 @@ pub struct AppState {
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
+    /// Every git command run this session, recorded whether shown or not.
+    pub command_log: CommandLog,
     /// The commits a paste cherry-picks. Kept across checkouts, so they
     /// can be copied on one branch and pasted on another.
     pub copied: CopiedCommits,
@@ -332,6 +338,7 @@ impl AppState {
             branches: BranchesPanel::default(),
             remote: None,
             commits: CommitsPanel::default(),
+            command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
             notice_text: None,
             input: None,
@@ -356,6 +363,9 @@ impl AppState {
             AppIntent::Key(key) => {
                 self.notice = None;
                 self.notice_text = None;
+                if key.code == crossterm::event::KeyCode::Enter && self.enter_refused() {
+                    return vec![];
+                }
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
@@ -730,6 +740,12 @@ impl AppState {
             AppIntent::WorktreeRemoved { tag, result } => {
                 return self.worktree_removed(tag, result);
             }
+            AppIntent::CommandLogged(event) => self.command_logged(event),
+            AppIntent::OpenCommandLog => self.open_command_log(),
+            AppIntent::CommandLogNext => self.move_command_log(1),
+            AppIntent::CommandLogPrev => self.move_command_log(-1),
+            AppIntent::CommandLogPageDown => self.move_command_log(self.command_log_page()),
+            AppIntent::CommandLogPageUp => self.move_command_log(-self.command_log_page()),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -895,9 +911,13 @@ impl AppState {
             }
             AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
             AppIntent::ContinueOperation => {
-                return self.resume(keymap::resume_disabled, GitOp::Continue);
+                return self.resume(bisect::continue_disabled, GitOp::Continue);
+            }
+            AppIntent::SkipOperation if bisect::bisect_only(self) => {
+                return self.update(AppIntent::BisectHead(BisectMark::Skip));
             }
             AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
+            AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
             AppIntent::ConfirmAbort(operation) => {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
@@ -918,6 +938,9 @@ impl AppState {
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
             AppIntent::RewriteCommit(edit) => return self.rewrite_commit(edit),
+            AppIntent::BisectSelected(mark) => return self.bisect_selected(mark),
+            AppIntent::BisectHead(mark) => return self.bisect_head(mark),
+            AppIntent::ConfirmBisectReset => return self.bisect_reset(),
             AppIntent::SwitchCommitsTab => return self.switch_commits_tab(),
             AppIntent::ReflogNext => self.commits.reflog.move_by(1),
             AppIntent::ReflogPrev => self.commits.reflog.move_by(-1),
@@ -1058,6 +1081,7 @@ impl AppState {
             Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
             Some(Popup::Travel(_)) => return KeyScope::Travel,
+            Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -1749,6 +1773,9 @@ impl AppState {
                     "Check out {short} as a detached HEAD? You will be on no branch; \
                      new commits there belong to no branch until you create one. (y/n)"
                 ))
+            }
+            (ConfirmKind::Abort(Operation::Bisect), _) => {
+                Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
             }
             _ => Cow::Borrowed(kind.question()),
         }
@@ -3332,7 +3359,8 @@ impl AppState {
                 {
                     self.files_anchor = None;
                 }
-                self.branch = Some(status.branch);
+                let before = self.branch.replace(status.branch);
+                self.announce_bisect(before.and_then(|b| b.bisect));
                 self.status_error = None;
                 match self.status_selection {
                     Selection::KeepPath => self.reselect(old_path),
@@ -4511,6 +4539,41 @@ impl AppState {
     }
 }
 
+/// The Command log: recording every git command, and its popup.
+impl AppState {
+    /// Record a runner's event, keeping an open log's cursor on its entry
+    /// or on the newest one.
+    fn command_logged(&mut self, event: CommandEvent) {
+        let evicted = self.command_log.apply(event);
+        let len = self.command_log.len();
+        for popup in &mut self.popups {
+            if let Popup::CommandLog(view) = popup {
+                view.logged(len, evicted);
+            }
+        }
+    }
+
+    fn open_command_log(&mut self) {
+        let view = CommandLogView::open(self.command_log.len());
+        self.popups.push(Popup::CommandLog(view));
+    }
+
+    fn move_command_log(&mut self, delta: isize) {
+        let len = self.command_log.len();
+        if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
+            view.move_by(delta, len);
+        }
+    }
+
+    /// Rows a page moves: the log fills the screen above the bottom bar,
+    /// inside its border.
+    fn command_log_page(&self) -> isize {
+        isize::try_from(self.size.1.saturating_sub(3))
+            .unwrap_or(isize::MAX)
+            .max(1)
+    }
+}
+
 /// The conflict view: loading a conflicted file, picking a side of each
 /// block, writing the file after each pick, and staging it at the end.
 impl AppState {
@@ -4975,6 +5038,92 @@ fn failure_next(op: &GitOp) -> &'static str {
     }
 }
 
+/// Bisecting: marks from the Commits and Status panels, the reset, and
+/// saying what a status load found.
+impl AppState {
+    /// Mark the selected commit. With no bisect in progress the mark
+    /// starts one; git checks nothing out until it has a good and a bad.
+    fn bisect_selected(&mut self, mark: BisectMark) -> Vec<Effect> {
+        let disabled = bisect::selected_disabled(mark);
+        let Some((commit, _)) = self.commit_for_action(disabled) else {
+            return vec![];
+        };
+        let start = !bisect::bisecting(self);
+        self.start_op(Ok(Some(GitOp::BisectMark {
+            mark,
+            commit,
+            start,
+        })))
+    }
+
+    /// Mark the commit git checked out to test.
+    fn bisect_head(&mut self, mark: BisectMark) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = (bisect::head_disabled(mark))(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let Some(commit) = bisect::head_commit(self) else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(GitOp::BisectMark {
+            mark,
+            commit,
+            start: false,
+        })))
+    }
+
+    /// Ask before resetting: the marks are dropped and the files change.
+    fn ask_bisect_reset(&mut self) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        match bisect::reset_disabled(self) {
+            Some(reason) => self.notice = Some(reason),
+            None => self
+                .popups
+                .push(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))),
+        }
+    }
+
+    fn bisect_reset(&mut self) -> Vec<Effect> {
+        if let Some(reason) = bisect::reset_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.start_op(Ok(Some(GitOp::BisectReset)))
+    }
+
+    /// Say so when this load is the first to show the bisect's outcome;
+    /// the same outcome loaded again says nothing.
+    fn announce_bisect(&mut self, before: Option<BisectState>) {
+        let Some(now) = bisect::bisect_state(self) else {
+            return;
+        };
+        let was_found = before.as_ref().and_then(|b| b.first_bad.as_ref());
+        let was_only_skipped = before.as_ref().is_some_and(|b| b.only_skipped);
+        if let Some(found) = &now.first_bad {
+            if was_found != Some(found) {
+                let short = self.commits.short_oid(&found.commit);
+                self.notice_text = Some(bisect::found_notice(&short, &found.subject));
+            }
+        } else if now.only_skipped && !was_only_skipped {
+            self.notice = Some(bisect::ONLY_SKIPPED);
+        }
+    }
+
+    /// Whether the question on top must be answered with `y`: Enter, the
+    /// key for going on elsewhere, is too easy to press by habit.
+    fn enter_refused(&self) -> bool {
+        matches!(
+            self.popups.last(),
+            Some(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect)))
+        )
+    }
+}
+
 /// What the error popup calls a failed operation.
 fn failure_title(op: &GitOp) -> &'static str {
     match op {
@@ -5023,6 +5172,8 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::RemoveRemote(_) => "Could not remove the remote",
         GitOp::CreateTag { .. } => "Could not create the tag",
         GitOp::DeleteTag { .. } => "Could not delete the tag",
+        GitOp::BisectMark { .. } => "Could not mark the commit",
+        GitOp::BisectReset => "Could not reset the bisect",
         GitOp::Travel {
             direction: undo::Direction::Undo,
             ..
@@ -5064,6 +5215,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         }
     }
 
@@ -6785,12 +6937,13 @@ mod tests {
         state.update(AppIntent::OpenMenu(MenuId::Actions));
         press(&mut state, KeyCode::Char('k'));
         assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
-        for _ in 0..10 {
+        let last = menu::items(MenuId::Actions).len() - 1;
+        for _ in 0..last + 2 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.popups, [menu(MenuId::Actions, 8)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last)]);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.popups, [menu(MenuId::Actions, 7)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last - 1)]);
         // The file selection did not move.
         assert_eq!(state.selected, Some(0));
     }
@@ -6852,7 +7005,8 @@ mod tests {
     fn the_quit_item_asks_first_and_y_quits() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..8 {
+        // Quit is the last item.
+        for _ in 1..menu::items(MenuId::Actions).len() {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
@@ -9162,7 +9316,11 @@ mod tests {
     fn the_actions_menu_opens_the_recent_list() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..7 {
+        let recent = menu::items(MenuId::Actions)
+            .iter()
+            .position(|item| item.intent == AppIntent::OpenRecent)
+            .unwrap();
+        for _ in 0..recent {
             state.update(AppIntent::MenuNext);
         }
         assert!(matches!(
@@ -12267,23 +12425,21 @@ mod tests {
 
     #[test]
     fn with_nothing_in_progress_the_status_keys_are_disabled() {
-        for ops in [&[][..], &[Operation::Bisect][..]] {
-            let mut state = status_focused(ops);
-            for c in ['c', 's', 'a'] {
-                state.notice = None;
-                assert_eq!(press_char(&mut state, c), vec![], "{c}");
-                assert_eq!(state.notice, Some("Nothing in progress"), "{c}");
-            }
-            for intent in [
-                AppIntent::ContinueOperation,
-                AppIntent::SkipOperation,
-                AppIntent::AbortOperation,
-            ] {
-                assert_eq!(state.update(intent), vec![]);
-            }
-            assert_eq!(state.popups, []);
-            assert_eq!(state.op_seq, None);
+        let mut state = status_focused(&[]);
+        for c in ['c', 's', 'a'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some("Nothing in progress"), "{c}");
         }
+        for intent in [
+            AppIntent::ContinueOperation,
+            AppIntent::SkipOperation,
+            AppIntent::AbortOperation,
+        ] {
+            assert_eq!(state.update(intent), vec![]);
+        }
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
     }
 
     #[test]
@@ -13433,6 +13589,181 @@ mod tests {
     }
 
     #[test]
+    fn a_credential_answer_never_reaches_the_command_log() {
+        use crate::git::command_line::display_line;
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+        use crate::git::remote::{AskpassEnv, remote_command};
+
+        let (mut state, _) = typing_password("hunter2");
+        let askpass = AskpassEnv {
+            program: "/usr/bin/kika".into(),
+            socket: "/tmp/kika-askpass-1/socket".into(),
+            git_askpass: true,
+        };
+        let line = display_line(&remote_command(&PUSH, Some(&askpass)));
+        state.update(AppIntent::CommandLogged(CommandEvent::Started {
+            id: 0,
+            line,
+            attached: false,
+        }));
+        state.update(AppIntent::CredentialAnswered(Some(Secret::new("hunter2"))));
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 0,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::from_millis(5),
+        }));
+
+        let entries = state.command_log.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].line, "git push");
+        for entry in entries {
+            for hidden in ["hunter2", "kika-askpass", "/usr/bin/kika", "KIKA_"] {
+                assert!(!entry.line.contains(hidden), "{hidden} in {entry:?}");
+            }
+        }
+        assert!(!format!("{:?}", state.command_log).contains("hunter2"));
+    }
+
+    fn log_started(state: &mut AppState, id: u64) {
+        state.update(AppIntent::CommandLogged(
+            crate::git::recording::CommandEvent::Started {
+                id,
+                line: format!("git cmd{id}"),
+                attached: false,
+            },
+        ));
+    }
+
+    fn command_log_view(state: &AppState) -> CommandLogView {
+        match state.popups.last() {
+            Some(Popup::CommandLog(view)) => *view,
+            other => panic!("expected the command log on top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_command_log_records_in_order_and_stays_bounded() {
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+
+        let mut state = AppState::new(Context::Workspace);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        let effects = state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Failed(None),
+            elapsed: std::time::Duration::from_millis(3),
+        }));
+        assert_eq!(effects, []);
+        let lines: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| &e.line)
+            .collect();
+        assert_eq!(lines, ["git cmd0", "git cmd1", "git cmd2"]);
+        let outcomes: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| e.outcome.clone())
+            .collect();
+        assert_eq!(outcomes, [None, Some(CommandOutcome::Failed(None)), None]);
+
+        let total = CommandLog::CAP as u64 + 10;
+        for id in 3..total {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.command_log.len(), CommandLog::CAP);
+        assert_eq!(state.command_log.entries()[0].id, 10);
+        let before = state.command_log.clone();
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::ZERO,
+        }));
+        assert_eq!(state.command_log, before);
+    }
+
+    #[test]
+    fn the_command_log_popup_follows_new_commands_until_moved_up() {
+        let mut state = AppState::new(Context::Workspace);
+        state.size = (80, 13);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.update(AppIntent::OpenCommandLog), []);
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: true
+            }
+        );
+
+        log_started(&mut state, 3);
+        assert_eq!(command_log_view(&state).cursor, 3);
+
+        state.update(AppIntent::CommandLogPrev);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: false
+            }
+        );
+        log_started(&mut state, 4);
+        assert_eq!(command_log_view(&state).cursor, 2);
+
+        state.update(AppIntent::CommandLogNext);
+        state.update(AppIntent::CommandLogNext);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 4,
+                follow: true
+            }
+        );
+
+        // A page is the rows inside the popup: 13 - bar - border = 10.
+        for id in 5..30 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::CommandLogPageUp);
+        assert_eq!(command_log_view(&state).cursor, 19);
+        state.update(AppIntent::CommandLogPageDown);
+        assert_eq!(command_log_view(&state).cursor, 29);
+
+        state.update(AppIntent::PopPopup);
+        assert_eq!(state.popups, []);
+        // Recording carries on while closed.
+        log_started(&mut state, 30);
+        assert_eq!(state.command_log.len(), 31);
+    }
+
+    #[test]
+    fn at_and_the_menu_open_the_command_log() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('@'),
+            KeyModifiers::SHIFT,
+        )));
+        assert!(matches!(state.popups.as_slice(), [Popup::CommandLog(_)]));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+
+        let items = menu::items(menu::MenuId::Actions);
+        let at = items
+            .iter()
+            .position(|item| item.label == "Command log…")
+            .expect("the Actions menu has the command log");
+        assert_eq!(items[at - 1].label, "Worktrees…");
+        assert_eq!(items[at].intent, AppIntent::OpenCommandLog);
+        assert_eq!((items[at].disabled)(&state), None);
+    }
+
+    #[test]
     fn ssh_yes_no_question_is_answered_with_y_or_n() {
         let mut state = remote_ready();
         let (tag, _) = remote_of(&press_char(&mut state, 'f'));
@@ -14204,6 +14535,291 @@ mod tests {
         assert_eq!(state.remote, None);
     }
 
+    // --- Bisect ---
+
+    fn bisect_branch(head: Head, ops: &[Operation], bisect: Option<BisectState>) -> BranchStatus {
+        BranchStatus {
+            head,
+            in_progress: ops.to_vec(),
+            bisect,
+            ..on_branch("main")
+        }
+    }
+
+    /// `with_commits` on `main` with no bisect, `c0` selected.
+    fn ready_to_bisect() -> AppState {
+        let mut state = with_commits(3, true);
+        state.branch = Some(on_branch("main"));
+        state.files_loaded = true;
+        state
+    }
+
+    /// A bisect testing `c1`, with the Status panel focused.
+    fn testing_c1(ops: &[Operation]) -> AppState {
+        let mut state = with_commits(3, true);
+        let bisect = BisectState {
+            start: "main".into(),
+            ..BisectState::default()
+        };
+        state.branch = Some(bisect_branch(
+            Head::Detached("c1".into()),
+            ops,
+            Some(bisect),
+        ));
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Status,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Status);
+        state
+    }
+
+    fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp {
+        GitOp::BisectMark {
+            mark,
+            commit: cid(commit),
+            start,
+        }
+    }
+
+    #[test]
+    fn shift_b_opens_the_bisect_menu_and_a_first_mark_starts_a_bisect() {
+        let mut state = ready_to_bisect();
+        assert_eq!(shift(&mut state, 'B'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Menu {
+                id: MenuId::Bisect,
+                cursor: 0
+            }]
+        );
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", true));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn during_a_bisect_marks_do_not_start_another() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let (_, op) = op_of(&press_char(&mut state, 'g'));
+        assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&press_char(&mut state, 'b'));
+        assert_eq!(op, bisect_mark(BisectMark::Bad, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&press_char(&mut state, 's'));
+        assert_eq!(op, bisect_mark(BisectMark::Skip, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Good)));
+        assert_eq!(op, bisect_mark(BisectMark::Good, "c0", false));
+    }
+
+    #[test]
+    fn c_says_to_mark_while_only_a_bisect_is_in_progress() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert_eq!(state.notice, Some(bisect::MARK_INSTEAD));
+        assert_eq!(state.update(AppIntent::ContinueOperation), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_start_is_refused_with_changes_no_commits_or_an_operation() {
+        let changed = |index, worktree| FileEntry {
+            path: "a.txt".into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind: EntryKind::Changed,
+        };
+        let cases = [
+            (vec![changed('M', '.')], on_branch("main"), bisect::DIRTY),
+            (vec![changed('.', 'M')], on_branch("main"), bisect::DIRTY),
+            (
+                vec![],
+                bisect_branch(Head::Unborn("main".into()), &[], None),
+                "No commits yet",
+            ),
+            (
+                vec![],
+                bisect_branch(Head::Branch("main".into()), &[Operation::Merge], None),
+                "Finish or abort the operation in progress",
+            ),
+        ];
+        for (files, branch, reason) in cases {
+            let mut state = ready_to_bisect();
+            state.files = files;
+            state.branch = Some(branch);
+            assert_eq!(
+                state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+                vec![]
+            );
+            assert_eq!(state.notice, Some(reason));
+            assert_eq!(state.op_seq, None);
+        }
+        let mut untracked_only = ready_to_bisect();
+        untracked_only.files = vec![untracked("new.txt")];
+        op_of(&untracked_only.update(AppIntent::BisectSelected(BisectMark::Good)));
+    }
+
+    #[test]
+    fn a_bisect_with_its_own_terms_is_not_marked() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        if let Some(bisect) = state.branch.as_mut().and_then(|b| b.bisect.as_mut()) {
+            bisect.terms = crate::git::bisect::Terms {
+                bad: "new".into(),
+                good: "old".into(),
+            };
+        }
+        for c in ['g', 'b', 's'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some(bisect::CUSTOM_TERMS), "{c}");
+        }
+        assert_eq!(
+            state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+            vec![]
+        );
+        assert_eq!(state.op_seq, None);
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+        );
+    }
+
+    #[test]
+    fn the_status_panel_marks_only_once_git_checks_out_a_commit() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        state.branch.as_mut().unwrap().head = Head::Branch("main".into());
+        assert_eq!(press_char(&mut state, 'g'), vec![]);
+        assert_eq!(state.notice, Some(bisect::NOT_TESTING));
+    }
+
+    #[test]
+    fn a_while_only_bisecting_asks_then_y_resets_and_only_y_answers() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        assert_eq!(state.popups, question);
+        assert!(
+            state
+                .confirm_question(ConfirmKind::Abort(Operation::Bisect))
+                .contains("HEAD goes back to main;")
+        );
+
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups, question);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::BisectReset);
+        assert_eq!(state.popups, []);
+
+        for no in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = testing_c1(&[Operation::Bisect]);
+            press_char(&mut state, 'a');
+            assert_eq!(press(&mut state, no), vec![], "{no:?}");
+            assert_eq!(state.popups, []);
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn a_with_a_rebase_and_a_bisect_still_aborts_the_rebase() {
+        let mut state = testing_c1(&[Operation::Rebase, Operation::Bisect]);
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Rebase))]
+        );
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, GitOp::Abort(Operation::Rebase));
+    }
+
+    #[test]
+    fn the_bisect_menu_reset_asks_too() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        state.update(AppIntent::OpenMenu(MenuId::Bisect));
+        for _ in 0..3 {
+            state.update(AppIntent::MenuNext);
+        }
+        assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+        );
+
+        let mut idle = ready_to_bisect();
+        idle.update(AppIntent::OpenMenu(MenuId::Bisect));
+        for _ in 0..3 {
+            idle.update(AppIntent::MenuNext);
+        }
+        idle.update(AppIntent::MenuSelect);
+        assert_eq!(idle.notice, Some(bisect::NO_BISECT));
+        assert_eq!(idle.update(AppIntent::ConfirmBisectReset), vec![]);
+    }
+
+    fn status_with(tag: Tag, branch: BranchStatus) -> AppIntent {
+        AppIntent::StatusLoaded {
+            tag,
+            result: Ok(RepoStatus {
+                branch,
+                files: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn a_load_that_brings_the_first_bad_commit_announces_it_once() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let found = BisectState {
+            bad: 2,
+            good: 1,
+            first_bad: Some(crate::git::bisect::Found {
+                commit: cid("c1"),
+                subject: "commit 1".into(),
+            }),
+            ..BisectState::default()
+        };
+        let branch = bisect_branch(
+            Head::Detached("c1".into()),
+            &[Operation::Bisect],
+            Some(found),
+        );
+
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(tag, branch.clone()));
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Bisect found c1 (a resets): commit 1")
+        );
+
+        press_char(&mut state, 'j');
+        assert_eq!(state.notice_text, None);
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(tag, branch));
+        assert_eq!(state.notice_text, None);
+    }
+
+    #[test]
+    fn a_load_that_leaves_only_skipped_commits_says_so() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let stuck = BisectState {
+            only_skipped: true,
+            ..BisectState::default()
+        };
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(
+            tag,
+            bisect_branch(
+                Head::Detached("c1".into()),
+                &[Operation::Bisect],
+                Some(stuck),
+            ),
+        ));
+        assert_eq!(state.notice, Some(bisect::ONLY_SKIPPED));
+        assert_eq!(state.notice_text, None);
+    }
+
     // --- Worktrees ---
 
     use crate::git::worktrees::parse_list;
@@ -14913,6 +15529,9 @@ mod tests {
         assert_eq!(state.commits.range(), [0, 1, 2]);
         press_char(&mut state, 'R');
         assert_eq!(state.notice, Some("Clear the selection first (esc)"));
+        press_char(&mut state, 'B');
+        assert_eq!(state.notice, Some("Clear the selection first (esc)"));
+        assert!(state.popups.is_empty(), "no bisect menu over a range");
 
         assert_eq!(press_char(&mut state, 'c'), vec![]);
         assert_eq!(

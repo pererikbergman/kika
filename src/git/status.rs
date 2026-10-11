@@ -1,3 +1,4 @@
+use super::bisect::{BisectState, read_bisect};
 use super::diff::{sanitize, terminal_safe};
 use super::path::RepoPath;
 use super::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
@@ -55,6 +56,9 @@ pub struct BranchStatus {
     /// means git could not find it: the upstream branch is gone.
     pub ahead_behind: Option<(u32, u32)>,
     pub in_progress: Vec<Operation>,
+    /// The bisect's marks and outcome, read only while one is in progress.
+    /// A linked worktree keeps its own, as git does.
+    pub bisect: Option<BisectState>,
 }
 
 /// One status load: the branch and the changed files.
@@ -81,7 +85,11 @@ pub fn status_command() -> GitCommand {
 pub fn read_status(runner: &dyn GitRunner) -> Result<RepoStatus, String> {
     let mut status = parse_status(&stdout_of(runner, &status_command(), "git status failed")?)?;
     let git_dir = stdout_of(runner, &git_dir_command(), "git rev-parse failed")?;
-    status.branch.in_progress = in_progress(&git_dir_from(&git_dir));
+    let git_dir = git_dir_from(&git_dir);
+    status.branch.in_progress = in_progress(&git_dir);
+    if status.branch.in_progress.contains(&Operation::Bisect) {
+        status.branch.bisect = read_bisect(&git_dir);
+    }
     Ok(status)
 }
 
@@ -203,6 +211,7 @@ impl BranchHeaders {
             upstream: self.upstream,
             ahead_behind: self.ahead_behind,
             in_progress: Vec::new(),
+            bisect: None,
         }
     }
 }
@@ -316,6 +325,32 @@ mod tests {
             envs[0].contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into())),
             "{envs:?}"
         );
+    }
+
+    #[test]
+    fn read_status_reads_the_bisect_only_while_one_is_in_progress() {
+        let tmp = TempDir::new("read-status-bisect");
+        let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
+        git_dir.push(b'\n');
+        let load = || {
+            let runner = FakeRunner::new()
+                .expect(
+                    STATUS_ARGV,
+                    ok(b"# branch.oid 1234567\0# branch.head (detached)\0"),
+                )
+                .expect(GIT_DIR_ARGV, ok(&git_dir));
+            read_status(&runner).unwrap().branch
+        };
+        let branch = load();
+        assert_eq!(branch.in_progress, []);
+        assert_eq!(branch.bisect, None);
+
+        std::fs::write(tmp.path().join("BISECT_LOG"), "git bisect bad abc\n").unwrap();
+        std::fs::write(tmp.path().join("BISECT_START"), "main\n").unwrap();
+        let branch = load();
+        assert_eq!(branch.in_progress, [Operation::Bisect]);
+        let bisect = branch.bisect.unwrap();
+        assert_eq!((bisect.bad, bisect.start.as_str()), (1, "main"));
     }
 
     #[test]

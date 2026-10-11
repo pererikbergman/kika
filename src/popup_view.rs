@@ -101,6 +101,9 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::CommandLog(view) => {
+                crate::command_log_view::render(&state.command_log, view, top, frame, area)
+            }
         }
     }
 }
@@ -855,9 +858,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 8,
+            cursor: menu::items(MenuId::Actions).len() - 1,
         }];
-        // Six rows: the bar leaves five, so three of the nine items show.
+        // Six rows: the bar leaves five, so three of the items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
@@ -872,7 +875,8 @@ mod tests {
                 cursor,
             }]
         };
-        // Three of the nine items show at a time.
+        // Three of the items show at a time.
+        let last = menu::items(MenuId::Actions).len() - 1;
         state.popups = menu(0);
         let (_, rows) = draw(&state, 30, 6);
         let (_, top) = find(&rows, " Actions ");
@@ -884,7 +888,7 @@ mod tests {
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
 
-        state.popups = menu(8);
+        state.popups = menu(last);
         let (_, rows) = draw(&state, 30, 6);
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(!rows[usize::from(top) + 4].contains('▼'), "{rows:#?}");
@@ -1229,5 +1233,27 @@ mod tests {
         assert!(contains(&rows, "(y/n)"), "{rows:#?}");
         let bar = rows.last().unwrap();
         assert!(bar.contains("y yes") && bar.contains("n no"), "{bar:?}");
+    }
+
+    #[test]
+    fn the_bisect_reset_question_names_where_it_started() {
+        use crate::git::bisect::BisectState;
+        use crate::git::repo_state::Operation;
+        use crate::git::status::{BranchStatus, Head};
+        let mut state = workspace(&[]);
+        state.branch = Some(BranchStatus {
+            head: Head::Detached("abc".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+            bisect: Some(BisectState {
+                start: "feature".into(),
+                ..BisectState::default()
+            }),
+        });
+        state.popups = vec![Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Reset bisect "), "{rows:#?}");
+        assert!(contains(&rows, "HEAD goes back to feature;"), "{rows:#?}");
     }
 }

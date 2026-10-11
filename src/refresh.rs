@@ -109,6 +109,13 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
         }
+        // A mark can check out the next commit to test, and a reset goes
+        // back to where the bisect started; both change what the Status
+        // panel says of the bisect.
+        GitOp::BisectMark { .. } | GitOp::BisectReset => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
     };
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
@@ -296,6 +303,36 @@ mod tests {
             GitOp::Continue(Operation::Merge),
             GitOp::Skip(Operation::Rebase),
             GitOp::Abort(Operation::CherryPick),
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bisect_marks_and_the_reset_reload_everything_head_touches() {
+        use crate::git::bisect::BisectMark;
+        use crate::git::commit_files::CommitId;
+        let ops = [
+            GitOp::BisectMark {
+                mark: BisectMark::Good,
+                commit: CommitId::parse("abc").unwrap(),
+                start: true,
+            },
+            GitOp::BisectReset,
         ];
         for op in ops {
             assert_eq!(
