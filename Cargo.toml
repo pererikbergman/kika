@@ -25,6 +25,10 @@ color-eyre = "0.6"
 # Config
 toml = "1.1"
 
+[target.'cfg(unix)'.dependencies]
+# Swap the SIGINT action around a hand-off and put the previous one back.
+libc = "0.2"
+
 [dev-dependencies]
 # Paused virtual time, so timer tests never wait for real.
 tokio = { version = "1.53", features = ["full", "test-util"] }

@@ -16,15 +16,22 @@
 //! refs = 2        # seconds
 //! files = 5
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
+//! [diff]
+//! pager = "delta --paging=never"   # a renderer for the Diff pane
 //! ```
 //!
-//! `[watch]` is read from the global file only, at startup. A repository
-//! file arrives with a clone and is not trusted: it may hold `[keys]` and
-//! nothing else, so it can never turn on fetching, and it cannot change the
-//! bindings in [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be
-//! a plain file, not a symlink. Either file must be a regular file of at most
+//! `[watch]` and `[diff]` are read from the global file only, at startup.
+//! `[[commands]]` is read from the global file only. A repository file
+//! arrives with a clone and is not trusted: it may hold `[keys]` and
+//! nothing else, so it can never turn on fetching, name a program to run or
+//! run one, and it cannot change the bindings in
+//! [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be a plain
+//! file, not a symlink. Either file must be a regular file of at most
 //! 64 KiB. A file with any error is ignored as a whole, and the layer below
 //! it applies.
+//!
+//! The user's guide to both files, with every binding id, is
+//! `docs/configuration.md`.
 
 use std::fmt;
 use std::fs::{self, File};
@@ -34,6 +41,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::custom_command::CommandTable;
+use crate::external_diff::parse_command;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
 
@@ -95,7 +104,17 @@ impl fmt::Display for ConfigError {
 pub struct Loaded {
     pub keymap: Keymap,
     pub watch: WatchConfig,
+    /// The global `[diff] pager` command, checked by `parse_command`.
+    pub diff_pager: Option<String>,
     pub errors: Vec<ConfigError>,
+}
+
+/// The global file's settings besides the keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GlobalSettings {
+    keymap: Keymap,
+    watch: WatchConfig,
+    diff_pager: Option<String>,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -107,6 +126,16 @@ struct GlobalFile {
     keys: KeysTable,
     #[serde(default)]
     watch: WatchTable,
+    #[serde(default)]
+    diff: DiffTable,
+    #[serde(default)]
+    commands: Vec<CommandTable>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiffTable {
+    pager: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -117,8 +146,9 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]` table here is an unknown
-/// field, so a cloned repository cannot turn on fetching.
+/// A repository's file: keys only. A `[watch]` or `[diff]` table, or
+/// `[[commands]]`, here is an unknown field, so a cloned repository can
+/// neither turn on fetching nor name or run a program.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -132,13 +162,15 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     let mut loaded = Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
+        diff_pager: None,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
-    if let Some((keymap, watch)) = global {
-        (loaded.keymap, loaded.watch) = (keymap, watch);
+    if let Some(global) = global {
+        (loaded.keymap, loaded.watch, loaded.diff_pager) =
+            (global.keymap, global.watch, global.diff_pager);
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -217,14 +249,10 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
         .map_err(|_| "not UTF-8 text".to_string())
 }
 
-/// `keymap` and `watch` with the global file's text applied.
-fn apply_global(
-    text: &str,
-    keymap: &Keymap,
-    watch: WatchConfig,
-) -> Result<(Keymap, WatchConfig), String> {
+/// `keymap` and `watch` with the global file's text applied, and its pager.
+fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
-    let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?;
+    let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
     let seconds = |name: &str, value: Option<u64>| match value {
         // A zero interval would poll without pause.
         Some(0) => Err(format!("watch.{name} must be at least 1 second")),
@@ -235,7 +263,15 @@ fn apply_global(
         files: seconds("files", file.watch.files)?.unwrap_or(watch.files),
         fetch: seconds("fetch", file.watch.fetch)?.or(watch.fetch),
     };
-    Ok((keymap, watch))
+    // Refused here, not when R is pressed, so the mistake is shown at once.
+    if let Some(pager) = &file.diff.pager {
+        parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
+    }
+    Ok(GlobalSettings {
+        keymap,
+        watch,
+        diff_pager: file.diff.pager,
+    })
 }
 
 /// `keymap` with a repository file's text applied.
@@ -282,7 +318,7 @@ mod tests {
     }
 
     fn global(text: &str) -> Result<(Keymap, WatchConfig), String> {
-        apply_global(text, &Keymap::default(), DEFAULT_WATCH)
+        apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| (g.keymap, g.watch))
     }
 
     fn repo(text: &str) -> Result<Keymap, String> {
@@ -446,6 +482,7 @@ mod tests {
             Loaded {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
+                diff_pager: None,
                 errors: vec![],
             }
         );
@@ -554,6 +591,37 @@ mod tests {
         assert_eq!(loaded.errors[0].message, "not a regular file");
     }
 
+    /// Every fenced `toml` block in the user page, so an example there
+    /// cannot go stale.
+    fn documented_examples() -> Vec<String> {
+        let page = include_str!("../docs/configuration.md");
+        let mut blocks = Vec::new();
+        let mut open: Option<String> = None;
+        for line in page.lines() {
+            match (&mut open, line.trim_end()) {
+                (None, "```toml") => open = Some(String::new()),
+                (Some(_), "```") => blocks.extend(open.take()),
+                (Some(block), text) => {
+                    block.push_str(text);
+                    block.push('\n');
+                }
+                (None, _) => {}
+            }
+        }
+        blocks
+    }
+
+    #[test]
+    fn documented_examples_load() {
+        let examples = documented_examples();
+        assert!(examples.len() >= 2, "{examples:?}");
+        for example in examples {
+            if let Err(e) = global(&example) {
+                panic!("docs/configuration.md example does not load: {e}\n{example}");
+            }
+        }
+    }
+
     #[test]
     fn only_the_global_file_turns_fetching_on() {
         let files = Files::new("fetch");
@@ -567,5 +635,127 @@ mod tests {
         let loaded = files.load();
         assert_eq!(loaded.errors, []);
         assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+    }
+
+    const COPY_COMMAND: &str = r#"
+[[commands]]
+context = "files"
+keys = ["ctrl-t"]
+description = "Copy the file to…"
+command = ["cp", "--", "{path}", "{prompt1}"]
+prompts = ["Copy to"]
+output = "none"
+"#;
+
+    #[test]
+    fn a_global_command_loads_into_the_keymap() {
+        use crate::custom_command::{OutputMode, Part};
+        let files = Files::new("commands");
+        files.global(COPY_COMMAND);
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        let [command] = loaded.keymap.commands.as_slice() else {
+            panic!("expected one command: {:?}", loaded.keymap.commands);
+        };
+        assert_eq!(command.scope, crate::keymap::KeyScope::Files);
+        assert_eq!(command.keys, [key("ctrl-t")]);
+        assert_eq!(command.description, "Copy the file to…");
+        assert_eq!(command.argv[2], [Part::Path]);
+        assert_eq!(command.prompts, ["Copy to"]);
+        assert_eq!(command.output, OutputMode::None);
+    }
+
+    #[test]
+    fn a_repository_file_cannot_define_commands_and_the_global_ones_stay() {
+        let files = Files::new("repo-commands");
+        files.global(COPY_COMMAND).repo(&format!(
+            "[keys]\n\"files.commit\" = [\"C\"]\n{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(
+            loaded.errors[0]
+                .message
+                .contains("unknown field `commands`"),
+            "{:?}",
+            loaded.errors
+        );
+        // Ignored as a whole: its `[keys]` did not apply either.
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-t")]);
+    }
+
+    #[test]
+    fn a_bad_command_drops_the_global_file() {
+        let err = |text: &str| global(text).unwrap_err();
+        assert_eq!(
+            err(&COPY_COMMAND.replace("ctrl-t", "q")),
+            r#"command 1: key "q" would hide "global.quit""#
+        );
+        assert_eq!(
+            err(&COPY_COMMAND.replace("ctrl-t", "c")),
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        let shell = err(&COPY_COMMAND.replace(
+            r#"["cp", "--", "{path}", "{prompt1}"]"#,
+            r#"["sh", "-c", "cp {path} x"]"#,
+        ));
+        assert!(shell.starts_with("command 1: "), "{shell}");
+        let typo = err(&COPY_COMMAND.replace("output", "shell = true\noutput"));
+        assert!(typo.contains("unknown field `shell`"), "{typo}");
+    }
+
+    #[test]
+    fn a_repository_file_cannot_move_a_binding_onto_a_command_key() {
+        let files = Files::new("repo-onto-command");
+        files
+            .global(COPY_COMMAND)
+            .repo("[keys]\n\"files.stage\" = [\"ctrl-t\"]\n");
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors[0].message,
+            r#"key "ctrl-t" is bound to both "files.stage" and command 1"#
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("space")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+    }
+
+    #[test]
+    fn the_global_file_names_a_diff_pager_and_a_bad_one_is_refused() {
+        let pager = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.diff_pager)
+        };
+        assert_eq!(
+            pager("[diff]\npager = \"delta --paging=never\"\n"),
+            Ok(Some("delta --paging=never".into()))
+        );
+        assert_eq!(pager(""), Ok(None));
+        assert_eq!(
+            pager("[diff]\npager = \"delta | less\"\n"),
+            Err("diff.pager: The command needs a shell, which is never used".into())
+        );
+        assert_eq!(
+            pager("[diff]\npager = \"./delta\"\n"),
+            Err("diff.pager: The program must be a bare name or an absolute path".into())
+        );
+        let typo = pager("[diff]\npagerr = \"delta\"\n").unwrap_err();
+        assert!(typo.contains("unknown field `pagerr`"), "{typo}");
+    }
+
+    #[test]
+    fn only_the_global_file_names_a_diff_pager() {
+        let refused = repo("[diff]\npager = \"delta\"\n").unwrap_err();
+        assert!(refused.contains("unknown field `diff`"), "{refused}");
+
+        let files = Files::new("pager");
+        files
+            .global("[diff]\npager = \"delta\"\n")
+            .repo("[diff]\npager = \"evil\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_pager, Some("delta".into()));
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.contains("unknown field `diff`"));
     }
 }

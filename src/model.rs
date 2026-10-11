@@ -1,15 +1,18 @@
+use crate::ansi::StyledRow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::CommitEditor;
 use crate::config::ConfigError;
+use crate::custom_command::{CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
+use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{
-    DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT,
+    DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
@@ -20,12 +23,13 @@ use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
-use crate::keymap::{self, KeyScope, Keymap, Resolution};
-use crate::layout::{Panel, ScreenMode, SidePanel};
+use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
+use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
-use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup};
+use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
+use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
 use crate::watch::{WatchEvent, WatchState};
 
@@ -85,6 +89,17 @@ pub struct ParkedRepo {
     pub selected: Option<usize>,
     /// The Diff pane had focus; Files or a blame count as Files.
     pub diff_focused: bool,
+}
+
+/// A custom command waiting for its prompts. It holds a copy of the
+/// command and the selection taken when its key was pressed, so a config
+/// reload or a refresh while the user types cannot change what runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCommand {
+    pub command: CustomCommand,
+    pub target: Target,
+    /// One per prompt answered so far, in order.
+    pub answers: Vec<String>,
 }
 
 /// Which panel has the keys in the workspace.
@@ -187,6 +202,13 @@ pub struct AppState {
     /// The repositories entered from, outermost first; the current one is
     /// a submodule of the last. Empty in a top-level repository.
     pub repo_stack: Vec<ParentRepo>,
+    /// The diff renderers configured for the session; empty until found.
+    pub renderers: Vec<ExternalRenderer>,
+    /// Index into `renderers` of the one the Diff pane uses; `None` for
+    /// the built-in view. Kept for the session.
+    pub renderer: Option<usize>,
+    /// The shown diff as the active renderer drew it.
+    pub rendered: Option<RenderedDiff>,
     /// The keys in force, after the user's config files.
     pub keymap: Keymap,
     /// The config errors last shown, so a reload that finds the same
@@ -200,6 +222,11 @@ pub struct AppState {
     pub recent: Vec<PathBuf>,
     /// Repositories switched away from, by top level, to restore on return.
     pub parked: HashMap<PathBuf, ParkedRepo>,
+    /// The custom command whose prompts are open.
+    pub pending_command: Option<PendingCommand>,
+    /// A custom command with captured output is running. One at a time,
+    /// so their results cannot pile up.
+    pub command_running: bool,
 }
 
 impl AppState {
@@ -232,12 +259,17 @@ impl AppState {
             diff_options: DiffOptions::default(),
             watch: WatchState::default(),
             repo_stack: Vec::new(),
+            renderers: Vec::new(),
+            renderer: None,
+            rendered: None,
             keymap: Keymap::default(),
             config_error: None,
             repo: None,
             launch: PathBuf::new(),
             recent: Vec::new(),
             parked: HashMap::new(),
+            pending_command: None,
+            command_running: false,
         }
     }
 
@@ -259,6 +291,7 @@ impl AppState {
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
+                    Resolution::Command(index) => return self.start_command(index),
                     Resolution::Disabled(reason) => self.notice = Some(reason),
                     // Only a prompt or the editor takes text; elsewhere
                     // unbound keys are dropped. A popup over the editor
@@ -288,8 +321,13 @@ impl AppState {
             AppIntent::ScrollHelp(by) => self.scroll_help(by),
             AppIntent::CloseHelp => self.help_open = false,
             AppIntent::Resize { width, height } => {
+                let cols = self.pane_cols();
                 self.size = (width, height);
-                return self.diff.demand(self.pane_rows());
+                let mut effects = self.diff.demand(self.pane_rows());
+                if self.pane_cols() != cols {
+                    effects.extend(self.render_shown());
+                }
+                return effects;
             }
             AppIntent::RefreshStatus => {
                 self.status_selection = Selection::KeepPath;
@@ -300,7 +338,11 @@ impl AppState {
             AppIntent::SelectPrev => return self.move_selection(-1),
             AppIntent::ScrollDiff(by) => {
                 let rows = self.pane_rows();
-                if let Focus::Diff(view) = &mut self.focus {
+                if self.rendered_shown().is_some()
+                    && let Some(rendered) = &mut self.rendered
+                {
+                    rendered.scroll(by, rows);
+                } else if let Focus::Diff(view) = &mut self.focus {
                     view.scroll(by, rows);
                 } else {
                     return self.diff.scroll(by, rows);
@@ -313,21 +355,40 @@ impl AppState {
                 }
             }
             AppIntent::FocusDiff => return self.focus_diff(),
-            AppIntent::FocusLeft => self.focus = Focus::side(self.expanded),
-            AppIntent::FocusPanel(panel) => return self.focus_panel(panel),
-            AppIntent::CycleFocus { back } => return self.cycle_focus(back),
-            AppIntent::CycleScreenMode => self.screen_mode = self.screen_mode.next(),
+            AppIntent::FocusLeft => {
+                let cols = self.pane_cols();
+                self.focus = Focus::side(self.expanded);
+                let effects = self.render_if_stale();
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::FocusPanel(panel) => {
+                let cols = self.pane_cols();
+                let effects = self.focus_panel(panel);
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::CycleFocus { back } => {
+                let cols = self.pane_cols();
+                let effects = self.cycle_focus(back);
+                return self.rerender_if_resized(cols, effects);
+            }
+            AppIntent::CycleScreenMode => {
+                let cols = self.pane_cols();
+                self.screen_mode = self.screen_mode.next();
+                return self.rerender_if_resized(cols, vec![]);
+            }
             AppIntent::NextHunk => {
                 let rows = self.pane_rows();
                 if let Focus::Diff(view) = &mut self.focus {
                     view.next(rows);
                 }
+                self.follow_cursor();
             }
             AppIntent::PrevHunk => {
                 let rows = self.pane_rows();
                 if let Focus::Diff(view) = &mut self.focus {
                     view.prev(rows);
                 }
+                self.follow_cursor();
             }
             AppIntent::ToggleHunkStage => return self.toggle_hunk_stage(),
             AppIntent::EnterLineMode => self.with_lines(HunkView::enter_lines),
@@ -356,7 +417,10 @@ impl AppState {
                     ..self.diff_options
                 });
             }
-            AppIntent::PatchLoaded { tag, result } => self.patch_loaded(tag, result),
+            AppIntent::PatchLoaded { tag, result } => {
+                self.patch_loaded(tag, result);
+                self.remap();
+            }
             AppIntent::ToggleStage => {
                 let op = self
                     .selected
@@ -463,15 +527,23 @@ impl AppState {
                 }
             }
             AppIntent::GoToFile(text) => return self.go_to_file(&text),
-            AppIntent::PopPopup => {
+            AppIntent::PopPopup => match self.popups.pop() {
                 // Closing the welcome shows what git says about the launch
                 // directory, as Kika did before there was a welcome.
-                if let Some(Popup::Recent(_)) = self.popups.pop()
-                    && self.repo.is_none()
-                {
-                    return self.refresh_status();
-                }
-            }
+                Some(Popup::Recent(_)) if self.repo.is_none() => return self.refresh_status(),
+                // Cancelling a command's prompt cancels the command.
+                Some(Popup::Prompt {
+                    kind: PromptKind::Command,
+                    ..
+                }) => self.pending_command = None,
+                _ => {}
+            },
+            AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
+            AppIntent::CommandFinished {
+                title,
+                output,
+                result,
+            } => return self.command_finished(&title, output, result),
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
@@ -523,9 +595,23 @@ impl AppState {
             AppIntent::CloseBlame => {
                 if matches!(self.focus, Focus::Blame(_)) {
                     self.focus = Focus::side(self.expanded);
+                    return self.render_if_stale();
                 }
             }
-            AppIntent::ConfigLoaded { keymap, errors } => self.config_loaded(keymap, errors),
+            AppIntent::CycleRenderer => return self.cycle_renderer(),
+            AppIntent::RenderersFound(renderers) => {
+                self.renderers = renderers;
+                if self.renderer.is_some_and(|i| i >= self.renderers.len()) {
+                    self.renderer = None;
+                    self.rendered = None;
+                }
+            }
+            AppIntent::DiffRendered { tag, result } => self.diff_rendered(tag, result),
+            AppIntent::ConfigLoaded {
+                repo,
+                keymap,
+                errors,
+            } => self.config_loaded(repo, keymap, errors),
             AppIntent::Start => return self.start(),
             AppIntent::OpenRecent => return self.open_recent(),
             AppIntent::RecentLoaded(list) => {
@@ -546,7 +632,13 @@ impl AppState {
 
     /// Use the keys just read. A broken file is shown once: reloading on
     /// every focus-in must not bring the same popup back each time.
-    fn config_loaded(&mut self, keymap: Keymap, errors: Vec<ConfigError>) {
+    ///
+    /// A result read for another repository is dropped: the user switched
+    /// while it loaded, and its keys and errors are not the open one's.
+    fn config_loaded(&mut self, repo: Option<PathBuf>, keymap: Keymap, errors: Vec<ConfigError>) {
+        if repo != self.repo {
+            return;
+        }
         self.keymap = keymap;
         if errors.is_empty() {
             self.config_error = None;
@@ -571,8 +663,10 @@ impl AppState {
     /// The popup's inside is as tall as the diff pane's.
     fn scroll_help(&mut self, by: Scroll) {
         let rows = self.pane_rows();
-        let total =
-            keymap::available(keymap::registry(), &self.keymap, self.panel_focus(), self).len();
+        let focus = self.panel_focus();
+        // As help lists them: the built-in keys, then the user's commands.
+        let total = keymap::available(keymap::registry(), &self.keymap, focus, self).len()
+            + keymap::available_commands(&self.keymap, focus).len();
         let scroll = match by {
             Scroll::LineDown => self.help_scroll.saturating_add(1),
             Scroll::LineUp => self.help_scroll.saturating_sub(1),
@@ -632,6 +726,183 @@ impl AppState {
     /// Text rows inside the Diff pane: the screen minus the status bar and borders.
     pub fn pane_rows(&self) -> usize {
         usize::from(self.size.1).saturating_sub(3).max(1)
+    }
+
+    /// Columns a renderer may fill: the Diff pane as the view lays it out
+    /// for this focus and screen mode, minus its borders and the cursor
+    /// gutter. Where the mode hides the diff, its width in Normal.
+    pub fn pane_cols(&self) -> u16 {
+        let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
+        let [main, _] = layout::screen_layout(screen);
+        let panel = self.focus.panel();
+        let diff = layout::workspace_layout(main, panel, self.expanded, self.screen_mode)
+            .rect(Panel::Diff)
+            .or_else(|| {
+                layout::workspace_layout(main, panel, self.expanded, ScreenMode::Normal)
+                    .rect(Panel::Diff)
+            })
+            .unwrap_or(main);
+        diff.width.saturating_sub(3).max(1)
+    }
+
+    /// Render again when a focus or mode change gave the diff another
+    /// width than `cols`, so a renderer's columns match the pane.
+    fn rerender_if_resized(&mut self, cols: u16, mut effects: Vec<Effect>) -> Vec<Effect> {
+        let pending = self.rendered.as_ref().is_some_and(|r| r.seq.is_some());
+        if self.pane_cols() != cols && self.active_renderer().is_some() && !pending {
+            effects.extend(self.render_shown());
+        }
+        effects
+    }
+
+    /// The renderer the Diff pane uses, if not the built-in view.
+    pub fn active_renderer(&self) -> Option<&ExternalRenderer> {
+        self.renderer.and_then(|i| self.renderers.get(i))
+    }
+
+    /// The diff the Diff pane shows: the selected file's from the Files
+    /// panel, the focused view's side with the Diff pane focused (renames
+    /// off, as its patch has them), nothing behind a blame.
+    fn shown_request(&self) -> Option<DiffRequest> {
+        match &self.focus {
+            Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
+                .selected
+                .and_then(|i| self.files.get(i))
+                .map(|entry| DiffRequest::for_entry(entry, self.diff_options)),
+            Focus::Diff(view) => Some(DiffRequest {
+                path: view.path.clone(),
+                orig_path: None,
+                side: view.side,
+                options: self.diff_options,
+            }),
+            Focus::Blame(_) => None,
+        }
+    }
+
+    /// The rendered diff, when a renderer is active and it is of the
+    /// shown file and side.
+    pub fn rendered_for_shown(&self) -> Option<&RenderedDiff> {
+        self.active_renderer()?;
+        let request = self.shown_request()?;
+        self.rendered
+            .as_ref()
+            .filter(|r| r.path == request.path && r.side == request.side)
+    }
+
+    /// The rendered diff when the Diff pane draws it. With the pane
+    /// focused, only while the selection has rows: a cursor on rows the
+    /// renderer did not draw would lie, so the built-in view is drawn.
+    pub fn rendered_shown(&self) -> Option<&RenderedDiff> {
+        let rendered = self.rendered_for_shown()?;
+        match &self.focus {
+            Focus::Diff(view) if rendered.error.is_none() && !rendered.rendering() => {
+                let picked = view.picked();
+                rendered
+                    .shows(view.hunk, picked.as_deref())
+                    .then_some(rendered)
+            }
+            _ => Some(rendered),
+        }
+    }
+
+    /// Step through built-in, each renderer, and back to built-in.
+    fn cycle_renderer(&mut self) -> Vec<Effect> {
+        if self.renderers.is_empty() {
+            self.notice = Some(external_diff::NO_RENDERER);
+            return vec![];
+        }
+        self.renderer = match self.renderer {
+            None => Some(0),
+            Some(i) if i + 1 < self.renderers.len() => Some(i + 1),
+            Some(_) => None,
+        };
+        // Another renderer's rows must not show under this one's name.
+        self.rendered = None;
+        self.render_shown()
+    }
+
+    /// Run the active renderer on the shown diff. A user effect, so the
+    /// busy indicator shows while it runs.
+    fn render_shown(&mut self) -> Vec<Effect> {
+        let Some(renderer) = self.active_renderer().cloned() else {
+            return vec![];
+        };
+        let Some(request) = self.shown_request() else {
+            return vec![];
+        };
+        let seq = self.take_seq();
+        match &mut self.rendered {
+            Some(r) if r.path == request.path && r.side == request.side => {
+                r.seq = Some(seq);
+                r.error = None;
+            }
+            _ => self.rendered = Some(RenderedDiff::new(seq, request.path.clone(), request.side)),
+        }
+        self.busy += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::RenderDiff {
+            tag,
+            request,
+            renderer,
+            cols: self.pane_cols(),
+        }]
+    }
+
+    /// Render again only if what is rendered is not what is shown, such
+    /// as after the Diff pane gives focus back on another side.
+    fn render_if_stale(&mut self) -> Vec<Effect> {
+        if self.active_renderer().is_some() && self.rendered_for_shown().is_none() {
+            self.render_shown()
+        } else {
+            vec![]
+        }
+    }
+
+    fn diff_rendered(&mut self, tag: Tag, result: Result<Vec<StyledRow>, String>) {
+        // Every user effect reports back once, stale or not.
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return;
+        }
+        if let Some(rendered) = &mut self.rendered
+            && rendered.apply(tag.seq, result)
+        {
+            self.remap();
+        }
+    }
+
+    /// Map the rendered rows to the focused view's patch, when both are
+    /// of the same file and side, then bring the selection into view.
+    fn remap(&mut self) {
+        let Some(rendered) = &mut self.rendered else {
+            return;
+        };
+        rendered.map = match &self.focus {
+            Focus::Diff(view) if view.path == rendered.path && view.side == rendered.side => view
+                .patch
+                .as_ref()
+                .map(|patch| map_rows(patch, &rendered.rows))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        self.follow_cursor();
+    }
+
+    /// Keep the rows of the selected hunk or lines inside the pane.
+    fn follow_cursor(&mut self) {
+        let rows = self.pane_rows();
+        let (Focus::Diff(view), Some(rendered)) = (&self.focus, &mut self.rendered) else {
+            return;
+        };
+        let picked = view.picked();
+        let selection = rendered.mapped_rows(view.hunk, picked.as_deref());
+        rendered.scroll_to(&selection, rows);
     }
 
     fn move_menu_cursor(&mut self, delta: isize) {
@@ -877,6 +1148,161 @@ impl AppState {
         }
     }
 
+    /// Start the user's command `index` on the current selection: ask its
+    /// prompts first, if it has any.
+    fn start_command(&mut self, index: usize) -> Vec<Effect> {
+        let Some(command) = self.keymap.commands.get(index).cloned() else {
+            return vec![];
+        };
+        let Some(target) = self.command_target() else {
+            self.notice = Some("No file selected");
+            return vec![];
+        };
+        if self.command_running {
+            self.notice = Some("A command is running");
+            return vec![];
+        }
+        // Say now what the selection lacks, not after the prompts.
+        let blanks = vec![String::new(); command.prompts.len()];
+        if let Err(reason) = command.expand(&target, &blanks) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.ask_or_run(PendingCommand {
+            command,
+            target,
+            answers: Vec::new(),
+        })
+    }
+
+    /// What a command in the focused panel runs on: the selected file, and
+    /// in the Diff pane its line, in the blame the cursor's line and commit.
+    fn command_target(&self) -> Option<Target> {
+        match &self.focus {
+            // Commands bind only in Files, the diff and the blame.
+            Focus::Status | Focus::Branches | Focus::Commits | Focus::Stash => None,
+            Focus::Files => {
+                let entry = self.selected.and_then(|i| self.files.get(i))?;
+                Some(Target {
+                    path: entry.path.clone(),
+                    line: None,
+                    commit: None,
+                })
+            }
+            Focus::Diff(view) => Some(Target {
+                path: view.path.clone(),
+                line: view.editor_line(),
+                commit: None,
+            }),
+            Focus::Blame(view) => {
+                let line = view.selected();
+                Some(Target {
+                    path: view.path.clone(),
+                    line: line.and_then(|l| u32::try_from(l.line_no).ok()),
+                    commit: line
+                        .filter(|l| !l.oid.is_empty() && !l.is_uncommitted())
+                        .map(|l| l.oid.clone()),
+                })
+            }
+        }
+    }
+
+    /// Open the next unanswered prompt, or run the command once all are.
+    fn ask_or_run(&mut self, pending: PendingCommand) -> Vec<Effect> {
+        if pending.answers.len() < pending.command.prompts.len() {
+            self.pending_command = Some(pending);
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::Command,
+                input: LineInput::default(),
+            });
+            return vec![];
+        }
+        self.run_command(pending)
+    }
+
+    fn command_answered(&mut self, text: String) -> Vec<Effect> {
+        let Some(mut pending) = self.pending_command.take() else {
+            return vec![];
+        };
+        pending.answers.push(text);
+        self.ask_or_run(pending)
+    }
+
+    /// Hand the terminal to the command, or run it in the background when
+    /// its output is captured.
+    fn run_command(&mut self, pending: PendingCommand) -> Vec<Effect> {
+        let PendingCommand {
+            command,
+            target,
+            answers,
+        } = pending;
+        let argv = match command.expand(&target, &answers) {
+            Ok(argv) => argv,
+            Err(reason) => {
+                self.notice = Some(reason);
+                return vec![];
+            }
+        };
+        // A popup title: one line, safe to draw.
+        let title = sanitize(command.description.as_bytes());
+        match command.output {
+            OutputMode::Terminal => vec![Effect::HandOff(HandOff::RunCommand { title, argv })],
+            output => {
+                self.command_running = true;
+                self.busy += 1;
+                vec![Effect::RunCommand {
+                    title,
+                    argv,
+                    output,
+                }]
+            }
+        }
+    }
+
+    /// Show what the command printed or why it failed, then reload: it
+    /// may have changed the repository.
+    fn command_finished(
+        &mut self,
+        title: &str,
+        output: OutputMode,
+        result: Result<String, String>,
+    ) -> Vec<Effect> {
+        if output != OutputMode::Terminal && self.command_running {
+            self.command_running = false;
+            self.busy = self.busy.saturating_sub(1);
+        }
+        match result {
+            Err(message) => self.push_error(ErrorPopup::new(
+                format!("{title} failed"),
+                &message,
+                "Check the command in your config file, then try again.",
+            )),
+            Ok(text) if output == OutputMode::Popup => {
+                let text = if text.is_empty() {
+                    "(no output)"
+                } else {
+                    &text
+                };
+                self.push_error(ErrorPopup::new(title, text, "Press Esc to close"));
+            }
+            Ok(_) => {}
+        }
+        self.status_selection = Selection::KeepPath;
+        self.refresh_status()
+    }
+
+    /// The title of a prompt: a command's comes from the user's config,
+    /// made one line and safe to draw.
+    pub fn prompt_title(&self, kind: PromptKind) -> String {
+        let pending = self
+            .pending_command
+            .as_ref()
+            .filter(|_| kind == PromptKind::Command);
+        pending
+            .and_then(|p| p.command.prompts.get(p.answers.len()))
+            .map_or_else(|| kind.title().to_string(), |t| sanitize(t.as_bytes()))
+    }
+
     /// Show an error, unless the same one is already on top: a repeated
     /// failure should not need dismissing twice.
     fn push_error(&mut self, error: ErrorPopup) {
@@ -934,7 +1360,9 @@ impl AppState {
                 *view = HunkView::new(request.path, request.side);
             }
             effects.extend(self.load_patch());
+            self.remap();
         }
+        effects.extend(self.render_shown());
         effects
     }
 
@@ -966,7 +1394,8 @@ impl AppState {
             Panel::Side(side) => {
                 self.focus = Focus::side(side);
                 self.expanded = side;
-                vec![]
+                // Leaving the diff or a blame, the pane shows the selected file.
+                self.render_if_stale()
             }
             Panel::Diff if self.focus.is_side() => self.focus_diff(),
             Panel::Diff => vec![],
@@ -994,7 +1423,10 @@ impl AppState {
         };
         let request = DiffRequest::for_entry(entry, self.diff_options);
         self.focus = Focus::Diff(HunkView::new(request.path, request.side));
-        self.load_patch()
+        let mut effects = self.load_patch();
+        self.remap();
+        effects.extend(self.render_shown());
+        effects
     }
 
     /// Start loading the focused view's patch. A user effect, so the busy
@@ -1054,6 +1486,7 @@ impl AppState {
             change(view);
             view.scroll_to_cursor(rows);
         }
+        self.follow_cursor();
     }
 
     fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
@@ -1126,7 +1559,10 @@ impl AppState {
             DiffSide::Untracked => return vec![],
         };
         *view = HunkView::new(view.path.clone(), side);
-        self.load_patch()
+        let mut effects = self.load_patch();
+        self.remap();
+        effects.extend(self.render_shown());
+        effects
     }
 
     /// Keep the selection on the same file across a refresh when it still
@@ -1135,6 +1571,7 @@ impl AppState {
         if self.files.is_empty() {
             self.selected = None;
             self.diff = DiffPane::default();
+            self.rendered = None;
             // Nothing is left for the diff or a blame to show.
             if !self.focus.is_side() {
                 self.focus = Focus::side(self.expanded);
@@ -1416,16 +1853,40 @@ impl AppState {
             // A failed git command gets a popup; `op_error` is for refusals.
             self.op_error = None;
             if let Err(message) = result {
-                self.push_error(ErrorPopup::new(
-                    failure_title(&op),
-                    &message,
-                    "The file list was reloaded. Fix the cause above, then try again.",
-                ));
+                let error = if matches!(op, GitOp::ApplyEdited { .. }) {
+                    self.edited_hunk_error(&message)
+                } else {
+                    ErrorPopup::new(
+                        failure_title(&op),
+                        &message,
+                        "The file list was reloaded. Fix the cause above, then try again.",
+                    )
+                };
+                self.push_error(error);
             }
         }
         // Refresh even after a failure: a failed `add` of several paths can
         // still have changed the index.
         self.apply_plan(refresh::plan(&op))
+    }
+
+    /// Git's words alone do not say what was wrong with the user's edit or
+    /// how to retry, so lead with that and name the key from their keymap.
+    pub(crate) fn edited_hunk_error(&self, message: &str) -> ErrorPopup {
+        let key = keymap::registry()
+            .iter()
+            .find(|b| b.id == "diff.edit_hunk")
+            .and_then(|binding| self.keymap.keys(binding).first())
+            .map(KeyPattern::label);
+        let next = match key {
+            Some(key) => format!("Press {key} to edit the hunk again."),
+            None => "Edit the hunk again to retry.".to_string(),
+        };
+        ErrorPopup::new(
+            failure_title(&GitOp::ApplyEdited { patch: vec![] }),
+            &format!("{EDITED_HUNK_INVALID}\n{message}"),
+            next,
+        )
     }
 
     /// Leave `Running`: closed on success, `Failed` with the output on
@@ -1788,6 +2249,7 @@ impl AppState {
     fn switch_repo(&mut self) {
         self.generation += 1;
         self.popups.clear();
+        self.pending_command = None;
         // The side panel stays; the diff or blame belonged to the old repository.
         if !self.focus.is_side() {
             self.focus = Focus::side(self.expanded);
@@ -1796,6 +2258,7 @@ impl AppState {
         self.branch = None;
         self.selected = None;
         self.diff = DiffPane::default();
+        self.rendered = None;
         self.status_error = None;
         self.op_error = None;
         self.status_selection = Selection::KeepPath;
@@ -1966,6 +2429,10 @@ impl AppState {
             && self.branch.as_ref() == Some(&status.branch)
     }
 }
+
+/// The first line of a rejected edited hunk's error, above git's message.
+pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
+Keep the @@ line as it was and start each line with a space, + or -.";
 
 /// What the error popup calls a failed operation.
 fn failure_title(op: &GitOp) -> &'static str {
@@ -4627,6 +5094,69 @@ mod tests {
         assert_eq!(state.op_seq, Some(tag.seq));
     }
 
+    const GARBAGE: &str = "error: patch with only garbage at <stdin>:4";
+
+    /// Stage an edited hunk with `keymap` in force, let git reject it, and
+    /// return the one popup that leaves.
+    fn rejected_edit(keymap: Keymap) -> ErrorPopup {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        state.keymap = keymap;
+        let effects = state.update(AppIntent::HunkEdited {
+            result: Ok(Some(b"edited".to_vec())),
+        });
+        let (tag, op) = op_of(&effects);
+        state.update(finished(tag, op, Err(GARBAGE.into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => error.clone(),
+            other => panic!("expected one error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rejected_edit_explains_itself_above_git_message() {
+        let error = rejected_edit(Keymap::default());
+        assert_eq!(error.title, "Could not stage the edited hunk");
+        let (first, rest) = error.message.split_once('\n').expect("two parts");
+        assert_eq!(first, EDITED_HUNK_INVALID);
+        assert_eq!(rest, GARBAGE);
+    }
+
+    #[test]
+    fn a_rejected_edit_names_the_key_to_edit_again() {
+        let error = rejected_edit(Keymap::default());
+        assert_eq!(error.next, "Press e to edit the hunk again.");
+        let error = rejected_edit(keymap::remap(&[("diff.edit_hunk", &["E"])]));
+        assert_eq!(error.next, "Press E to edit the hunk again.");
+        let error = rejected_edit(keymap::remap(&[("diff.edit_hunk", &[])]));
+        assert_eq!(error.next, "Edit the hunk again to retry.");
+    }
+
+    #[test]
+    fn other_failed_ops_keep_the_plain_message_and_hint() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let tag = Tag {
+            generation: state.generation,
+            seq: 1,
+            user: true,
+        };
+        let op = GitOp::ApplyCached {
+            patch: vec![],
+            reverse: false,
+        };
+        state.update(finished(tag, op, Err(GARBAGE.into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not stage the change");
+                assert_eq!(error.message, GARBAGE);
+                assert_eq!(
+                    error.next,
+                    "The file list was reloaded. Fix the cause above, then try again."
+                );
+            }
+            other => panic!("expected one error popup, got {other:?}"),
+        }
+    }
+
     #[test]
     fn a_cancelled_edit_says_so_and_runs_nothing() {
         let mut state = focused(three_files(), TWO_HUNKS);
@@ -5018,7 +5548,9 @@ mod tests {
             assert_eq!(state.expanded, side, "{key}");
         }
         // The new side panels have no keys of their own yet.
-        state.update(AppIntent::FocusPanel(Panel::Side(SidePanel::Commits)));
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Commits,
+        )));
         assert_eq!(state.key_focus(), KeyScope::Workspace);
     }
 
@@ -6431,8 +6963,17 @@ mod tests {
     use crate::config::ConfigError;
     use crate::keymap::{Keymap, remap as keymap};
 
+    /// A config result for `idle_with_files`'s repository, `/r/a`.
     fn config_loaded(keymap: Keymap, errors: Vec<ConfigError>) -> AppIntent {
-        AppIntent::ConfigLoaded { keymap, errors }
+        config_for(Some("/r/a"), keymap, errors)
+    }
+
+    fn config_for(repo: Option<&str>, keymap: Keymap, errors: Vec<ConfigError>) -> AppIntent {
+        AppIntent::ConfigLoaded {
+            repo: repo.map(PathBuf::from),
+            keymap,
+            errors,
+        }
     }
 
     fn config_error(message: &str) -> ConfigError {
@@ -6521,6 +7062,73 @@ mod tests {
         assert_eq!(state.keymap, Keymap::default());
     }
 
+    #[test]
+    fn a_config_result_for_another_repository_changes_nothing() {
+        let mut state = idle_with_files();
+        let before = state.clone();
+        state.update(config_for(
+            Some("/r/b"),
+            keymap(&[("files.stage", &["x"])]),
+            vec![config_error("bad")],
+        ));
+        assert_eq!(state.keymap, before.keymap);
+        assert_eq!(state.config_error, before.config_error);
+        assert_eq!(state.popups, before.popups);
+    }
+
+    #[test]
+    fn a_late_config_result_from_before_a_switch_is_dropped() {
+        let mut state = idle_with_files();
+        assert_eq!(
+            watch(&mut state, WatchEvent::FocusGained)[0],
+            Effect::LoadConfig {
+                repo: Some("/r/a".into())
+            }
+        );
+        let effects = state.update(AppIntent::OpenRepo("/r/b".into()));
+        assert_eq!(
+            effects.last(),
+            Some(&Effect::LoadConfig {
+                repo: Some("/r/b".into())
+            })
+        );
+
+        // A's reload lands after the switch.
+        state.update(config_for(
+            Some("/r/a"),
+            keymap(&[("files.stage", &["x"])]),
+            vec![config_error("a is broken")],
+        ));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.config_error, None);
+        assert_eq!(state.keymap, Keymap::default());
+
+        // B's own result applies.
+        let remapped = keymap(&[("files.stage", &["y"])]);
+        state.update(config_for(
+            Some("/r/b"),
+            remapped.clone(),
+            vec![config_error("b is broken")],
+        ));
+        assert_eq!(state.keymap, remapped);
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => assert!(error.message.contains("b is broken")),
+            other => panic!("expected B's config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_config_result_without_a_repository_applies_while_none_is_open() {
+        let mut state = outside("/w");
+        state.update(AppIntent::Start);
+        let remapped = keymap(&[("files.stage", &["x"])]);
+        state.update(config_for(None, remapped.clone(), vec![]));
+        assert_eq!(state.keymap, remapped);
+        // Nor does a repository's result leak outside one.
+        state.update(config_for(Some("/w"), Keymap::default(), vec![]));
+        assert_eq!(state.keymap, remapped);
+    }
+
     /// An idle workspace whose user opted in to auto-fetch.
     fn idle_with_fetch() -> AppState {
         let mut state = idle_with_files();
@@ -6607,6 +7215,267 @@ mod tests {
         assert!(effects.is_empty());
     }
 
+    fn renderer(label: &str) -> ExternalRenderer {
+        ExternalRenderer {
+            label: label.into(),
+            argv: vec![label.into()],
+        }
+    }
+
+    /// `files` loaded on an 80x24 screen, with renderers `labels` found.
+    fn with_renderers(files: Vec<FileEntry>, labels: &[&str]) -> AppState {
+        let (mut state, _) = with_files(files, 24);
+        state.update(AppIntent::RenderersFound(
+            labels.iter().map(|l| renderer(l)).collect(),
+        ));
+        state
+    }
+
+    /// The one `RenderDiff` among `effects`: its tag, request and cols.
+    fn render_of(effects: &[Effect]) -> (Tag, DiffRequest, u16) {
+        let renders: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::RenderDiff {
+                    tag, request, cols, ..
+                } => Some((*tag, request.clone(), *cols)),
+                _ => None,
+            })
+            .collect();
+        match renders.as_slice() {
+            [render] => render.clone(),
+            other => panic!("expected one RenderDiff in {effects:?}, got {other:?}"),
+        }
+    }
+
+    fn rendered(tag: Tag, text: &str) -> AppIntent {
+        AppIntent::DiffRendered {
+            tag,
+            result: Ok(crate::ansi::parse(text.as_bytes())),
+        }
+    }
+
+    #[test]
+    fn cycling_renders_the_shown_diff_at_the_pane_width() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        let busy = state.busy;
+        let (tag, request, cols) = render_of(&state.update(AppIntent::CycleRenderer));
+        assert_eq!(state.renderer, Some(0));
+        assert_eq!(cols, state.pane_cols());
+        // 80 columns: the Diff pane is 53 wide, less borders and gutter.
+        assert_eq!(cols, 50);
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(
+            request,
+            DiffRequest::for_entry(&state.files[0], state.diff_options)
+        );
+        assert!(state.rendered.as_ref().unwrap().rendering());
+    }
+
+    #[test]
+    fn a_wider_screen_renders_again_and_a_taller_one_does_not() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        state.update(AppIntent::CycleRenderer);
+        let effects = state.update(AppIntent::Resize {
+            width: 120,
+            height: 24,
+        });
+        let (_, _, cols) = render_of(&effects);
+        assert_eq!(cols, state.pane_cols());
+        assert_eq!(cols, 77);
+        let effects = state.update(AppIntent::Resize {
+            width: 120,
+            height: 40,
+        });
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::RenderDiff { .. }))
+        );
+    }
+
+    #[test]
+    fn zooming_renders_again_at_the_diffs_new_width() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        let (tag, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        state.update(rendered(tag, "row\n"));
+        // Focus the diff, then zoom it: half, then full.
+        // The diff's own view renders on focus; answer it.
+        let (tag, _, _) = render_of(&press(&mut state, KeyCode::Char('l')));
+        state.update(rendered(tag, "row\n"));
+        let mut widths = vec![state.pane_cols()];
+        for _ in 0..2 {
+            let (tag, _, cols) = render_of(&press(&mut state, KeyCode::Char('z')));
+            assert_eq!(cols, state.pane_cols());
+            widths.push(cols);
+            state.update(rendered(tag, "row\n"));
+        }
+        // 80 columns: 2/3, then 3/4, then all of it, less borders and gutter.
+        assert_eq!(widths, [50, 57, 77]);
+    }
+
+    #[test]
+    fn r_works_in_the_diff_reached_from_any_side_panel() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        press(&mut state, KeyCode::Char('1'));
+        press(&mut state, KeyCode::Char('l'));
+        assert!(matches!(state.focus, Focus::Diff(_)));
+        render_of(&state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('R'),
+            KeyModifiers::SHIFT,
+        ))));
+        assert_eq!(state.renderer, Some(0));
+    }
+
+    #[test]
+    fn r_steps_through_each_renderer_and_back_to_the_built_in_view() {
+        let mut state = with_renderers(three_files(), &["delta", "riff"]);
+        // R is a Diff pane key.
+        press(&mut state, KeyCode::Enter);
+        let shift_r = |state: &mut AppState| {
+            state.update(AppIntent::Key(KeyPress::new(
+                KeyCode::Char('R'),
+                KeyModifiers::SHIFT,
+            )))
+        };
+        let (_, _, _) = render_of(&shift_r(&mut state));
+        assert_eq!(state.renderer, Some(0));
+        let (_, _, _) = render_of(&shift_r(&mut state));
+        assert_eq!(state.renderer, Some(1));
+        assert_eq!(shift_r(&mut state), vec![]);
+        assert_eq!(state.renderer, None);
+        assert_eq!(state.rendered, None);
+    }
+
+    #[test]
+    fn without_renderers_r_says_so_and_does_nothing() {
+        let (mut state, _) = with_files(three_files(), 24);
+        assert_eq!(state.update(AppIntent::CycleRenderer), vec![]);
+        assert_eq!(state.notice, Some(external_diff::NO_RENDERER));
+        assert_eq!(state.renderer, None);
+        state.notice = None;
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(press(&mut state, KeyCode::Char('R')), vec![]);
+        assert_eq!(state.notice, Some(external_diff::NO_RENDERER));
+    }
+
+    #[test]
+    fn a_stale_render_is_dropped_but_busy_still_falls() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        let (old, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        let (new, _, _) = render_of(&state.update(AppIntent::SelectNext));
+        let busy = state.busy;
+        state.update(rendered(old, "old\n"));
+        assert_eq!(state.busy, busy - 1);
+        assert!(state.rendered.as_ref().unwrap().rows.is_empty());
+        state.update(rendered(new, "new\n"));
+        let shown = state.rendered_shown().expect("rendered rows shown");
+        assert_eq!(shown.path, "b.rs".into());
+        assert_eq!(shown.rows.len(), 1);
+    }
+
+    #[test]
+    fn scrolling_moves_the_rendered_rows_while_they_are_shown() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        let (tag, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        state.update(rendered(tag, &"row\n".repeat(50)));
+        state.update(AppIntent::ScrollDiff(Scroll::PageDown));
+        assert_eq!(state.rendered.as_ref().unwrap().scroll, state.pane_rows());
+        assert_eq!(state.diff.scroll, 0);
+    }
+
+    #[test]
+    fn staging_options_and_side_changes_render_again() {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        state.update(AppIntent::CycleRenderer);
+        render_of(&press(&mut state, KeyCode::Char('w')));
+        let (_, request, _) = render_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            (request.side, request.orig_path),
+            (DiffSide::Worktree, None)
+        );
+        let (_, request, _) = render_of(&press(&mut state, KeyCode::Char('t')));
+        assert_eq!(request.side, DiffSide::Index);
+        // Back to the Files panel on the entry's side again.
+        let (_, request, _) = render_of(&press(&mut state, KeyCode::Esc));
+        assert_eq!(request.side, DiffSide::Worktree);
+        let (tag, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+        let status = refresh_tag(&mut state);
+        state.update(finished(tag, op, Ok(())));
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag: Tag {
+                seq: state.status_seq.unwrap(),
+                ..status
+            },
+            result: Ok(repo(three_files())),
+        });
+        render_of(&effects);
+    }
+
+    /// `TWO_HUNKS` as a decorating renderer draws it: a file banner, a box
+    /// per hunk, and old and new line numbers before each line.
+    const DECORATED: &str = "───────\na.rs\n───────\n┌────┐\n│ @1 │\n└────┘\n\
+        1 ⋮   │a\n  ⋮ 1 │b\n  ⋮ 2 │c\n2 ⋮ 3 │d\n┌────┐\n│ @9 │\n└────┘\n\
+        9 ⋮   │e\n  ⋮10 │f\n";
+
+    /// Focus the first of `three_files` with `TWO_HUNKS` loaded, through
+    /// renderer `delta` when `render` is set.
+    fn focused_through(render: bool) -> AppState {
+        let mut state = with_renderers(three_files(), &["delta"]);
+        if render {
+            state.update(AppIntent::CycleRenderer);
+        }
+        let effects = press(&mut state, KeyCode::Enter);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        if render {
+            let (tag, _, _) = render_of(&effects);
+            state.update(rendered(tag, DECORATED));
+        }
+        state
+    }
+
+    #[test]
+    fn line_staging_through_a_renderer_stages_what_the_built_in_view_does() {
+        let mut built_in = focused_through(false);
+        let mut through = focused_through(true);
+        for state in [&mut built_in, &mut through] {
+            press(state, KeyCode::Char('v'));
+            press(state, KeyCode::Char('j'));
+        }
+        let shown = through
+            .rendered_shown()
+            .expect("the rendered rows are shown");
+        let picked = view(&through).selected_range();
+        assert_eq!(shown.mapped_rows(0, Some(&picked)), [7], "the `b` row");
+        let expected = op_of(&press(&mut built_in, KeyCode::Char(' '))).1;
+        let (_, op) = op_of(&press(&mut through, KeyCode::Char(' ')));
+        assert_eq!(op, expected);
+    }
+
+    #[test]
+    fn hunk_moves_scroll_the_rendered_rows_to_the_hunk() {
+        let (mut state, _) = with_files(three_files(), 6);
+        state.update(AppIntent::RenderersFound(vec![renderer("delta")]));
+        state.update(AppIntent::CycleRenderer);
+        let effects = press(&mut state, KeyCode::Enter);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        let (tag, _, _) = render_of(&effects);
+        state.update(rendered(tag, DECORATED));
+        // 3 rows: hunk 0's lines are rows 6 to 9, so its first is on top.
+        assert_eq!(state.rendered.as_ref().unwrap().scroll, 6);
+        // Hunk 1's are rows 13 and 14, so the last is at the bottom.
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(state.rendered.as_ref().unwrap().scroll, 12);
+    }
     #[test]
     fn outside_a_repository_the_watch_only_reloads_the_global_config() {
         let mut state = outside("/w");
@@ -6622,5 +7491,332 @@ mod tests {
             watch(&mut state, WatchEvent::FocusGained),
             [Effect::LoadConfig { repo: None }]
         );
+    }
+
+    // --- Custom commands ---
+
+    use crate::custom_command::{CommandTable, Panel, test_table};
+
+    /// `state` with these commands from the global file.
+    fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
+        let keymap = Keymap::default().with_commands(tables).unwrap();
+        let repo = state.repo.clone();
+        state.update(AppIntent::ConfigLoaded {
+            repo,
+            keymap,
+            errors: vec![],
+        });
+    }
+
+    fn ctrl_t(state: &mut AppState) -> Vec<Effect> {
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )))
+    }
+
+    fn files_command(command: &[&str], prompts: &[&str], output: OutputMode) -> CommandTable {
+        test_table(Panel::Files, &["ctrl-t"], command, prompts, output)
+    }
+
+    fn os(items: &[&str]) -> Vec<std::ffi::OsString> {
+        items.iter().map(std::ffi::OsString::from).collect()
+    }
+
+    /// A workspace whose one file has a hostile name, selected.
+    fn hostile_file() -> AppState {
+        let (state, _) = with_files(vec![changed("a b;$(rm -rf x).rs", '.', 'M')], 24);
+        state
+    }
+
+    #[test]
+    fn a_captured_command_runs_on_the_selected_file_as_one_argument() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(
+                &["wc", "--", "{path}"],
+                &[],
+                OutputMode::None,
+            )],
+        );
+        let busy = state.busy;
+
+        let effects = ctrl_t(&mut state);
+
+        assert_eq!(
+            effects,
+            [Effect::RunCommand {
+                title: "Run wc".into(),
+                argv: os(&["wc", "--", "a b;$(rm -rf x).rs"]),
+                output: OutputMode::None,
+            }]
+        );
+        assert!(state.command_running);
+        assert_eq!(state.busy, busy + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_gets_the_raw_bytes_of_the_file_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let raw = FileEntry {
+            path: RepoPath::from_bytes(b"x\xff.rs"),
+            ..changed("x", '.', 'M')
+        };
+        let (mut state, _) = with_files(vec![raw], 24);
+        with_commands(
+            &mut state,
+            &[files_command(
+                &["less", "{path}"],
+                &[],
+                OutputMode::Terminal,
+            )],
+        );
+
+        match ctrl_t(&mut state).as_slice() {
+            [Effect::HandOff(HandOff::RunCommand { title, argv })] => {
+                assert_eq!(title, "Run less");
+                assert_eq!(argv[1].as_bytes(), b"x\xff.rs");
+            }
+            other => panic!("expected a RunCommand hand-off, got {other:?}"),
+        }
+        // The terminal is handed over; nothing counts as running here.
+        assert!(!state.command_running);
+    }
+
+    #[test]
+    fn prompts_are_asked_in_order_then_the_command_runs_with_the_answers() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(
+                &["cp", "{path}", "{prompt1}", "--mode={prompt2}"],
+                &["Copy to", "Mode\x1b[2J"],
+                OutputMode::Popup,
+            )],
+        );
+
+        assert_eq!(ctrl_t(&mut state), []);
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::Command,
+                ..
+            }]
+        ));
+        assert_eq!(state.prompt_title(PromptKind::Command), "Copy to");
+        type_text(&mut state, "dir with space");
+        assert_eq!(press(&mut state, KeyCode::Enter), []);
+        assert_eq!(state.popups.len(), 1);
+        let title = state.prompt_title(PromptKind::Command);
+        assert_eq!(title, "Mode\u{FFFD}[2J");
+        // A reload while the user types does not change what runs.
+        with_commands(&mut state, &[]);
+
+        let effects = state.update(AppIntent::SubmitPrompt);
+
+        assert_eq!(
+            effects,
+            [Effect::RunCommand {
+                title: "Run cp".into(),
+                argv: os(&["cp", "a b;$(rm -rf x).rs", "dir with space", "--mode="]),
+                output: OutputMode::Popup,
+            }]
+        );
+        assert!(state.popups.is_empty());
+        assert_eq!(state.pending_command, None);
+    }
+
+    #[test]
+    fn answers_arrive_as_intents_in_order() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(
+                &["echo", "{prompt2}", "{prompt1}"],
+                &["One", "Two"],
+                OutputMode::None,
+            )],
+        );
+        ctrl_t(&mut state);
+        state.popups.pop();
+        assert_eq!(
+            state.update(AppIntent::CommandPromptAnswered("1".into())),
+            []
+        );
+        state.popups.pop();
+        let effects = state.update(AppIntent::CommandPromptAnswered("2".into()));
+        match effects.as_slice() {
+            [Effect::RunCommand { argv, .. }] => assert_eq!(argv, &os(&["echo", "2", "1"])),
+            other => panic!("expected RunCommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelling_a_prompt_cancels_the_command() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(
+                &["echo", "{prompt1}"],
+                &["Q"],
+                OutputMode::None,
+            )],
+        );
+        ctrl_t(&mut state);
+        assert!(state.pending_command.is_some());
+
+        assert_eq!(state.update(AppIntent::PopPopup), []);
+
+        assert_eq!(state.pending_command, None);
+        assert!(state.popups.is_empty());
+        assert!(!state.command_running);
+        // A late answer has nothing to run.
+        assert_eq!(
+            state.update(AppIntent::CommandPromptAnswered("x".into())),
+            []
+        );
+        // Esc does the same.
+        ctrl_t(&mut state);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.pending_command, None);
+    }
+
+    #[test]
+    fn a_command_needs_a_selection_and_what_its_template_uses() {
+        let mut state = AppState::new(Context::Workspace);
+        with_commands(
+            &mut state,
+            &[files_command(&["echo", "{path}"], &["Q"], OutputMode::None)],
+        );
+        assert_eq!(ctrl_t(&mut state), []);
+        assert_eq!(state.notice, Some("No file selected"));
+        assert!(state.popups.is_empty());
+    }
+
+    #[test]
+    fn a_blame_command_gets_the_line_and_commit_or_says_why_not() {
+        let mut state = blamed(3, 24);
+        let table = test_table(
+            Panel::Blame,
+            &["ctrl-t"],
+            &["git", "show", "{commit}", "{path}:{line}"],
+            &["Q"],
+            OutputMode::Terminal,
+        );
+        with_commands(&mut state, &[table]);
+        state.update(AppIntent::BlameNext);
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )));
+        type_text(&mut state, "x");
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            [Effect::HandOff(HandOff::RunCommand {
+                title: "Run git".into(),
+                argv: os(&["git", "show", OID, "a.rs:2"]),
+            })]
+        );
+
+        // The last line is not committed: refused before any prompt.
+        state.update(AppIntent::BlameNext);
+        assert_eq!(ctrl_t(&mut state), []);
+        assert_eq!(state.notice, Some("Not committed yet"));
+        assert!(state.popups.is_empty());
+    }
+
+    #[test]
+    fn only_one_captured_command_runs_at_a_time() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::None)],
+        );
+        assert_eq!(ctrl_t(&mut state).len(), 1);
+        let busy = state.busy;
+
+        assert_eq!(ctrl_t(&mut state), []);
+
+        assert_eq!(state.notice, Some("A command is running"));
+        assert_eq!(state.busy, busy);
+        assert!(state.popups.is_empty());
+    }
+
+    fn command_finished(output: OutputMode, result: Result<&str, &str>) -> AppIntent {
+        AppIntent::CommandFinished {
+            title: "Show it".into(),
+            output,
+            result: result.map(String::from).map_err(String::from),
+        }
+    }
+
+    fn is_status_load(effects: &[Effect]) -> bool {
+        matches!(effects, [Effect::LoadStatus { .. }])
+    }
+
+    #[test]
+    fn captured_output_is_shown_safely_and_the_status_reloaded() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(&["sh", "x"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        let busy = state.busy;
+
+        let effects = state.update(command_finished(
+            OutputMode::Popup,
+            Ok("red \x1b[31mtext\nline 2"),
+        ));
+
+        assert!(is_status_load(&effects), "{effects:?}");
+        assert!(!state.command_running);
+        // One down for the command, one up for the reload.
+        assert_eq!(state.busy, busy);
+        match state.popups.as_slice() {
+            [Popup::Error(popup)] => {
+                assert_eq!(popup.title, "Show it");
+                assert!(!popup.message.contains('\x1b'), "{popup:?}");
+                assert!(popup.message.starts_with("red "), "{popup:?}");
+                assert!(popup.message.ends_with("text\nline 2"), "{popup:?}");
+            }
+            other => panic!("expected the output popup, got {other:?}"),
+        }
+        // And another command may start.
+        state.popups.clear();
+        assert_eq!(ctrl_t(&mut state).len(), 1);
+    }
+
+    #[test]
+    fn a_failed_command_says_so_and_still_reloads() {
+        let mut state = hostile_file();
+        for output in [OutputMode::None, OutputMode::Popup, OutputMode::Terminal] {
+            state.popups.clear();
+            let effects = state.update(command_finished(
+                output,
+                Err("exited with exit status: 3\nno"),
+            ));
+            assert!(is_status_load(&effects), "{effects:?}");
+            match state.popups.as_slice() {
+                [Popup::Error(popup)] => {
+                    assert_eq!(popup.title, "Show it failed");
+                    assert_eq!(popup.message, "exited with exit status: 3\nno");
+                }
+                other => panic!("expected the failure popup, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_quiet_success_shows_nothing_but_reloads() {
+        let mut state = hostile_file();
+        for output in [OutputMode::None, OutputMode::Terminal] {
+            let effects = state.update(command_finished(output, Ok("")));
+            assert!(is_status_load(&effects), "{effects:?}");
+            assert!(state.popups.is_empty());
+        }
     }
 }
