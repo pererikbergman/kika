@@ -270,28 +270,62 @@ pub fn edited_patch(header: &[u8], edited: &[u8]) -> Option<Vec<u8>> {
     Some(patch)
 }
 
-/// A private file in the temp dir, deleted when dropped, whatever happened
-/// in between.
+/// How many directory names [`TempFile::create`] tries before giving up.
+const TEMP_ATTEMPTS: u32 = 16;
+
+/// A private file in a fresh directory of its own under the temp dir. The
+/// file is read back by name after the editor exits, and an editor may save
+/// by deleting and re-creating it; inside a directory only this user can
+/// write to, no other user can put a file at that name in the gap. The
+/// directory and all in it go when this is dropped, whatever happened in
+/// between, panics included.
 struct TempFile {
     path: PathBuf,
+    dir: PathBuf,
 }
 
 impl TempFile {
     /// A new file only this user can read, named `<prefix>-<pid>-<n>.<extension>`
-    /// so editors pick the right mode, and unlike any other file, open for
-    /// writing.
+    /// so editors pick the right mode, inside a new mode-0700 directory
+    /// `<prefix>-<pid>-<n>`, and unlike any other file, open for writing.
     fn create(prefix: &str, extension: &str) -> io::Result<(Self, File)> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        loop {
-            let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("{prefix}-{}-{n}.{extension}", std::process::id()));
-            match Self::open_new(&path) {
-                Ok(file) => return Ok((Self { path }, file)),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+        Self::create_with(&NEXT, prefix, extension)
+    }
+
+    /// [`Self::create`] counting `n` from `next`.
+    fn create_with(next: &AtomicU64, prefix: &str, extension: &str) -> io::Result<(Self, File)> {
+        let pid = std::process::id();
+        let mut last = io::Error::from(io::ErrorKind::AlreadyExists);
+        for _ in 0..TEMP_ATTEMPTS {
+            let name = format!("{prefix}-{pid}-{}", next.fetch_add(1, Ordering::Relaxed));
+            let dir = std::env::temp_dir().join(&name);
+            match Self::create_dir(&dir) {
+                Ok(()) => {}
+                // Never reuse an entry already there: it may be planted.
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    last = e;
+                    continue;
+                }
                 Err(e) => return Err(e),
             }
+            let path = dir.join(format!("{name}.{extension}"));
+            // Held before the file opens, so a failure there removes the
+            // directory too.
+            let temp = Self { path, dir };
+            let file = Self::open_new(&temp.path)?;
+            return Ok((temp, file));
         }
+        Err(last)
+    }
+
+    /// Not recursive, so an existing directory or symlink at `dir` fails
+    /// with `AlreadyExists` instead of being used.
+    fn create_dir(dir: &Path) -> io::Result<()> {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir)
     }
 
     fn open_new(path: &Path) -> io::Result<File> {
@@ -305,8 +339,9 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        // Already gone is fine; the editor may have replaced or removed it.
-        let _ = fs::remove_file(&self.path);
+        // Also clears swap and backup files the editor left beside the file.
+        // Symlinks inside are removed, not followed.
+        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -495,6 +530,10 @@ mod tests {
         let temp = Path::new(seen.trim_end());
         assert!(temp.starts_with(std::env::temp_dir()), "{seen}");
         assert!(!temp.exists(), "{seen} was left behind");
+        assert!(
+            !temp.parent().unwrap().exists(),
+            "{seen}: directory left behind"
+        );
     }
 
     #[cfg(unix)]
@@ -534,6 +573,10 @@ mod tests {
             "{name}"
         );
         assert!(!temp.exists(), "{seen} was left behind");
+        assert!(
+            !temp.parent().unwrap().exists(),
+            "{seen}: directory left behind"
+        );
     }
 
     #[cfg(unix)]
@@ -560,7 +603,10 @@ mod tests {
     fn the_hunk_file_is_private_while_the_editor_runs() {
         let tmp = crate::git::fake::TempDir::new("handoff-mode");
         let dir = tmp.path();
-        let editor = editor_script(dir, "ls -l \"$1\" > mode");
+        let editor = editor_script(
+            dir,
+            "ls -l \"$1\" > mode\nls -ld \"$(dirname \"$1\")\" > dir_mode\ndirname \"$1\" > parent",
+        );
         let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
         let job = HandOff::edit_hunk(b"diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n");
 
@@ -568,6 +614,15 @@ mod tests {
 
         let mode = fs::read_to_string(dir.join("mode")).unwrap();
         assert!(mode.starts_with("-rw-------"), "{mode}");
+        let dir_mode = fs::read_to_string(dir.join("dir_mode")).unwrap();
+        assert!(dir_mode.starts_with("drwx------"), "{dir_mode}");
+        let parent = fs::read_to_string(dir.join("parent")).unwrap();
+        let parent = Path::new(parent.trim_end());
+        assert_eq!(
+            parent.parent(),
+            Some(std::env::temp_dir().as_path()),
+            "{parent:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -586,7 +641,127 @@ mod tests {
             other => panic!("expected a failed edit, got {other:?}"),
         }
         let seen = fs::read_to_string(dir.join("seen")).unwrap();
-        assert!(!Path::new(seen.trim_end()).exists());
+        let temp = Path::new(seen.trim_end());
+        assert!(!temp.exists());
+        assert!(
+            !temp.parent().unwrap().exists(),
+            "{seen}: directory left behind"
+        );
+    }
+
+    /// Runs edit-hunk with a scripted editor that writes the file's path to
+    /// `seen`; returns the result and that path's directory.
+    #[cfg(unix)]
+    fn edit_hunk_with(name: &str, body: &str) -> (AppIntent, PathBuf) {
+        let tmp = crate::git::fake::TempDir::new(name);
+        let dir = tmp.path();
+        let editor = editor_script(dir, &format!("echo \"$1\" > seen\n{body}"));
+        let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
+        let job = HandOff::edit_hunk(b"diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n");
+        let intent = execute(job, &runner, dir);
+        let seen = fs::read_to_string(dir.join("seen")).unwrap();
+        let parent = Path::new(seen.trim_end()).parent().unwrap().to_path_buf();
+        (intent, parent)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cancelled_edit_is_none_and_removes_the_directory() {
+        let (intent, parent) = edit_hunk_with("handoff-cancel", ": > \"$1\"");
+        assert_eq!(intent, AppIntent::HunkEdited { result: Ok(None) });
+        assert!(!parent.exists(), "{parent:?} was left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_the_editor_leaves_beside_the_hunk_are_removed_too() {
+        let (_, parent) = edit_hunk_with(
+            "handoff-swap",
+            "touch \"$1.swp\" \"$1~\"\nmkdir \"$(dirname \"$1\")/backup\"",
+        );
+        assert!(!parent.exists(), "{parent:?} was left behind");
+    }
+
+    #[test]
+    fn a_panic_while_the_file_is_alive_still_removes_the_directory() {
+        let (temp, _file) = TempFile::create("kika-test-panic", "txt").unwrap();
+        let dir = temp.dir.clone();
+        assert!(dir.is_dir());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _temp = temp;
+            panic!("editor hand-off blew up");
+        }));
+        assert!(result.is_err());
+        assert!(!dir.exists(), "{dir:?} was left behind");
+    }
+
+    #[test]
+    fn the_file_sits_alone_in_a_new_directory_under_the_temp_dir() {
+        let (temp, _file) = TempFile::create("kika-test-layout", "diff").unwrap();
+        assert_eq!(temp.path.parent(), Some(temp.dir.as_path()));
+        assert_eq!(temp.dir.parent(), Some(std::env::temp_dir().as_path()));
+        let name = temp
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let dir_name = temp.dir.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name, format!("{dir_name}.diff"));
+        assert!(name.starts_with("kika-test-layout-"), "{name}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_already_at_the_directory_name_is_skipped_and_left_alone() {
+        let tmp = crate::git::fake::TempDir::new("handoff-planted");
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("planted"), "x").unwrap();
+        let prefix = "kika-test-planted";
+        let pid = std::process::id();
+        let planted = std::env::temp_dir().join(format!("{prefix}-{pid}-0"));
+        let _ = fs::remove_file(&planted);
+        std::os::unix::fs::symlink(&target, &planted).unwrap();
+        // A counter of its own, so other tests cannot move `n` on.
+        let next = AtomicU64::new(0);
+
+        let created = TempFile::create_with(&next, prefix, "diff");
+
+        let link = fs::read_link(&planted);
+        let _ = fs::remove_file(&planted);
+        let (temp, _file) = created.unwrap();
+        assert_eq!(
+            temp.dir,
+            std::env::temp_dir().join(format!("{prefix}-{pid}-1"))
+        );
+        assert_eq!(link.unwrap(), target);
+        let entries: Vec<_> = fs::read_dir(&target)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from("planted")]);
+    }
+
+    #[test]
+    fn creating_gives_up_after_a_bounded_number_of_taken_names() {
+        let prefix = "kika-test-exhausted";
+        let pid = std::process::id();
+        let taken: Vec<PathBuf> = (0..TEMP_ATTEMPTS)
+            .map(|n| std::env::temp_dir().join(format!("{prefix}-{pid}-{n}")))
+            .collect();
+        for dir in &taken {
+            let _ = fs::create_dir(dir);
+        }
+        let next = AtomicU64::new(0);
+
+        let created = TempFile::create_with(&next, prefix, "diff");
+
+        for dir in &taken {
+            let _ = fs::remove_dir(dir);
+        }
+        let error = created.err().expect("every name was taken");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     }
 
     #[cfg(unix)]
