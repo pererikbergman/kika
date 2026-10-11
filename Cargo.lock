@@ -1269,6 +1269,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "git2",
+ "libc",
  "ratatui",
  "reqwest",
  "serde",
