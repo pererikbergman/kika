@@ -20,6 +20,7 @@ use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
 use crate::git::rebase_plan::Edit;
+use crate::git::recording::CommandEvent;
 use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
@@ -285,6 +286,15 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<(), String>,
     },
+    /// A git command started or ended; the runner reports every one.
+    CommandLogged(CommandEvent),
+    /// Show the git commands Kika ran this session.
+    OpenCommandLog,
+    /// Move the Command log cursor a row or a page down or up.
+    CommandLogNext,
+    CommandLogPrev,
+    CommandLogPageDown,
+    CommandLogPageUp,
     /// Blame the selected file: who last changed each line, and when.
     OpenBlame,
     /// A blame load finished; `tag` says which one.

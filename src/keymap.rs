@@ -269,6 +269,8 @@ pub enum KeyScope {
     Reflog,
     /// "Undo this?" or "Redo this?" on top of the popup stack.
     Travel,
+    /// The git commands Kika ran, on top of the popup stack.
+    CommandLog,
 }
 
 impl KeyScope {
@@ -312,7 +314,8 @@ impl KeyScope {
             | KeyScope::RemoveWorktree
             | KeyScope::Recent
             | KeyScope::Credential
-            | KeyScope::Travel => None,
+            | KeyScope::Travel
+            | KeyScope::CommandLog => None,
         }
     }
 
@@ -356,6 +359,7 @@ impl KeyScope {
             KeyScope::Credential => "Git is asking",
             KeyScope::Reflog => "Reflog",
             KeyScope::Travel => "Undo or redo",
+            KeyScope::CommandLog => "Command log",
         }
     }
 
@@ -500,6 +504,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.yes",
     "travel.no",
     "travel.quit",
+    "command_log.quit",
     "commits.paste",
 ];
 
@@ -2059,6 +2064,19 @@ static REGISTRY: &[Binding] = &[
         label: "worktrees",
         bar: false,
         disabled: worktrees_disabled,
+    },
+    // `@` arrives as itself whatever it takes to type it: Shift on most
+    // layouts, AltGr (reported as Ctrl+Alt on Windows) or Option on
+    // others, so it matches with any modifiers.
+    Binding {
+        id: "workspace.command_log",
+        keys: &[KeyPattern::any(KeyCode::Char('@'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::OpenCommandLog,
+        description: "Show the git commands Kika ran",
+        label: "command log",
+        bar: false,
+        disabled: never,
     },
     Binding {
         id: "workspace.recent",
@@ -3623,6 +3641,75 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    Binding {
+        id: "command_log.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::CommandLogNext,
+        description: "Select the next command",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::CommandLogPrev,
+        description: "Select the previous command",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::CommandLogPageDown,
+        description: "Move a page down",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::CommandLogPageUp,
+        description: "Move a page up",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.close",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('q'), NONE),
+        ],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::PopPopup,
+        description: "Close the log",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound: the worktree's directory goes with it.
     Binding {
         id: "remove_worktree.yes",
@@ -4434,6 +4521,117 @@ mod tests {
         ] {
             assert_eq!(run(k), None, "{k:?}");
         }
+    }
+
+    /// `@` is shifted on most layouts and AltGr (Ctrl+Alt on Windows) or
+    /// Option on others; crossterm reports the character itself with
+    /// whatever modifiers made it, so each of those must open the log.
+    #[test]
+    fn at_opens_the_command_log_however_it_is_typed_and_clashes_with_nothing() {
+        use AppIntent::*;
+
+        let at = KeyCode::Char('@');
+        let binding = registry()
+            .iter()
+            .find(|b| b.id == "workspace.command_log")
+            .unwrap();
+        assert_eq!(binding.scope, KeyScope::Workspace);
+        assert_eq!(binding.intent, OpenCommandLog);
+        assert_eq!(binding.keys, [KeyPattern::any(at)]);
+        assert_eq!(parse_key("@"), Ok(KeyPattern::any(at)));
+
+        // Nothing in the workspace, its panels or the global scope takes it.
+        for other in registry() {
+            let reaches_workspace = other.scope.chain().any(|s| s == KeyScope::Workspace)
+                || other.scope == KeyScope::Global;
+            if other.id == binding.id || !reaches_workspace {
+                continue;
+            }
+            for key in other.keys {
+                assert!(!key.overlaps(&KeyPattern::any(at)), "{} takes @", other.id);
+            }
+        }
+
+        let workspace = AppState::new(Context::Workspace);
+        let alt_gr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        let mods = [
+            KeyModifiers::NONE,
+            KeyModifiers::SHIFT,
+            alt_gr,
+            KeyModifiers::ALT,
+        ];
+        for scope in [
+            KeyScope::Files,
+            KeyScope::Branches,
+            KeyScope::Remotes,
+            KeyScope::Tags,
+            KeyScope::Commits,
+            KeyScope::CommitFiles,
+            KeyScope::Reflog,
+            KeyScope::Status,
+            KeyScope::Diff,
+            KeyScope::Lines,
+            KeyScope::Blame,
+            KeyScope::BlameCommit,
+            KeyScope::Conflict,
+            KeyScope::Workspace,
+        ] {
+            for mods in mods {
+                let found = resolve(
+                    registry(),
+                    &Keymap::default(),
+                    scope,
+                    &workspace,
+                    key(at, mods),
+                );
+                assert!(
+                    matches!(found, Resolution::Run(b) if b.intent == OpenCommandLog),
+                    "{scope:?} {mods:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_log_has_its_own_keys_and_never_reaches_global_ones() {
+        use AppIntent::*;
+
+        assert_eq!(KeyScope::CommandLog.parent(), None);
+        assert_eq!(KeyScope::CommandLog.title(), "Command log");
+        let state = AppState::new(Context::Workspace);
+        let none = KeyModifiers::NONE;
+        let run = |k| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::CommandLog,
+            &state,
+            k,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
+            Resolution::Unbound | Resolution::Command(_) => None,
+        };
+        assert_eq!(run(plain('j')), Some(CommandLogNext));
+        assert_eq!(run(key(KeyCode::Down, none)), Some(CommandLogNext));
+        assert_eq!(run(plain('k')), Some(CommandLogPrev));
+        assert_eq!(run(key(KeyCode::Up, none)), Some(CommandLogPrev));
+        assert_eq!(run(key(KeyCode::PageDown, none)), Some(CommandLogPageDown));
+        assert_eq!(run(key(KeyCode::PageUp, none)), Some(CommandLogPageUp));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(plain('q')), Some(PopPopup));
+        assert_eq!(
+            run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Quit)
+        );
+        for k in [
+            plain('?'),
+            plain('@'),
+            plain('r'),
+            key(KeyCode::Enter, none),
+        ] {
+            assert_eq!(run(k), None, "{k:?}");
+        }
+        assert!(REPO_LOCKED.contains(&"command_log.quit"));
     }
 
     #[test]
@@ -5909,6 +6107,7 @@ mod tests {
             KeyScope::Credential => "credential",
             KeyScope::Reflog => "reflog",
             KeyScope::Travel => "travel",
+            KeyScope::CommandLog => "command_log",
         }
     }
 
