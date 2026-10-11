@@ -18,9 +18,11 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! [forge]
+//! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! ```
 //!
-//! `[watch]` and `[diff]` are read from the global file only, at startup.
+//! `[watch]`, `[diff]` and `[forge]` are read from the global file only, at startup.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -43,6 +45,7 @@ use serde::Deserialize;
 
 use crate::custom_command::CommandTable;
 use crate::external_diff::parse_command;
+use crate::forge::ForgeHost;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
 
@@ -106,6 +109,8 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
+    /// The global `[forge] github` hosts; empty keeps the forge off.
+    pub forge_hosts: Vec<ForgeHost>,
     pub errors: Vec<ConfigError>,
 }
 
@@ -115,6 +120,7 @@ struct GlobalSettings {
     keymap: Keymap,
     watch: WatchConfig,
     diff_pager: Option<String>,
+    forge_hosts: Vec<ForgeHost>,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -130,6 +136,18 @@ struct GlobalFile {
     diff: DiffTable,
     #[serde(default)]
     commands: Vec<CommandTable>,
+    #[serde(default)]
+    forge: ForgeTable,
+}
+
+/// The hosts Kika may ask about pull requests, by forge. Only here, in
+/// the user's own file: a cloned repository can never make Kika contact
+/// a host.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgeTable {
+    #[serde(default)]
+    github: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,9 +164,10 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]` or `[diff]` table, or
-/// `[[commands]]`, here is an unknown field, so a cloned repository can
-/// neither turn on fetching nor name or run a program.
+/// A repository's file: keys only. A `[watch]`, `[diff]` or `[forge]`
+/// table, or `[[commands]]`, here is an unknown field, so a cloned
+/// repository can neither turn on fetching, name or run a program, nor
+/// make Kika contact a forge.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -163,6 +182,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
         diff_pager: None,
+        forge_hosts: Vec::new(),
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
@@ -171,6 +191,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     if let Some(global) = global {
         (loaded.keymap, loaded.watch, loaded.diff_pager) =
             (global.keymap, global.watch, global.diff_pager);
+        loaded.forge_hosts = global.forge_hosts;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -267,10 +288,17 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(pager) = &file.diff.pager {
         parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
     }
+    let forge_hosts = file
+        .forge
+        .github
+        .iter()
+        .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.github: {e}")))
+        .collect::<Result<_, _>>()?;
     Ok(GlobalSettings {
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        forge_hosts,
     })
 }
 
@@ -487,6 +515,7 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                forge_hosts: vec![],
                 errors: vec![],
             }
         );
@@ -746,6 +775,66 @@ output = "none"
         );
         let typo = pager("[diff]\npagerr = \"delta\"\n").unwrap_err();
         assert!(typo.contains("unknown field `pagerr`"), "{typo}");
+    }
+
+    #[test]
+    fn the_global_file_names_the_forge_hosts_and_a_bad_one_drops_the_file() {
+        let hosts = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.forge_hosts)
+        };
+        assert_eq!(
+            hosts("[forge]\ngithub = [\"github.com\"]\n"),
+            Ok(vec![ForgeHost::parse("github.com").unwrap()])
+        );
+        assert_eq!(hosts(""), Ok(vec![]));
+        assert_eq!(hosts("[forge]\ngithub = []\n"), Ok(vec![]));
+        for bad in [
+            "GitHub.com",
+            "github.com:443",
+            "user@github.com",
+            "https://github.com",
+            "*.github.com",
+            "github.com.",
+            "gіthub.com",
+        ] {
+            let err =
+                hosts(&format!("[forge]\ngithub = [\"github.com\", \"{bad}\"]\n")).unwrap_err();
+            assert!(err.starts_with("forge.github: "), "{bad}: {err}");
+        }
+        let typo = hosts("[forge]\ngitlab = [\"gitlab.com\"]\n").unwrap_err();
+        assert!(typo.contains("unknown field `gitlab`"), "{typo}");
+
+        let files = Files::new("forge-bad");
+        files.global("[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"GitHub.com\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn only_the_global_file_turns_the_forge_on() {
+        let refused = repo("[forge]\ngithub = [\"github.com\"]\n").unwrap_err();
+        assert!(refused.contains("unknown field `forge`"), "{refused}");
+
+        let files = Files::new("forge");
+        files.repo("[forge]\ngithub = [\"github.com\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.errors.len(), 1);
+
+        files
+            .global("[forge]\ngithub = [\"github.com\", \"github.example.com\"]\n")
+            .repo("");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(
+            loaded.forge_hosts,
+            [
+                ForgeHost::parse("github.com").unwrap(),
+                ForgeHost::parse("github.example.com").unwrap()
+            ]
+        );
     }
 
     #[test]

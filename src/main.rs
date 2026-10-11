@@ -26,6 +26,7 @@ mod diff_stream;
 mod e2e;
 mod effect;
 mod external_diff;
+mod forge;
 mod git;
 mod handoff;
 mod hunk_view;
@@ -115,7 +116,9 @@ fn main() -> color_eyre::Result<ExitCode> {
     let recording = RecordingRunner::new(Arc::new(cli_runner), sink.clone());
     // Another process holding a lock for a moment is not worth an error.
     let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
-    let state = AppState::new(cli.context()).with_location(repo, launch);
+    let state = AppState::new(cli.context())
+        .with_location(repo, launch)
+        .with_forge_hosts(config.forge_hosts.clone());
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 

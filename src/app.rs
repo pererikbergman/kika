@@ -15,6 +15,9 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
+use crate::forge;
+use crate::forge::github::CliGh;
+use crate::forge::task::ForgeContext;
 use crate::git::GitRunner;
 use crate::git::recording::CommandSink;
 use crate::handoff::{self, HandOff};
@@ -41,10 +44,17 @@ pub async fn run(
     sink.connect(move |event| {
         let _ = log_tx.send(AppIntent::CommandLogged(event));
     });
+    // Only when the user named hosts; otherwise `gh` is never run.
+    let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
+        gh: Arc::new(CliGh),
+        sink: sink.clone(),
+        cache_dir: forge::cache::default_dir(|key| std::env::var_os(key)),
+    });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
         .with_global_config(global_config)
-        .with_diff_pager(config.diff_pager.clone());
+        .with_diff_pager(config.diff_pager.clone())
+        .with_forge(forge);
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);

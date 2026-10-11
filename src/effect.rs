@@ -13,6 +13,9 @@ use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
+use crate::forge::ForgeHost;
+use crate::forge::ForgeStatus;
+use crate::forge::task::{ForgeContext, Load, run_load};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
@@ -259,6 +262,16 @@ pub enum Effect {
     /// Hand the answer to the question the running remote operation
     /// asked; `None` cancels it. Does nothing when no question waits.
     AnswerCredential(Option<Secret>),
+    /// Find the forge repository of the remote and send its cached badges,
+    /// then, with `refresh`, ask the forge for `branches`. Answered by
+    /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
+    /// `PullRequestsFetched`. With no `hosts` it only answers `ForgeRepoNone`.
+    LoadPullRequests {
+        tag: Tag,
+        hosts: Vec<ForgeHost>,
+        branches: Vec<BranchName>,
+        refresh: bool,
+    },
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -289,6 +302,8 @@ pub struct Runtime {
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
     credential: AnswerSlot,
+    /// How to reach a forge; `None` keeps every forge load local and empty.
+    forge: Option<ForgeContext>,
 }
 
 impl Runtime {
@@ -302,7 +317,13 @@ impl Runtime {
             diff_pager: None,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
+            forge: None,
         }
+    }
+
+    /// The forge client, used only for hosts the global config names.
+    pub fn with_forge(self, forge: Option<ForgeContext>) -> Self {
+        Self { forge, ..self }
     }
 
     /// The renderer the global config names, offered first by `FindRenderers`.
@@ -796,6 +817,43 @@ impl Runtime {
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
+            Effect::LoadPullRequests {
+                tag,
+                hosts,
+                branches,
+                refresh,
+            } => match self.forge.clone().filter(|_| !hosts.is_empty()) {
+                // Off: nothing is read, run or written.
+                None => {
+                    let _ = tx.send(AppIntent::ForgeRepoNone { tag });
+                }
+                Some(forge) => {
+                    tokio::spawn(async move {
+                        let send = tx.clone();
+                        let done = tokio::task::spawn_blocking(move || {
+                            let load = Load {
+                                tag,
+                                hosts: &hosts,
+                                branches: &branches,
+                                refresh,
+                                top: std::fs::canonicalize(runner.workdir()).ok(),
+                                now: unix_now(),
+                            };
+                            run_load(runner.as_ref(), &forge, &load, &|intent| {
+                                let _ = send.send(intent);
+                            });
+                        })
+                        .await;
+                        // A panic still ends the call, or no refresh would run again.
+                        if done.is_err() && refresh {
+                            let _ = tx.send(AppIntent::PullRequestsFetched {
+                                tag,
+                                result: Err(ForgeStatus::Failed),
+                            });
+                        }
+                    });
+                }
+            },
         }
     }
 
@@ -905,6 +963,130 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    fn forge_tag() -> Tag {
+        Tag {
+            generation: 0,
+            seq: 11,
+            user: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_load_with_no_hosts_runs_nothing_and_writes_nothing() {
+        use crate::forge::github::FakeGh;
+        use crate::git::recording::CommandSink;
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-off");
+        let cache_dir = tmp.path().join("forge");
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: Some(cache_dir.clone()),
+        }));
+        let load = |hosts| Effect::LoadPullRequests {
+            tag: forge_tag(),
+            hosts,
+            branches: vec!["main".into()],
+            refresh: true,
+        };
+        runtime.spawn(load(vec![]));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+        );
+        // Without a forge client, even named hosts reach nobody.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bare = Runtime::new(git.clone(), tx);
+        bare.spawn(load(vec![ForgeHost::parse("github.com").unwrap()]));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
+        assert!(!cache_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
+        use crate::forge::github::fixtures::STATES;
+        use crate::forge::github::{FakeGh, answer};
+        use crate::git::recording::{CommandEvent, CommandSink, RecordingRunner};
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-log");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = CommandSink::new();
+        let keep = Arc::clone(&events);
+        sink.connect(move |ev| keep.lock().unwrap().push(ev));
+        let fake = Arc::new(
+            FakeRunner::new()
+                .expect(&["remote"], ok(b"origin\n"))
+                .expect(
+                    &["config", "-z", "--get", "remote.origin.url"],
+                    ok(b"git@github.com:acme/widgets.git\0"),
+                ),
+        );
+        let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
+        let gh = Arc::new(FakeGh::new().reply(answer(STATES)).reply(answer(STATES)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git, tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink,
+            cache_dir: Some(tmp.path().join("forge")),
+        }));
+        let branches: Vec<BranchName> = (0..60).map(|i| format!("b{i}").as_str().into()).collect();
+        runtime.spawn(Effect::LoadPullRequests {
+            tag: forge_tag(),
+            hosts: vec![ForgeHost::parse("github.com").unwrap()],
+            branches,
+            refresh: true,
+        });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestsCached { badges: None, .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestsFetched { result: Ok(_), .. })
+        ));
+        fake.assert_done();
+        assert_eq!(gh.calls().len(), 2);
+
+        let events = events.lock().unwrap();
+        let started: Vec<(u64, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                CommandEvent::Started { id, line, .. } => Some((*id, line.as_str())),
+                _ => None,
+            })
+            .collect();
+        let gh_line = "gh api graphql --hostname github.com --input -";
+        let lines: Vec<&str> = started.iter().map(|(_, line)| *line).collect();
+        assert_eq!(
+            lines,
+            [
+                "git remote",
+                "git config -z --get remote.origin.url",
+                gh_line,
+                gh_line
+            ]
+        );
+        let mut ids: Vec<u64> = started.iter().map(|(id, _)| *id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "{events:?}");
+        // One finish per start, with the same id.
+        for (id, _) in &started {
+            let finished = events
+                .iter()
+                .filter(|e| matches!(e, CommandEvent::Finished { id: f, .. } if f == id))
+                .count();
+            assert_eq!(finished, 1, "{id}");
+        }
+    }
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, fail, ok};

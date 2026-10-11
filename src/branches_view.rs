@@ -7,6 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::remotes_view;
 use crate::tags_view;
@@ -22,6 +23,7 @@ const LOG_AUTHOR: usize = 16;
 /// for, and the frame to draw in place of its marker.
 pub fn render_panel(
     panel: &BranchesPanel,
+    forge: &ForgeState,
     look: &PanelLook,
     expanded: bool,
     spinner: Option<(&BranchName, &str)>,
@@ -32,7 +34,7 @@ pub fn render_panel(
         let frame = spinner
             .filter(|(name, _)| **name == branch.name)
             .map(|(_, frame)| frame);
-        branch_row(branch, frame, width)
+        branch_row(branch, frame, forge.badges.get(&branch.name), width)
     };
     let current = panel.current();
     let title = match current {
@@ -42,7 +44,10 @@ pub fn render_panel(
         _ if expanded => look.title(&tabs_title(panel.tab, look)),
         _ => look.title("Branches"),
     };
-    let block = look.block(title);
+    let mut block = look.block(title);
+    if let Some(line) = forge_line(forge) {
+        block = block.title_bottom(Line::from(line));
+    }
     let inner = block.inner(area);
     let width = usize::from(inner.width);
     let body = if expanded && panel.tab == BranchesTab::Remotes {
@@ -120,11 +125,17 @@ fn tabs_title(shown: BranchesTab, look: &PanelLook) -> String {
         .unwrap_or_else(|| short(1))
 }
 
-/// `* name  upstream ↑1 ↓2`: `*` marks the current branch, counts of zero
-/// are left out, and a deleted upstream says `gone`. The name loses its
-/// start first, so the upstream and counts stay in sight. A `spinner`
+/// `* name  upstream ↑1 ↓2  #12 open ✓`: `*` marks the current branch,
+/// counts of zero are left out, a deleted upstream says `gone`, and the
+/// branch's pull request ends the row. The name loses its start first,
+/// so the upstream, counts and pull request stay in sight. A `spinner`
 /// frame takes the marker's place.
-fn branch_row(branch: &Branch, spinner: Option<&str>, width: usize) -> String {
+fn branch_row(
+    branch: &Branch,
+    spinner: Option<&str>,
+    badge: Option<&PrBadge>,
+    width: usize,
+) -> String {
     let marker = match spinner {
         Some(frame) => format!("{frame} "),
         None if branch.head => "* ".to_string(),
@@ -144,12 +155,59 @@ fn branch_row(branch: &Branch, spinner: Option<&str>, width: usize) -> String {
             counts
         }
     };
-    let upstream = match &branch.upstream {
+    let mut suffix = match &branch.upstream {
         Some(upstream) => format!("  {upstream}{track}"),
         None => String::new(),
     };
-    let name = fit(&branch.name.display(), &upstream, width.saturating_sub(2));
+    if let Some(badge) = badge {
+        suffix.push_str("  ");
+        suffix.push_str(&badge_text(badge));
+    }
+    let name = fit(&branch.name.display(), &suffix, width.saturating_sub(2));
     elide_right(&format!("{marker}{name}"), width)
+}
+
+/// `#12 open ✓`: the number, the state, and a mark for the checks when
+/// there are any: ✓ passed, ✗ failed, ● running.
+fn badge_text(badge: &PrBadge) -> String {
+    let state = match badge.state {
+        PrState::Open => "open",
+        PrState::Draft => "draft",
+        PrState::Merged => "merged",
+        PrState::Closed => "closed",
+    };
+    let ci = match badge.ci {
+        Some(CiState::Success) => " ✓",
+        Some(CiState::Failure) => " ✗",
+        Some(CiState::Pending) => " ●",
+        None => "",
+    };
+    format!("#{} {state}{ci}", badge.number)
+}
+
+/// The panel's bottom line about the forge, or none: when it is off, the
+/// repository is not on a configured host, or all is well. Fixed words
+/// and the configured host only; nothing the forge or `gh` said.
+fn forge_line(forge: &ForgeState) -> Option<String> {
+    let repo = forge.repo.as_ref()?;
+    let problem = match forge.status {
+        ForgeView::Off | ForgeView::Cached | ForgeView::Fresh => return None,
+        ForgeView::Updating => return Some("GitHub: updating…".into()),
+        ForgeView::Problem(problem) => problem,
+    };
+    Some(match problem {
+        ForgeStatus::NotLoggedIn => format!(
+            "GitHub: not logged in · run gh auth login --hostname {}",
+            repo.host.to_ascii_lowercase()
+        ),
+        ForgeStatus::NoGh => {
+            "GitHub: gh not found · install the GitHub CLI to see pull requests".into()
+        }
+        ForgeStatus::Offline if forge.badges.is_empty() => "GitHub: offline".into(),
+        ForgeStatus::Offline => "GitHub: offline · cached".into(),
+        ForgeStatus::NoAccess => "GitHub: repository not found or no access".into(),
+        ForgeStatus::Failed => "GitHub: could not load pull requests".into(),
+    })
 }
 
 /// The selected branch's newest commits, one per row, scrolled by the
@@ -208,7 +266,7 @@ fn log_row(row: &LogRow) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -245,6 +303,131 @@ mod tests {
         state.expanded = SidePanel::Branches;
         state.branches.loaded(Ok(branches));
         state
+    }
+
+    /// The Branches panel drawn on its own, focused, for checks that only
+    /// care what it shows.
+    pub(crate) fn draw_branches(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        let mut state = state.clone();
+        state.files_loaded = true;
+        state.focus = Focus::Branches;
+        state.expanded = SidePanel::Branches;
+        draw(&state, width, height)
+    }
+
+    fn pr(number: u64, state: PrState, ci: Option<CiState>) -> PrBadge {
+        PrBadge { number, state, ci }
+    }
+
+    /// A focused panel of `rows`, each branch with its pull request, on a
+    /// repository that matched github.com.
+    fn with_badges(rows: &[(&str, Option<PrBadge>)]) -> AppState {
+        let mut state = focused(
+            rows.iter()
+                .map(|(name, _)| branch(name, false, None, Track::None))
+                .collect(),
+        );
+        state.forge.repo = Some(crate::forge::ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        });
+        state.forge.status = ForgeView::Fresh;
+        for (name, badge) in rows {
+            if let Some(badge) = badge {
+                state.forge.badges.insert((*name).into(), *badge);
+            }
+        }
+        state
+    }
+
+    #[test]
+    fn each_badge_form_is_drawn_after_the_track_counts() {
+        let mut state = with_badges(&[
+            ("ok", Some(pr(123, PrState::Open, Some(CiState::Success)))),
+            ("wip", Some(pr(7, PrState::Draft, Some(CiState::Pending)))),
+            ("done", Some(pr(9, PrState::Merged, None))),
+            ("nope", Some(pr(4, PrState::Closed, Some(CiState::Failure)))),
+            ("bare", None),
+        ]);
+        state.branches.branches[0].upstream = Some("origin/ok".into());
+        state.branches.branches[0].track = Track::Counts {
+            ahead: 1,
+            behind: 0,
+        };
+        let rows = draw(&state, 160, 24);
+        assert!(
+            contains(&rows, "  ok  origin/ok ↑1  #123 open ✓"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "  wip  #7 draft ●"), "{rows:#?}");
+        assert!(contains(&rows, "  done  #9 merged "), "{rows:#?}");
+        assert!(contains(&rows, "  nope  #4 closed ✗"), "{rows:#?}");
+        assert!(contains(&rows, "  bare "), "{rows:#?}");
+        assert!(!contains(&rows, "bare  #"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_narrow_row_cuts_the_name_not_the_badge() {
+        let long = "feature/".repeat(10);
+        let row = branch_row(
+            &branch(&long, false, Some("origin/x"), Track::None),
+            None,
+            Some(&pr(42, PrState::Open, Some(CiState::Failure))),
+            34,
+        );
+        assert!(row.ends_with("origin/x  #42 open ✗"), "{row:?}");
+        assert!(row.starts_with("  …"), "{row:?}");
+        assert_eq!(crate::view::width_of(&row), 34);
+    }
+
+    #[test]
+    fn each_forge_status_draws_its_exact_line() {
+        let mut state = with_badges(&[("main", Some(pr(1, PrState::Open, None)))]);
+        let line = |state: &AppState| {
+            let rows = draw(state, 240, 24);
+            rows.iter()
+                .find_map(|row| row.find("GitHub:").map(|at| row[at..].to_string()))
+                .map(|text| {
+                    text.trim_end_matches(['─', '┘', '╯', ' ', '│', '┛', '━'])
+                        .to_string()
+                })
+        };
+        assert_eq!(line(&state), None, "Fresh says nothing");
+        state.forge.status = ForgeView::Cached;
+        assert_eq!(line(&state), None);
+        state.forge.status = ForgeView::Updating;
+        assert_eq!(line(&state).as_deref(), Some("GitHub: updating…"));
+        let cases = [
+            (
+                ForgeStatus::NotLoggedIn,
+                "GitHub: not logged in · run gh auth login --hostname github.com",
+            ),
+            (
+                ForgeStatus::NoGh,
+                "GitHub: gh not found · install the GitHub CLI to see pull requests",
+            ),
+            (ForgeStatus::Offline, "GitHub: offline · cached"),
+            (
+                ForgeStatus::NoAccess,
+                "GitHub: repository not found or no access",
+            ),
+            (ForgeStatus::Failed, "GitHub: could not load pull requests"),
+        ];
+        for (problem, want) in cases {
+            state.forge.status = ForgeView::Problem(problem);
+            assert_eq!(line(&state).as_deref(), Some(want), "{problem:?}");
+        }
+        state.forge.badges.clear();
+        state.forge.status = ForgeView::Problem(ForgeStatus::Offline);
+        assert_eq!(line(&state).as_deref(), Some("GitHub: offline"));
+
+        // Off, or a repository on no configured host: nothing at all.
+        state.forge.status = ForgeView::Off;
+        assert_eq!(line(&state), None);
+        state.forge.status = ForgeView::Problem(ForgeStatus::Failed);
+        state.forge.repo = None;
+        assert_eq!(line(&state), None);
     }
 
     #[test]
@@ -292,6 +475,7 @@ mod tests {
                     behind: 0,
                 },
             ),
+            None,
             None,
             30,
         );

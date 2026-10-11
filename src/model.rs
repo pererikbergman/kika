@@ -17,6 +17,7 @@ use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
+use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
 use crate::git::bisect::{BisectMark, BisectState};
@@ -281,6 +282,8 @@ pub struct AppState {
     /// A notice whose words are made at run time, such as a count. Shown
     /// and cleared like `notice`, which wins when both are set.
     pub notice_text: Option<String>,
+    /// Pull requests per branch; off unless the global config names hosts.
+    pub forge: ForgeState,
 }
 
 impl AppState {
@@ -333,6 +336,15 @@ impl AppState {
             command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
             notice_text: None,
+            forge: ForgeState::default(),
+        }
+    }
+
+    /// The forge hosts the global config lets Kika contact; none is off.
+    pub fn with_forge_hosts(self, hosts: Vec<ForgeHost>) -> Self {
+        Self {
+            forge: ForgeState::new(hosts),
+            ..self
         }
     }
 
@@ -799,6 +811,19 @@ impl AppState {
                 return self.repo_initialised(tag, result);
             }
             AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
+            AppIntent::ForgeRepoNone { tag } => {
+                if tag.generation == self.generation {
+                    self.forge.repo_none(tag);
+                }
+            }
+            AppIntent::PullRequestsCached { tag, repo, badges } => {
+                if tag.generation == self.generation {
+                    self.forge.cached(tag, repo, badges);
+                }
+            }
+            AppIntent::PullRequestsFetched { tag, result } => {
+                return self.pull_requests_fetched(tag, result);
+            }
             AppIntent::BranchLogLoaded {
                 tag,
                 refname,
@@ -3238,6 +3263,7 @@ impl AppState {
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
+        self.forge.reset();
     }
 
     fn refresh_status(&mut self) -> Vec<Effect> {
@@ -3590,12 +3616,20 @@ impl AppState {
             return vec![];
         }
         self.branches.list_seq = None;
+        if let Ok(branches) = &result {
+            self.forge.set_branches(branches.iter().map(|b| &b.name));
+        }
+        let listed = result.is_ok();
         self.branches.loaded(result);
-        if self.branches.tab == BranchesTab::Local {
+        let mut effects = if self.branches.tab == BranchesTab::Local {
             self.load_branch_log(tag.user)
         } else {
             vec![]
+        };
+        if listed {
+            effects.extend(self.load_pull_requests());
         }
+        effects
     }
 
     /// Show the remotes, and on their tab load the selected branch's log
@@ -4443,6 +4477,10 @@ impl AppState {
             return vec![];
         }
         let reload = result.is_ok() || op == RemoteOp::Pull;
+        if result.is_ok() {
+            // The forge may know of new pull requests, or new checks.
+            self.forge.want_refresh();
+        }
         match result {
             Ok(()) => {}
             Err(RemoteFailure::Rejected(_)) => {

@@ -9,7 +9,7 @@ use super::runner::{GitCommand, GitOutput, GitRunner};
 
 /// A branch's short name as the raw bytes of its ref, so a name that is
 /// not UTF-8 reaches argv unchanged. Equality is on the bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BranchName(pub Vec<u8>);
 
 /// How a branch stands against its upstream.
