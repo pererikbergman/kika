@@ -1,3 +1,4 @@
+use super::commit_files::{CommitFile, CommitRange};
 use super::joiner;
 use super::patch::{self, FilePatch};
 use super::path::RepoPath;
@@ -50,13 +51,17 @@ impl DiffOptions {
     }
 }
 
-/// One diff to load. Built from a status entry so the model never spells argv.
+/// One diff to load. Built from a status entry or a commit's file so the
+/// model never spells argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffRequest {
     pub path: RepoPath,
     pub orig_path: Option<RepoPath>,
+    /// Ignored when `commit` is set: a commit's diff has no sides.
     pub side: DiffSide,
     pub options: DiffOptions,
+    /// The file's change in this commit, instead of in the working tree.
+    pub commit: Option<CommitRange>,
 }
 
 impl DiffRequest {
@@ -75,6 +80,18 @@ impl DiffRequest {
             orig_path: entry.orig_path.clone(),
             side,
             options,
+            commit: None,
+        }
+    }
+
+    /// `file`'s change in the commit `range` names, against its first parent.
+    pub fn for_commit_file(range: &CommitRange, file: &CommitFile, options: DiffOptions) -> Self {
+        Self {
+            path: file.path.clone(),
+            orig_path: file.orig_path.clone(),
+            side: DiffSide::Index,
+            options,
+            commit: Some(range.clone()),
         }
     }
 }
@@ -82,6 +99,9 @@ impl DiffRequest {
 /// The `git diff` for a request. Colour and external diff drivers are off so
 /// the output is plain text we classify ourselves.
 pub fn diff_command(request: &DiffRequest) -> GitCommand {
+    if let Some(range) = &request.commit {
+        return commit_diff_command(range, request);
+    }
     let mut cmd = GitCommand::new("diff")
         .arg("--no-color")
         .arg("--no-ext-diff");
@@ -108,6 +128,31 @@ pub fn diff_command(request: &DiffRequest) -> GitCommand {
     // File names come from the repo, so a hostile `:(top)x` or `x*` must not
     // be read as pathspec magic or a glob. A no-op under `--no-index`.
     cmd.env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+}
+
+/// One file's change in a commit, against its first parent or, for a root
+/// commit, the empty tree. A rename names both paths, so `-M` can pair them.
+fn commit_diff_command(range: &CommitRange, request: &DiffRequest) -> GitCommand {
+    let cmd = GitCommand::new("diff-tree")
+        .arg("-p")
+        .arg("-r")
+        .arg("-M")
+        .arg("--no-commit-id")
+        .arg("--no-color")
+        .arg("--no-ext-diff");
+    let cmd = request.options.args().fold(cmd, |cmd, arg| cmd.arg(arg));
+    let cmd = range
+        .args()
+        .fold(cmd.arg("--root"), |cmd, arg| cmd.arg(arg))
+        .arg("--");
+    let cmd = match &request.orig_path {
+        Some(orig) => cmd.arg(orig.as_os_str()),
+        None => cmd,
+    };
+    cmd.arg(request.path.as_os_str())
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
 }
@@ -367,6 +412,7 @@ mod tests {
             orig_path: orig.map(Into::into),
             side,
             options: DiffOptions::default(),
+            commit: None,
         }
     }
 
@@ -462,6 +508,7 @@ mod tests {
                 orig_path: Some("src/old.rs".into()),
                 side: DiffSide::Index,
                 options: DiffOptions::default(),
+                commit: None,
             }
         );
     }
@@ -567,6 +614,7 @@ mod tests {
                     orig_path: None,
                     side,
                     options: DiffOptions::default(),
+                    commit: None,
                 };
                 let cmd = diff_command(&req);
                 assert_eq!(argv(&cmd).last().map(String::as_str), Some(name));
@@ -602,6 +650,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: DiffOptions::default(),
+                commit: None,
             };
             let out = crate::git::GitRunner::run(&runner, &diff_command(&request)).unwrap();
             let text = String::from_utf8_lossy(&out.stdout);
@@ -649,6 +698,80 @@ mod tests {
         let text = diff_of_raw(DiffSide::Index);
         assert!(text.contains("-raw old"), "{text}");
         assert!(!text.contains("look-alike"), "{text}");
+    }
+
+    fn commit_request(
+        parent: Option<&str>,
+        orig: Option<&str>,
+        options: DiffOptions,
+    ) -> DiffRequest {
+        use crate::git::commit_files::{CommitFile, CommitId};
+        let range = CommitRange {
+            oid: CommitId::parse("c0ffee").unwrap(),
+            parent: parent.map(|p| CommitId::parse(p).unwrap()),
+        };
+        let file = CommitFile {
+            status: if orig.is_some() { 'R' } else { 'M' },
+            path: "new name.rs".into(),
+            orig_path: orig.map(Into::into),
+        };
+        DiffRequest::for_commit_file(&range, &file, options)
+    }
+
+    const COMMIT_FLAGS: [&str; 7] = [
+        "diff-tree",
+        "-p",
+        "-r",
+        "-M",
+        "--no-commit-id",
+        "--no-color",
+        "--no-ext-diff",
+    ];
+
+    #[test]
+    fn a_commit_file_diffs_against_the_first_parent_with_both_names_of_a_rename() {
+        let request = commit_request(Some("beef"), Some("old.rs"), DiffOptions::default());
+        assert_eq!(request.side, DiffSide::Index);
+        let cmd = diff_command(&request);
+        let tail = [
+            "-U3",
+            "--root",
+            "beef",
+            "c0ffee",
+            "--",
+            "old.rs",
+            "new name.rs",
+        ];
+        assert_eq!(argv(&cmd), [&COMMIT_FLAGS[..], &tail].concat());
+        assert_eq!(
+            env(&cmd),
+            [
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("LC_ALL".into(), "C".into()),
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_root_commit_file_diffs_against_the_empty_tree_with_the_options() {
+        let options = DiffOptions {
+            context: 7,
+            ignore_whitespace: true,
+        };
+        let cmd = diff_command(&commit_request(None, None, options));
+        let tail = ["-U7", "-w", "--root", "c0ffee", "--", "new name.rs"];
+        assert_eq!(argv(&cmd), [&COMMIT_FLAGS[..], &tail].concat());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_file_name_reaches_argv_as_its_raw_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut request = commit_request(None, None, DiffOptions::default());
+        request.path = RepoPath::from_bytes(b"x\xff");
+        let cmd = diff_command(&request);
+        assert_eq!(cmd.args().last().unwrap().as_bytes(), b"x\xff");
     }
 
     const PATCH_FLAGS: [&str; 8] = [
@@ -709,6 +832,7 @@ mod tests {
             orig_path: None,
             side,
             options: DiffOptions::default(),
+            commit: None,
         }
     }
 

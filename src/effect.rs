@@ -15,6 +15,7 @@ use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::{BranchName, branch_log, list_branches};
+use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::fetch::run_fetch;
 use crate::git::head::read_head_message;
@@ -161,6 +162,12 @@ pub enum Effect {
         tag: Tag,
         tip: Option<String>,
         skip: usize,
+    },
+    /// List the files `range` changed; always answered by one
+    /// `CommitFilesLoaded`.
+    LoadCommitFiles {
+        tag: Tag,
+        range: CommitRange,
     },
     /// Read which commits are unpushed or unmerged; always answered by
     /// one `MarkersLoaded`.
@@ -471,6 +478,20 @@ impl Runtime {
                         Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
                     });
                     let _ = tx.send(AppIntent::CommitsLoaded { tag, skip, result });
+                });
+            }
+            Effect::LoadCommitFiles { tag, range } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || commit_files(runner.as_ref(), &range))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git diff-tree crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
                 });
             }
             Effect::LoadMarkers { tag } => {
@@ -1101,6 +1122,7 @@ mod tests {
             orig_path: None,
             side: DiffSide::Index,
             options: Default::default(),
+            commit: None,
         }
     }
 
@@ -1396,6 +1418,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             want: 100,
         });
@@ -1663,6 +1686,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_commit_files_reports_back_with_the_same_tag_even_on_a_panic() {
+        use crate::git::commit_files::{CommitFile, CommitId};
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: None,
+        };
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-commit-id",
+                "--name-status",
+                "-M",
+                "--root",
+                "abc",
+                "--",
+            ],
+            ok(b"A\0new\0"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 2,
+            seq: 8,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadCommitFiles {
+            tag,
+            range: range.clone(),
+        });
+
+        let new = CommitFile {
+            status: 'A',
+            path: "new".into(),
+            orig_path: None,
+        };
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitFilesLoaded {
+                tag,
+                result: Ok(vec![new])
+            })
+        );
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadCommitFiles { tag, range });
+        match rx.recv().await {
+            Some(AppIntent::CommitFilesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(
+                    message.starts_with("git diff-tree crashed: "),
+                    "{message:?}"
+                );
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed CommitFilesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn fetch_reports_back_with_the_same_tag() {
         let runner = Arc::new(FakeRunner::new().expect(
             &["fetch", "--all", "--quiet", "--no-write-fetch-head"],
@@ -1724,6 +1814,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             want: 100,
         });
@@ -1856,6 +1947,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             renderer: ExternalRenderer {
                 label: "cat".into(),

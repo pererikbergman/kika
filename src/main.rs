@@ -6,6 +6,7 @@ mod branches_view;
 mod captured_command;
 mod cli;
 mod commit_editor;
+mod commit_files;
 mod commit_graph;
 mod commits;
 mod commits_view;
