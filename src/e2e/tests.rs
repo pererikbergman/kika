@@ -183,7 +183,11 @@ async fn cancelling_the_commit_leaves_the_index_untouched() {
     app.assert_screen_contains("Discard the typed message? (y/n)");
     app.press(KeyCode::Char('y')).await;
 
-    assert!(!app.screen().iter().any(|row| row.contains("Commit")));
+    assert!(
+        !app.screen()
+            .iter()
+            .any(|row| row.contains("Commit message"))
+    );
     assert!(repo.staged().is_empty());
     assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
     assert!(!app.state().should_quit);
@@ -260,7 +264,9 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 
     let mut app = Harness::start(&repo).await;
 
+    // Collapsed, the panel shows only the branch; expanded, the rest.
     app.assert_screen_contains("│work ");
+    app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("│base ↑2 ↓1 ");
 }
 
@@ -269,6 +275,7 @@ async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
     app.assert_screen_contains("│main ");
+    app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("│no upstream ");
 }
 
@@ -292,6 +299,7 @@ async fn a_conflicting_merge_shows_merging() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
     app.assert_screen_contains("│merging ");
 }
@@ -305,6 +313,7 @@ async fn a_conflicting_rebase_shows_rebasing() {
     );
 
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
 
     app.assert_screen_contains("│rebasing ");
 }
@@ -316,13 +325,16 @@ async fn committing_in_the_app_updates_the_ahead_count() {
     repo.git(["branch", "-q", "--set-upstream-to=base"]);
     let repo = repo.write("a.txt", "two\n").stage("a.txt");
     let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("│base ↑0 ↓0 ");
 
+    app.press(KeyCode::Char('2')).await;
     app.press(KeyCode::Char('c')).await;
     app.type_text("Ahead").await;
     app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
         .await;
 
+    app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("│base ↑1 ↓0 ");
 }
 

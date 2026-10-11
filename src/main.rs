@@ -12,6 +12,7 @@ mod handoff;
 mod hunk_view;
 mod intent;
 mod keymap;
+mod layout;
 mod menu;
 mod model;
 mod popup;
