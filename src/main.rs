@@ -23,14 +23,18 @@ use std::time::Duration;
 use clap::Parser;
 
 use crate::cli::Cli;
-use crate::git::CliRunner;
+use crate::git::{CliRunner, repo_root};
 use crate::model::AppState;
 
 fn main() -> color_eyre::Result<()> {
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
-    let runner = Arc::new(CliRunner::new(std::env::current_dir()?));
+    // Once, before anything runs: status paths are root-relative, so every
+    // git command runs at the top level whichever subdirectory Kika started in.
+    let launch = std::env::current_dir()?;
+    let workdir = repo_root::resolve_workdir(&CliRunner::new(&launch), launch);
+    let runner = Arc::new(CliRunner::new(workdir));
     let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();

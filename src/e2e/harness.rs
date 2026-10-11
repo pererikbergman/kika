@@ -15,6 +15,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
+use crate::git::CliRunner;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context};
 use crate::view;
@@ -39,8 +40,18 @@ impl Harness {
     }
 
     pub async fn start_sized(repo: &TestRepo, width: u16, height: u16) -> Self {
+        Self::start_with(repo.runner(), width, height).await
+    }
+
+    /// Start as if Kika were launched in `<repo>/<sub>`, on an 80x24 screen.
+    pub async fn start_from(repo: &TestRepo, sub: &str) -> Self {
+        Self::start_with(repo.runner_from(sub), 80, 24).await
+    }
+
+    /// Start over any runner, such as one resolved outside a repository.
+    pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(repo.runner()), tx);
+        let runtime = Runtime::new(Arc::new(runner), tx);
         let mut harness = Self {
             state: AppState::new(Context::Workspace),
             rx,
