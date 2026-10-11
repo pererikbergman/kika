@@ -1,4 +1,5 @@
 use crate::blame_view::{BlameView, CommitView};
+use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
 use crate::diff_pane::DiffPane;
@@ -56,12 +57,13 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         match side {
             SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
             SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
+            SidePanel::Branches => {
+                branches_view::render_panel(&state.branches, &look, expanded, frame, area)
+            }
             SidePanel::Commits => {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
-            SidePanel::Branches | SidePanel::Stash => {
-                render_placeholder(side, &look, expanded, frame, area)
-            }
+            SidePanel::Stash => render_placeholder(side, &look, expanded, frame, area),
         }
     }
     let Some(area) = layout.rect(Panel::Diff) else {
@@ -82,6 +84,8 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (true, false) => "Press l, then R, for the next renderer",
     };
     match (&state.focus, state.rendered_shown(), label) {
+        // What the selected branch holds, before acting on it.
+        (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
         (Focus::Diff(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
             render_rendered(rendered, block, Some(view), hint, frame, area);
@@ -118,7 +122,7 @@ pub(crate) struct PanelLook {
     /// Only the top border: no room for a bottom one.
     top_only: bool,
     /// One row: the title is all there is, so it carries the summary.
-    title_only: bool,
+    pub(crate) title_only: bool,
 }
 
 impl PanelLook {
@@ -323,7 +327,7 @@ fn head_name(head: &Head) -> String {
 
 /// `name` then `suffix` in `width` columns. The name gives way first, so
 /// the suffix (counts, markers) is cut only when it cannot fit at all.
-fn fit(name: &str, suffix: &str, width: usize) -> String {
+pub(crate) fn fit(name: &str, suffix: &str, width: usize) -> String {
     let room = width.saturating_sub(width_of(suffix)).max(1);
     format!("{}{suffix}", elide_left(name, room))
 }
@@ -1302,7 +1306,7 @@ fn blame_row(line: &BlameLine, number_width: usize) -> String {
 }
 
 /// `text` followed by spaces up to `width` columns.
-fn pad(text: &str, width: usize) -> String {
+pub(crate) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(width_of(text))))
 }
 
@@ -1804,15 +1808,15 @@ mod tests {
     fn an_expanded_placeholder_says_nothing_is_here_yet() {
         let mut state = loaded(vec![]);
         assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        for side in [SidePanel::Branches, SidePanel::Stash] {
-            state.focus = Focus::side(side);
-            state.expanded = side;
-            let buffer = draw_buffer(&state, 80, 24);
-            let (x, y) = find(&buffer, "Nothing here yet");
-            assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-            let title = format!("[{}] {}", side.number(), side.title());
-            assert!(y > find(&buffer, &title).1, "{side:?}");
-        }
+        // Only Stash is still a placeholder.
+        let side = SidePanel::Stash;
+        state.focus = Focus::side(side);
+        state.expanded = side;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (x, y) = find(&buffer, "Nothing here yet");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let title = format!("[{}] {}", side.number(), side.title());
+        assert!(y > find(&buffer, &title).1);
     }
 
     #[test]
@@ -1905,7 +1909,7 @@ mod tests {
             row("Stage the selected file").contains("space "),
             "{rows:#?}"
         );
-        assert!(row("Reload the list").contains(" r "), "{rows:#?}");
+        assert!(row("Reload the changed files").contains(" r "), "{rows:#?}");
         assert!(row("Quit Kika").contains("q/esc/ctrl-c "), "{rows:#?}");
         assert!(row("Select the next file").contains("j/↓ "), "{rows:#?}");
         // Help's own close key is in the bar, not in the panel's list.
@@ -3311,6 +3315,8 @@ mod tests {
         match (panel, &state.focus) {
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
+            // The selected branch's commits take the diff's place.
+            (Panel::Diff, Focus::Branches) => format!(" [0] Commits{mode} "),
             (Panel::Diff, _) => format!(" [0] Diff a.rs · 1/1{mode} "),
         }
     }
@@ -3580,6 +3586,7 @@ mod tests {
                 let name = match panel {
                     Panel::Side(side) => side.title(),
                     Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
+                    Panel::Diff if state.focus == Focus::Branches => "Commits",
                     Panel::Diff => "Diff",
                 };
                 assert!(

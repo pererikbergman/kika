@@ -16,7 +16,7 @@ use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
-use crate::popup::Popup;
+use crate::popup::{DeleteBranchConfirm, Popup};
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +192,8 @@ pub enum KeyScope {
     Global,
     Workspace,
     Files,
+    /// The Branches panel with focus.
+    Branches,
     /// The Commits panel, with a cursor on the log.
     Commits,
     /// The Diff pane with focus, working on hunks.
@@ -224,6 +226,8 @@ pub enum KeyScope {
     Error,
     /// "Discard this work?" on top of the popup stack.
     DiscardConfirm,
+    /// "Delete this branch?" on top of the popup stack.
+    DeleteBranch,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The recent repositories on top of the popup stack.
@@ -238,6 +242,7 @@ impl KeyScope {
     pub fn parent(self) -> Option<KeyScope> {
         match self {
             KeyScope::Files
+            | KeyScope::Branches
             | KeyScope::Commits
             | KeyScope::Diff
             | KeyScope::Blame
@@ -255,6 +260,7 @@ impl KeyScope {
             | KeyScope::Prompt
             | KeyScope::Error
             | KeyScope::DiscardConfirm
+            | KeyScope::DeleteBranch
             | KeyScope::Submodules
             | KeyScope::Recent => None,
         }
@@ -266,6 +272,7 @@ impl KeyScope {
             KeyScope::Global => "Global",
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
+            KeyScope::Branches => "Branches",
             KeyScope::Commits => "Commits",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
@@ -283,6 +290,7 @@ impl KeyScope {
             KeyScope::Prompt => "Prompt",
             KeyScope::Error => "Error",
             KeyScope::DiscardConfirm => "Discard",
+            KeyScope::DeleteBranch => "Delete branch",
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
         }
@@ -375,6 +383,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "recent.quit",
     "recent.open",
     "recent.init",
+    "branches.delete",
+    "delete_branch.yes",
+    "delete_branch.force",
+    "delete_branch.no",
+    "delete_branch.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -647,7 +660,7 @@ pub(crate) fn never(_: &AppState) -> Option<&'static str> {
     None
 }
 
-const OP_RUNNING: &str = "An operation is running";
+pub(crate) const OP_RUNNING: &str = "An operation is running";
 
 /// A diff made with `-w` can differ from the file, so a patch built from it
 /// can fail to apply or stage the wrong lines.
@@ -912,6 +925,58 @@ pub(crate) fn init_repo_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+/// Why no branch action can run right now: one needs a selected branch,
+/// and git one operation at a time.
+pub(crate) fn branch_action_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if state.branches.selected_branch().is_none() {
+        Some("No branch selected")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<&'static str> {
+    branch_action_disabled(state).or_else(|| {
+        let selected = state.branches.selected_branch();
+        selected
+            .is_some_and(|b| b.head)
+            .then_some("Already on this branch")
+    })
+}
+
+pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<&'static str> {
+    branch_action_disabled(state).or_else(|| {
+        let selected = state.branches.selected_branch();
+        selected
+            .is_some_and(|b| b.head)
+            .then_some("Cannot delete the current branch")
+    })
+}
+
+/// The delete question on top, if one is.
+fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
+    match state.popups.last() {
+        Some(Popup::DeleteBranch(confirm)) => Some(confirm),
+        _ => None,
+    }
+}
+
+/// `y` deletes only a merged branch; an unmerged one needs `D`.
+fn plain_delete_disabled(state: &AppState) -> Option<&'static str> {
+    delete_question(state)
+        .is_some_and(DeleteBranchConfirm::force)
+        .then_some("Not fully merged: press D to force delete")
+}
+
+/// `D` answers only the stronger question, about an unmerged branch.
+fn force_delete_disabled(state: &AppState) -> Option<&'static str> {
+    delete_question(state)
+        .is_some_and(|c| !c.force())
+        .then_some("Fully merged: press y to delete")
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -944,7 +1009,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char('r'), NONE)],
         scope: KeyScope::Workspace,
         intent: AppIntent::RefreshStatus,
-        description: "Reload the list of changed files",
+        description: "Reload the changed files and the branches",
         label: "refresh",
         bar: true,
         disabled: never,
@@ -2020,6 +2085,117 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "branches.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Branches,
+        intent: AppIntent::BranchNext,
+        description: "Select the next branch",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Branches,
+        intent: AppIntent::BranchPrev,
+        description: "Select the previous branch",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.checkout",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::CheckoutBranch,
+        description: "Check out the selected branch",
+        label: "checkout",
+        bar: true,
+        disabled: checkout_branch_disabled,
+    },
+    Binding {
+        id: "branches.new",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::NewBranch,
+        description: "Create a branch at the selected one and check it out",
+        label: "new",
+        bar: true,
+        disabled: branch_action_disabled,
+    },
+    // Not `r`, which reloads everywhere in the workspace.
+    Binding {
+        id: "branches.rename",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::RenameBranch,
+        description: "Rename the selected branch",
+        label: "rename",
+        bar: true,
+        disabled: branch_action_disabled,
+    },
+    Binding {
+        id: "branches.delete",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::DeleteBranch,
+        description: "Delete the selected branch, asking first",
+        label: "delete",
+        bar: true,
+        disabled: delete_branch_disabled,
+    },
+    // As with discarding, Enter is left unbound: a delete cannot be undone.
+    Binding {
+        id: "delete_branch.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DeleteBranch,
+        intent: AppIntent::ConfirmDeleteBranch { force: false },
+        description: "Yes, delete the merged branch",
+        label: "delete",
+        bar: true,
+        disabled: plain_delete_disabled,
+    },
+    Binding {
+        id: "delete_branch.force",
+        keys: &[KeyPattern::any(KeyCode::Char('D'))],
+        scope: KeyScope::DeleteBranch,
+        intent: AppIntent::ConfirmDeleteBranch { force: true },
+        description: "Yes, delete the branch and its unmerged commits",
+        label: "force delete",
+        bar: true,
+        disabled: force_delete_disabled,
+    },
+    Binding {
+        id: "delete_branch.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DeleteBranch,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the branch",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "delete_branch.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DeleteBranch,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "submodules.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
@@ -3081,6 +3257,112 @@ mod tests {
     }
 
     #[test]
+    fn the_branches_panel_has_its_own_keys_and_reaches_the_workspace_ones() {
+        use crate::git::branches::{Branch, Track};
+        let mut state = AppState::new(Context::Workspace);
+        let branch = |name: &str, head| Branch {
+            name: name.into(),
+            head,
+            upstream: None,
+            track: Track::None,
+            merged: true,
+        };
+        state
+            .branches
+            .loaded(Ok(vec![branch("main", true), branch("topic", false)]));
+        state.branches.move_by(1);
+        let run = |state: &AppState, key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Branches,
+            state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
+        assert_eq!(run(&state, plain('j')), Some(AppIntent::BranchNext));
+        assert_eq!(
+            run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(AppIntent::BranchPrev)
+        );
+        assert_eq!(run(&state, plain(' ')), Some(AppIntent::CheckoutBranch));
+        assert_eq!(run(&state, plain('n')), Some(AppIntent::NewBranch));
+        assert_eq!(run(&state, shift('R')), Some(AppIntent::RenameBranch));
+        assert_eq!(run(&state, plain('d')), Some(AppIntent::DeleteBranch));
+        // `r` still reloads, and the digits still move focus.
+        assert_eq!(run(&state, plain('r')), Some(AppIntent::RefreshStatus));
+        assert_eq!(
+            run(&state, plain('2')),
+            Some(AppIntent::FocusPanel(crate::layout::Panel::Side(
+                SidePanel::Files
+            )))
+        );
+        assert_eq!(
+            run(&state, shift('J')),
+            Some(AppIntent::ScrollDiff(Scroll::LineDown))
+        );
+
+        state.branches.move_by(-1);
+        for c in [' ', 'd'] {
+            assert!(matches!(
+                resolve(
+                    registry(),
+                    &Keymap::default(),
+                    KeyScope::Branches,
+                    &state,
+                    plain(c)
+                ),
+                Resolution::Disabled(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn the_delete_question_lets_only_the_matching_key_answer() {
+        use crate::popup::DeleteBranchConfirm;
+        let mut state = AppState::new(Context::Workspace);
+        let ask = |force| {
+            Popup::DeleteBranch(DeleteBranchConfirm {
+                name: "t".into(),
+                op: crate::git::ops::GitOp::DeleteBranch {
+                    name: "t".into(),
+                    force,
+                },
+            })
+        };
+        let resolve_in = |state: &AppState, key| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::DeleteBranch,
+                state,
+                key,
+            )
+        };
+        let shift_d = key(KeyCode::Char('D'), KeyModifiers::SHIFT);
+        state.popups = vec![ask(false)];
+        assert!(matches!(resolve_in(&state, plain('y')), Resolution::Run(_)));
+        assert!(matches!(
+            resolve_in(&state, shift_d),
+            Resolution::Disabled(_)
+        ));
+        state.popups = vec![ask(true)];
+        assert!(matches!(
+            resolve_in(&state, plain('y')),
+            Resolution::Disabled(_)
+        ));
+        assert!(matches!(resolve_in(&state, shift_d), Resolution::Run(_)));
+        assert!(matches!(
+            resolve_in(&state, plain('q')),
+            Resolution::Unbound
+        ));
+        assert_eq!(KeyScope::DeleteBranch.parent(), None);
+        assert_eq!(KeyScope::Branches.parent(), Some(KeyScope::Workspace));
+    }
+
+    #[test]
     fn no_scope_binds_the_same_key_twice() {
         let patterns: Vec<(KeyScope, &KeyPattern)> = registry()
             .iter()
@@ -3297,6 +3579,7 @@ mod tests {
             KeyScope::Global => "global",
             KeyScope::Workspace => "workspace",
             KeyScope::Files => "files",
+            KeyScope::Branches => "branches",
             KeyScope::Commits => "commits",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",
@@ -3314,6 +3597,7 @@ mod tests {
             KeyScope::Prompt => "prompt",
             KeyScope::Error => "error",
             KeyScope::DiscardConfirm => "discard_confirm",
+            KeyScope::DeleteBranch => "delete_branch",
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
         }
@@ -3542,6 +3826,8 @@ mod tests {
                     | ConfirmNo
                     | InitRepo
                     | RecentSelect
+                    | DeleteBranch
+                    | ConfirmDeleteBranch { .. }
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

@@ -47,6 +47,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 let text = format!("{}\n{}", what.question(), confirm.path);
                 render_question(&format!(" {} ", what.title()), &text, frame, area)
             }
+            Popup::DeleteBranch(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
         }
@@ -342,7 +348,7 @@ mod tests {
     use crate::git::submodule::{Submodule, SubmoduleState};
     use crate::model::Context;
     use crate::popup::PromptKind;
-    use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat};
+    use crate::popup::{ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat};
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> (Buffer, Vec<String>) {
@@ -543,6 +549,42 @@ mod tests {
             rows[11].starts_with(" y discard  n keep  ctrl-c quit"),
             "{rows:#?}"
         );
+    }
+
+    fn delete_branch(force: bool) -> Popup {
+        Popup::DeleteBranch(DeleteBranchConfirm {
+            name: "topic".into(),
+            op: GitOp::DeleteBranch {
+                name: "topic".into(),
+                force,
+            },
+        })
+    }
+
+    #[test]
+    fn deleting_an_unmerged_branch_warns_and_offers_only_force() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![delete_branch(true)];
+        let (_, rows) = draw(&state, 80, 12);
+        assert!(contains(&rows, " Force delete branch "), "{rows:#?}");
+        assert!(
+            contains(&rows, "topic is not fully merged; its commits may be lost."),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "Press D to force delete, n or Esc to cancel"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_merged_branch_asks_plainly() {
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![delete_branch(false)];
+        let (_, rows) = draw(&state, 80, 12);
+        assert!(contains(&rows, " Delete branch "), "{rows:#?}");
+        assert!(contains(&rows, "Delete branch topic? (y/n)"), "{rows:#?}");
+        assert!(!contains(&rows, "not fully merged"), "{rows:#?}");
     }
 
     #[test]

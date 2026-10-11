@@ -1,6 +1,8 @@
 mod ansi;
 mod app;
 mod blame_view;
+mod branches;
+mod branches_view;
 mod captured_command;
 mod cli;
 mod commit_editor;

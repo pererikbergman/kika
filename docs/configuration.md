@@ -345,7 +345,7 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   in the file list that key would take over `global.quit`.
 
 Locked bindings quit, start other programs (your editor or a diff renderer),
-reach the network, discard work, answer a confirmation, or create or switch
+reach the network, discard work or delete a branch, answer a confirmation, or create or switch
 repositories. A cloned repository could otherwise trap you in Kika, or move
 "discard" onto a key you press without thinking. Locked bindings can still be changed in the
 global file.
@@ -353,10 +353,10 @@ global file.
 ## Binding reference
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
-then its enclosing scopes: the file list, commits, diff and blame panels fall
-back to Workspace, and Workspace falls back to Global. Popups, menus and the
-commit editor do not fall back, so `q` and `?` do not quit or open help there; each
-popup that can stay open has its own `ctrl-c` to quit.
+then its enclosing scopes: the file list, branch list, commits, diff and blame
+panels fall back to Workspace, and Workspace falls back to Global. Popups,
+menus and the commit editor do not fall back, so `q` and `?` do not quit or
+open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
 `(none)` means a binding has no default keys. `locked` in the last column
 means a repository's `.kika.toml` cannot change it.
@@ -372,7 +372,7 @@ means a repository's `.kika.toml` cannot change it.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `workspace.refresh` | `r` | Reload the list of changed files | |
+| `workspace.refresh` | `r` | Reload the changed files and the branches | |
 | `workspace.scroll_down` | `J` | Scroll the diff down a line | |
 | `workspace.scroll_up` | `K` | Scroll the diff up a line | |
 | `workspace.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -409,6 +409,20 @@ means a repository's `.kika.toml` cannot change it.
 | `files.blame` | `b` | Blame the selected file | |
 | `files.hunks` | `enter` | Work on the hunks of the selected file | |
 | `files.menu` | `m` | Open the actions menu | |
+
+### Branches
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `branches.next` | `j`, `down` | Select the next branch | |
+| `branches.prev` | `k`, `up` | Select the previous branch | |
+| `branches.checkout` | `space` | Check out the selected branch | |
+| `branches.new` | `n` | Create a branch at the selected one and check it out | |
+| `branches.rename` | `R` | Rename the selected branch | |
+| `branches.delete` | `d` | Delete the selected branch, asking first | locked |
+
+While the Branches panel has focus, the diff pane shows the selected branch's
+commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
 
 ### Commits
 
@@ -553,6 +567,18 @@ means a repository's `.kika.toml` cannot change it.
 | `discard_confirm.yes` | `y` | Yes, throw it away | locked |
 | `discard_confirm.no` | `n`, `esc` | No, keep it | locked |
 | `discard_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Delete this branch?
+
+A branch whose commits are all merged is deleted with `y`. One with commits
+that are not merged asks in stronger words, and only `D` deletes it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `delete_branch.yes` | `y` | Yes, delete the merged branch | locked |
+| `delete_branch.force` | `D` | Yes, delete the branch and its unmerged commits | locked |
+| `delete_branch.no` | `n`, `esc` | No, keep the branch | locked |
+| `delete_branch.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 
