@@ -2105,11 +2105,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_remote_op_reports_back_with_the_same_tag_and_op() {
-        let runner = Arc::new(
+        // With the bridge (unix), the user's own askpass is looked for first.
+        let fake = if cfg!(unix) {
+            FakeRunner::new().expect(&["config", "--get", "core.askPass"], fail(""))
+        } else {
             FakeRunner::new()
-                .expect(&["config", "--get", "core.askPass"], fail(""))
-                .expect(&["push"], ok(b"")),
-        );
+        };
+        let runner = Arc::new(fake.expect(&["push"], ok(b"")));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(runner.clone(), tx);
         let tag = Tag {
