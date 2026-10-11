@@ -1786,3 +1786,140 @@ async fn shift_p_on_the_tags_tab_pushes_the_tag_to_the_upstreams_remote() {
     assert!(listed.contains("refs/tags/v1"), "{listed}");
     assert_eq!(app.state().popups, []);
 }
+
+/// Deletes a directory made beside a test repository, which the repo's
+/// own temp dir does not cover, even when the test fails.
+#[cfg(unix)]
+struct Beside(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for Beside {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `main` with a branch `feature`, and where Kika's suggested worktree
+/// for it goes: `../<repo dir>-feature`, removed when dropped.
+#[cfg(unix)]
+fn with_feature() -> (TestRepo, Beside) {
+    let repo = on_main();
+    repo.git(["branch", "feature"]);
+    let top = repo.path().canonicalize().unwrap();
+    let name = top.file_name().unwrap().to_str().unwrap().to_string();
+    let beside = Beside(top.parent().unwrap().join(format!("{name}-feature")));
+    (repo, beside)
+}
+
+/// What `git worktree list --porcelain` says, as text.
+#[cfg(unix)]
+fn worktree_list(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["worktree", "list", "--porcelain"])).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
+    let (repo, beside) = with_feature();
+    let mut app = Harness::start(&repo).await;
+    let main = app.state().repo.clone().expect("started in the repository");
+
+    // Add one for `feature`, at the path the prompt suggests.
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains(" Worktrees ");
+    app.press(KeyCode::Char('a')).await;
+    app.assert_screen_contains("New worktree for feature");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(
+        app.state().notice,
+        Some("Worktree added; Enter switches to it")
+    );
+    let listed = worktree_list(&repo);
+    let wt = beside.0.canonicalize().unwrap();
+    assert!(
+        listed.contains(&format!("worktree {}\n", wt.display())),
+        "{listed}"
+    );
+    assert!(listed.contains("branch refs/heads/feature"), "{listed}");
+
+    // Enter on it switches Kika there.
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("feature");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().repo.as_deref(), Some(wt.as_path()));
+    let status = app.screen()[1].clone();
+    assert!(status.contains("│feature "), "{status:?}");
+
+    // Back in the main worktree, d then y removes the clean one.
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().repo.as_deref(), Some(main.as_path()));
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Remove worktree");
+    app.press(KeyCode::Char('y')).await;
+    let listed = worktree_list(&repo);
+    assert!(!listed.contains("feature"), "{listed}");
+    assert!(!wt.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_with_an_untracked_file_is_not_removed() {
+    let (repo, beside) = with_feature();
+    repo.git([
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+        OsStr::new("-q"),
+        beside.0.as_os_str(),
+        OsStr::new("feature"),
+    ]);
+    std::fs::write(beside.0.join("keep.txt"), "mine\n").unwrap();
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.press(KeyCode::Char('y')).await;
+
+    app.assert_screen_contains("Could not remove worktree");
+    assert!(worktree_list(&repo).contains("branch refs/heads/feature"));
+    assert_eq!(
+        std::fs::read_to_string(beside.0.join("keep.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone() {
+    let (repo, _beside) = with_feature();
+    let repo = repo.write("full/a.txt", "kept\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('a')).await;
+    // Clear the suggestion, then type the occupied directory.
+    for _ in 0..200 {
+        app.press(KeyCode::Backspace).await;
+    }
+    app.type_text("full\n").await;
+
+    app.assert_screen_contains("Could not add worktree");
+    assert!(!worktree_list(&repo).contains("feature"));
+    assert_eq!(repo.read("full/a.txt"), "kept\n");
+    assert_eq!(
+        std::fs::read_dir(repo.path().join("full")).unwrap().count(),
+        1
+    );
+}
