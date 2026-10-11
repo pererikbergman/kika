@@ -7,6 +7,8 @@ use crate::e2e::repo::TestRepo;
 use crate::git::CliRunner;
 use crate::git::repo_root::resolve_workdir;
 use crate::git::status::EntryKind;
+use crate::intent::AppIntent;
+use crate::watch::WatchEvent;
 
 #[test]
 fn the_setup_api_builds_commits_and_leaves_new_files_untracked() {
@@ -1020,4 +1022,45 @@ async fn a_submodule_is_listed_updated_entered_and_left() {
     app.assert_screen_contains("+two");
     let screen = app.screen().join("\n");
     assert!(!screen.contains("Status · sub"), "{screen}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_edited_outside_appears_on_the_next_files_poll() {
+    let repo = TestRepo::new().write("a.txt", "one\n").commit("init");
+    let mut app = Harness::start(&repo).await;
+    assert!(app.state().files.is_empty());
+
+    let _repo = repo.write("outside.txt", "new\n");
+    app.intent(AppIntent::Watch(WatchEvent::PollFiles)).await;
+
+    app.assert_screen_contains("outside.txt");
+    assert_eq!(app.state().busy, 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_made_outside_disappears_from_the_list_on_focus_in() {
+    let repo = modified_repo();
+    let mut app = Harness::start(&repo).await;
+    app.assert_screen_contains("a.txt");
+
+    repo.git(["commit", "-q", "-am", "elsewhere"]);
+    app.intent(AppIntent::Watch(WatchEvent::FocusGained)).await;
+
+    let screen = app.screen().join("\n");
+    assert!(!screen.contains("a.txt"), "a.txt still listed:\n{screen}");
+    assert!(app.state().files.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_commit_made_outside_is_noticed_by_the_refs_poll() {
+    let repo = modified_repo();
+    let mut app = Harness::start(&repo).await;
+    // The first snapshot is the baseline.
+    app.intent(AppIntent::Watch(WatchEvent::PollRefs)).await;
+    app.assert_screen_contains("a.txt");
+
+    repo.git(["commit", "-q", "-am", "elsewhere"]);
+    app.intent(AppIntent::Watch(WatchEvent::PollRefs)).await;
+
+    assert!(app.state().files.is_empty());
 }
