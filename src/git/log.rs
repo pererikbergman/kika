@@ -58,6 +58,16 @@ pub fn log_page(
     skip: usize,
     limit: usize,
 ) -> Result<LogPage, String> {
+    // Only an object id from an earlier page: nothing that git could read
+    // as an option, without `--end-of-options`, which older git lacks.
+    if let Some(tip) = tip
+        && (tip.is_empty() || !tip.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(format!(
+            "not a commit id: {}",
+            terminal_safe(tip.as_bytes())
+        ));
+    }
     let output = run(
         runner,
         GitCommand::new("log")
@@ -68,7 +78,6 @@ pub fn log_page(
             .arg(format!("--skip={skip}"))
             .arg("-n")
             .arg(limit.to_string())
-            .arg("--end-of-options")
             .arg(tip.unwrap_or("HEAD"))
             .arg("--"),
     )?;
@@ -433,7 +442,6 @@ mod tests {
             "--skip=0",
             "-n",
             "3",
-            "--end-of-options",
             "HEAD",
             "--",
         ];
@@ -464,6 +472,17 @@ mod tests {
     }
 
     #[test]
+    fn a_tip_that_is_not_a_hex_object_id_is_refused_before_git_runs() {
+        use crate::git::fake::FakeRunner;
+
+        let fake = FakeRunner::new();
+        for tip in ["--output=x", "", "HEAD~1", "abc def", "abc\u{1b}"] {
+            assert!(log_page(&fake, Some(tip), 0, 10).is_err(), "{tip:?}");
+        }
+        fake.assert_done();
+    }
+
+    #[test]
     fn every_query_is_lock_free_and_in_the_c_locale() {
         use crate::git::fake::{FakeRunner, ok};
         use std::ffi::OsString;
@@ -478,7 +497,6 @@ mod tests {
                 "--skip=0",
                 "-n",
                 "2",
-                "--end-of-options",
                 "HEAD",
                 "--",
             ],

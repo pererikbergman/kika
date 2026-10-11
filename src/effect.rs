@@ -1473,7 +1473,6 @@ mod tests {
                 "--skip=200",
                 "-n",
                 "200",
-                "--end-of-options",
                 "abc",
                 "--",
             ],
