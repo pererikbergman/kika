@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
+use crate::branches::BranchesPanel;
 use crate::commit_editor::CommitEditor;
 use crate::config::ConfigError;
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
@@ -11,6 +12,7 @@ use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
+use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
@@ -27,7 +29,9 @@ use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
-use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
+use crate::popup::{
+    DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind,
+};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::rendered_view::RenderedDiff;
@@ -230,6 +234,8 @@ pub struct AppState {
     /// A custom command with captured output is running. One at a time,
     /// so their results cannot pile up.
     pub command_running: bool,
+    /// The Branches panel and the selected branch's log.
+    pub branches: BranchesPanel,
 }
 
 impl AppState {
@@ -274,6 +280,7 @@ impl AppState {
             parked: HashMap::new(),
             pending_command: None,
             command_running: false,
+            branches: BranchesPanel::default(),
         }
     }
 
@@ -335,14 +342,18 @@ impl AppState {
             }
             AppIntent::RefreshStatus => {
                 self.status_selection = Selection::KeepPath;
-                return self.refresh_status();
+                let mut effects = self.refresh_status();
+                effects.extend(self.reload_branches());
+                return effects;
             }
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
             AppIntent::SelectNext => return self.move_selection(1),
             AppIntent::SelectPrev => return self.move_selection(-1),
             AppIntent::ScrollDiff(by) => {
                 let rows = self.pane_rows();
-                if self.rendered_shown().is_some()
+                if self.focus == Focus::Branches {
+                    self.branches.log.scroll(by, rows);
+                } else if self.rendered_shown().is_some()
                     && let Some(rendered) = &mut self.rendered
                 {
                     rendered.scroll(by, rows);
@@ -543,6 +554,10 @@ impl AppState {
                     kind: PromptKind::Command,
                     ..
                 }) => self.pending_command = None,
+                Some(Popup::Prompt {
+                    kind: PromptKind::NewBranch | PromptKind::RenameBranch,
+                    ..
+                }) => self.branches.pending = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -639,6 +654,24 @@ impl AppState {
             AppIntent::RepoInitialised { tag, result } => {
                 return self.repo_initialised(tag, result);
             }
+            AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
+            AppIntent::BranchLogLoaded { tag, name, result } => {
+                self.branch_log_loaded(tag, name, result)
+            }
+            AppIntent::BranchNext => return self.move_branch(1),
+            AppIntent::BranchPrev => return self.move_branch(-1),
+            AppIntent::CheckoutBranch => return self.checkout_branch(),
+            AppIntent::NewBranch => self.ask_branch_name(PromptKind::NewBranch),
+            AppIntent::RenameBranch => self.ask_branch_name(PromptKind::RenameBranch),
+            AppIntent::DeleteBranch => self.ask_delete_branch(),
+            AppIntent::CreateBranchNamed(text) => {
+                return self
+                    .named_branch_op(&text, |from, name| GitOp::CreateBranch { name, from });
+            }
+            AppIntent::RenameBranchTo(text) => {
+                return self.named_branch_op(&text, |from, to| GitOp::RenameBranch { from, to });
+            }
+            AppIntent::ConfirmDeleteBranch { force } => return self.confirm_delete_branch(force),
         }
         vec![]
     }
@@ -698,10 +731,10 @@ impl AppState {
     pub fn panel_focus(&self) -> KeyScope {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
-            (
-                Context::Workspace,
-                Focus::Status | Focus::Branches | Focus::Commits | Focus::Stash,
-            ) => KeyScope::Workspace,
+            (Context::Workspace, Focus::Branches) => KeyScope::Branches,
+            (Context::Workspace, Focus::Status | Focus::Commits | Focus::Stash) => {
+                KeyScope::Workspace
+            }
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -722,6 +755,7 @@ impl AppState {
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
+            Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
         }
@@ -959,6 +993,8 @@ impl AppState {
             }
             Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
             Some(Popup::Discard(_)) => vec![],
+            // Only `ConfirmDeleteBranch` deletes; yes or no here keeps it.
+            Some(Popup::DeleteBranch(_)) if !yes => vec![],
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
@@ -1318,6 +1354,13 @@ impl AppState {
     /// The title of a prompt: a command's comes from the user's config,
     /// made one line and safe to draw.
     pub fn prompt_title(&self, kind: PromptKind) -> String {
+        if let Some(name) = &self.branches.pending {
+            match kind {
+                PromptKind::NewBranch => return format!("New branch from {}", name.display()),
+                PromptKind::RenameBranch => return format!("Rename {}", name.display()),
+                _ => {}
+            }
+        }
         let pending = self
             .pending_command
             .as_ref()
@@ -1914,11 +1957,7 @@ impl AppState {
                 let error = if matches!(op, GitOp::ApplyEdited { .. }) {
                     self.edited_hunk_error(&message)
                 } else {
-                    ErrorPopup::new(
-                        failure_title(&op),
-                        &message,
-                        "The file list was reloaded. Fix the cause above, then try again.",
-                    )
+                    ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
                 };
                 self.push_error(error);
             }
@@ -1979,6 +2018,9 @@ impl AppState {
             };
         if plan.scopes.contains(&Scope::Submodules) {
             effects.extend(self.reload_submodules());
+        }
+        if plan.scopes.contains(&Scope::Branches) {
+            effects.extend(self.reload_branches());
         }
         effects
     }
@@ -2087,6 +2129,7 @@ impl AppState {
         self.files_loaded = false;
         let mut effects = vec![self.set_repo(&root)];
         effects.extend(self.refresh_status());
+        effects.extend(self.reload_branches());
         effects
     }
 
@@ -2115,6 +2158,7 @@ impl AppState {
             effects.extend(self.select(index));
         }
         effects.extend(self.refresh_status());
+        effects.extend(self.reload_branches());
         effects
     }
 
@@ -2133,6 +2177,7 @@ impl AppState {
             Some(path) => {
                 let mut effects = vec![Effect::RecordRecent { path }];
                 effects.extend(self.refresh_status());
+                effects.extend(self.reload_branches());
                 effects
             }
             None => self.open_recent(),
@@ -2284,6 +2329,7 @@ impl AppState {
             effects.extend(self.select(index));
         }
         effects.extend(self.refresh_status());
+        effects.extend(self.reload_branches());
         // The keys follow the repository: its own file replaces the last one's.
         effects.push(Effect::LoadConfig {
             repo: self.repo.clone(),
@@ -2321,6 +2367,7 @@ impl AppState {
         self.status_error = None;
         self.op_error = None;
         self.status_selection = Selection::KeepPath;
+        self.branches = BranchesPanel::default();
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -2441,7 +2488,9 @@ impl AppState {
         if tag.generation != self.generation || !self.watch.refs_changed(snapshot) {
             return vec![];
         }
-        self.background_status()
+        let mut effects = self.background_status();
+        effects.extend(self.background_branches());
+        effects
     }
 
     /// A fetch can move remote refs and so ahead/behind. A failed one,
@@ -2489,9 +2538,214 @@ impl AppState {
     }
 }
 
+/// The Branches panel: loading the list and the selected branch's log,
+/// and the actions on the selected branch.
+impl AppState {
+    /// Load the branch list again, keeping what it shows until it lands.
+    fn reload_branches(&mut self) -> Vec<Effect> {
+        self.load_branches(true)
+    }
+
+    /// [`Self::reload_branches`], for a change noticed outside Kika: out
+    /// of the busy count, and only one at a time.
+    fn background_branches(&mut self) -> Vec<Effect> {
+        if self.watch.branches_pending {
+            return vec![];
+        }
+        self.load_branches(false)
+    }
+
+    fn load_branches(&mut self, user: bool) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        let seq = self.take_seq();
+        self.branches.list_seq = Some(seq);
+        self.start_branch_load(user);
+        vec![Effect::LoadBranches {
+            tag: Tag {
+                generation: self.generation,
+                seq,
+                user,
+            },
+        }]
+    }
+
+    /// A user load raises the busy count; a background one the watch's flag.
+    fn start_branch_load(&mut self, user: bool) {
+        if user {
+            self.busy += 1;
+        } else {
+            self.watch.branches_pending = true;
+        }
+    }
+
+    /// Every branch load reports back once, stale or not.
+    fn end_branch_load(&mut self, user: bool) {
+        if user {
+            self.busy = self.busy.saturating_sub(1);
+        } else {
+            self.watch.branches_pending = false;
+        }
+    }
+
+    /// Show the list, and load the selected branch's log afresh: a
+    /// reload means its commits may have moved.
+    fn branches_loaded(&mut self, tag: Tag, result: Result<Vec<Branch>, String>) -> Vec<Effect> {
+        self.end_branch_load(tag.user);
+        if tag.generation != self.generation || self.branches.list_seq != Some(tag.seq) {
+            return vec![];
+        }
+        self.branches.list_seq = None;
+        self.branches.loaded(result);
+        self.load_branch_log(tag.user)
+    }
+
+    /// Start loading the selected branch's log; with none selected, there
+    /// is no log to show. `user` as for the list.
+    fn load_branch_log(&mut self, user: bool) -> Vec<Effect> {
+        let Some(name) = self.branches.selected_branch().map(|b| b.name.clone()) else {
+            self.branches.log = Default::default();
+            return vec![];
+        };
+        let seq = self.take_seq();
+        self.branches.log.begin(seq, name.clone());
+        self.start_branch_load(user);
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user,
+        };
+        vec![Effect::LoadBranchLog { tag, name }]
+    }
+
+    fn branch_log_loaded(
+        &mut self,
+        tag: Tag,
+        name: BranchName,
+        result: Result<Vec<LogRow>, String>,
+    ) {
+        self.end_branch_load(tag.user);
+        let log = &mut self.branches.log;
+        if tag.generation != self.generation || log.for_name.as_ref() != Some(&name) {
+            return;
+        }
+        log.apply(tag.seq, result);
+    }
+
+    fn move_branch(&mut self, delta: isize) -> Vec<Effect> {
+        if self.branches.move_by(delta) {
+            self.load_branch_log(true)
+        } else {
+            vec![]
+        }
+    }
+
+    /// The selected branch's name, or why no action may run on it now,
+    /// said in the bar.
+    fn branch_for_action(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+    ) -> Option<BranchName> {
+        if self.context != Context::Workspace {
+            return None;
+        }
+        if let Some(reason) = disabled(self) {
+            self.notice = Some(reason);
+            return None;
+        }
+        self.branches.selected_branch().map(|b| b.name.clone())
+    }
+
+    fn checkout_branch(&mut self) -> Vec<Effect> {
+        match self.branch_for_action(keymap::checkout_branch_disabled) {
+            Some(name) => self.start_op(Ok(Some(GitOp::Checkout(name)))),
+            None => vec![],
+        }
+    }
+
+    /// Ask for a branch name, keeping the selected branch for the answer.
+    /// Renaming starts from the old name.
+    fn ask_branch_name(&mut self, kind: PromptKind) {
+        let Some(name) = self.branch_for_action(keymap::branch_action_disabled) else {
+            return;
+        };
+        let input = match kind {
+            PromptKind::RenameBranch => LineInput::with_text(&name.display()),
+            _ => LineInput::default(),
+        };
+        self.branches.pending = Some(name);
+        self.popups.push(Popup::Prompt { kind, input });
+    }
+
+    /// Run the op a branch prompt's answer makes, on the branch kept when
+    /// the prompt opened.
+    fn named_branch_op(&mut self, text: &str, op: fn(BranchName, String) -> GitOp) -> Vec<Effect> {
+        let Some(branch) = self.branches.pending.take() else {
+            return vec![];
+        };
+        let name = text.trim();
+        if name.is_empty() {
+            self.notice = Some("A branch needs a name");
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        self.start_op(Ok(Some(op(branch, name.to_string()))))
+    }
+
+    /// Ask before deleting the selected branch: plainly when `git branch
+    /// -d` would take it, else warning that its commits may be lost.
+    fn ask_delete_branch(&mut self) {
+        if self
+            .branch_for_action(keymap::delete_branch_disabled)
+            .is_none()
+        {
+            return;
+        }
+        let Some(branch) = self.branches.selected_branch() else {
+            return;
+        };
+        let confirm = DeleteBranchConfirm {
+            name: branch.name.display(),
+            op: GitOp::DeleteBranch {
+                name: branch.name.clone(),
+                force: !branch.merged,
+            },
+        };
+        self.popups.push(Popup::DeleteBranch(confirm));
+    }
+
+    /// Delete as the open question asked: `force` must match it, so `y`
+    /// never deletes unmerged commits.
+    fn confirm_delete_branch(&mut self, force: bool) -> Vec<Effect> {
+        match self.popups.last() {
+            Some(Popup::DeleteBranch(confirm)) if confirm.force() == force => {}
+            _ => return vec![],
+        }
+        let Some(Popup::DeleteBranch(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+}
+
 /// The first line of a rejected edited hunk's error, above git's message.
 pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
 Keep the @@ line as it was and start each line with a space, + or -.";
+
+/// What the error popup says to do after a failed operation: what was
+/// reloaded, then try again.
+fn failure_next(op: &GitOp) -> &'static str {
+    match op {
+        GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
+            "The branch list was reloaded. Fix the cause above, then try again."
+        }
+        _ => "The file list was reloaded. Fix the cause above, then try again.",
+    }
+}
 
 /// What the error popup calls a failed operation.
 fn failure_title(op: &GitOp) -> &'static str {
@@ -2510,6 +2764,10 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::ApplyEdited { .. } => "Could not stage the edited hunk",
         GitOp::SubmoduleInit(_) => "Could not initialize the submodule",
         GitOp::SubmoduleUpdate(_) => "Could not update the submodule",
+        GitOp::Checkout(_) => "Could not check out the branch",
+        GitOp::CreateBranch { .. } => "Could not create the branch",
+        GitOp::RenameBranch { .. } => "Could not rename the branch",
+        GitOp::DeleteBranch { .. } => "Could not delete the branch",
     }
 }
 
@@ -2561,10 +2819,23 @@ mod tests {
         }
     }
 
+    /// Refresh, as `r` does, and return the status load's tag. The
+    /// branch list it also reloads is answered at once with nothing, so
+    /// tests about the status see only that.
     fn refresh_tag(state: &mut AppState) -> Tag {
         match state.update(AppIntent::RefreshStatus).as_slice() {
-            [Effect::LoadStatus { tag }] => *tag,
-            other => panic!("expected one LoadStatus, got {other:?}"),
+            [
+                Effect::LoadStatus { tag },
+                Effect::LoadBranches { tag: list },
+            ] => {
+                let (tag, list) = (*tag, *list);
+                state.update(AppIntent::BranchesLoaded {
+                    tag: list,
+                    result: Ok(vec![]),
+                });
+                tag
+            }
+            other => panic!("expected LoadStatus and LoadBranches, got {other:?}"),
         }
     }
 
@@ -2609,11 +2880,12 @@ mod tests {
                 user: true
             }
         );
+        // Seq 1 went to the branch list `r` reloads too.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 1,
+                seq: 2,
                 user: true
             }
         );
@@ -3161,8 +3433,8 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 1);
-        assert_eq!(state.busy, 1);
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 2);
+        assert_eq!(state.busy, 2, "the status and the branch list");
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
@@ -3725,7 +3997,10 @@ mod tests {
         assert_eq!(state.commit, CommitFlow::Closed);
         assert_eq!(state.op_seq, None);
         assert!(
-            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            matches!(
+                effects.as_slice(),
+                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+            ),
             "{effects:?}"
         );
     }
@@ -3737,7 +4012,10 @@ mod tests {
 
         assert_eq!(state.op_error, None);
         assert!(
-            matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
+            matches!(
+                effects.as_slice(),
+                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+            ),
             "{effects:?}"
         );
         match &state.commit {
@@ -6355,7 +6633,7 @@ mod tests {
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.diff, DiffPane::default());
         match effects.as_slice() {
-            [set, Effect::LoadStatus { tag }] => {
+            [set, Effect::LoadStatus { tag }, Effect::LoadBranches { .. }] => {
                 assert_eq!(set_repo(set), [RepoPath::from("sub")]);
                 assert_eq!(tag.generation, state.generation);
             }
@@ -6420,6 +6698,7 @@ mod tests {
                 Effect::LoadDiff { request, tag, .. },
                 Effect::DiffLoadingDelay { .. },
                 Effect::LoadStatus { tag: status },
+                Effect::LoadBranches { .. },
             ] => {
                 assert_eq!(set_repo(set), []);
                 assert_eq!(request.path, "b.rs".into());
@@ -6498,7 +6777,11 @@ mod tests {
             AppState::new(Context::Workspace).with_location(Some("/r/a".into()), "/r/a/d".into());
         let effects = state.update(AppIntent::Start);
         match effects.as_slice() {
-            [Effect::RecordRecent { path }, Effect::LoadStatus { .. }] => {
+            [
+                Effect::RecordRecent { path },
+                Effect::LoadStatus { .. },
+                Effect::LoadBranches { .. },
+            ] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
             other => panic!("expected RecordRecent and LoadStatus, got {other:?}"),
@@ -6616,7 +6899,7 @@ mod tests {
             result: Ok("/w".into()),
         });
 
-        assert_eq!(state.busy, 1, "only the status load is left");
+        assert_eq!(state.busy, 2, "only the status and branch loads are left");
         assert_eq!(state.repo, Some("/w".into()));
         assert_eq!(state.popups, []);
         match effects.as_slice() {
@@ -6624,6 +6907,7 @@ mod tests {
                 Effect::SetRepo { root, nested },
                 Effect::RecordRecent { path },
                 Effect::LoadStatus { .. },
+                Effect::LoadBranches { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!((root.as_path(), nested.len()), (Path::new("/w"), 0));
@@ -6695,6 +6979,7 @@ mod tests {
                 Effect::SetRepo { root, nested },
                 Effect::RecordRecent { path },
                 Effect::LoadStatus { tag },
+                Effect::LoadBranches { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!(repo.as_deref(), Some(Path::new("/r/b")), "its own keys");
@@ -6742,8 +7027,12 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 2..],
-            [Effect::LoadStatus { .. }, Effect::LoadConfig { .. }]
+            effects[effects.len() - 3..],
+            [
+                Effect::LoadStatus { .. },
+                Effect::LoadBranches { .. },
+                Effect::LoadConfig { .. }
+            ]
         ));
         assert!(!state.parked.contains_key(Path::new("/r/a")));
         assert!(state.parked.contains_key(Path::new("/r/b")));
@@ -6920,8 +7209,14 @@ mod tests {
         assert!(state.update(refs_loaded(equal, b"a")).is_empty());
 
         let moved = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
-        let tag = background_status_tag(&state.update(refs_loaded(moved, b"b")));
+        let effects = state.update(refs_loaded(moved, b"b"));
+        let tag = background_status_tag(&effects[..1]);
         assert_eq!(state.status_seq, Some(tag.seq));
+        // Branches or their upstreams may have moved too, out of the busy count.
+        match &effects[1..] {
+            [Effect::LoadBranches { tag }] => assert!(!tag.user),
+            other => panic!("expected a background LoadBranches, got {other:?}"),
+        }
         assert_eq!(state.busy, 0);
     }
 
@@ -7118,11 +7413,19 @@ mod tests {
     fn entering_a_submodule_makes_its_first_snapshot_a_baseline() {
         let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
         state.watch.refs = Some(RefsSnapshot::of(b"parent"));
-        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
-            [_, Effect::LoadStatus { tag }] => *tag,
-            other => panic!("expected SetRepo and LoadStatus, got {other:?}"),
+        let (tag, list) = match press(&mut state, KeyCode::Enter).as_slice() {
+            [
+                _,
+                Effect::LoadStatus { tag },
+                Effect::LoadBranches { tag: list },
+            ] => (*tag, *list),
+            other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
+        state.update(AppIntent::BranchesLoaded {
+            tag: list,
+            result: Ok(vec![]),
+        });
         assert_eq!(state.busy, 0);
 
         let refs = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
@@ -8077,5 +8380,406 @@ mod tests {
             assert!(is_status_load(&effects), "{effects:?}");
             assert!(state.popups.is_empty());
         }
+    }
+
+    // --- The Branches panel ---
+
+    use crate::git::branches::Track;
+
+    fn git_branch(name: &str, head: bool, merged: bool) -> Branch {
+        Branch {
+            name: name.into(),
+            head,
+            upstream: None,
+            track: Track::None,
+            merged,
+        }
+    }
+
+    /// `main` (current), `topic` (merged) and `wip` (not merged).
+    fn three_branches() -> Vec<Branch> {
+        vec![
+            git_branch("main", true, true),
+            git_branch("topic", false, true),
+            git_branch("wip", false, false),
+        ]
+    }
+
+    /// The tag of the one `LoadBranches` in `effects`.
+    fn branches_tag(effects: &[Effect]) -> Tag {
+        let found = effects.iter().find_map(|e| match e {
+            Effect::LoadBranches { tag } => Some(*tag),
+            _ => None,
+        });
+        found.unwrap_or_else(|| panic!("expected LoadBranches in {effects:?}"))
+    }
+
+    /// The `LoadBranchLog` in `effects`, if any.
+    fn log_load(effects: &[Effect]) -> Option<(Tag, BranchName)> {
+        effects.iter().find_map(|e| match e {
+            Effect::LoadBranchLog { tag, name } => Some((*tag, name.clone())),
+            _ => None,
+        })
+    }
+
+    fn branches_loaded(tag: Tag, branches: Vec<Branch>) -> AppIntent {
+        AppIntent::BranchesLoaded {
+            tag,
+            result: Ok(branches),
+        }
+    }
+
+    /// A workspace with `three_branches` loaded and the Branches panel
+    /// focused, its first log load answered.
+    fn with_branches() -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 24,
+        });
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let effects = state.update(branches_loaded(tag, three_branches()));
+        let (tag, name) = log_load(&effects).expect("the selection's log loads");
+        state.update(AppIntent::BranchLogLoaded {
+            tag,
+            name,
+            result: Ok(vec![]),
+        });
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Branches,
+        )));
+        state
+    }
+
+    fn selected_name(state: &AppState) -> String {
+        state.branches.selected_branch().unwrap().name.display()
+    }
+
+    fn log_row(subject: &str) -> LogRow {
+        LogRow {
+            short_oid: "abc1234".into(),
+            date: "2024-01-01".into(),
+            author: "a".into(),
+            subject: subject.into(),
+        }
+    }
+
+    #[test]
+    fn the_branches_panel_takes_its_own_keys() {
+        let state = with_branches();
+        assert_eq!(state.panel_focus(), KeyScope::Branches);
+        assert_eq!(state.key_focus(), KeyScope::Branches);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_selected_branch_by_name() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        assert_eq!(selected_name(&state), "topic");
+
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let mut moved = three_branches();
+        moved.swap(1, 2);
+        state.update(branches_loaded(tag, moved));
+
+        assert_eq!(selected_name(&state), "topic");
+        assert_eq!(state.branches.selected, Some(2));
+    }
+
+    #[test]
+    fn a_stale_branch_list_or_log_is_dropped() {
+        let mut state = with_branches();
+        let old = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let new = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(old, vec![git_branch("stale", true, true)]));
+        assert_eq!(state.branches.branches, three_branches());
+
+        let mut other_repo = new;
+        other_repo.generation += 1;
+        state.update(branches_loaded(other_repo, vec![]));
+        assert_eq!(state.branches.branches, three_branches());
+
+        let (first, name) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        let (second, _) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        state.update(AppIntent::BranchLogLoaded {
+            tag: first,
+            name,
+            result: Ok(vec![log_row("topic's")]),
+        });
+        assert!(
+            state.branches.log.rows.is_empty(),
+            "the log of wip is awaited"
+        );
+        state.update(AppIntent::BranchLogLoaded {
+            tag: second,
+            name: "wip".into(),
+            result: Ok(vec![log_row("wip's")]),
+        });
+        assert_eq!(state.branches.log.rows, [log_row("wip's")]);
+    }
+
+    #[test]
+    fn moving_the_selection_loads_the_new_branch_log() {
+        let mut state = with_branches();
+        let (tag, name) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        assert_eq!(name, "topic".into());
+        assert!(tag.user);
+        assert_eq!(state.branches.log.for_name, Some("topic".into()));
+        // At the end there is nowhere to go, so nothing loads.
+        state.update(AppIntent::BranchNext);
+        assert_eq!(state.update(AppIntent::BranchNext), vec![]);
+    }
+
+    #[test]
+    fn j_and_k_move_the_branch_selection_and_shift_j_scrolls_its_log() {
+        let mut state = with_branches();
+        press_char(&mut state, 'j');
+        assert_eq!(selected_name(&state), "topic");
+        let (tag, name) = log_load(&press_char(&mut state, 'j')).unwrap();
+        state.update(AppIntent::BranchLogLoaded {
+            tag,
+            name,
+            result: Ok(vec![log_row("1"), log_row("2")]),
+        });
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('J'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(state.branches.log.scroll, 1);
+        press_char(&mut state, 'k');
+        assert_eq!(selected_name(&state), "topic");
+        assert_eq!(state.branches.log.scroll, 0, "another branch's log");
+    }
+
+    #[test]
+    fn checking_out_runs_the_op_and_its_finish_reloads_status_and_branches() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        let (tag, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::Checkout("topic".into()));
+
+        let effects = state.update(finished(tag, op, Ok(())));
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+        branches_tag(&effects);
+    }
+
+    #[test]
+    fn checking_out_or_deleting_the_current_branch_is_refused() {
+        let mut state = with_branches();
+        assert_eq!(state.update(AppIntent::CheckoutBranch), vec![]);
+        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.update(AppIntent::DeleteBranch), vec![]);
+        assert_eq!(state.notice, Some("Cannot delete the current branch"));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn branch_actions_are_refused_while_an_op_runs_or_with_nothing_selected() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        state.op_seq = Some(99);
+        for intent in [
+            AppIntent::CheckoutBranch,
+            AppIntent::NewBranch,
+            AppIntent::RenameBranch,
+            AppIntent::DeleteBranch,
+        ] {
+            state.notice = None;
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.notice, Some("An operation is running"), "{intent:?}");
+        }
+        assert_eq!(state.popups, []);
+
+        let mut empty = AppState::new(Context::Workspace);
+        empty.update(AppIntent::CheckoutBranch);
+        assert_eq!(empty.notice, Some("No branch selected"));
+    }
+
+    #[test]
+    fn deleting_a_merged_branch_asks_and_y_deletes_without_force() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        assert_eq!(state.key_focus(), KeyScope::DeleteBranch);
+        // `D` answers only the question about an unmerged branch.
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('D'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.popups.len(), 1);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+
+        assert_eq!(
+            op,
+            GitOp::DeleteBranch {
+                name: "topic".into(),
+                force: false
+            }
+        );
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn deleting_an_unmerged_branch_ignores_y_and_d_forces() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        match state.popups.as_slice() {
+            [Popup::DeleteBranch(confirm)] => assert!(confirm.force()),
+            other => panic!("expected the delete question, got {other:?}"),
+        }
+
+        assert_eq!(press_char(&mut state, 'y'), vec![]);
+        assert_eq!(state.popups.len(), 1, "y leaves the question open");
+        assert_eq!(state.op_seq, None);
+
+        let (_, op) = op_of(&state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('D'),
+            KeyModifiers::SHIFT,
+        ))));
+        assert_eq!(
+            op,
+            GitOp::DeleteBranch {
+                name: "wip".into(),
+                force: true
+            }
+        );
+    }
+
+    #[test]
+    fn n_or_esc_keeps_the_branch() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = with_branches();
+            state.update(AppIntent::BranchNext);
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.popups, []);
+            assert!(!state.should_quit);
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn the_create_prompt_uses_the_branch_selected_when_it_opened() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'n');
+        assert_eq!(
+            state.prompt_title(PromptKind::NewBranch),
+            "New branch from topic"
+        );
+        // A reload while the user types moves the list under the prompt.
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(tag, vec![git_branch("main", true, true)]));
+
+        type_text(&mut state, "fresh");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(
+            op,
+            GitOp::CreateBranch {
+                name: "fresh".into(),
+                from: "topic".into()
+            }
+        );
+        assert_eq!(state.branches.pending, None);
+    }
+
+    #[test]
+    fn the_rename_prompt_starts_from_the_old_name_and_renames_that_branch() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::BranchNext);
+        press(&mut state, KeyCode::Char('R'));
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::RenameBranch);
+                assert_eq!((input.text.as_str(), input.col), ("wip", 3));
+            }
+            other => panic!("expected the rename prompt, got {other:?}"),
+        }
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(tag, three_branches()[..2].to_vec()));
+
+        type_text(&mut state, "-2");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(
+            op,
+            GitOp::RenameBranch {
+                from: "wip".into(),
+                to: "wip-2".into()
+            }
+        );
+    }
+
+    #[test]
+    fn an_empty_name_is_refused_and_a_cancelled_prompt_forgets_the_branch() {
+        let mut state = with_branches();
+        press_char(&mut state, 'n');
+        type_text(&mut state, "  ");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("A branch needs a name"));
+        assert_eq!(state.op_seq, None);
+
+        press_char(&mut state, 'n');
+        assert!(state.branches.pending.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.branches.pending, None);
+        assert_eq!(
+            state.update(AppIntent::CreateBranchNamed("x".into())),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn switching_repository_resets_the_panel() {
+        let mut state = with_branches().with_location(Some("/r/a".into()), "/r/a".into());
+        state.update(AppIntent::OpenRepo("/r/b".into()));
+        assert!(!state.branches.loaded);
+        assert_eq!(state.branches.branches, []);
+        assert_eq!(state.branches.log, Default::default());
+    }
+
+    #[test]
+    fn a_failed_delete_says_the_branch_list_was_reloaded() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        state.update(finished(tag, op, Err("error: not fully merged".into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not delete the branch");
+                assert!(error.next.starts_with("The branch list was reloaded"));
+            }
+            other => panic!("expected an error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_finished_delete_reloads_only_the_list() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "a delete changes no files: {effects:?}"
+        );
+        branches_tag(&effects);
     }
 }

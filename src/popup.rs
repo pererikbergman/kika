@@ -23,6 +23,7 @@ pub enum Popup {
     Prompt { kind: PromptKind, input: LineInput },
     Error(ErrorPopup),
     Discard(DiscardConfirm),
+    DeleteBranch(DeleteBranchConfirm),
     Submodules(SubmoduleList),
     Recent(RecentList),
 }
@@ -62,6 +63,43 @@ impl DiscardWhat {
             DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)",
             DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)",
             DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)",
+        }
+    }
+}
+
+/// "Delete this branch?" Like [`DiscardConfirm`], it carries the op chosen
+/// when it was asked. A branch whose commits are not merged is asked about
+/// in stronger words, and only a force delete answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteBranchConfirm {
+    /// The branch's display name, already terminal-safe.
+    pub name: String,
+    pub op: GitOp,
+}
+
+impl DeleteBranchConfirm {
+    /// Whether answering deletes with `-D`, so only `D` may answer.
+    pub fn force(&self) -> bool {
+        matches!(self.op, GitOp::DeleteBranch { force: true, .. })
+    }
+
+    pub fn title(&self) -> &'static str {
+        if self.force() {
+            "Force delete branch"
+        } else {
+            "Delete branch"
+        }
+    }
+
+    pub fn question(&self) -> String {
+        let name = &self.name;
+        if self.force() {
+            format!(
+                "{name} is not fully merged; its commits may be lost.\n\
+                 Press D to force delete, Esc to cancel"
+            )
+        } else {
+            format!("Delete branch {name}? (y/n)")
         }
     }
 }
@@ -106,6 +144,10 @@ pub enum PromptKind {
     /// command, so [`AppState::prompt_title`](crate::model::AppState::prompt_title)
     /// gives it; this one is only a fallback.
     Command,
+    /// The name of a branch to make at the selected one.
+    NewBranch,
+    /// A new name for the selected branch.
+    RenameBranch,
 }
 
 impl PromptKind {
@@ -113,6 +155,8 @@ impl PromptKind {
         match self {
             PromptKind::GoToFile => "Go to file",
             PromptKind::Command => "Command",
+            PromptKind::NewBranch => "New branch",
+            PromptKind::RenameBranch => "Rename branch",
         }
     }
 
@@ -120,6 +164,8 @@ impl PromptKind {
         match self {
             PromptKind::GoToFile => AppIntent::GoToFile(text),
             PromptKind::Command => AppIntent::CommandPromptAnswered(text),
+            PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
+            PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
         }
     }
 }
@@ -133,6 +179,14 @@ pub struct LineInput {
 }
 
 impl LineInput {
+    /// `text` already typed, with the cursor after it.
+    pub fn with_text(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            col: char_len(text),
+        }
+    }
+
     /// Apply one key. Keys that mean nothing on one line are ignored.
     pub fn edit(&mut self, key: KeyPress) {
         if key
@@ -253,6 +307,43 @@ mod tests {
         press(&mut input, KeyCode::Tab);
         assert_eq!(input.text, "A");
         assert_eq!(input.col, 1);
+    }
+
+    #[test]
+    fn prefilled_text_puts_the_cursor_after_it() {
+        let input = LineInput::with_text("fé");
+        assert_eq!((input.text.as_str(), input.col), ("fé", 2));
+    }
+
+    #[test]
+    fn a_merged_branch_is_asked_plainly_and_an_unmerged_one_with_a_warning() {
+        let ask = |force| DeleteBranchConfirm {
+            name: "topic".into(),
+            op: GitOp::DeleteBranch {
+                name: "topic".into(),
+                force,
+            },
+        };
+        assert!(!ask(false).force());
+        assert_eq!(ask(false).question(), "Delete branch topic? (y/n)");
+        assert!(ask(true).force());
+        assert_eq!(
+            ask(true).question(),
+            "topic is not fully merged; its commits may be lost.\n\
+             Press D to force delete, Esc to cancel"
+        );
+    }
+
+    #[test]
+    fn branch_prompts_answer_with_their_intents() {
+        assert_eq!(
+            PromptKind::NewBranch.submit("n".into()),
+            AppIntent::CreateBranchNamed("n".into())
+        );
+        assert_eq!(
+            PromptKind::RenameBranch.submit("r".into()),
+            AppIntent::RenameBranchTo("r".into())
+        );
     }
 
     #[test]
