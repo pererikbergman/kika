@@ -15,7 +15,12 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
     let dim = Style::new().fg(Color::DarkGray);
     let mut lines: Vec<Line<'static>> = Vec::new();
     if let Some(error) = &list.error {
-        lines.extend(error.lines().map(|l| Line::from(format!("! {l}"))));
+        // Already terminal-safe: git's stderr through `terminal_safe`.
+        lines.extend(
+            error
+                .lines()
+                .map(|l| Line::from(elide_right(&format!("! {l}"), width))),
+        );
         lines.push(Line::from("Press r to retry"));
     }
     let Some(reflog) = &list.data else {
@@ -89,8 +94,8 @@ mod tests {
         state.screen_mode = ScreenMode::Full;
         state.commits.tab = CommitsTab::Reflog;
         state.commits.reflog.data = Some(Reflog {
-            head: None,
             entries: parse_records(bytes),
+            ..Reflog::default()
         });
         state
     }
@@ -176,6 +181,21 @@ mod tests {
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "! Could not read the reflog: fatal: x");
         line_with(&rows, "Press r to retry");
+    }
+
+    #[test]
+    fn small_and_tiny_screens_draw_without_panicking_and_cut_with_an_ellipsis() {
+        let mut state = showing(include_bytes!("git/fixtures/reflog/checkout.bin"));
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "ccccccc checkout moving from main to side");
+        for (w, h) in [(20, 5), (1, 1), (3, 3)] {
+            draw(&state, w, h);
+        }
+        state.commits.reflog.error =
+            Some(format!("Could not read the reflog: {}", "x".repeat(300)));
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "! Could not read the reflog: xxx");
+        assert!(rows.iter().any(|r| r.contains("x…")), "{rows:#?}");
     }
 
     #[test]

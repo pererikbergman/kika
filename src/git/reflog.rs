@@ -23,8 +23,22 @@ pub const REDO_MARKER: &str = "kika redo";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Reflog {
     pub head: Option<CommitId>,
+    /// The branch `HEAD` is on, as the full ref `symbolic-ref` names;
+    /// `None` when detached.
+    pub head_ref: Option<Vec<u8>>,
     /// Newest first.
     pub entries: Vec<ReflogEntry>,
+    /// That branch's own reflog, newest first. Only it says where a
+    /// rebased branch was before: `HEAD`'s may have been elsewhere, as
+    /// after `git rebase <upstream> <branch>` run from another branch.
+    pub branch_entries: Vec<ReflogEntry>,
+}
+
+/// Where `HEAD` is: its commit, and its branch as a full ref.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeadState {
+    pub oid: Option<CommitId>,
+    pub head_ref: Option<Vec<u8>>,
 }
 
 /// One reflog entry. The message is kept raw: it can hold anything but
@@ -238,20 +252,74 @@ pub fn read_reflog(runner: &dyn GitRunner) -> Result<Reflog, String> {
             .arg("HEAD"),
     )?;
     let entries = parse_records(&out);
-    let head = run(
-        runner,
+    let HeadState { oid, head_ref } = read_head(runner);
+    // A missing branch reflog only leaves a rebase without an undo.
+    let branch_entries = head_ref
+        .as_ref()
+        .filter(|r| r.starts_with(b"refs/heads/"))
+        .and_then(|r| {
+            run(
+                runner,
+                GitCommand::new("reflog")
+                    .arg("show")
+                    .arg("-z")
+                    .arg("-n")
+                    .arg(DEPTH)
+                    .arg("--format=%H %T %gs")
+                    .arg(super::path::os_string(r))
+                    .arg("--"),
+            )
+            .ok()
+        })
+        .map(|out| parse_records(&out))
+        .unwrap_or_default();
+    Ok(Reflog {
+        head: oid,
+        head_ref,
+        entries,
+        branch_entries,
+    })
+}
+
+/// `HEAD`'s commit and branch, each `None` when git cannot say: an unborn
+/// or broken `HEAD`, or a detached one.
+pub fn read_head(runner: &dyn GitRunner) -> HeadState {
+    let line = |cmd: GitCommand| {
+        run(runner, cmd).ok().map(|mut out| {
+            while out.last().is_some_and(|b| b.is_ascii_whitespace()) {
+                out.pop();
+            }
+            out
+        })
+    };
+    let oid = line(
         GitCommand::new("rev-parse")
             .arg("-q")
             .arg("--verify")
             .arg("HEAD"),
     )
-    .ok()
-    .and_then(|out| {
-        std::str::from_utf8(&out)
-            .ok()
-            .and_then(|s| CommitId::parse(s.trim()))
-    });
-    Ok(Reflog { head, entries })
+    .and_then(|out| String::from_utf8(out).ok())
+    .and_then(|s| CommitId::parse(&s));
+    let head_ref =
+        line(GitCommand::new("symbolic-ref").arg("-q").arg("HEAD")).filter(|r| !r.is_empty());
+    HeadState { oid, head_ref }
+}
+
+/// Whether `entry`, from the reflog of the branch `full_ref`, is a rebase
+/// putting that branch at its new tip: `rebase (finish): <ref> onto …`,
+/// the `-i` and `pull --rebase` forms, or git 2.15's `rebase finished:`.
+pub fn finishes_rebase_of(entry: &ReflogEntry, full_ref: &[u8]) -> bool {
+    let message = &entry.message;
+    let Some(colon) = message.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let head = &message[..colon];
+    let finish = (word(message, b"rebase") || word(message, b"pull"))
+        && (head.ends_with(b"(finish)") || head == b"rebase finished");
+    let mut wanted = b": ".to_vec();
+    wanted.extend_from_slice(full_ref);
+    wanted.extend_from_slice(b" onto ");
+    finish && message[colon..].starts_with(&wanted)
 }
 
 /// NUL-terminated records, the empty end left out.
@@ -279,6 +347,17 @@ mod tests {
         "HEAD",
     ];
     const VERIFY: &[&str] = &["rev-parse", "-q", "--verify", "HEAD"];
+    const SYMBOLIC: &[&str] = &["symbolic-ref", "-q", "HEAD"];
+    const BRANCH: &[&str] = &[
+        "reflog",
+        "show",
+        "-z",
+        "-n",
+        "1000",
+        "--format=%H %T %gs",
+        "refs/heads/main",
+        "--",
+    ];
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const T: &str = "1111111111111111111111111111111111111111";
 
@@ -289,9 +368,12 @@ mod tests {
     #[test]
     fn the_read_runs_exactly_these_commands_without_locks_and_in_the_c_locale() {
         let hostile = include_bytes!("fixtures/reflog/hostile.bin");
+        let branch = format!("{A} {T} commit: x\0");
         let runner = FakeRunner::new()
             .expect(SHOW, ok(hostile))
-            .expect(VERIFY, ok(format!("{A}\n").as_bytes()));
+            .expect(VERIFY, ok(format!("{A}\n").as_bytes()))
+            .expect(SYMBOLIC, ok(b"refs/heads/main\n"))
+            .expect(BRANCH, ok(branch.as_bytes()));
 
         let reflog = read_reflog(&runner).unwrap();
 
@@ -300,9 +382,11 @@ mod tests {
             ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
             ("LC_ALL".into(), "C".into()),
         ];
-        assert_eq!(runner.envs(), [env.clone(), env]);
+        assert_eq!(runner.envs(), vec![env; 4]);
         assert_eq!(reflog.head, CommitId::parse(A));
+        assert_eq!(reflog.head_ref.as_deref(), Some(&b"refs/heads/main"[..]));
         assert_eq!(reflog.entries.len(), 5);
+        assert_eq!(reflog.branch_entries.len(), 1);
     }
 
     #[test]
@@ -443,8 +527,44 @@ mod tests {
     fn a_head_that_does_not_verify_is_none() {
         let runner = FakeRunner::new()
             .expect(SHOW, ok(b""))
-            .expect(VERIFY, fail(""));
+            .expect(VERIFY, fail(""))
+            .expect(SYMBOLIC, fail(""));
         assert_eq!(read_reflog(&runner), Ok(Reflog::default()));
+    }
+
+    #[test]
+    fn a_branch_reflog_that_cannot_be_read_leaves_it_empty() {
+        let runner = FakeRunner::new()
+            .expect(SHOW, ok(b""))
+            .expect(VERIFY, ok(format!("{A}\n").as_bytes()))
+            .expect(SYMBOLIC, ok(b"refs/heads/main\n"))
+            .expect(BRANCH, fail("fatal: no reflog"));
+        let reflog = read_reflog(&runner).unwrap();
+        assert_eq!(reflog.branch_entries, []);
+        assert_eq!(reflog.head_ref.as_deref(), Some(&b"refs/heads/main"[..]));
+    }
+
+    #[test]
+    fn only_a_rebase_finish_naming_the_branch_counts_as_its_new_tip() {
+        let entry = |message: &str| ReflogEntry::parse(format!("{A} {T} {message}").as_bytes());
+        let topic = b"refs/heads/topic";
+        for yes in [
+            "rebase (finish): refs/heads/topic onto abc",
+            "rebase -i (finish): refs/heads/topic onto abc",
+            "rebase finished: refs/heads/topic onto abc",
+            "pull --rebase (finish): refs/heads/topic onto abc",
+        ] {
+            assert!(finishes_rebase_of(&entry(yes), topic), "{yes}");
+        }
+        for no in [
+            "rebase (finish): refs/heads/topical onto abc",
+            "rebase (finish): returning to refs/heads/topic",
+            "rebase (pick): refs/heads/topic onto abc",
+            "commit: rebase (finish): refs/heads/topic onto abc",
+            "kika undo: updating HEAD",
+        ] {
+            assert!(!finishes_rebase_of(&entry(no), topic), "{no}");
+        }
     }
 
     #[test]
@@ -466,6 +586,8 @@ mod tests {
 
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
         assert_eq!(reflog.head, CommitId::parse(head.trim()));
+        assert_eq!(reflog.head_ref.as_deref(), Some(&b"refs/heads/side"[..]));
+        assert_eq!(reflog.branch_entries.len(), 1, "side was just made");
         let actions: Vec<&Action> = reflog.entries.iter().map(|e| &e.action).collect();
         assert_eq!(
             actions,

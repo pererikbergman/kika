@@ -14,7 +14,7 @@ use super::remotes::{RemoteBranch, RemoteName};
 use super::repo_state::Operation;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
-use super::undo::{Direction, Step};
+use super::undo::{Direction, Expected, Step};
 use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
@@ -161,10 +161,12 @@ pub enum GitOp {
     RemoveRemote(RemoteName),
     /// Undo or redo the last action, as the undo planner chose (see
     /// `git::undo`). Git writes `direction`'s marker into the reflog, which
-    /// is how the next plan knows this step happened.
+    /// is how the next plan knows this step happened. It runs only while
+    /// `HEAD` is still where `expect` says, as when the user was asked.
     Travel {
         direction: Direction,
         step: Step,
+        expect: Expected,
     },
 }
 
@@ -202,6 +204,10 @@ impl ResetMode {
         }
     }
 }
+
+/// Why an undo or redo stopped before running: `HEAD` is no longer where
+/// the question said, so the step would move something else.
+pub const HEAD_MOVED: &str = "HEAD moved since the question was asked; nothing was changed";
 
 /// Why staging everything is refused while conflicts exist.
 pub const CONFLICTS_REFUSAL: &str = "Resolve conflicts before staging everything";
@@ -326,7 +332,9 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // an untracked file, is in the way. The marker in
         // `GIT_REFLOG_ACTION` is all `checkout` logs, and `reset` logs it as
         // `<marker>: updating HEAD`, as far back as git 2.15.
-        GitOp::Travel { direction, step } => match step {
+        GitOp::Travel {
+            direction, step, ..
+        } => match step {
             Step::MoveTo(oid) => GitCommand::new("reset")
                 .arg("-q")
                 .arg("--keep")
@@ -520,6 +528,12 @@ fn run_op_with(
     } = op
     {
         run_op(runner, &GitOp::StageAll)?;
+    }
+    if let GitOp::Travel { expect, .. } = op {
+        let now = super::reflog::read_head(runner);
+        if now.oid.as_ref() != Some(&expect.oid) || now.head_ref != expect.head_ref {
+            return Err(HEAD_MOVED.into());
+        }
     }
     let mut cmd = op_command(op);
     if matches!(op, GitOp::SubmoduleUpdate(_)) && ssh_is_default(runner, env_set) {
@@ -2292,8 +2306,38 @@ mod tests {
         assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
     }
 
+    /// A travel op expecting a detached `HEAD` at `abc`; only its argv
+    /// is looked at.
     fn travel(direction: Direction, step: Step) -> GitOp {
-        GitOp::Travel { direction, step }
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: None,
+                oid: oid("abc"),
+            },
+        }
+    }
+
+    /// A travel op expecting `HEAD` where it is now in `runner`'s repo.
+    fn travel_here(runner: &dyn GitRunner, direction: Direction, step: Step) -> GitOp {
+        let now = crate::git::reflog::read_head(runner);
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: now.head_ref,
+                oid: now.oid.unwrap(),
+            },
+        }
+    }
+
+    fn planned(plan: crate::git::undo::Plan) -> GitOp {
+        GitOp::Travel {
+            direction: plan.direction,
+            step: plan.step,
+            expect: plan.expect,
+        }
     }
 
     #[test]
@@ -2359,7 +2403,7 @@ mod tests {
 
         let undo = plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
         assert_eq!(undo.step, Step::MoveTo(first.clone()));
-        run_op(&runner, &travel(Direction::Undo, undo.step)).unwrap();
+        run_op(&runner, &planned(undo)).unwrap();
 
         assert_eq!(rev_parse(dir, "HEAD"), first);
         let reflog = read_reflog(&runner).unwrap();
@@ -2377,8 +2421,9 @@ mod tests {
         let dir = tmp.path();
         let runner = crate::git::CliRunner::isolated(dir);
         std::fs::write(dir.join("a.txt"), "mine\n").unwrap();
-        let undo = travel(Direction::Undo, Step::MoveTo(first.clone()));
-        assert!(run_op(&runner, &undo).is_err());
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+        let refused = run_op(&runner, &undo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
         assert_eq!(
             std::fs::read_to_string(dir.join("a.txt")).unwrap(),
             "mine\n"
@@ -2391,13 +2436,90 @@ mod tests {
         git(dir, &["add", "b.txt"]);
         git(dir, &["commit", "-q", "-m", "third"]);
         let third = rev_parse(dir, "HEAD");
-        run_op(&runner, &travel(Direction::Undo, Step::MoveTo(first))).unwrap();
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        run_op(&runner, &undo).unwrap();
         std::fs::write(dir.join("b.txt"), "untracked\n").unwrap();
-        let redo = travel(Direction::Redo, Step::MoveTo(third));
-        assert!(run_op(&runner, &redo).is_err());
+        let redo = travel_here(&runner, Direction::Redo, Step::MoveTo(third));
+        let refused = run_op(&runner, &redo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
         assert_eq!(
             std::fs::read_to_string(dir.join("b.txt")).unwrap(),
             "untracked\n"
+        );
+    }
+
+    #[test]
+    fn a_travel_whose_head_moved_since_the_question_changes_nothing_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+
+        // Another commit lands while the question is open.
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "HEAD"), third);
+
+        // Same commit, another branch: still not what was asked about.
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        git(dir, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "refs/heads/other"), third);
+    }
+
+    #[test]
+    fn undoing_a_rebase_started_from_another_branch_restores_the_rebased_branch_in_real_git() {
+        use crate::git::fake::git;
+        use crate::git::reflog::read_reflog;
+        use crate::git::undo::{Context, plan};
+
+        let (tmp, base) = two_commit_repo();
+        let dir = tmp.path();
+        let main = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "topic", base.as_str()]);
+        std::fs::write(dir.join("t.txt"), "topic\n").unwrap();
+        git(dir, &["add", "t.txt"]);
+        git(dir, &["commit", "-q", "-m", "topic"]);
+        let old_topic = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "other", main.as_str()]);
+        std::fs::write(dir.join("o.txt"), "other\n").unwrap();
+        git(dir, &["add", "o.txt"]);
+        git(dir, &["commit", "-q", "-m", "other"]);
+        let other = rev_parse(dir, "HEAD");
+        // Run from `other`: HEAD's reflog never held topic's old tip.
+        git(dir, &["rebase", "-q", main.as_str(), "topic"]);
+        let new_topic = rev_parse(dir, "HEAD");
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        let reflog = read_reflog(&runner).unwrap();
+        let branches = crate::git::branches::list_branches(&runner).unwrap();
+        let ctx = Context {
+            branch: Some("topic"),
+            branches: &branches,
+            dirty: false,
+        };
+        let undo = plan(Direction::Undo, &reflog, &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(old_topic.clone()));
+        assert_ne!(undo.step, Step::MoveTo(other.clone()));
+        run_op(&runner, &planned(undo)).unwrap();
+        assert_eq!(rev_parse(dir, "refs/heads/topic"), old_topic);
+        assert_eq!(rev_parse(dir, "refs/heads/other"), other);
+
+        // Without the branch's own reflog there is no safe target.
+        let redo = plan(Direction::Redo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        run_op(&runner, &planned(redo)).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD"), new_topic);
+        std::fs::remove_file(dir.join(".git/logs/refs/heads/topic")).unwrap();
+        assert_eq!(
+            plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx),
+            Err(
+                "Cannot undo rebase: the branch's own reflog does not say where it was before"
+                    .into()
+            )
         );
     }
 }

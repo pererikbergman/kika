@@ -430,7 +430,10 @@ checkout or a whole rebase) and show what reversing it would do: which ref
 moves, from which commit to which, and whether the files change. Nothing moves
 until you press `y`. A branch moves with `git reset --keep`, so git itself
 refuses when a local change or an untracked file is in the way; Kika also
-refuses while tracked files have changes. A checkout is reversed with a
+refuses while tracked files have changes. Ignored files in the way are
+replaced, as git always treats them, and the question says so. A rebase is
+undone to where the rebased branch's own reflog says it was. If `HEAD` moves
+while the question is open, `y` changes nothing and says so. A checkout is reversed with a
 checkout, which carries uncommitted changes over. Undo and redo wait while an
 operation (a merge, rebase, cherry-pick, revert or bisect) is in progress.
 Kika marks its own steps in the reflog as `kika undo` and `kika redo`, so

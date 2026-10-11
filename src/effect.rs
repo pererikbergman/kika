@@ -2400,7 +2400,8 @@ mod tests {
                     ],
                     ok(b"abc 123 commit: x\0"),
                 )
-                .expect(&["rev-parse", "-q", "--verify", "HEAD"], ok(b"abc\n")),
+                .expect(&["rev-parse", "-q", "--verify", "HEAD"], ok(b"abc\n"))
+                .expect(&["symbolic-ref", "-q", "HEAD"], fail("")),
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(runner.clone(), tx);

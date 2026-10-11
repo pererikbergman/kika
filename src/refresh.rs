@@ -244,10 +244,18 @@ mod tests {
             GitOp::Travel {
                 direction: crate::git::undo::Direction::Undo,
                 step: crate::git::undo::Step::MoveTo(oid()),
+                expect: crate::git::undo::Expected {
+                    head_ref: None,
+                    oid: oid(),
+                },
             },
             GitOp::Travel {
                 direction: crate::git::undo::Direction::Redo,
                 step: crate::git::undo::Step::CheckoutBranch("main".into()),
+                expect: crate::git::undo::Expected {
+                    head_ref: Some(b"refs/heads/side".to_vec()),
+                    oid: oid(),
+                },
             },
         ];
         for op in ops {

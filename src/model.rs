@@ -2457,12 +2457,14 @@ impl AppState {
         let Some(reflog) = &self.commits.reflog.data else {
             return;
         };
-        let branch = self.branch.as_ref().and_then(|b| match &b.head {
-            crate::git::status::Head::Branch(name) => Some(name.as_str()),
-            _ => None,
-        });
+        // The branch as read with the reflog, not as the last status saw it.
+        let branch = reflog
+            .head_ref
+            .as_deref()
+            .and_then(|r| r.strip_prefix(b"refs/heads/"))
+            .map(String::from_utf8_lossy);
         let ctx = undo::Context {
-            branch,
+            branch: branch.as_deref(),
             branches: &self.branches.branches,
             dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
         };
@@ -2473,6 +2475,7 @@ impl AppState {
                 op: GitOp::Travel {
                     direction: plan.direction,
                     step: plan.step,
+                    expect: plan.expect,
                 },
             })),
             Err(message) => self.op_error = Some(message),
@@ -12591,6 +12594,8 @@ mod tests {
     fn commit_reflog(head: char) -> Reflog {
         Reflog {
             head: CommitId::parse(&head.to_string().repeat(40)),
+            head_ref: Some(b"refs/heads/main".to_vec()),
+            branch_entries: vec![],
             entries: crate::git::reflog::parse_records(include_bytes!(
                 "git/fixtures/reflog/commit.bin"
             )),
@@ -12601,6 +12606,10 @@ mod tests {
         GitOp::Travel {
             direction: undo::Direction::Undo,
             step: undo::Step::MoveTo(cid(&"b".repeat(40))),
+            expect: undo::Expected {
+                head_ref: Some(b"refs/heads/main".to_vec()),
+                oid: cid(&"c".repeat(40)),
+            },
         }
     }
 
@@ -12640,7 +12649,7 @@ mod tests {
                 preview: vec![
                     "Undo: commit: second".into(),
                     "Branch main moves from ccccccc to bbbbbbb.".into(),
-                    "Files change to match bbbbbbb.".into(),
+                    "Files change to match bbbbbbb; ignored files in the way are replaced.".into(),
                     "Commits after bbbbbbb leave main; redo brings them back.".into(),
                 ],
                 op: undo_commit_op(),

@@ -54,8 +54,8 @@ mod tests {
 
     fn three() -> Reflog {
         Reflog {
-            head: None,
             entries: parse_records(include_bytes!("git/fixtures/reflog/commit.bin")),
+            ..Reflog::default()
         }
     }
 

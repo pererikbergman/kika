@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
         use crate::git::commit_files::CommitId;
-        use crate::git::undo::{Direction, Step};
+        use crate::git::undo::{Direction, Expected, Step};
         use crate::popup::TravelConfirm;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Travel(TravelConfirm {
@@ -711,6 +711,10 @@ mod tests {
             op: GitOp::Travel {
                 direction: Direction::Undo,
                 step: Step::MoveTo(CommitId::parse("bbb").unwrap()),
+                expect: Expected {
+                    head_ref: Some(b"refs/heads/main".to_vec()),
+                    oid: CommitId::parse("ccc").unwrap(),
+                },
             },
         })];
         let (_, rows) = draw(&state, 100, 14);

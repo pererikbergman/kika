@@ -527,13 +527,17 @@ mod tests {
     #[test]
     fn the_travel_question_is_the_preview_then_y_or_n() {
         use crate::git::commit_files::CommitId;
-        use crate::git::undo::{Direction, Step};
+        use crate::git::undo::{Direction, Expected, Step};
         let ask = TravelConfirm {
             title: "Undo",
             preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],
             op: GitOp::Travel {
                 direction: Direction::Undo,
                 step: Step::MoveTo(CommitId::parse("abc").unwrap()),
+                expect: Expected {
+                    head_ref: None,
+                    oid: CommitId::parse("def").unwrap(),
+                },
             },
         };
         assert_eq!(ask.question(), "Undo: commit: x\nBranch main moves.\n(y/n)");

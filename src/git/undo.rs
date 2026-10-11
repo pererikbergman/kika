@@ -9,7 +9,7 @@
 use super::branches::{Branch, BranchName};
 use super::commit_files::CommitId;
 use super::diff::terminal_safe;
-use super::reflog::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER};
+use super::reflog::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER, finishes_rebase_of};
 
 /// Characters any reflog-derived text may take in the preview.
 const ELIDE: usize = 60;
@@ -71,6 +71,16 @@ pub struct Plan {
     pub direction: Direction,
     pub step: Step,
     pub preview: Vec<String>,
+    pub expect: Expected,
+}
+
+/// Where `HEAD` was when the plan was made. The step runs only if it is
+/// still there, so what moves is what the preview named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expected {
+    /// The branch as a full ref; `None` for a detached `HEAD`.
+    pub head_ref: Option<Vec<u8>>,
+    pub oid: CommitId,
 }
 
 /// What the planner needs from the rest of the state.
@@ -93,10 +103,10 @@ enum Logical<'a> {
         after: &'a ReflogEntry,
         before: Option<&'a ReflogEntry>,
     },
-    /// A whole rebase, from the entry before its start to its finish.
+    /// A whole rebase, from its start to its finish. Where the branch
+    /// was before is in the branch's own reflog, not `HEAD`'s.
     Rebase {
         after: &'a ReflogEntry,
-        before: Option<&'a ReflogEntry>,
         branch: &'a [u8],
     },
     Checkout {
@@ -169,7 +179,6 @@ fn fold(entries: &[ReflogEntry]) -> Vec<Logical<'_>> {
                     Some(start) => {
                         out.push(Logical::Rebase {
                             after: entry,
-                            before: entries.get(start + 1),
                             branch,
                         });
                         i = start + 1;
@@ -235,8 +244,30 @@ fn build(
         )
     };
     let head = reflog.head.as_ref();
+    let expect = |oid: &CommitId| Expected {
+        head_ref: reflog.head_ref.clone(),
+        oid: oid.clone(),
+    };
     match *target {
-        Logical::Move { after, before } | Logical::Rebase { after, before, .. } => {
+        Logical::Move { after, .. } | Logical::Rebase { after, .. } => {
+            let before = match *target {
+                Logical::Move { before, .. } => before,
+                Logical::Rebase { branch, .. } => {
+                    let mut full = b"refs/heads/".to_vec();
+                    full.extend_from_slice(branch);
+                    if reflog.head_ref.as_deref() != Some(&full[..]) {
+                        return Err(moved());
+                    }
+                    let Some(before) = rebase_before(reflog, after) else {
+                        return Err(format!(
+                            "Cannot {verb} {label}: the branch's own reflog does not say \
+                             where it was before"
+                        ));
+                    };
+                    Some(before)
+                }
+                _ => None,
+            };
             let (Some(after_oid), Some(before)) = (after.oid.as_ref(), before) else {
                 return Err(cannot());
             };
@@ -253,11 +284,6 @@ fn build(
             if head != Some(from.0) {
                 return Err(moved());
             }
-            if let Logical::Rebase { branch, .. } = target
-                && ctx.branch != Some(&String::from_utf8_lossy(branch))
-            {
-                return Err(moved());
-            }
             if ctx.dirty {
                 return Err("Commit or stash your changes first".into());
             }
@@ -272,7 +298,9 @@ fn build(
                 if from.1.is_some() && from.1 == to.1 {
                     "Files stay the same (same tree).".to_string()
                 } else {
-                    format!("Files change to match {to_short}.")
+                    format!(
+                        "Files change to match {to_short}; ignored files in the way are replaced."
+                    )
                 },
             ];
             if direction == Direction::Undo {
@@ -285,6 +313,7 @@ fn build(
                 direction,
                 step: Step::MoveTo(to.0.clone()),
                 preview,
+                expect: expect(from.0),
             })
         }
         Logical::Checkout {
@@ -323,14 +352,27 @@ fn build(
                     format!("{}: {}", direction.title(), elide(&after.display())),
                     format!("HEAD switches from {x} to {y}. No branch moves."),
                     format!(
-                        "Files change to match {y}; uncommitted changes are carried over, \
-                         and git refuses if one would be overwritten."
+                        "Files change to match {y}; uncommitted changes carry over, git \
+                         refuses to overwrite them, and ignored files in the way are replaced."
                     ),
                 ],
+                expect: expect(leave_oid),
             })
         }
         Logical::Fixed(_) | Logical::Marker(_) => Err(cannot()),
     }
+}
+
+/// The entry before the rebase that ended at `after`, from the reflog of
+/// the branch `HEAD` is on: the one just older than its finish there.
+fn rebase_before<'a>(reflog: &'a Reflog, after: &ReflogEntry) -> Option<&'a ReflogEntry> {
+    let full = reflog.head_ref.as_deref()?;
+    let after = after.oid.as_ref()?;
+    let at = reflog
+        .branch_entries
+        .iter()
+        .position(|e| e.oid.as_ref() == Some(after) && finishes_rebase_of(e, full))?;
+    reflog.branch_entries.get(at + 1)
 }
 
 /// Whether `HEAD` is on the checkout side named `name`: on that branch
@@ -399,6 +441,7 @@ mod tests {
     const REBASE_2_15: &[u8] = include_bytes!("fixtures/reflog/rebase_2_15.bin");
     const REBASE_2_15_I: &[u8] = include_bytes!("fixtures/reflog/rebase_2_15_interactive.bin");
     const ABORTED: &[u8] = include_bytes!("fixtures/reflog/aborted_rebase.bin");
+    const FROM_OTHER: &[u8] = include_bytes!("fixtures/reflog/rebase_from_other.bin");
 
     fn id(c: char) -> String {
         c.to_string().repeat(40)
@@ -417,6 +460,24 @@ mod tests {
         Reflog {
             head: CommitId::parse(&id(head)),
             entries: parse_records(&records.concat()),
+            ..Reflog::default()
+        }
+    }
+
+    /// `HEAD`'s `records` while on `topic`, whose own reflog says a rebase,
+    /// in its branch-side `finish` form, took it from `fff…` to `eee…`.
+    fn on_topic(records: &[&[u8]], head: char, finish: &str) -> Reflog {
+        let onto = id('c');
+        let own = [
+            record('e', '5', &format!("{finish}: refs/heads/topic onto {onto}")),
+            record('f', '6', "commit: topic two"),
+            record('g', '7', "commit: topic one"),
+            record('b', '2', "branch: Created from HEAD"),
+        ];
+        Reflog {
+            head_ref: Some(b"refs/heads/topic".to_vec()),
+            branch_entries: parse_records(&own.concat()),
+            ..reflog(records, head)
         }
     }
 
@@ -464,7 +525,7 @@ mod tests {
             [
                 "Undo: commit: second",
                 "Branch main moves from ccccccc to bbbbbbb.",
-                "Files change to match bbbbbbb.",
+                "Files change to match bbbbbbb; ignored files in the way are replaced.",
                 "Commits after bbbbbbb leave main; redo brings them back.",
             ]
         );
@@ -480,8 +541,8 @@ mod tests {
             [
                 "Undo: checkout: moving from main to side",
                 "HEAD switches from side to main. No branch moves.",
-                "Files change to match main; uncommitted changes are carried over, and git \
-                 refuses if one would be overwritten.",
+                "Files change to match main; uncommitted changes carry over, git refuses \
+                 to overwrite them, and ignored files in the way are replaced.",
             ]
         );
     }
@@ -511,23 +572,75 @@ mod tests {
     #[test]
     fn undoing_a_rebase_of_either_git_era_moves_the_branch_to_its_old_tip() {
         let topic = branches(&["main", "topic"]);
-        for fixture in [REBASE, REBASE_2_15, REBASE_2_15_I] {
-            let plan = undo(&reflog(&[fixture], 'e'), &ctx(Some("topic"), &topic)).unwrap();
+        for (fixture, finish) in [
+            (REBASE, "rebase (finish)"),
+            (REBASE_2_15, "rebase finished"),
+            (REBASE_2_15_I, "rebase -i (finish)"),
+        ] {
+            let log = on_topic(&[fixture], 'e', finish);
+            let plan = undo(&log, &ctx(Some("topic"), &topic)).unwrap();
             assert_eq!(plan.step, Step::MoveTo(oid('f')));
             assert_eq!(
                 plan.preview[1],
                 "Branch topic moves from eeeeeee to fffffff."
             );
+            assert_eq!(
+                plan.expect,
+                Expected {
+                    head_ref: Some(b"refs/heads/topic".to_vec()),
+                    oid: oid('e'),
+                }
+            );
         }
+    }
+
+    #[test]
+    fn a_rebase_started_from_another_branch_goes_back_to_the_rebased_branchs_own_tip() {
+        // HEAD's entry before the start is `other`'s commit `hhh…`; the
+        // branch's own reflog says topic was at `fff…`.
+        let topic = branches(&["main", "other", "topic"]);
+        let log = on_topic(&[FROM_OTHER], 'e', "rebase (finish)");
+        let plan = undo(&log, &ctx(Some("topic"), &topic)).unwrap();
+        assert_eq!(plan.step, Step::MoveTo(oid('f')));
+
+        let undone = record('f', '6', "kika undo: updating HEAD");
+        let mut log = on_topic(&[&undone, FROM_OTHER], 'f', "rebase (finish)");
+        let mut own = parse_records(&undone);
+        own.append(&mut log.branch_entries);
+        log.branch_entries = own;
+        let plan = redo(&log, &ctx(Some("topic"), &topic)).unwrap();
+        assert_eq!(plan.step, Step::MoveTo(oid('e')));
+    }
+
+    #[test]
+    fn a_rebase_with_no_finish_in_the_branchs_own_reflog_is_refused() {
+        let topic = branches(&["main", "topic"]);
+        let mut log = on_topic(&[FROM_OTHER], 'e', "rebase (finish)");
+        log.branch_entries.remove(0);
+        let refused = Err(
+            "Cannot undo rebase: the branch's own reflog does not say where it was before".into(),
+        );
+        assert_eq!(undo(&log, &ctx(Some("topic"), &topic)), refused);
+        log.branch_entries.clear();
+        assert_eq!(undo(&log, &ctx(Some("topic"), &topic)), refused);
+        // A finish of another branch at the same commit does not count.
+        let mut log = on_topic(&[FROM_OTHER], 'e', "rebase (finish)");
+        log.branch_entries[0].message =
+            format!("rebase (finish): refs/heads/x onto {}", id('c')).into_bytes();
+        assert_eq!(undo(&log, &ctx(Some("topic"), &topic)), refused);
     }
 
     #[test]
     fn a_rebase_is_undone_only_on_its_own_branch() {
         let list = branches(&["main", "topic"]);
+        let mut log = on_topic(&[REBASE], 'e', "rebase (finish)");
+        log.head_ref = Some(b"refs/heads/main".to_vec());
         assert_eq!(
-            undo(&reflog(&[REBASE], 'e'), &ctx(Some("main"), &list)),
+            undo(&log, &ctx(Some("main"), &list)),
             Err("HEAD has moved since rebase; nothing is undone".into())
         );
+        log.head_ref = None;
+        assert!(undo(&log, &ctx(None, &list)).is_err());
     }
 
     #[test]
