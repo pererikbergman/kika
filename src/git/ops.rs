@@ -982,6 +982,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "Windows forbids * and : in file names")]
     fn delete_untracked_on_a_glob_name_deletes_only_that_file_in_real_git() {
         use crate::git::fake::{TempDir, git};
 
@@ -1454,6 +1455,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "Windows forbids * in file names")]
     fn a_file_named_like_a_glob_stages_and_unstages_only_itself_in_real_git() {
         use crate::git::fake::{TempDir, git};
         use crate::git::status::read_status;
