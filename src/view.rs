@@ -3,7 +3,7 @@ use crate::commit_editor::{CommitEditor, Field};
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
-use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
@@ -790,9 +790,16 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
+                    let text = match row.kind {
+                        RowKind::Header | RowKind::HunkHeader => sanitize(&row.text),
+                        RowKind::Context
+                        | RowKind::Added
+                        | RowKind::Removed
+                        | RowKind::NoNewline => sanitize_body(&row.text),
+                    };
                     let line = Line::from(vec![
                         Span::styled(gutter, Style::new().fg(FOCUSED)),
-                        Span::styled(sanitize(&row.text), style),
+                        Span::styled(text, style),
                     ]);
                     let mark = match view.lines {
                         Some(_) => row.line.is_some(),
@@ -2466,6 +2473,33 @@ mod tests {
         assert!(contains(&rows, "▌+new nine"), "{rows:#?}");
     }
 
+    /// A diff of a file whose name holds a ZWJ, adding a ZWJ emoji then `X`.
+    const JOINED: &str = "diff --git a/👨\u{200D}👩.rs b/👨\u{200D}👩.rs\n\
+        --- a/👨\u{200D}👩.rs\n+++ b/👨\u{200D}👩.rs\n\
+        @@ -1 +1 @@\n-old\n+👨\u{200D}👩\u{200D}👧X\n";
+
+    #[test]
+    fn a_hunk_body_keeps_a_joined_emoji_and_its_file_header_escapes_the_joiner() {
+        let rows = draw(&hunks(DiffSide::Worktree, JOINED.as_bytes()), 100, 20);
+        assert!(contains(&rows, "+👨\u{200D}👩\u{200D}👧X"), "{rows:#?}");
+        assert!(contains(&rows, "+++ b/👨<U+200D>👩.rs"), "{rows:#?}");
+        assert!(!contains(&rows, "+👨<U+200D>"), "{rows:#?}");
+    }
+
+    #[test]
+    fn text_after_a_joined_emoji_lands_where_its_width_says() {
+        let width = 60;
+        let buffer = draw_buffer(&hunks(DiffSide::Worktree, JOINED.as_bytes()), width, 20);
+        let emoji = "👨\u{200D}👩\u{200D}👧";
+        let (x, y) = (0..buffer.area.height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == "+" && buffer[(x + 1, y)].symbol() == emoji)
+            .expect("the added row");
+        let column = x + width_of(&format!("+{emoji}")) as u16;
+        assert_eq!(buffer[(column, y)].symbol(), "X");
+        assert_eq!(buffer[(width - 1, y)].symbol(), "│");
+    }
+
     #[test]
     fn in_line_mode_the_picked_lines_are_reversed_and_the_header_is_not() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
@@ -2692,6 +2726,15 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn a_blamed_word_keeps_its_zwnj() {
+        let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهم\n");
+        let lines = crate::git::blame::parse_blame(out.as_bytes()).unwrap();
+        let rows = draw(&blamed(lines, 0), 120, 20);
+        assert!(contains(&rows, "می\u{200C}خواهم"), "{rows:#?}");
+        assert!(!contains(&rows, "<U+200C>"), "{rows:#?}");
     }
 
     #[test]

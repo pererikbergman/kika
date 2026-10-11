@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::diff::{Classifier, DiffLine, sanitize, terminal_safe};
+use super::diff::{Classifier, DiffLine, sanitize, sanitize_body, terminal_safe};
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
 
@@ -66,7 +66,7 @@ pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>, String> {
                 date: info.map(CommitInfo::date).unwrap_or_default(),
                 oid,
                 line_no,
-                text: sanitize(text),
+                text: sanitize_body(text),
             });
             continue;
         }
@@ -277,6 +277,14 @@ mod tests {
                 line(A, ann, "2023-11-15", 4, "four"),
             ])
         );
+    }
+
+    #[test]
+    fn line_text_keeps_a_joiner_that_the_author_name_escapes() {
+        let out = format!("{A} 1 1 1\nauthor 👨\u{200D}👩\n\t👨\u{200D}👩\n");
+        let lines = parse_blame(out.as_bytes()).unwrap();
+        assert_eq!(lines[0].author, "👨<U+200D>👩");
+        assert_eq!(lines[0].text, "👨\u{200D}👩");
     }
 
     #[test]

@@ -224,10 +224,11 @@ impl Classifier {
                 _ => LineKind::Context,
             }
         };
-        DiffLine {
-            kind,
-            text: sanitize(raw),
-        }
+        let text = match kind {
+            LineKind::Added | LineKind::Removed | LineKind::Context => sanitize_body(raw),
+            LineKind::Header | LineKind::Hunk => sanitize(raw),
+        };
+        DiffLine { kind, text }
     }
 }
 
@@ -239,14 +240,49 @@ impl Classifier {
 pub fn sanitize(raw: &[u8]) -> String {
     let mut text = String::with_capacity(raw.len());
     for c in String::from_utf8_lossy(raw).chars() {
-        match c {
-            '\t' => text.push_str("    "),
-            c if is_invisible_or_bidi(c) => text.push_str(&format!("<U+{:04X}>", u32::from(c))),
-            c if c.is_control() => text.push('\u{FFFD}'),
-            c => text.push(c),
-        }
+        push_safe(&mut text, c);
     }
     text
+}
+
+/// `sanitize` for the lines of a file (diff, blame, rendered diff). Emoji
+/// sequences and Persian, Arabic-script and Indic words need ZWJ/ZWNJ, which
+/// only shape their neighbours and cannot reorder text, so a joiner is kept
+/// when both neighbours are visible non-ASCII characters. The neighbour rule
+/// keeps a joiner hidden in ASCII, such as `is\u{200D}admin`, visible.
+pub fn sanitize_body(raw: &[u8]) -> String {
+    let mut text = String::with_capacity(raw.len());
+    let mut before = None;
+    let decoded = String::from_utf8_lossy(raw);
+    let mut chars = decoded.chars().peekable();
+    while let Some(c) = chars.next() {
+        if matches!(c, '\u{200C}' | '\u{200D}')
+            && before.is_some_and(shapes_with_joiner)
+            && chars.peek().is_some_and(|&after| shapes_with_joiner(after))
+        {
+            text.push(c);
+        } else {
+            push_safe(&mut text, c);
+        }
+        before = Some(c);
+    }
+    text
+}
+
+/// The one escaping rule both sanitisers share, so they cannot drift apart.
+fn push_safe(text: &mut String, c: char) {
+    match c {
+        '\t' => text.push_str("    "),
+        c if is_invisible_or_bidi(c) => text.push_str(&format!("<U+{:04X}>", u32::from(c))),
+        c if c.is_control() => text.push('\u{FFFD}'),
+        c => text.push(c),
+    }
+}
+
+/// A visible non-ASCII character a kept ZWJ/ZWNJ may sit next to. Joiners are
+/// in the strict set themselves, so a run of them is escaped.
+fn shapes_with_joiner(c: char) -> bool {
+    !c.is_ascii() && !c.is_control() && !is_invisible_or_bidi(c)
 }
 
 /// Format characters (not `is_control`) that reorder text or draw nothing:
@@ -794,52 +830,54 @@ mod tests {
         assert_eq!(c.classify(b"a\xffb\n").text, "a\u{FFFD}b");
     }
 
+    /// Every class the strict sanitiser escapes, with sample code points.
+    const STRICT_CLASSES: [(&str, &[char]); 17] = [
+        (
+            "embedding/override",
+            &['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'],
+        ),
+        ("isolate", &['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
+        ("mark", &['\u{200E}', '\u{200F}', '\u{061C}']),
+        ("zero-width", &['\u{200B}', '\u{200C}', '\u{200D}']),
+        ("word joiner", &['\u{2060}']),
+        ("byte order mark", &['\u{FEFF}']),
+        ("soft hyphen", &['\u{00AD}']),
+        ("combining grapheme joiner", &['\u{034F}']),
+        (
+            "hangul filler",
+            &['\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'],
+        ),
+        ("khmer vowel inherent", &['\u{17B4}', '\u{17B5}']),
+        (
+            "mongolian format",
+            &['\u{180B}', '\u{180C}', '\u{180D}', '\u{180E}', '\u{180F}'],
+        ),
+        (
+            "invisible operator and deprecated format",
+            &['\u{2061}', '\u{2064}', '\u{2065}', '\u{206A}', '\u{206F}'],
+        ),
+        ("variation selector", &['\u{FE00}', '\u{FE0D}']),
+        (
+            "unassigned and interlinear annotation",
+            &['\u{FFF0}', '\u{FFF8}', '\u{FFF9}', '\u{FFFA}', '\u{FFFB}'],
+        ),
+        ("shorthand format", &['\u{1BCA0}', '\u{1BCA3}']),
+        ("musical format", &['\u{1D173}', '\u{1D17A}']),
+        (
+            "tag",
+            &[
+                '\u{E0000}',
+                '\u{E0001}',
+                '\u{E0041}',
+                '\u{E007F}',
+                '\u{E0FFF}',
+            ],
+        ),
+    ];
+
     #[test]
     fn bidi_and_invisible_characters_become_visible_escapes() {
-        let classes: [(&str, &[char]); 17] = [
-            (
-                "embedding/override",
-                &['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'],
-            ),
-            ("isolate", &['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}']),
-            ("mark", &['\u{200E}', '\u{200F}', '\u{061C}']),
-            ("zero-width", &['\u{200B}', '\u{200C}', '\u{200D}']),
-            ("word joiner", &['\u{2060}']),
-            ("byte order mark", &['\u{FEFF}']),
-            ("soft hyphen", &['\u{00AD}']),
-            ("combining grapheme joiner", &['\u{034F}']),
-            (
-                "hangul filler",
-                &['\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'],
-            ),
-            ("khmer vowel inherent", &['\u{17B4}', '\u{17B5}']),
-            (
-                "mongolian format",
-                &['\u{180B}', '\u{180C}', '\u{180D}', '\u{180E}', '\u{180F}'],
-            ),
-            (
-                "invisible operator and deprecated format",
-                &['\u{2061}', '\u{2064}', '\u{2065}', '\u{206A}', '\u{206F}'],
-            ),
-            ("variation selector", &['\u{FE00}', '\u{FE0D}']),
-            (
-                "unassigned and interlinear annotation",
-                &['\u{FFF0}', '\u{FFF8}', '\u{FFF9}', '\u{FFFA}', '\u{FFFB}'],
-            ),
-            ("shorthand format", &['\u{1BCA0}', '\u{1BCA3}']),
-            ("musical format", &['\u{1D173}', '\u{1D17A}']),
-            (
-                "tag",
-                &[
-                    '\u{E0000}',
-                    '\u{E0001}',
-                    '\u{E0041}',
-                    '\u{E007F}',
-                    '\u{E0FFF}',
-                ],
-            ),
-        ];
-        for (class, chars) in classes {
+        for (class, chars) in STRICT_CLASSES {
             for &c in chars {
                 let raw = format!("a{c}b");
                 let expected = format!("a<U+{:04X}>b", c as u32);
@@ -871,5 +909,99 @@ mod tests {
             terminal_safe("fatal: bad \u{2066}path\u{2069}\n".as_bytes()),
             "fatal: bad <U+2066>path<U+2069>"
         );
+    }
+
+    #[test]
+    fn body_text_keeps_joiners_inside_non_ascii_text() {
+        for text in [
+            "👨\u{200D}👩\u{200D}👧",
+            "❤\u{FE0F}\u{200D}🔥",
+            "می\u{200C}خواهم",
+            "क्\u{200D}ष",
+        ] {
+            assert_eq!(sanitize_body(text.as_bytes()), text);
+        }
+    }
+
+    #[test]
+    fn body_text_still_escapes_every_other_strict_character() {
+        for (class, chars) in STRICT_CLASSES {
+            for &c in chars
+                .iter()
+                .filter(|&&c| c != '\u{200C}' && c != '\u{200D}')
+            {
+                let escape = format!("<U+{:04X}>", c as u32);
+                for (before, after) in [('a', 'b'), ('é', 'ü'), ('👨', '👩')] {
+                    let raw = format!("{before}{c}{after}");
+                    let expected = format!("{before}{escape}{after}");
+                    assert_eq!(sanitize_body(raw.as_bytes()), expected, "{class} {c:?}");
+                }
+            }
+        }
+        assert_eq!(sanitize_body("é\u{202E}ü".as_bytes()), "é<U+202E>ü");
+        assert_eq!(sanitize_body("é\u{2066}ü".as_bytes()), "é<U+2066>ü");
+    }
+
+    #[test]
+    fn body_text_escapes_joiners_without_two_non_ascii_neighbours() {
+        let cases = [
+            // An ASCII neighbour: hides a split inside an identifier.
+            ("is\u{200D}admin", "is<U+200D>admin"),
+            ("👨\u{200D}a", "👨<U+200D>a"),
+            ("a\u{200C}خ", "a<U+200C>خ"),
+            // Start or end of the line.
+            ("\u{200D}👩", "<U+200D>👩"),
+            ("👨\u{200D}", "👨<U+200D>"),
+            ("\u{200C}", "<U+200C>"),
+            // A run of joiners.
+            ("👨\u{200D}\u{200D}👩", "👨<U+200D><U+200D>👩"),
+            ("می\u{200C}\u{200D}خ", "می<U+200C><U+200D>خ"),
+            // Next to a tag or a strict variation selector.
+            ("👨\u{200D}\u{E0041}", "👨<U+200D><U+E0041>"),
+            ("\u{E0041}\u{200D}👩", "<U+E0041><U+200D>👩"),
+            ("👨\u{200D}\u{FE00}", "👨<U+200D><U+FE00>"),
+            ("\u{FE00}\u{200C}👩", "<U+FE00><U+200C>👩"),
+            // Next to a control character.
+            ("👨\u{200D}\u{7}", "👨<U+200D>\u{FFFD}"),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(sanitize_body(raw.as_bytes()), expected, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn body_text_expands_tabs_and_replaces_controls_like_strict() {
+        let raw = b"\tx\x1b[31m\x07\xff";
+        assert_eq!(sanitize_body(raw), sanitize(raw));
+    }
+
+    #[test]
+    fn strict_text_still_escapes_joiners_inside_non_ascii_text() {
+        assert_eq!(sanitize("👨\u{200D}👩".as_bytes()), "👨<U+200D>👩");
+        assert_eq!(sanitize("می\u{200C}خواهم".as_bytes()), "می<U+200C>خواهم");
+        assert_eq!(
+            terminal_safe("fatal: 👨\u{200D}👩\n".as_bytes()),
+            "fatal: 👨<U+200D>👩"
+        );
+    }
+
+    #[test]
+    fn classify_keeps_joiners_in_body_lines_and_escapes_them_in_headers() {
+        let mut c = Classifier::new();
+        let header = c.classify("+++ b/👨\u{200D}👩.txt\n".as_bytes());
+        assert_eq!(header.kind, LineKind::Header);
+        assert_eq!(header.text, "+++ b/👨<U+200D>👩.txt");
+        let hunk = c.classify("@@ -1 +1 @@ 👨\u{200D}👩\n".as_bytes());
+        assert_eq!(hunk.kind, LineKind::Hunk);
+        assert_eq!(hunk.text, "@@ -1 +1 @@ 👨<U+200D>👩");
+        for (raw, kind) in [
+            ("+👨\u{200D}👩", LineKind::Added),
+            ("-👨\u{200D}👩", LineKind::Removed),
+            (" 👨\u{200D}👩", LineKind::Context),
+        ] {
+            let line = c.classify(raw.as_bytes());
+            assert_eq!(line.kind, kind);
+            assert_eq!(line.text, raw);
+        }
     }
 }
