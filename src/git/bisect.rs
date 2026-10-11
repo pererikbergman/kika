@@ -142,7 +142,7 @@ fn count_mark(state: &mut BisectState, mark: &[u8]) {
 }
 
 /// `# first <bad> commit: [<hex>] <subject>`, which git appends once it
-/// names the first bad commit.
+/// names the first bad commit; newer git writes `'<bad>'`.
 fn found_line(line: &[u8], bad: &str) -> Option<Found> {
     let line = std::str::from_utf8(line).ok()?;
     let rest = line.strip_prefix("# first ")?;
@@ -158,10 +158,16 @@ fn found_line(line: &[u8], bad: &str) -> Option<Found> {
 }
 
 /// `text` after the term `term`, compared as the terms were read: through
-/// the sanitiser.
+/// the sanitiser. Git 2.55 and newer quote the term (`'bad'`); older git
+/// writes it bare.
 fn sanitized_prefix<'a>(text: &'a str, term: &str) -> Option<&'a str> {
     let end = text.find(" commit: [")?;
-    (sanitize(&text.as_bytes()[..end]) == term).then(|| &text[end..])
+    let word = &text.as_bytes()[..end];
+    let word = word
+        .strip_prefix(b"'")
+        .and_then(|w| w.strip_suffix(b"'"))
+        .unwrap_or(word);
+    (sanitize(word) == term).then(|| &text[end..])
 }
 
 /// The two lines of `BISECT_TERMS`, bad first. Anything else is not a set
@@ -242,6 +248,34 @@ mod tests {
         let found = parse(&log).first_bad.unwrap();
         assert_eq!(found.commit.as_str(), C);
         assert_eq!(found.subject, "commit 5");
+    }
+
+    #[test]
+    fn newer_gits_quoted_term_still_names_the_found_commit() {
+        let log = format!(
+            "# status: waiting for 'good' commit(s), 'bad' commit known\n\
+             git bisect bad {A}\n\
+             # first 'bad' commit: [{C}] commit 5\n"
+        );
+        let state = parse(&log);
+        assert_eq!(state.bad, 1);
+        let found = state.first_bad.unwrap();
+        assert_eq!(
+            (found.commit.as_str(), found.subject.as_str()),
+            (C, "commit 5")
+        );
+        let custom = Terms {
+            bad: "broken".into(),
+            good: "fixed".into(),
+        };
+        let log = format!("# first 'broken' commit: [{A}] x\n# first 'bad' commit: [{C}] y\n");
+        assert_eq!(
+            parse_log(log.as_bytes(), &custom)
+                .first_bad
+                .unwrap()
+                .subject,
+            "x"
+        );
     }
 
     #[test]
