@@ -1164,6 +1164,28 @@ async fn a_commit_made_outside_is_noticed_by_the_refs_poll() {
     assert!(app.state().files.is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_commits_panel_shows_head_and_loads_more_as_the_cursor_nears_the_end() {
+    let repo = TestRepo::new().history(260);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('z')).await;
+    app.assert_screen_contains("commit 260");
+    assert_eq!(app.state().commits.rows.len(), 200);
+
+    for _ in 0..210 {
+        app.press(KeyCode::Char('j')).await;
+    }
+
+    let commits = &app.state().commits;
+    assert_eq!(commits.rows.len(), 260);
+    assert!(commits.done);
+    assert_eq!(commits.selected, 210);
+    assert_eq!(commits.rows[210].subject, "commit 50");
+    app.assert_screen_contains("commit 50");
+}
+
 /// Every local branch's name, as git lists them.
 fn branch_names(repo: &TestRepo) -> Vec<String> {
     String::from_utf8(repo.git(["for-each-ref", "--format=%(refname:short)", "refs/heads"]))
@@ -1334,4 +1356,89 @@ async fn a_push_behind_the_remote_offers_a_lease_and_y_forces_it() {
         repo.head().trim()
     );
     assert_eq!(app.state().popups, []);
+}
+
+/// What `git status` says, branch line included, to compare before and after.
+fn porcelain_status(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["status", "--porcelain=v2", "--branch"])).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conflicting_merge_commit_is_aborted_from_the_status_panel() {
+    let repo = diverged();
+    let head = repo.head();
+    let status = porcelain_status(&repo);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("[0] Commits · other");
+    app.press(KeyCode::Char('m')).await;
+    app.assert_screen_contains("Merge / rebase");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+
+    // Git stopped on the conflict; its output went to the terminal.
+    app.assert_screen_contains("Could not merge");
+    app.press(KeyCode::Esc).await;
+    assert_eq!(repo.entry("a.txt").unwrap().kind, EntryKind::Conflicted);
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃merging ");
+
+    app.press(KeyCode::Char('a')).await;
+    app.assert_screen_contains("Abort the merge and return to where it started?");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.head(), head);
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.read("a.txt"), "ours\n");
+    assert_eq!(porcelain_status(&repo), status);
+    let in_progress = &app.state().branch.as_ref().unwrap().in_progress;
+    assert!(in_progress.is_empty(), "{in_progress:?}");
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("merging")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebasing_onto_a_branch_from_the_menu_replays_the_current_one_on_its_tip() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "feature"]);
+    let repo = repo.write("b.txt", "feature\n").commit("on feature");
+    repo.git(["checkout", "-q", "main"]);
+    let repo = repo.write("c.txt", "main\n").commit("on main");
+    let main = repo.head();
+    repo.git(["checkout", "-q", "feature"]);
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("[0] Commits · main");
+    app.press(KeyCode::Char('m')).await;
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(current_branch(&repo), "feature");
+    assert!(
+        repo.try_git(["merge-base", "--is-ancestor", main.trim(), "HEAD"]),
+        "main's tip is not under feature"
+    );
+    assert_eq!(repo.head_message(), "on feature\n\n");
+    assert_eq!(repo.read("b.txt"), "feature\n");
+    assert_eq!(repo.read("c.txt"), "main\n");
+    assert_eq!(
+        porcelain_status(&repo),
+        "# branch.oid ".to_string() + repo.head().trim() + "\n# branch.head feature\n"
+    );
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("Could not")),
+        "{}",
+        screen.join("\n")
+    );
 }

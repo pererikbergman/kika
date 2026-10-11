@@ -4,11 +4,14 @@
 pub mod askpass;
 pub mod blame;
 pub mod branches;
+pub mod commit_files;
 pub mod diff;
 #[cfg(test)]
 pub mod fake;
 pub mod fetch;
 pub mod head;
+mod joiner;
+pub mod log;
 pub mod ops;
 pub mod patch;
 pub mod path;

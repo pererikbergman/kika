@@ -10,12 +10,15 @@ use crate::external_diff::ExternalRenderer;
 use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::commit_files::CommitFile;
 use crate::git::diff::{DiffChunk, DiffLine};
-use crate::git::ops::GitOp;
+use crate::git::log::{LogPage, Markers};
+use crate::git::ops::{GitOp, MergeStrategy};
 use crate::git::patch::FilePatch;
 use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
+use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::keymap::{KeyPress, Keymap};
@@ -200,6 +203,33 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<(), String>,
     },
+    /// A page of the log finished; `tag` says which load, `skip` which
+    /// page. `Ok` also carries the unix time it was read at.
+    CommitsLoaded {
+        tag: Tag,
+        skip: usize,
+        result: Result<(LogPage, i64), String>,
+    },
+    /// The push and merge markers finished; `tag` says which load.
+    MarkersLoaded {
+        tag: Tag,
+        result: Result<Markers, String>,
+    },
+    /// Move the commit cursor down or up.
+    CommitNext,
+    CommitPrev,
+    /// Show the selected commit's files in place of the log.
+    OpenCommitFiles,
+    /// Back from a commit's files to the log, at the same commit.
+    CloseCommitFiles,
+    /// Move the cursor in a commit's files down or up.
+    CommitFileNext,
+    CommitFilePrev,
+    /// A commit's files were read; `tag` says which load.
+    CommitFilesLoaded {
+        tag: Tag,
+        result: Result<Vec<CommitFile>, String>,
+    },
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.
@@ -350,6 +380,18 @@ pub enum AppIntent {
     },
     /// Time to draw the next frame of the remote operation's spinner.
     SpinnerTick,
+    /// Merge the selected branch into the current one this way.
+    Merge(MergeStrategy),
+    /// Rebase the current branch onto the selected one.
+    RebaseOnto,
+    /// Go on with the merge, rebase or cherry-pick in progress.
+    ContinueOperation,
+    /// Drop the commit the rebase or cherry-pick stopped on and go on.
+    SkipOperation,
+    /// Ask before aborting the operation in progress.
+    AbortOperation,
+    /// Abort this operation, as the question asked.
+    ConfirmAbort(Operation),
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

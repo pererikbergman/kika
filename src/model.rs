@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::BranchesPanel;
 use crate::commit_editor::CommitEditor;
+use crate::commit_files::CommitFilesList;
+use crate::commits::CommitsPanel;
 use crate::config::ConfigError;
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
@@ -14,15 +16,17 @@ use crate::git::FileEntry;
 use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::commit_files::{CommitFile, CommitRange};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
-use crate::git::ops::GitOp;
+use crate::git::ops::{GitOp, MergeStrategy};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::prompts::{PromptFacts, needs_terminal};
+use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
+use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
@@ -247,6 +251,8 @@ pub struct AppState {
     pub branches: BranchesPanel,
     /// The fetch, pull or push running now. It also holds `op_seq`.
     pub remote: Option<RemoteRun>,
+    /// The history of `HEAD`, loaded at startup whether shown or not.
+    pub commits: CommitsPanel,
 }
 
 impl AppState {
@@ -295,6 +301,7 @@ impl AppState {
             command_running: false,
             branches: BranchesPanel::default(),
             remote: None,
+            commits: CommitsPanel::default(),
         }
     }
 
@@ -367,6 +374,7 @@ impl AppState {
                 self.status_selection = Selection::KeepPath;
                 let mut effects = self.refresh_status();
                 effects.extend(self.reload_branches());
+                effects.extend(self.reload_commits());
                 return effects;
             }
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
@@ -602,6 +610,29 @@ impl AppState {
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
             AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
+            AppIntent::CommitsLoaded { tag, skip, result } => {
+                if tag.generation == self.generation {
+                    self.commits.page_loaded(tag.seq, skip, result);
+                    return self.more_commits();
+                }
+            }
+            AppIntent::MarkersLoaded { tag, result } => {
+                if tag.generation == self.generation {
+                    self.commits.markers_loaded(tag.seq, result);
+                }
+            }
+            AppIntent::CommitNext => {
+                self.commits.move_by(1);
+                return self.more_commits();
+            }
+            AppIntent::CommitPrev => self.commits.move_by(-1),
+            AppIntent::OpenCommitFiles => return self.open_commit_files(),
+            AppIntent::CloseCommitFiles => return self.close_commit_files(),
+            AppIntent::CommitFileNext => return self.move_commit_file(1),
+            AppIntent::CommitFilePrev => return self.move_commit_file(-1),
+            AppIntent::CommitFilesLoaded { tag, result } => {
+                return self.commit_files_loaded(tag, result);
+            }
             AppIntent::OpenSubmodules => return self.open_submodules(),
             AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
             AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
@@ -735,6 +766,18 @@ impl AppState {
                     run.tick();
                 }
             }
+            AppIntent::Merge(strategy) => {
+                return self.branch_op(|branch| GitOp::Merge { branch, strategy });
+            }
+            AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
+            AppIntent::ContinueOperation => {
+                return self.resume(keymap::resume_disabled, GitOp::Continue);
+            }
+            AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
+            AppIntent::AbortOperation => self.ask_abort(),
+            AppIntent::ConfirmAbort(operation) => {
+                return self.start_op(Ok(Some(GitOp::Abort(operation))));
+            }
         }
         vec![]
     }
@@ -795,9 +838,12 @@ impl AppState {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
             (Context::Workspace, Focus::Branches) => KeyScope::Branches,
-            (Context::Workspace, Focus::Status | Focus::Commits | Focus::Stash) => {
-                KeyScope::Workspace
+            (Context::Workspace, Focus::Commits) if self.commits.open.is_some() => {
+                KeyScope::CommitFiles
             }
+            (Context::Workspace, Focus::Commits) => KeyScope::Commits,
+            (Context::Workspace, Focus::Status) => KeyScope::Status,
+            (Context::Workspace, Focus::Stash) => KeyScope::Workspace,
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -879,9 +925,11 @@ impl AppState {
 
     /// The diff the Diff pane shows: the selected file's from the Files
     /// panel, the focused view's side with the Diff pane focused (renames
-    /// off, as its patch has them), nothing behind a blame.
+    /// off, as its patch has them), nothing behind a blame. A commit's file
+    /// is never rendered, so it is not one of these.
     fn shown_request(&self) -> Option<DiffRequest> {
         match &self.focus {
+            Focus::Commits if self.commits.open.is_some() => None,
             Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
                 .selected
                 .and_then(|i| self.files.get(i))
@@ -891,6 +939,7 @@ impl AppState {
                 orig_path: None,
                 side: view.side,
                 options: self.diff_options,
+                commit: None,
             }),
             Focus::Blame(_) => None,
         }
@@ -1470,25 +1519,16 @@ impl AppState {
     /// Select file `index` and start loading its diff. With the Diff pane
     /// focused, its patch reloads too, on the same side while the file is
     /// the same one.
+    ///
+    /// While a commit's files are open the pane is theirs: the selection
+    /// moves, but nothing loads.
     fn select(&mut self, index: usize) -> Vec<Effect> {
         self.selected = Some(index);
+        if self.commits.open.is_some() {
+            return vec![];
+        }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
-        let seq = self.take_seq();
-        let want = self.diff.begin(seq, &request.path, self.pane_rows());
-        // Diff streams report many times, so they stay out of the busy count.
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: false,
-        };
-        let mut effects = vec![
-            Effect::LoadDiff {
-                tag,
-                request: request.clone(),
-                want,
-            },
-            Effect::DiffLoadingDelay { tag },
-        ];
+        let mut effects = self.stream_diff(request.clone());
         if let Focus::Diff(view) = &mut self.focus {
             // A file that stopped (or started) being untracked has other
             // sides now, so the remembered one no longer applies.
@@ -1503,6 +1543,22 @@ impl AppState {
         effects
     }
 
+    /// Start streaming `request` into the Diff pane.
+    fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
+        let seq = self.take_seq();
+        let want = self.diff.begin(seq, &request.path, self.pane_rows());
+        // Diff streams report many times, so they stay out of the busy count.
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: false,
+        };
+        vec![
+            Effect::LoadDiff { tag, request, want },
+            Effect::DiffLoadingDelay { tag },
+        ]
+    }
+
     /// Take new diff options, with the context clamped to its limits, and
     /// reload the selected file's diff with them. `select` keeps the scroll
     /// and the hunk cursor, since the file is the same one.
@@ -1515,6 +1571,9 @@ impl AppState {
             return vec![];
         }
         self.diff_options = options;
+        if self.commits.open.is_some() {
+            return self.commit_file_diff();
+        }
         match self.selected {
             Some(index) if index < self.files.len() => self.select(index),
             _ => vec![],
@@ -1522,17 +1581,25 @@ impl AppState {
     }
 
     /// Focus `panel`. A side panel expands, and closes a blame on the way.
-    /// The diff keeps its hunk view when it already has focus.
+    /// The diff keeps its hunk view when it already has focus. Leaving the
+    /// Commits panel closes a commit's files, so the pane never shows a
+    /// commit's diff under another panel.
     fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
         match panel {
             Panel::Side(side) => {
+                let mut effects = if side == SidePanel::Commits {
+                    vec![]
+                } else {
+                    self.close_commit_files()
+                };
                 self.focus = Focus::side(side);
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
-                self.render_if_stale()
+                effects.extend(self.render_if_stale());
+                effects
             }
             Panel::Diff if self.focus.is_side() => self.focus_diff(),
             Panel::Diff => vec![],
@@ -1554,7 +1621,11 @@ impl AppState {
     }
 
     /// Focus the Diff pane on the selected file, on the side its diff shows.
+    /// Not while a commit's file is shown: it has no hunks to stage.
     fn focus_diff(&mut self) -> Vec<Effect> {
+        if self.commits.open.is_some() {
+            return vec![];
+        }
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
             return vec![];
         };
@@ -1586,6 +1657,7 @@ impl AppState {
             orig_path: None,
             side: view.side,
             options: self.diff_options,
+            commit: None,
         };
         vec![Effect::LoadPatch { tag, request }]
     }
@@ -1707,6 +1779,9 @@ impl AppState {
     fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
         if self.files.is_empty() {
             self.selected = None;
+            if self.commits.open.is_some() {
+                return vec![];
+            }
             self.diff = DiffPane::default();
             self.rendered = None;
             // Nothing is left for the diff or a blame to show.
@@ -2023,13 +2098,28 @@ impl AppState {
         } else {
             // A failed git command gets a popup; `op_error` is for refusals.
             self.op_error = None;
-            if let Err(message) = result {
-                let error = if matches!(op, GitOp::ApplyEdited { .. }) {
-                    self.edited_hunk_error(&message)
-                } else {
-                    ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
-                };
-                self.push_error(error);
+            match result {
+                // Git stops before committing a squash, so say what is left.
+                Ok(())
+                    if matches!(
+                        op,
+                        GitOp::Merge {
+                            strategy: MergeStrategy::Squash,
+                            ..
+                        }
+                    ) =>
+                {
+                    self.notice = Some("Squashed changes are staged; commit them");
+                }
+                Ok(()) => {}
+                Err(message) => {
+                    let error = if matches!(op, GitOp::ApplyEdited { .. }) {
+                        self.edited_hunk_error(&message)
+                    } else {
+                        ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
+                    };
+                    self.push_error(error);
+                }
             }
         }
         // Refresh even after a failure: a failed `add` of several paths can
@@ -2092,7 +2182,44 @@ impl AppState {
         if plan.scopes.contains(&Scope::Branches) {
             effects.extend(self.reload_branches());
         }
+        if plan.scopes.contains(&Scope::Commits) {
+            effects.extend(self.reload_commits());
+        }
         effects
+    }
+
+    /// Load the log from the top, and the markers with it. What is shown
+    /// stays until the new page lands, which supersedes any page in flight.
+    fn reload_commits(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        let page = self.background_tag();
+        let markers = self.background_tag();
+        self.commits.begin_page(page.seq, 0);
+        self.commits.markers_seq = Some(markers.seq);
+        vec![
+            Effect::LoadCommits {
+                tag: page,
+                tip: None,
+                skip: 0,
+            },
+            Effect::LoadMarkers { tag: markers },
+        ]
+    }
+
+    /// Load the next page when the cursor nears the end of the log.
+    fn more_commits(&mut self) -> Vec<Effect> {
+        let Some(skip) = self.commits.wants_more() else {
+            return vec![];
+        };
+        let tag = self.background_tag();
+        self.commits.begin_page(tag.seq, skip);
+        vec![Effect::LoadCommits {
+            tag,
+            tip: self.commits.tip.clone(),
+            skip,
+        }]
     }
 
     /// The Submodules popup, wherever it is on the stack.
@@ -2200,6 +2327,7 @@ impl AppState {
         let mut effects = vec![self.set_repo(&root)];
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2229,6 +2357,7 @@ impl AppState {
         }
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2248,6 +2377,7 @@ impl AppState {
                 let mut effects = vec![self.record_recent(path)];
                 effects.extend(self.refresh_status());
                 effects.extend(self.reload_branches());
+                effects.extend(self.reload_commits());
                 effects
             }
             None => self.open_recent(),
@@ -2420,6 +2550,7 @@ impl AppState {
         }
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
+        effects.extend(self.reload_commits());
         // The keys follow the repository: its own file replaces the last one's.
         effects.push(Effect::LoadConfig {
             repo: self.repo.clone(),
@@ -2458,6 +2589,7 @@ impl AppState {
         self.op_error = None;
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
+        self.commits = CommitsPanel::default();
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -2527,6 +2659,114 @@ impl AppState {
     }
 }
 
+/// A commit opened to its files from the Commits panel. The Diff pane
+/// shows the selected file's change in that commit until it closes.
+impl AppState {
+    /// Open the selected commit's files in place of the log. A user
+    /// effect, so the busy indicator shows while git lists them.
+    fn open_commit_files(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace
+            || self.focus != Focus::Commits
+            || self.commits.open.is_some()
+        {
+            return vec![];
+        }
+        let Some(row) = self.commits.rows.get(self.commits.selected) else {
+            return vec![];
+        };
+        let range = match CommitRange::of(row) {
+            Ok(range) => range,
+            Err(message) => {
+                self.commits.error = Some(message);
+                return vec![];
+            }
+        };
+        let short_oid = row.short_oid.clone();
+        let seq = self.take_seq();
+        self.commits.open = Some(CommitFilesList::begin(range.clone(), short_oid, seq));
+        self.busy += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::LoadCommitFiles { tag, range }]
+    }
+
+    /// Show the first file's diff, or nothing for a commit with no files.
+    fn commit_files_loaded(
+        &mut self,
+        tag: Tag,
+        result: Result<Vec<CommitFile>, String>,
+    ) -> Vec<Effect> {
+        // Every user effect reports back once, stale or not.
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        let Some(open) = &mut self.commits.open else {
+            return vec![];
+        };
+        if !open.loaded(tag.seq, result) {
+            return vec![];
+        }
+        if open.selected_file().is_none() {
+            self.diff = DiffPane::default();
+            return vec![Effect::CancelDiff];
+        }
+        // Another commit's file: start at its top, whatever was shown.
+        self.diff.path = None;
+        self.commit_file_diff()
+    }
+
+    fn move_commit_file(&mut self, delta: isize) -> Vec<Effect> {
+        let moved = self
+            .commits
+            .open
+            .as_mut()
+            .is_some_and(|open| open.move_by(delta));
+        if moved {
+            self.commit_file_diff()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Stream the selected commit file's diff, if one is selected.
+    fn commit_file_diff(&mut self) -> Vec<Effect> {
+        let request = self.commits.open.as_ref().and_then(|open| {
+            let file = open.selected_file()?;
+            Some(DiffRequest::for_commit_file(
+                &open.range,
+                file,
+                self.diff_options,
+            ))
+        });
+        match request {
+            Some(request) => self.stream_diff(request),
+            None => vec![],
+        }
+    }
+
+    /// Back to the log, still on the same commit, with the pane showing the
+    /// selected working-tree file again.
+    fn close_commit_files(&mut self) -> Vec<Effect> {
+        if self.commits.open.take().is_none() {
+            return vec![];
+        }
+        self.diff.path = None;
+        match self.selected {
+            Some(index) if index < self.files.len() => self.select(index),
+            _ => {
+                self.diff = DiffPane::default();
+                vec![Effect::CancelDiff]
+            }
+        }
+    }
+}
+
 /// Watching for changes made outside Kika. None of it counts as busy.
 impl AppState {
     fn watch(&mut self, event: WatchEvent) -> Vec<Effect> {
@@ -2580,6 +2820,7 @@ impl AppState {
         }
         let mut effects = self.background_status();
         effects.extend(self.background_branches());
+        effects.extend(self.reload_commits());
         effects
     }
 
@@ -2751,6 +2992,64 @@ impl AppState {
         match self.branch_for_action(keymap::checkout_branch_disabled) {
             Some(name) => self.start_op(Ok(Some(GitOp::Checkout(name)))),
             None => vec![],
+        }
+    }
+
+    /// Merge the selected branch, or rebase onto it: the op `make` builds
+    /// from its name, run on the terminal when it may make commits.
+    fn branch_op(&mut self, make: impl FnOnce(BranchName) -> GitOp) -> Vec<Effect> {
+        match self.branch_for_action(keymap::merge_disabled) {
+            Some(name) => self.run_op_where_it_belongs(make(name)),
+            None => vec![],
+        }
+    }
+
+    /// Start `op` attached to the terminal or detached, as
+    /// [`runs_attached`] says.
+    fn run_op_where_it_belongs(&mut self, op: GitOp) -> Vec<Effect> {
+        if runs_attached(&op) {
+            self.start_op_as(Ok(Some(op)), |tag, op| {
+                Effect::HandOff(HandOff::Attached { tag, op })
+            })
+        } else {
+            self.start_op(Ok(Some(op)))
+        }
+    }
+
+    /// The merge, rebase or cherry-pick in progress, or why none can be
+    /// acted on now, said in the bar.
+    fn operation_for_action(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+    ) -> Option<Operation> {
+        if self.context != Context::Workspace {
+            return None;
+        }
+        if let Some(reason) = disabled(self) {
+            self.notice = Some(reason);
+            return None;
+        }
+        keymap::resumable_operation(self)
+    }
+
+    /// Continue or skip the operation in progress.
+    fn resume(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+        make: fn(Operation) -> GitOp,
+    ) -> Vec<Effect> {
+        match self.operation_for_action(disabled) {
+            Some(operation) => self.run_op_where_it_belongs(make(operation)),
+            None => vec![],
+        }
+    }
+
+    /// Ask before aborting: resolved conflicts are thrown away. The
+    /// question names the operation, and the answer aborts that one.
+    fn ask_abort(&mut self) {
+        if let Some(operation) = self.operation_for_action(keymap::resume_disabled) {
+            self.popups
+                .push(Popup::Confirm(ConfirmKind::Abort(operation)));
         }
     }
 
@@ -2943,6 +3242,9 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
+        GitOp::Merge { .. } | GitOp::Rebase { .. } | GitOp::Continue(_) | GitOp::Skip(_) => {
+            "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
+        }
         GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
@@ -2971,6 +3273,17 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::CreateBranch { .. } => "Could not create the branch",
         GitOp::RenameBranch { .. } => "Could not rename the branch",
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
+        GitOp::Merge { .. } => "Could not merge",
+        GitOp::Rebase { .. } => "Could not rebase",
+        GitOp::Continue(Operation::Merge) => "Could not continue the merge",
+        GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
+        GitOp::Continue(Operation::CherryPick) => "Could not continue the cherry-pick",
+        GitOp::Continue(Operation::Bisect) => "Could not continue the bisect",
+        GitOp::Skip(_) => "Could not skip",
+        GitOp::Abort(Operation::Merge) => "Could not abort the merge",
+        GitOp::Abort(Operation::Rebase) => "Could not abort the rebase",
+        GitOp::Abort(Operation::CherryPick) => "Could not abort the cherry-pick",
+        GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
     }
 }
 
@@ -2985,7 +3298,7 @@ mod tests {
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
-    use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat, PromptKind};
+    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
@@ -3030,6 +3343,8 @@ mod tests {
             [
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 let (tag, list) = (*tag, *list);
                 state.update(AppIntent::BranchesLoaded {
@@ -3038,7 +3353,7 @@ mod tests {
                 });
                 tag
             }
-            other => panic!("expected LoadStatus and LoadBranches, got {other:?}"),
+            other => panic!("expected LoadStatus, LoadBranches and the commits, got {other:?}"),
         }
     }
 
@@ -3083,12 +3398,12 @@ mod tests {
                 user: true
             }
         );
-        // Seq 1 went to the branch list `r` reloads too.
+        // Seq 1 went to the branch list `r` reloads too, 2 and 3 to the commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 2,
+                seq: 4,
                 user: true
             }
         );
@@ -3339,6 +3654,7 @@ mod tests {
                     orig_path: None,
                     side: DiffSide::Worktree,
                     options: Default::default(),
+                    commit: None,
                 },
                 want: 21 + DIFF_PREFETCH,
             }
@@ -3636,7 +3952,8 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 2);
+        // The status, the branch list, then the commits and their markers.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 4);
         assert_eq!(state.busy, 2, "the status and the branch list");
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
@@ -3878,6 +4195,7 @@ mod tests {
                     orig_path: None,
                     side: DiffSide::Worktree,
                     options: Default::default(),
+                    commit: None,
                 }
             ),
             other => panic!("{other:?}"),
@@ -4202,7 +4520,12 @@ mod tests {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+                [
+                    Effect::LoadStatus { .. },
+                    Effect::LoadBranches { .. },
+                    Effect::LoadCommits { skip: 0, .. },
+                    Effect::LoadMarkers { .. },
+                ]
             ),
             "{effects:?}"
         );
@@ -4217,7 +4540,12 @@ mod tests {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::LoadStatus { .. }, Effect::LoadBranches { .. }]
+                [
+                    Effect::LoadStatus { .. },
+                    Effect::LoadBranches { .. },
+                    Effect::LoadCommits { skip: 0, .. },
+                    Effect::LoadMarkers { .. },
+                ]
             ),
             "{effects:?}"
         );
@@ -5000,6 +5328,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             }
         );
         assert_eq!(view(&state).side, DiffSide::Worktree);
@@ -6217,9 +6546,13 @@ mod tests {
             assert_eq!(state.focus, focus, "{key}");
             assert_eq!(state.expanded, side, "{key}");
         }
-        // The new side panels have no keys of their own yet.
+        // Commits has keys of its own; the newer panels not yet.
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Commits,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Stash,
         )));
         assert_eq!(state.key_focus(), KeyScope::Workspace);
     }
@@ -6836,7 +7169,13 @@ mod tests {
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.diff, DiffPane::default());
         match effects.as_slice() {
-            [set, Effect::LoadStatus { tag }, Effect::LoadBranches { .. }] => {
+            [
+                set,
+                Effect::LoadStatus { tag },
+                Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
+            ] => {
                 assert_eq!(set_repo(set), [RepoPath::from("sub")]);
                 assert_eq!(tag.generation, state.generation);
             }
@@ -6902,6 +7241,8 @@ mod tests {
                 Effect::DiffLoadingDelay { .. },
                 Effect::LoadStatus { tag: status },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 assert_eq!(set_repo(set), []);
                 assert_eq!(request.path, "b.rs".into());
@@ -6990,10 +7331,12 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
             ] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
-            other => panic!("expected RecordRecent and LoadStatus, got {other:?}"),
+            other => panic!("expected RecordRecent, LoadStatus and the commits, got {other:?}"),
         }
         assert_eq!(state.popups, []);
     }
@@ -7150,6 +7493,8 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!((root.as_path(), nested.len()), (Path::new("/w"), 0));
@@ -7222,6 +7567,8 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!(repo.as_deref(), Some(Path::new("/r/b")), "its own keys");
@@ -7269,10 +7616,12 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 3..],
+            effects[effects.len() - 5..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
                 Effect::LoadConfig { .. }
             ]
         ));
@@ -7385,6 +7734,517 @@ mod tests {
         assert_eq!(state.repo, None);
     }
 
+    // --- The Commits panel ---
+
+    use crate::commits::{PAGE, PREFETCH};
+    use crate::git::log::{CommitRow, LogPage, Markers};
+
+    /// `n` commits named `c<from>`, `c<from+1>`, …, each the parent's child.
+    fn page(from: usize, n: usize, done: bool) -> LogPage {
+        let rows = (from..from + n)
+            .map(|i| CommitRow {
+                oid: format!("c{i}"),
+                short_oid: format!("c{i}"),
+                parents: vec![format!("c{}", i + 1)],
+                author: "Ann".into(),
+                time: 0,
+                subject: format!("commit {i}"),
+            })
+            .collect();
+        LogPage { rows, done }
+    }
+
+    /// The one page load in `effects`: its tag, tip and skip.
+    fn commits_load(effects: &[Effect]) -> (Tag, Option<String>, usize) {
+        let loads: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadCommits { tag, tip, skip } => Some((*tag, tip.clone(), *skip)),
+                _ => None,
+            })
+            .collect();
+        match loads.as_slice() {
+            [load] => load.clone(),
+            other => panic!("expected one LoadCommits, got {other:?} in {effects:?}"),
+        }
+    }
+
+    fn markers_tag(effects: &[Effect]) -> Tag {
+        match effects
+            .iter()
+            .find(|e| matches!(e, Effect::LoadMarkers { .. }))
+        {
+            Some(Effect::LoadMarkers { tag }) => *tag,
+            _ => panic!("expected LoadMarkers in {effects:?}"),
+        }
+    }
+
+    fn commits_loaded(tag: Tag, skip: usize, page: LogPage) -> AppIntent {
+        AppIntent::CommitsLoaded {
+            tag,
+            skip,
+            result: Ok((page, 1_000)),
+        }
+    }
+
+    /// Started in a repository with the first page of `first` commits in.
+    fn with_commits(first: usize, done: bool) -> AppState {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let effects = state.update(AppIntent::Start);
+        let (tag, _, _) = commits_load(&effects);
+        state.update(commits_loaded(tag, 0, page(0, first, done)));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state
+    }
+
+    #[test]
+    fn startup_loads_the_first_page_and_the_markers_without_waiting_for_focus() {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
+        let effects = state.update(AppIntent::Start);
+        let (tag, tip, skip) = commits_load(&effects);
+        assert_eq!((tip, skip), (None, 0));
+        assert!(!tag.user, "the panel loads quietly");
+        markers_tag(&effects);
+        assert_eq!(state.focus, Focus::Files);
+    }
+
+    #[test]
+    fn a_loaded_page_fills_the_rows_and_the_graph() {
+        let state = with_commits(3, true);
+        let commits = &state.commits;
+        assert!(commits.loaded && commits.done);
+        assert_eq!(commits.rows.len(), 3);
+        assert_eq!(commits.graph.len(), 3);
+        assert_eq!(commits.tip.as_deref(), Some("c0"));
+        assert_eq!(commits.loaded_at, 1_000);
+        assert_eq!(commits.page_seq, None);
+    }
+
+    #[test]
+    fn j_and_k_move_the_commit_cursor_within_the_list() {
+        let mut state = with_commits(3, true);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        for _ in 0..5 {
+            press(&mut state, KeyCode::Char('j'));
+        }
+        assert_eq!(state.commits.selected, 2);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(state.commits.selected, 1);
+    }
+
+    #[test]
+    fn nearing_the_end_loads_the_next_page_once_from_the_same_tip() {
+        let mut state = with_commits(PAGE, false);
+        state.commits.selected = PAGE - PREFETCH - 2;
+        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+
+        let effects = state.update(AppIntent::CommitNext);
+        let (tag, tip, skip) = commits_load(&effects);
+        assert_eq!((tip.as_deref(), skip), (Some("c0"), PAGE));
+        assert_eq!(effects.len(), 1);
+        // Not again while that page is on its way.
+        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        assert!(state.commits.more_in_flight);
+
+        state.update(commits_loaded(tag, PAGE, page(PAGE, 10, true)));
+        assert_eq!(state.commits.rows.len(), PAGE + 10);
+        assert_eq!(state.commits.graph.len(), PAGE + 10);
+        assert_eq!(state.commits.rows[PAGE].oid, format!("c{PAGE}"));
+        assert!(!state.commits.more_in_flight);
+    }
+
+    #[test]
+    fn a_done_page_stops_further_loads() {
+        let mut state = with_commits(10, true);
+        for _ in 0..20 {
+            assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        }
+        assert_eq!(state.commits.selected, 9);
+    }
+
+    #[test]
+    fn stale_pages_and_markers_are_dropped() {
+        let mut state = with_commits(2, true);
+        let effects = state.update(AppIntent::RefreshStatus);
+        let (old, _, _) = commits_load(&effects);
+        let old_markers = markers_tag(&effects);
+        let effects = state.update(AppIntent::RefreshStatus);
+        let (new, _, _) = commits_load(&effects);
+        let new_markers = markers_tag(&effects);
+
+        state.update(commits_loaded(old, 0, page(50, 3, true)));
+        let unpushed = Markers {
+            unpushed: Some(["c0".to_string()].into()),
+            ..Markers::default()
+        };
+        state.update(AppIntent::MarkersLoaded {
+            tag: old_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(
+            state.commits.rows[0].oid, "c0",
+            "the superseded page is dropped"
+        );
+        assert_eq!(state.commits.markers, Markers::default());
+
+        // Right seq, but for a repository left since.
+        let mut other = state.clone();
+        other.generation += 1;
+        other.update(commits_loaded(new, 0, page(50, 3, true)));
+        other.update(AppIntent::MarkersLoaded {
+            tag: new_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(other.commits.rows[0].oid, "c0");
+        assert_eq!(other.commits.markers, Markers::default());
+
+        state.update(commits_loaded(new, 0, page(50, 3, true)));
+        state.update(AppIntent::MarkersLoaded {
+            tag: new_markers,
+            result: Ok(unpushed.clone()),
+        });
+        assert_eq!(state.commits.rows[0].oid, "c50");
+        assert_eq!(state.commits.markers, unpushed);
+    }
+
+    #[test]
+    fn a_reload_keeps_the_old_rows_until_it_lands_then_the_cursor_on_the_same_commit() {
+        let mut state = with_commits(5, true);
+        state.commits.selected = 2;
+        let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
+        assert_eq!(state.commits.rows.len(), 5, "shown while the reload runs");
+
+        // A new commit on top moves c2 one row down.
+        let mut newer = page(1, 4, true);
+        newer.rows.insert(0, page(99, 1, true).rows.remove(0));
+        newer.rows.splice(1..1, page(0, 1, true).rows);
+        state.update(commits_loaded(tag, 0, newer));
+        assert_eq!(state.commits.rows[state.commits.selected].oid, "c2");
+        assert_eq!(state.commits.tip.as_deref(), Some("c99"));
+
+        // Gone: the cursor stays near where it was, inside the list.
+        state.commits.selected = 5;
+        let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
+        state.update(commits_loaded(tag, 0, page(10, 2, true)));
+        assert_eq!(state.commits.selected, 1);
+    }
+
+    #[test]
+    fn a_finished_commit_reloads_the_commits_from_the_top() {
+        let mut state = with_commits(3, true);
+        let effects = state.apply_plan(refresh::plan(&GitOp::Commit {
+            message: Some("m".into()),
+            stage_all: false,
+            amend: false,
+            no_verify: false,
+        }));
+        let (_, tip, skip) = commits_load(&effects);
+        assert_eq!((tip, skip), (None, 0));
+        markers_tag(&effects);
+    }
+
+    #[test]
+    fn a_checkout_or_new_branch_reloads_the_commits_and_rename_or_delete_do_not() {
+        let moves = [
+            GitOp::Checkout("side".into()),
+            GitOp::CreateBranch {
+                name: "new".into(),
+                from: "main".into(),
+            },
+        ];
+        for op in moves {
+            let mut state = with_commits(3, true);
+            let effects = state.apply_plan(refresh::plan(&op));
+            let (_, tip, skip) = commits_load(&effects);
+            assert_eq!((tip, skip), (None, 0), "{op:?}");
+            markers_tag(&effects);
+        }
+        let stays = [
+            GitOp::RenameBranch {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GitOp::DeleteBranch {
+                name: "a".into(),
+                force: false,
+            },
+        ];
+        for op in stays {
+            let mut state = with_commits(3, true);
+            let effects = state.apply_plan(refresh::plan(&op));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::LoadCommits { .. } | Effect::LoadMarkers { .. })),
+                "{op:?}: {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_repositories_resets_the_panel_and_loads_the_new_one() {
+        let mut state = with_commits(3, true);
+        let effects = state.update(AppIntent::OpenRepo("/r/other".into()));
+        assert_eq!(state.commits.rows, []);
+        assert!(!state.commits.loaded);
+        let (tag, _, skip) = commits_load(&effects);
+        assert_eq!((tag.generation, skip), (state.generation, 0));
+    }
+
+    // --- A commit's files ---
+
+    use crate::git::commit_files::{CommitFile, CommitId};
+
+    /// `three_files` in the worktree, eight commits in the log, and the
+    /// Commits panel focused with the cursor on `c5`.
+    fn on_commit_five() -> AppState {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.commits.begin_page(900, 0);
+        state
+            .commits
+            .page_loaded(900, 0, Ok((page(0, 8, true), 1_000)));
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.commits.selected = 5;
+        state
+    }
+
+    fn files_load(effects: &[Effect]) -> (Tag, CommitRange) {
+        match effects {
+            [Effect::LoadCommitFiles { tag, range }] => (*tag, range.clone()),
+            other => panic!("expected one LoadCommitFiles, got {other:?}"),
+        }
+    }
+
+    fn range_of(oid: &str, parent: &str) -> CommitRange {
+        CommitRange {
+            oid: CommitId::parse(oid).unwrap(),
+            parent: CommitId::parse(parent),
+        }
+    }
+
+    fn commit_file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
+        CommitFile {
+            status,
+            path: path.into(),
+            orig_path: orig.map(Into::into),
+        }
+    }
+
+    fn two_commit_files() -> Vec<CommitFile> {
+        vec![
+            commit_file('M', "src/lib.rs", None),
+            commit_file('R', "new.rs", Some("old.rs")),
+        ]
+    }
+
+    /// Open `c5` and answer with `files`; returns the effects of the answer.
+    fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect> {
+        let (tag, _) = files_load(&press(state, KeyCode::Enter));
+        state.update(AppIntent::CommitFilesLoaded {
+            tag,
+            result: Ok(files),
+        })
+    }
+
+    #[test]
+    fn enter_opens_the_commit_against_its_first_parent_as_a_user_load() {
+        let mut state = on_commit_five();
+        let busy = state.busy;
+
+        let (tag, range) = files_load(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(range, range_of("c5", "c6"));
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        let open = state.commits.open.as_ref().unwrap();
+        assert_eq!((open.short_oid.as_str(), open.loaded), ("c5", false));
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        assert_eq!(state.commits.selected, 5);
+    }
+
+    #[test]
+    fn a_commit_whose_id_or_parent_is_not_hex_opens_nothing_and_says_why() {
+        for (oid, parent) in [("--output=x", "c6"), ("c5", "-p")] {
+            let mut state = on_commit_five();
+            state.commits.rows[5].oid = oid.into();
+            state.commits.rows[5].parents = vec![parent.into()];
+
+            assert_eq!(state.update(AppIntent::OpenCommitFiles), vec![]);
+
+            assert_eq!(state.commits.open, None);
+            let error = state.commits.error.as_deref().unwrap();
+            assert!(error.starts_with("not a commit id"), "{error}");
+        }
+    }
+
+    #[test]
+    fn enter_with_no_commits_is_disabled() {
+        let mut state = on_commit_five();
+        state.commits.rows.clear();
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("No commits"));
+    }
+
+    #[test]
+    fn the_loaded_files_show_the_first_ones_diff_in_that_commit_and_j_the_next() {
+        let mut state = on_commit_five();
+        let busy = state.busy;
+        let range = range_of("c5", "c6");
+
+        let effects = opened(&mut state, two_commit_files());
+
+        assert_eq!(state.busy, busy);
+        let request = diff_request(&effects);
+        assert_eq!(request.commit, Some(range.clone()));
+        assert_eq!(request.path, "src/lib.rs".into());
+        assert_eq!(state.diff.path, Some("src/lib.rs".into()));
+
+        let request = diff_request(&press(&mut state, KeyCode::Char('j')));
+        assert_eq!(request.commit, Some(range));
+        assert_eq!(
+            (request.path, request.orig_path),
+            ("new.rs".into(), Some("old.rs".into()))
+        );
+        // The ends of the list load nothing more.
+        assert_eq!(press(&mut state, KeyCode::Down), vec![]);
+        let request = diff_request(&state.update(AppIntent::CommitFilePrev));
+        assert_eq!(request.path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn a_stale_or_other_repositorys_file_list_is_dropped_but_lowers_busy() {
+        let stale: [fn(Tag) -> Tag; 2] = [
+            |tag| Tag {
+                seq: tag.seq + 1,
+                ..tag
+            },
+            |tag| Tag {
+                generation: tag.generation + 1,
+                ..tag
+            },
+        ];
+        for stale in stale {
+            let mut state = on_commit_five();
+            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
+            let busy = state.busy;
+            let effects = state.update(AppIntent::CommitFilesLoaded {
+                tag: stale(tag),
+                result: Ok(two_commit_files()),
+            });
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.busy, busy - 1);
+            assert!(!state.commits.open.as_ref().unwrap().loaded);
+        }
+    }
+
+    #[test]
+    fn a_commit_with_no_files_or_a_failed_list_empties_the_diff() {
+        for result in [Ok(vec![]), Err("bad object".to_string())] {
+            let mut state = on_commit_five();
+            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
+            let effects = state.update(AppIntent::CommitFilesLoaded { tag, result });
+            assert_eq!(effects, vec![Effect::CancelDiff]);
+            assert_eq!(state.diff, DiffPane::default());
+        }
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_same_commit_and_reloads_the_worktree_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        press(&mut state, KeyCode::Char('j'));
+
+        let effects = press(&mut state, KeyCode::Esc);
+
+        assert!(!state.should_quit);
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.commits.selected, 5);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        let request = diff_request(&effects);
+        assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+    }
+
+    #[test]
+    fn closing_with_no_worktree_file_empties_the_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        state.files.clear();
+        state.selected = None;
+        assert_eq!(
+            state.update(AppIntent::CloseCommitFiles),
+            vec![Effect::CancelDiff]
+        );
+        assert_eq!(state.diff, DiffPane::default());
+    }
+
+    #[test]
+    fn a_status_refresh_while_open_keeps_the_commit_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        let diff = state.diff.clone();
+
+        for files in [vec![changed("b.rs", 'M', '.')], vec![]] {
+            let tag = refresh_tag(&mut state);
+            let effects = state.update(AppIntent::StatusLoaded {
+                tag,
+                result: Ok(repo(files.clone())),
+            });
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::LoadDiff { .. } | Effect::CancelDiff)),
+                "{effects:?}"
+            );
+            assert_eq!(state.diff, diff);
+            assert_eq!(state.selected, (!files.is_empty()).then_some(0));
+        }
+    }
+
+    #[test]
+    fn new_diff_options_reload_the_open_commits_file() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        assert!(request.options.ignore_whitespace);
+        assert_eq!(request.commit, Some(range_of("c5", "c6")));
+        assert_eq!(request.path, "src/lib.rs".into());
+    }
+
+    #[test]
+    fn the_diff_cannot_take_focus_from_an_open_commit() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        assert_eq!(press(&mut state, KeyCode::Char('l')), vec![]);
+        assert_eq!(
+            state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff)),
+            vec![]
+        );
+        assert_eq!(state.focus, Focus::Commits);
+    }
+
+    #[test]
+    fn focusing_another_panel_closes_the_commit_and_shows_the_worktree_diff() {
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+
+        let effects = press(&mut state, KeyCode::Char('2'));
+
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.focus, Focus::Files);
+        let request = diff_request(&effects);
+        assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+
+        // Focusing the Commits panel again from itself keeps a commit open.
+        let mut state = on_commit_five();
+        opened(&mut state, two_commit_files());
+        assert_eq!(press(&mut state, KeyCode::Char('4')), vec![]);
+        assert!(state.commits.open.is_some());
+    }
+
     // --- Watching for outside changes ---
 
     use crate::git::refs::RefsSnapshot;
@@ -7455,9 +8315,14 @@ mod tests {
         let tag = background_status_tag(&effects[..1]);
         assert_eq!(state.status_seq, Some(tag.seq));
         // Branches or their upstreams may have moved too, out of the busy count.
+        // The log moved too.
         match &effects[1..] {
-            [Effect::LoadBranches { tag }] => assert!(!tag.user),
-            other => panic!("expected a background LoadBranches, got {other:?}"),
+            [
+                Effect::LoadBranches { tag },
+                Effect::LoadCommits { skip: 0, .. },
+                Effect::LoadMarkers { .. },
+            ] => assert!(!tag.user),
+            other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
     }
@@ -7660,6 +8525,7 @@ mod tests {
                 _,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                ..,
             ] => (*tag, *list),
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
@@ -9025,6 +9891,275 @@ mod tests {
         branches_tag(&effects);
     }
 
+    // --- Merge, rebase and the operation in progress ---
+
+    /// The one attached hand-off in `effects`.
+    fn attached_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
+            other => panic!("expected one attached hand-off, got {other:?}"),
+        }
+    }
+
+    /// `with_branches`, with `ops` in progress.
+    fn in_progress(ops: &[Operation]) -> AppState {
+        let mut state = with_branches();
+        let mut branch = on_branch("main");
+        branch.in_progress = ops.to_vec();
+        state.branch = Some(branch);
+        state
+    }
+
+    /// `in_progress`, with the Status panel focused.
+    fn status_focused(ops: &[Operation]) -> AppState {
+        let mut state = in_progress(ops);
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Status,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Status);
+        state
+    }
+
+    #[test]
+    fn m_on_another_branch_opens_the_merge_menu() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        assert_eq!(press_char(&mut state, 'm'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Menu {
+                id: MenuId::Merge,
+                cursor: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn fast_forward_and_squash_run_detached_on_the_selected_branch() {
+        for strategy in [MergeStrategy::FastForwardOnly, MergeStrategy::Squash] {
+            let mut state = in_progress(&[]);
+            state.update(AppIntent::BranchNext);
+            let (_, op) = op_of(&state.update(AppIntent::Merge(strategy)));
+            assert_eq!(
+                op,
+                GitOp::Merge {
+                    branch: "topic".into(),
+                    strategy
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_commit_and_a_rebase_run_on_the_terminal() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        let (tag, op) = attached_of(&state.update(AppIntent::Merge(MergeStrategy::NoFastForward)));
+        assert_eq!(
+            op,
+            GitOp::Merge {
+                branch: "topic".into(),
+                strategy: MergeStrategy::NoFastForward
+            }
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        state.update(finished(tag, op, Ok(())));
+
+        let (_, op) = attached_of(&state.update(AppIntent::RebaseOnto));
+        assert_eq!(
+            op,
+            GitOp::Rebase {
+                onto: "topic".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_merge_menu_runs_the_chosen_item() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'm');
+        press_char(&mut state, 'j');
+        let (_, op) = attached_of(&press(&mut state, KeyCode::Enter));
+        assert!(matches!(
+            op,
+            GitOp::Merge {
+                strategy: MergeStrategy::NoFastForward,
+                ..
+            }
+        ));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn merging_the_current_branch_or_during_an_operation_is_refused() {
+        let mut state = in_progress(&[]);
+        assert_eq!(press_char(&mut state, 'm'), vec![]);
+        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.popups, []);
+        assert_eq!(
+            state.update(AppIntent::Merge(MergeStrategy::Squash)),
+            vec![]
+        );
+        assert_eq!(state.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(state.notice, Some("Already on this branch"));
+
+        let mut merging = in_progress(&[Operation::Merge]);
+        merging.update(AppIntent::BranchNext);
+        assert_eq!(press_char(&mut merging, 'm'), vec![]);
+        assert_eq!(
+            merging.notice,
+            Some("Finish or abort the operation in progress")
+        );
+        assert_eq!(merging.popups, []);
+        assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(merging.op_seq, None);
+    }
+
+    #[test]
+    fn a_bisect_alone_does_not_stop_a_merge() {
+        let mut state = in_progress(&[Operation::Bisect]);
+        state.update(AppIntent::BranchNext);
+        op_of(&state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)));
+    }
+
+    #[test]
+    fn c_continues_a_merge_on_the_terminal_and_s_cannot_skip_it() {
+        let mut state = status_focused(&[Operation::Merge]);
+        let (tag, op) = attached_of(&press_char(&mut state, 'c'));
+        assert_eq!(op, GitOp::Continue(Operation::Merge));
+        state.update(finished(tag, op, Ok(())));
+
+        assert_eq!(press_char(&mut state, 's'), vec![]);
+        assert_eq!(state.notice, Some("A merge cannot be skipped"));
+        assert_eq!(state.update(AppIntent::SkipOperation), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn s_skips_a_rebase_commit_on_the_terminal() {
+        let mut state = status_focused(&[Operation::Rebase]);
+        let (_, op) = attached_of(&press_char(&mut state, 's'));
+        assert_eq!(op, GitOp::Skip(Operation::Rebase));
+    }
+
+    #[test]
+    fn a_asks_first_and_y_aborts_detached() {
+        let mut state = status_focused(&[Operation::Merge]);
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))]
+        );
+        assert_eq!(state.op_seq, None);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::Abort(Operation::Merge));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_keeps_the_operation() {
+        let mut state = status_focused(&[Operation::Merge]);
+        press_char(&mut state, 'a');
+        assert_eq!(press_char(&mut state, 'n'), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn with_nothing_in_progress_the_status_keys_are_disabled() {
+        for ops in [&[][..], &[Operation::Bisect][..]] {
+            let mut state = status_focused(ops);
+            for c in ['c', 's', 'a'] {
+                state.notice = None;
+                assert_eq!(press_char(&mut state, c), vec![], "{c}");
+                assert_eq!(state.notice, Some("Nothing in progress"), "{c}");
+            }
+            for intent in [
+                AppIntent::ContinueOperation,
+                AppIntent::SkipOperation,
+                AppIntent::AbortOperation,
+            ] {
+                assert_eq!(state.update(intent), vec![]);
+            }
+            assert_eq!(state.popups, []);
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn the_status_keys_wait_for_a_running_op() {
+        let mut state = status_focused(&[Operation::Rebase]);
+        state.op_seq = Some(9);
+        for c in ['c', 's', 'a'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{c}");
+        }
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_finished_squash_says_the_changes_wait_to_be_committed() {
+        let mut state = in_progress(&[]);
+        state.update(AppIntent::BranchNext);
+        let (tag, op) = op_of(&state.update(AppIntent::Merge(MergeStrategy::Squash)));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert_eq!(
+            state.notice,
+            Some("Squashed changes are staged; commit them")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+        branches_tag(&effects);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadCommits { .. })),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn failures_name_the_step_and_point_at_the_status_panel() {
+        let conflicts = "If git stopped on conflicts, resolve them, then continue or abort from the Status panel.";
+        let cases = [
+            (
+                GitOp::Merge {
+                    branch: "b".into(),
+                    strategy: MergeStrategy::NoFastForward,
+                },
+                "Could not merge",
+                conflicts,
+            ),
+            (
+                GitOp::Rebase { onto: "b".into() },
+                "Could not rebase",
+                conflicts,
+            ),
+            (
+                GitOp::Continue(Operation::CherryPick),
+                "Could not continue the cherry-pick",
+                conflicts,
+            ),
+            (GitOp::Skip(Operation::Rebase), "Could not skip", conflicts),
+            (
+                GitOp::Abort(Operation::Merge),
+                "Could not abort the merge",
+                "The file list was reloaded. Fix the cause above, then try again.",
+            ),
+        ];
+        for (op, title, next) in cases {
+            assert_eq!(failure_title(&op), title, "{op:?}");
+            assert_eq!(failure_next(&op), next, "{op:?}");
+        }
+    }
+
     /// A repository with `three_branches`, on `main`, nothing running.
     fn remote_ready() -> AppState {
         let mut state = with_branches().with_location(Some("/r".into()), "/r".into());
@@ -9151,7 +10286,7 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_remote_op_frees_the_slot_and_reloads_status_and_branches() {
+    fn a_finished_remote_op_frees_the_slot_and_reloads_status_branches_and_commits() {
         for op in [RemoteOp::Fetch, RemoteOp::Pull, PUSH] {
             let mut state = remote_ready();
             let (tag, _) = remote_of(&state.update(match op {
@@ -9169,6 +10304,13 @@ mod tests {
                 "{effects:?}"
             );
             branches_tag(&effects);
+            // Remote refs moved, and with a pull `HEAD` too: the log reloads.
+            assert!(
+                effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::LoadCommits { .. })),
+                "{effects:?}"
+            );
             assert_eq!(state.popups, []);
             // Only the reloads count as busy now.
             assert_eq!(state.busy, 2);

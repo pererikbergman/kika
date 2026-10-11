@@ -230,8 +230,8 @@ impl Harness {
 }
 
 /// Whether nothing more will change without input: no status load or Git
-/// operation in flight, no background or recent-list load pending, and the
-/// diff settled.
+/// operation in flight, no background or recent-list load pending, the
+/// diff settled and no commits page or markers on their way.
 /// Diff streams and background loads stay out of `busy`, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
@@ -245,6 +245,8 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && !state.watch.is_pending()
         && !state.recent_pending()
         && diff_settled
+        && state.commits.page_seq.is_none()
+        && state.commits.markers_seq.is_none()
 }
 
 #[cfg(test)]

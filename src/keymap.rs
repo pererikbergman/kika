@@ -9,6 +9,7 @@ use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
 use crate::hunk_view::NO_CHANGES;
@@ -194,6 +195,12 @@ pub enum KeyScope {
     Files,
     /// The Branches panel with focus.
     Branches,
+    /// The Commits panel, with a cursor on the log.
+    Commits,
+    /// The Commits panel showing one commit's files.
+    CommitFiles,
+    /// The Status panel with focus: controls for the operation in progress.
+    Status,
     /// The Diff pane with focus, working on hunks.
     Diff,
     /// The Diff pane picking changed lines inside a hunk.
@@ -243,6 +250,9 @@ impl KeyScope {
         match self {
             KeyScope::Files
             | KeyScope::Branches
+            | KeyScope::Commits
+            | KeyScope::CommitFiles
+            | KeyScope::Status
             | KeyScope::Diff
             | KeyScope::Blame
             | KeyScope::BlameCommit => Some(KeyScope::Workspace),
@@ -273,6 +283,9 @@ impl KeyScope {
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
             KeyScope::Branches => "Branches",
+            KeyScope::Commits => "Commits",
+            KeyScope::CommitFiles => "Commit files",
+            KeyScope::Status => "Status",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
             KeyScope::Blame => "Blame",
@@ -384,6 +397,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "recent.open",
     "recent.init",
     "branches.delete",
+    "branches.merge",
+    "status.continue",
+    "status.skip",
+    "status.abort",
     "delete_branch.yes",
     "delete_branch.force",
     "delete_branch.no",
@@ -698,6 +715,11 @@ fn least_context(state: &AppState) -> Option<&'static str> {
     })
 }
 
+/// Enter has no commit to open before the log has rows.
+fn no_commit(state: &AppState) -> Option<&'static str> {
+    state.commits.rows.is_empty().then_some("No commits")
+}
+
 /// With no renderer configured there is nothing to cycle.
 fn renderer_disabled(state: &AppState) -> Option<&'static str> {
     state.renderers.is_empty().then_some(NO_RENDERER)
@@ -958,6 +980,48 @@ pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<&'static str> {
         selected
             .is_some_and(|b| b.head)
             .then_some("Cannot delete the current branch")
+    })
+}
+
+/// The operation continue, skip and abort act on, if one is in progress.
+pub(crate) fn resumable_operation(state: &AppState) -> Option<Operation> {
+    state
+        .branch
+        .as_ref()
+        .and_then(|b| resumable(&b.in_progress))
+}
+
+/// Why the selected branch cannot be merged or rebased onto now: not into
+/// itself, and not while another operation waits to be finished.
+pub(crate) fn merge_disabled(state: &AppState) -> Option<&'static str> {
+    branch_action_disabled(state).or_else(|| {
+        if state.branches.selected_branch().is_some_and(|b| b.head) {
+            Some("Already on this branch")
+        } else if resumable_operation(state).is_some() {
+            Some("Finish or abort the operation in progress")
+        } else {
+            None
+        }
+    })
+}
+
+/// Why continue or abort cannot run: one at a time, and only with a
+/// merge, rebase or cherry-pick to act on.
+pub(crate) fn resume_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if resumable_operation(state).is_none() {
+        Some("Nothing in progress")
+    } else {
+        None
+    }
+}
+
+pub(crate) fn skip_disabled(state: &AppState) -> Option<&'static str> {
+    resume_disabled(state).or_else(|| {
+        resumable_operation(state)
+            .is_some_and(|op| !op.can_skip())
+            .then_some("A merge cannot be skipped")
     })
 }
 
@@ -1302,6 +1366,82 @@ static REGISTRY: &[Binding] = &[
         description: "Select the previous file",
         label: "",
         bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::CommitNext,
+        description: "Select the next commit",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::CommitPrev,
+        description: "Select the previous commit",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.open",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenCommitFiles,
+        description: "Show the files the selected commit changed",
+        label: "files",
+        bar: true,
+        disabled: no_commit,
+    },
+    Binding {
+        id: "commit_files.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CommitFileNext,
+        description: "Select the next file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commit_files.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CommitFilePrev,
+        description: "Select the previous file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commit_files.back",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('h'), NONE),
+            KeyPattern::any(KeyCode::Left),
+        ],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::CloseCommitFiles,
+        description: "Back to the log, at the same commit",
+        label: "back",
+        bar: true,
         disabled: never,
     },
     Binding {
@@ -2226,6 +2366,46 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: delete_branch_disabled,
     },
+    Binding {
+        id: "branches.merge",
+        keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::OpenMenu(MenuId::Merge),
+        description: "Merge the selected branch into the current one, or rebase onto it",
+        label: "merge",
+        bar: true,
+        disabled: merge_disabled,
+    },
+    Binding {
+        id: "status.continue",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
+        scope: KeyScope::Status,
+        intent: AppIntent::ContinueOperation,
+        description: "Continue the merge, rebase or cherry-pick once conflicts are resolved",
+        label: "continue",
+        bar: true,
+        disabled: resume_disabled,
+    },
+    Binding {
+        id: "status.skip",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::Status,
+        intent: AppIntent::SkipOperation,
+        description: "Skip the commit the rebase or cherry-pick stopped on",
+        label: "skip",
+        bar: true,
+        disabled: skip_disabled,
+    },
+    Binding {
+        id: "status.abort",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::Status,
+        intent: AppIntent::AbortOperation,
+        description: "Abort the operation in progress, asking first",
+        label: "abort",
+        bar: true,
+        disabled: resume_disabled,
+    },
     // As with discarding, Enter is left unbound: a delete cannot be undone.
     Binding {
         id: "delete_branch.yes",
@@ -2590,7 +2770,8 @@ mod tests {
     }
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
-        // Every binding is enabled on a workspace with a stageable file selected.
+        // Every binding is enabled on a workspace with a stageable file
+        // selected and a commit in the log.
         let mut state = AppState::new(Context::Workspace);
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
@@ -2600,11 +2781,91 @@ mod tests {
             kind: EntryKind::Changed,
         }];
         state.selected = Some(0);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc".into(),
+            short_oid: "abc".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        }];
         match resolve(registry(), &Keymap::default(), focus, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
         }
+    }
+
+    #[test]
+    fn the_commits_panel_moves_its_cursor_and_falls_back_to_the_workspace() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::Commits.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Commits.title(), "Commits");
+        let commits = |k| from(KeyScope::Commits, k);
+        let none = KeyModifiers::NONE;
+        assert_eq!(commits(plain('j')), Some(CommitNext));
+        assert_eq!(commits(key(KeyCode::Down, none)), Some(CommitNext));
+        assert_eq!(commits(plain('k')), Some(CommitPrev));
+        assert_eq!(commits(key(KeyCode::Up, none)), Some(CommitPrev));
+        assert_eq!(commits(plain('r')), Some(RefreshStatus));
+        assert_eq!(commits(plain('q')), Some(Quit));
+    }
+
+    #[test]
+    fn enter_opens_a_commits_files_where_esc_goes_back_instead_of_quitting() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            from(KeyScope::Commits, key(KeyCode::Enter, none)),
+            Some(OpenCommitFiles)
+        );
+        assert_eq!(KeyScope::CommitFiles.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::CommitFiles.title(), "Commit files");
+        let files = |k| from(KeyScope::CommitFiles, k);
+        for k in [
+            key(KeyCode::Esc, none),
+            plain('h'),
+            key(KeyCode::Left, none),
+        ] {
+            assert_eq!(files(k), Some(CloseCommitFiles), "{k:?}");
+        }
+        assert_eq!(files(plain('j')), Some(CommitFileNext));
+        assert_eq!(files(key(KeyCode::Down, none)), Some(CommitFileNext));
+        assert_eq!(files(plain('k')), Some(CommitFilePrev));
+        assert_eq!(files(key(KeyCode::Up, none)), Some(CommitFilePrev));
+        assert_eq!(files(plain('q')), Some(Quit));
+        assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
+    }
+
+    #[test]
+    fn the_status_panel_controls_the_operation_and_falls_back_to_the_workspace() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::Status.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Status.title(), "Status");
+        // A rebase is in progress, so all three keys are enabled.
+        let mut state = AppState::new(Context::Workspace);
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Rebase],
+        });
+        let status = |c| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Status,
+            &state,
+            plain(c),
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            _ => None,
+        };
+        assert_eq!(status('c'), Some(ContinueOperation));
+        assert_eq!(status('s'), Some(SkipOperation));
+        assert_eq!(status('a'), Some(AbortOperation));
+        assert_eq!(status('r'), Some(RefreshStatus));
+        let merge = registry().iter().find(|b| b.id == "branches.merge");
+        assert_eq!(merge.map(|b| &b.intent), Some(&OpenMenu(MenuId::Merge)));
     }
 
     #[test]
@@ -3640,6 +3901,9 @@ mod tests {
             KeyScope::Workspace => "workspace",
             KeyScope::Files => "files",
             KeyScope::Branches => "branches",
+            KeyScope::Commits => "commits",
+            KeyScope::CommitFiles => "commit_files",
+            KeyScope::Status => "status",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",
             KeyScope::Blame => "blame",
@@ -3894,6 +4158,10 @@ mod tests {
                     | ForcePush
                     | SubmitCredential
                     | CredentialAnswered(_)
+                    | OpenMenu(MenuId::Merge)
+                    | ContinueOperation
+                    | SkipOperation
+                    | AbortOperation
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

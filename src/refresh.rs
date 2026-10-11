@@ -20,6 +20,8 @@ pub enum Scope {
     Submodules,
     /// The Branches panel's list, with upstreams and ahead/behind.
     Branches,
+    /// The Commits panel's log and markers.
+    Commits,
 }
 
 /// How the file selection survives a refresh.
@@ -52,17 +54,28 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::DeleteUntracked(_)
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
-        // Ahead/behind moves with a commit.
+        // Ahead/behind moves with a commit, and so does the log.
         GitOp::Commit { .. } => (
-            &[Scope::Files, Scope::Branch, Scope::Branches][..],
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
-        // A checkout changes the worktree and which branch is current.
+        // A checkout changes the worktree, which branch is current and so
+        // the log of HEAD.
         GitOp::Checkout(_) | GitOp::CreateBranch { .. } => (
-            &[Scope::Files, Scope::Branch, Scope::Branches][..],
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
-        // Renaming the current branch renames what the Status panel shows.
+        // These move HEAD, rewrite the worktree and index, and start or
+        // end an operation the Status panel shows.
+        GitOp::Merge { .. }
+        | GitOp::Rebase { .. }
+        | GitOp::Continue(_)
+        | GitOp::Skip(_)
+        | GitOp::Abort(_) => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
+        // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
         // The parent lists a submodule whose checkout moved as modified.
@@ -76,12 +89,15 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
     }
 }
 
-/// What a fetch, pull or push makes stale. Each moves ahead/behind; a
-/// pull also changes the worktree.
+/// What a fetch, pull or push makes stale. Each moves remote refs, so
+/// ahead/behind and the log's markers; a pull also moves `HEAD` and
+/// changes the worktree.
 pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
     let scopes: &[Scope] = match op {
-        RemoteOp::Pull => &[Scope::Files, Scope::Branch, Scope::Branches],
-        RemoteOp::Fetch | RemoteOp::Push { .. } => &[Scope::Branch, Scope::Branches],
+        RemoteOp::Pull => &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits],
+        RemoteOp::Fetch | RemoteOp::Push { .. } => {
+            &[Scope::Branch, Scope::Branches, Scope::Commits]
+        }
     };
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
@@ -145,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_also_reloads_the_branch_and_the_list() {
+    fn a_commit_also_reloads_the_branch_the_list_and_the_commits() {
         let op = GitOp::Commit {
             message: Some("subj\n".into()),
             stage_all: true,
@@ -155,14 +171,20 @@ mod tests {
         assert_eq!(
             plan(&op),
             RefreshPlan {
-                scopes: set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Branches]),
+                scopes: set(&[
+                    Scope::Files,
+                    Scope::Branch,
+                    Scope::Diff,
+                    Scope::Branches,
+                    Scope::Commits
+                ]),
                 selection: Selection::KeepPath,
             }
         );
     }
 
     #[test]
-    fn checkout_and_create_reload_files_diff_the_branch_and_the_list() {
+    fn checkout_and_create_reload_files_diff_the_branch_the_list_and_the_commits() {
         let ops = [
             GitOp::Checkout("b".into()),
             GitOp::CreateBranch {
@@ -173,12 +195,51 @@ mod tests {
         for op in ops {
             assert_eq!(
                 plan(&op).scopes,
-                set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Branches]),
+                set(&[
+                    Scope::Files,
+                    Scope::Branch,
+                    Scope::Diff,
+                    Scope::Branches,
+                    Scope::Commits
+                ]),
                 "{op:?}"
             );
         }
     }
 
+    #[test]
+    fn merge_rebase_and_their_controls_reload_everything_head_touches() {
+        use crate::git::ops::MergeStrategy;
+        use crate::git::repo_state::Operation;
+        let ops = [
+            GitOp::Merge {
+                branch: "b".into(),
+                strategy: MergeStrategy::Squash,
+            },
+            GitOp::Rebase { onto: "b".into() },
+            GitOp::Continue(Operation::Merge),
+            GitOp::Skip(Operation::Rebase),
+            GitOp::Abort(Operation::CherryPick),
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
+    }
+
+    /// Neither moves `HEAD`, so the log stays as it is.
     #[test]
     fn rename_reloads_the_branch_and_the_list_and_delete_only_the_list() {
         let rename = GitOp::RenameBranch {
@@ -194,20 +255,26 @@ mod tests {
     }
 
     #[test]
-    fn remote_ops_reload_the_branch_and_the_list_and_a_pull_the_files_too() {
+    fn remote_ops_reload_the_branch_the_lists_and_a_pull_the_files_too() {
         let push = RemoteOp::Push {
             force_with_lease: false,
         };
         for op in [RemoteOp::Fetch, push] {
             assert_eq!(
                 remote_plan(op).scopes,
-                set(&[Scope::Branch, Scope::Branches]),
+                set(&[Scope::Branch, Scope::Branches, Scope::Commits]),
                 "{op:?}"
             );
         }
         assert_eq!(
             remote_plan(RemoteOp::Pull).scopes,
-            set(&[Scope::Files, Scope::Branch, Scope::Diff, Scope::Branches])
+            set(&[
+                Scope::Files,
+                Scope::Branch,
+                Scope::Diff,
+                Scope::Branches,
+                Scope::Commits
+            ])
         );
     }
 

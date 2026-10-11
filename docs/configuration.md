@@ -379,10 +379,10 @@ global file.
 ## Binding reference
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
-then its enclosing scopes: the file list, branch list, diff and blame panels fall back to
-Workspace, and Workspace falls back to Global. Popups, menus and the commit
-editor do not fall back, so `q` and `?` do not quit or open help there; each
-popup that can stay open has its own `ctrl-c` to quit.
+then its enclosing scopes: the status, file list, branch list, commits, commit
+files, diff and blame panels fall back to Workspace, and Workspace falls back to Global. Popups,
+menus and the commit editor do not fall back, so `q` and `?` do not quit or
+open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
 `(none)` means a binding has no default keys. `locked` in the last column
 means a repository's `.kika.toml` cannot change it.
@@ -449,9 +449,49 @@ means a repository's `.kika.toml` cannot change it.
 | `branches.new` | `n` | Create a branch at the selected one and check it out | |
 | `branches.rename` | `R` | Rename the selected branch | |
 | `branches.delete` | `d` | Delete the selected branch, asking first | locked |
+| `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
+
+`m` opens a menu: fast-forward only, a merge commit, a squash (the changes are
+staged for you to commit), or rebasing the current branch onto the selected
+one. A merge commit, a rebase, and continuing or skipping run git on the
+terminal, so hooks, signing and git's editor for the message work as on the
+command line.
+
+### Status
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `status.continue` | `c` | Continue the merge, rebase or cherry-pick once conflicts are resolved | locked |
+| `status.skip` | `s` | Skip the commit the rebase or cherry-pick stopped on | locked |
+| `status.abort` | `a` | Abort the operation in progress, asking first | locked |
+
+These act on the merge, rebase or cherry-pick the Status panel shows in
+progress. `cherry-pick --skip` needs git 2.23 or newer; an older git refuses it
+and changes nothing.
+
+### Commits
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `commits.next` | `j`, `down` | Select the next commit | |
+| `commits.prev` | `k`, `up` | Select the previous commit | |
+| `commits.open` | `enter` | Show the files the selected commit changed | |
+
+### Commit files (a commit opened from the Commits panel)
+
+The diff pane shows the selected file's change in that commit, against its
+first parent. `J`, `K`, `pgdn` and `pgup` scroll it, and `+`, `-` and `w`
+change its context and whitespace as for any diff. Focusing another panel
+goes back to the log.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `commit_files.next` | `j`, `down` | Select the next file and show its change | |
+| `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
 
 ### Diff (hunks)
 

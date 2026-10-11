@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ansi;
 use crate::captured_command::run_captured;
+use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
@@ -15,9 +16,11 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::{BranchName, branch_log, list_branches};
+use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::fetch::run_fetch;
 use crate::git::head::read_head_message;
+use crate::git::log::{log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
@@ -155,6 +158,24 @@ pub enum Effect {
     SnapshotRefs {
         tag: Tag,
     },
+    /// Read a page of `HEAD`'s log, from `tip` when set; always answered
+    /// by one `CommitsLoaded`.
+    LoadCommits {
+        tag: Tag,
+        tip: Option<String>,
+        skip: usize,
+    },
+    /// List the files `range` changed; always answered by one
+    /// `CommitFilesLoaded`.
+    LoadCommitFiles {
+        tag: Tag,
+        range: CommitRange,
+    },
+    /// Read which commits are unpushed or unmerged; always answered by
+    /// one `MarkersLoaded`.
+    LoadMarkers {
+        tag: Tag,
+    },
     /// Fetch every remote; always answered by one `FetchFinished`.
     Fetch {
         tag: Tag,
@@ -184,6 +205,13 @@ pub enum Effect {
     /// Hand the answer to the question the running remote operation
     /// asked; `None` cancels it. Does nothing when no question waits.
     AnswerCredential(Option<Secret>),
+}
+
+/// Seconds since the epoch, which relative commit dates count from.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -450,6 +478,47 @@ impl Runtime {
                             ))
                         });
                     let _ = tx.send(AppIntent::RefsLoaded { tag, result });
+                });
+            }
+            Effect::LoadCommits { tag, tip, skip } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let page = log_page(runner.as_ref(), tip.as_deref(), skip, commits::PAGE)?;
+                        Ok((page, unix_now()))
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
+                    });
+                    let _ = tx.send(AppIntent::CommitsLoaded { tag, skip, result });
+                });
+            }
+            Effect::LoadCommitFiles { tag, range } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || commit_files(runner.as_ref(), &range))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git diff-tree crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
+                });
+            }
+            Effect::LoadMarkers { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result = tokio::task::spawn_blocking(move || markers(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git rev-list crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::MarkersLoaded { tag, result });
                 });
             }
             Effect::Fetch { tag } => {
@@ -1161,6 +1230,7 @@ mod tests {
             orig_path: None,
             side: DiffSide::Index,
             options: Default::default(),
+            commit: None,
         }
     }
 
@@ -1456,6 +1526,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             want: 100,
         });
@@ -1646,6 +1717,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_commits_reports_the_page_with_the_same_tag_skip_and_a_time() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "log",
+                "--no-show-signature",
+                "--no-color",
+                "-z",
+                "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s",
+                "--skip=200",
+                "-n",
+                "200",
+                "abc",
+                "--",
+            ],
+            ok(b"abc1\x1fabc\x1f\x1f7\x1fAnn\x1fsubj\0"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadCommits {
+            tag: background(5),
+            tip: Some("abc".into()),
+            skip: 200,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::CommitsLoaded {
+                tag,
+                skip,
+                result: Ok((page, now)),
+            }) => {
+                assert_eq!((tag, skip), (background(5), 200));
+                assert_eq!(page.rows[0].subject, "subj");
+                assert!(page.done);
+                assert!(now > 1_600_000_000, "{now}");
+            }
+            other => panic!("expected a loaded page, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn panicking_commit_and_marker_loads_still_report_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+
+        runtime.spawn(Effect::LoadCommits {
+            tag: background(6),
+            tip: None,
+            skip: 0,
+        });
+        match rx.recv().await {
+            Some(AppIntent::CommitsLoaded {
+                tag,
+                result: Err(message),
+                ..
+            }) => {
+                assert_eq!(tag, background(6));
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed CommitsLoaded, got {other:?}"),
+        }
+
+        runtime.spawn(Effect::LoadMarkers { tag: background(7) });
+        match rx.recv().await {
+            Some(AppIntent::MarkersLoaded {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, background(7));
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed MarkersLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_commit_files_reports_back_with_the_same_tag_even_on_a_panic() {
+        use crate::git::commit_files::{CommitFile, CommitId};
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: None,
+        };
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-commit-id",
+                "--name-status",
+                "-M",
+                "--root",
+                "abc",
+                "--",
+            ],
+            ok(b"A\0new\0"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 2,
+            seq: 8,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadCommitFiles {
+            tag,
+            range: range.clone(),
+        });
+
+        let new = CommitFile {
+            status: 'A',
+            path: "new".into(),
+            orig_path: None,
+        };
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitFilesLoaded {
+                tag,
+                result: Ok(vec![new])
+            })
+        );
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadCommitFiles { tag, range });
+        match rx.recv().await {
+            Some(AppIntent::CommitFilesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(
+                    message.starts_with("git diff-tree crashed: "),
+                    "{message:?}"
+                );
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed CommitFilesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn fetch_reports_back_with_the_same_tag() {
         let runner = Arc::new(FakeRunner::new().expect(
             &["fetch", "--all", "--quiet", "--no-write-fetch-head"],
@@ -1707,6 +1922,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             want: 100,
         });
@@ -1839,6 +2055,7 @@ mod tests {
                 orig_path: None,
                 side: DiffSide::Worktree,
                 options: Default::default(),
+                commit: None,
             },
             renderer: ExternalRenderer {
                 label: "cat".into(),

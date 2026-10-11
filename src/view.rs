@@ -1,10 +1,11 @@
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
+use crate::commits_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
-use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
@@ -63,9 +64,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                     .and_then(|run| Some((run.branch.as_ref()?, run.spinner())));
                 branches_view::render_panel(&state.branches, &look, expanded, spinner, frame, area)
             }
-            SidePanel::Commits | SidePanel::Stash => {
-                render_placeholder(side, &look, expanded, frame, area)
+            SidePanel::Commits => {
+                commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
+            SidePanel::Stash => render_placeholder(side, &look, expanded, frame, area),
         }
     }
     let Some(area) = layout.rect(Panel::Diff) else {
@@ -88,6 +90,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
     match (&state.focus, state.rendered_shown(), label) {
         // What the selected branch holds, before acting on it.
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
+        // A commit's file, streamed like a working-tree diff; never rendered.
+        (Focus::Commits, ..) if state.commits.open.is_some() => {
+            render_diff_pane(&state.diff, options, &look, frame, area)
+        }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
             render_rendered(rendered, block, Some(view), hint, frame, area);
@@ -1110,7 +1116,14 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&sanitize(&row.text), 0, width.saturating_sub(1));
+                    let text = match row.kind {
+                        RowKind::Header | RowKind::HunkHeader => sanitize(&row.text),
+                        RowKind::Context
+                        | RowKind::Added
+                        | RowKind::Removed
+                        | RowKind::NoNewline => sanitize_body(&row.text),
+                    };
+                    let text = clip(&text, 0, width.saturating_sub(1));
                     let line = Line::from(vec![
                         Span::styled(gutter, Style::new().fg(FOCUSED)),
                         Span::styled(text, style),
@@ -1816,15 +1829,15 @@ mod tests {
     fn an_expanded_placeholder_says_nothing_is_here_yet() {
         let mut state = loaded(vec![]);
         assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        for side in [SidePanel::Commits, SidePanel::Stash] {
-            state.focus = Focus::side(side);
-            state.expanded = side;
-            let buffer = draw_buffer(&state, 80, 24);
-            let (x, y) = find(&buffer, "Nothing here yet");
-            assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-            let title = format!("[{}] {}", side.number(), side.title());
-            assert!(y > find(&buffer, &title).1, "{side:?}");
-        }
+        // Only Stash is still a placeholder.
+        let side = SidePanel::Stash;
+        state.focus = Focus::side(side);
+        state.expanded = side;
+        let buffer = draw_buffer(&state, 80, 24);
+        let (x, y) = find(&buffer, "Nothing here yet");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
+        let title = format!("[{}] {}", side.number(), side.title());
+        assert!(y > find(&buffer, &title).1);
     }
 
     #[test]
@@ -2898,6 +2911,71 @@ mod tests {
         assert!(contains(&rows, "▌+new nine"), "{rows:#?}");
     }
 
+    /// A diff of a file whose name holds a ZWNJ, adding a ZWNJ word, an emoji
+    /// ZWJ sequence and a Devanagari conjunct, each followed by `X`.
+    const JOINED: &str = "diff --git a/می\u{200C}خواهم.rs b/می\u{200C}خواهم.rs\n\
+        --- a/می\u{200C}خواهم.rs\n+++ b/می\u{200C}خواهم.rs\n\
+        @@ -1 +1,3 @@\n-old\n+می\u{200C}خواهمX\n+👨\u{200D}👩\u{200D}👧X\n+क्\u{200D}षX\n";
+
+    #[test]
+    fn a_hunk_body_keeps_script_joiners_and_its_file_header_escapes_them() {
+        let rows = draw(&hunks(DiffSide::Worktree, JOINED.as_bytes()), 100, 20);
+        assert!(contains(&rows, "+می\u{200C}خواهمX"), "{rows:#?}");
+        assert!(contains(&rows, "+क्\u{200D}षX"), "{rows:#?}");
+        assert!(contains(&rows, "+++ b/می<U+200C>خواهم.rs"), "{rows:#?}");
+        // Emoji sequences stay escaped: their width depends on the terminal.
+        assert!(contains(&rows, "+👨<U+200D>👩<U+200D>👧X"), "{rows:#?}");
+    }
+
+    /// Where the `+` of the added row starting with `first` is drawn.
+    fn added_row(buffer: &ratatui::buffer::Buffer, first: char) -> (u16, u16) {
+        let area = buffer.area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width.saturating_sub(1)).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buffer[(x, y)].symbol() == "+" && buffer[(x + 1, y)].symbol().starts_with(first)
+            })
+            .unwrap_or_else(|| panic!("no added row starting with {first:?}"))
+    }
+
+    #[test]
+    fn text_after_a_joined_word_lands_where_a_terminal_draws_it() {
+        // Columns as a terminal counts them, one per letter, two per emoji,
+        // none for a joiner or virama: not `width_of`, which the layout uses.
+        let width = 100;
+        let buffer = draw_buffer(&hunks(DiffSide::Worktree, JOINED.as_bytes()), width, 20);
+        for (first, columns) in [('م', 1 + 7), ('👨', 1 + 2 + 8 + 2 + 8 + 2), ('क', 1 + 2)] {
+            let (x, y) = added_row(&buffer, first);
+            assert_eq!(buffer[(x + columns, y)].symbol(), "X", "{first:?}");
+            // The focused Diff pane's border is drawn thick.
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{first:?}");
+        }
+    }
+
+    #[test]
+    fn a_clipped_joined_row_keeps_its_border_and_never_splits_a_cluster() {
+        let long = "می\u{200C}خواهم क्\u{200D}ष 👨\u{200D}👩 ".repeat(8);
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{long}\n");
+        // Every width from 30 to 60 clips the row at a different point of it;
+        // the tiny sizes only show that nothing splits or panics.
+        let sizes = (30..=60).map(|w| (w, 12)).chain([(24, 8), (12, 5)]);
+        for (width, height) in sizes {
+            let buffer = draw_buffer(&hunks(DiffSide::Worktree, diff.as_bytes()), width, height);
+            if height == 12 {
+                let (_, y) = added_row(&buffer, 'م');
+                assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{width}x{height}");
+            }
+            for cell in buffer.content() {
+                let lead = cell.symbol().chars().next();
+                assert!(
+                    !matches!(lead, Some('\u{200C}' | '\u{200D}' | '\u{094D}')),
+                    "{width}x{height}: a cell starts with {lead:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn in_line_mode_the_picked_lines_are_reversed_and_the_header_is_not() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
@@ -3714,6 +3792,19 @@ mod tests {
     }
 
     #[test]
+    fn a_blamed_word_keeps_its_zwnj() {
+        let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهمX\n");
+        let lines = crate::git::blame::parse_blame(out.as_bytes()).unwrap();
+        let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "می\u{200C}خواهمX"), "{rows:#?}");
+        assert!(!contains(&rows, "<U+200C>"), "{rows:#?}");
+        // Seven letters, one column each; the ZWNJ takes none.
+        let (x, y) = find(&buffer, "م");
+        assert_eq!(buffer[(x + 7, y)].symbol(), "X");
+    }
+
+    #[test]
     fn only_the_scrolled_window_of_a_blame_is_drawn() {
         let lines = (1..=30)
             .map(|i| blame_line(OID, "Ann", i, &format!("text {i}")))
@@ -3853,6 +3944,29 @@ mod tests {
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "+built in"), "{rows:#?}");
         assert!(contains(&rows, " Diff "), "{rows:#?}");
+        assert!(!contains(&rows, "delta"), "{rows:#?}");
+    }
+
+    #[test]
+    fn an_open_commits_file_shows_its_streamed_diff_not_a_stale_render() {
+        use crate::commit_files::CommitFilesList;
+        use crate::git::commit_files::{CommitId, CommitRange};
+
+        // A commit's file of the same name as the rendered worktree file.
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+in the commit")]);
+        through_renderer(&mut state, DECORATED);
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: None,
+        };
+        state.commits.open = Some(CommitFilesList::begin(range, "abc".into(), 1));
+
+        let rows = draw(&state, 100, 20);
+
+        assert!(contains(&rows, "+in the commit"), "{rows:#?}");
+        assert!(!contains(&rows, "old one"), "{rows:#?}");
         assert!(!contains(&rows, "delta"), "{rows:#?}");
     }
 

@@ -405,6 +405,7 @@ mod tests {
             orig_path: None,
             side: DiffSide::Untracked,
             options: Default::default(),
+            commit: None,
         }
     }
 
@@ -436,6 +437,7 @@ mod tests {
             orig_path: None,
             side: DiffSide::Worktree,
             options: Default::default(),
+            commit: None,
         }
     }
 
@@ -543,5 +545,63 @@ mod tests {
             }
             other => panic!("expected a failed DiffLoaded, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_commit_files_diff_streams_only_that_files_change_in_that_commit() {
+        use crate::git::CliRunner;
+        use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("commit-file-diff");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "bee\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        std::fs::write(dir.join("a.txt"), "one\nTWO\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "BEE\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "second"]);
+        // The working tree moves on; the commit's diff must not.
+        std::fs::write(dir.join("a.txt"), "later\n").unwrap();
+        let rev = |name: &str| {
+            let out = String::from_utf8(git(dir, &["rev-parse", name])).unwrap();
+            CommitId::parse(out.trim()).unwrap()
+        };
+        let range = CommitRange {
+            oid: rev("HEAD"),
+            parent: Some(rev("HEAD^")),
+        };
+        let file = CommitFile {
+            status: 'M',
+            path: "a.txt".into(),
+            orig_path: None,
+        };
+        let request = DiffRequest::for_commit_file(&range, &file, Default::default());
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let streamer = DiffStreamer::new(Arc::new(CliRunner::isolated(dir)), tx);
+
+        streamer.start(tag(4), request, 250);
+
+        let Some(AppIntent::DiffLoaded {
+            result: Ok(chunk), ..
+        }) = rx.recv().await
+        else {
+            panic!("expected a chunk");
+        };
+        assert!(chunk.done);
+        let text: Vec<(LineKind, &str)> = chunk
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert!(text.contains(&(LineKind::Removed, "-two")), "{text:?}");
+        assert!(text.contains(&(LineKind::Added, "+TWO")), "{text:?}");
+        assert!(
+            !text
+                .iter()
+                .any(|(_, t)| t.contains("b.txt") || t.contains("later"))
+        );
     }
 }
