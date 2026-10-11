@@ -28,6 +28,7 @@ pub mod runner;
 pub mod status;
 pub mod submodule;
 pub mod version;
+pub mod worktrees;
 
 pub use runner::{CliRunner, GitRunner};
 pub use status::FileEntry;

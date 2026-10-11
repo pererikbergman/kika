@@ -410,6 +410,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.more_context` | `+`, `=` | Show more context lines in the diff | |
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
+| `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
@@ -761,6 +762,30 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `submodules.init` | `i` | Record the selected submodule's URL without cloning it | locked |
 | `submodules.close` | `esc`, `q` | Close the list | |
 | `submodules.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Worktree list
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `worktrees.next` | `j`, `down` | Select the next worktree | |
+| `worktrees.prev` | `k`, `up` | Select the previous worktree | |
+| `worktrees.open` | `enter` | Switch to the selected worktree | locked |
+| `worktrees.add` | `a` | Add a worktree for the local branch selected in the Branches panel | locked |
+| `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
+| `worktrees.close` | `esc`, `q` | Close the list | |
+| `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Remove this worktree?
+
+Removing a worktree deletes its directory, so `enter` does not answer it. Git
+refuses a worktree with uncommitted or untracked changes, or a locked one, and
+Kika never forces it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `remove_worktree.yes` | `y` | Yes, remove the worktree and its directory | locked |
+| `remove_worktree.no` | `n`, `esc` | No, keep the worktree | locked |
+| `remove_worktree.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Recent repositories
 

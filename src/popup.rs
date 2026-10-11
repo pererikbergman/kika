@@ -11,12 +11,14 @@ use crate::commit_editor::{byte_at, char_len};
 use crate::git::askpass::Secret;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
+use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
+use crate::worktree_list::WorktreeList;
 
 /// One entry on the popup stack. The top one takes the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +38,8 @@ pub enum Popup {
     ResetHard(ResetHardConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     Submodules(SubmoduleList),
+    Worktrees(WorktreeList),
+    RemoveWorktree(RemoveWorktreeConfirm),
     Recent(RecentList),
     /// Git or ssh asks something for a running fetch, pull or push.
     Credential(CredentialPrompt),
@@ -221,6 +225,29 @@ impl RemoveRemoteConfirm {
     }
 }
 
+/// "Remove this worktree?" It carries the path taken when it was asked,
+/// so a reload before the answer cannot change what is removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveWorktreeConfirm {
+    /// The path's display form, already terminal-safe.
+    pub display: String,
+    pub path: RepoPath,
+}
+
+impl RemoveWorktreeConfirm {
+    pub fn title(&self) -> &'static str {
+        "Remove worktree"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Remove worktree {}? Git refuses if it has uncommitted or untracked \
+             changes. (y/n)",
+            self.display
+        )
+    }
+}
+
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
@@ -335,6 +362,8 @@ pub enum PromptKind {
     RenameRemote,
     /// The remote branch the selected local branch should track.
     SetUpstream,
+    /// Where to add a worktree for the branch `a` was pressed on.
+    WorktreePath,
 }
 
 impl PromptKind {
@@ -349,6 +378,7 @@ impl PromptKind {
             PromptKind::RemoteUrl => "New remote URL",
             PromptKind::RenameRemote => "Rename remote",
             PromptKind::SetUpstream => "Set upstream",
+            PromptKind::WorktreePath => "New worktree",
         }
     }
 
@@ -363,6 +393,7 @@ impl PromptKind {
             PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
             PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
             PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
+            PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
         }
     }
 }

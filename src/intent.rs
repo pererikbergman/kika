@@ -25,6 +25,7 @@ use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
+use crate::git::worktrees::Worktree;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -251,6 +252,36 @@ pub enum AppIntent {
     EnterSubmodule,
     /// Back to the repository the current one was entered from.
     LeaveSubmodule,
+    /// Open the list of worktrees and load it.
+    OpenWorktrees,
+    /// The worktree list was read; `tag` says which load.
+    WorktreesLoaded {
+        tag: Tag,
+        result: Result<Vec<Worktree>, String>,
+    },
+    /// Move the worktree cursor down or up.
+    WorktreeNext,
+    WorktreePrev,
+    /// Switch Kika to the worktree under the cursor.
+    OpenWorktree,
+    /// Ask where to add a worktree for the Branches panel's local branch.
+    AddWorktree,
+    /// The typed path for the worktree `AddWorktree` asked about.
+    AddWorktreeAt(String),
+    /// A worktree add finished: where it was made, or why not.
+    WorktreeAdded {
+        tag: Tag,
+        result: Result<PathBuf, String>,
+    },
+    /// Ask before removing the worktree under the cursor.
+    RemoveWorktree,
+    /// Remove the worktree the question named.
+    ConfirmRemoveWorktree,
+    /// A worktree remove finished.
+    WorktreeRemoved {
+        tag: Tag,
+        result: Result<(), String>,
+    },
     /// Blame the selected file: who last changed each line, and when.
     OpenBlame,
     /// A blame load finished; `tag` says which one.
