@@ -49,6 +49,8 @@ mod tags_view;
 mod view;
 mod watch;
 mod worktree_file;
+mod worktree_list;
+mod worktrees_view;
 
 use std::process::ExitCode;
 use std::sync::Arc;

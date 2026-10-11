@@ -75,6 +75,15 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
+            Popup::Worktrees(list) => {
+                crate::worktrees_view::render_worktrees(state, list, top, frame, area)
+            }
+            Popup::RemoveWorktree(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
                 let text = format!("{}\n(y/n)", prompt.prompt);
@@ -841,9 +850,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 7,
+            cursor: 8,
         }];
-        // Six rows: the bar leaves five, so three of the eight items show.
+        // Six rows: the bar leaves five, so three of the nine items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
@@ -858,7 +867,7 @@ mod tests {
                 cursor,
             }]
         };
-        // Three of the eight items show at a time.
+        // Three of the nine items show at a time.
         state.popups = menu(0);
         let (_, rows) = draw(&state, 30, 6);
         let (_, top) = find(&rows, " Actions ");
@@ -870,7 +879,7 @@ mod tests {
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
 
-        state.popups = menu(7);
+        state.popups = menu(8);
         let (_, rows) = draw(&state, 30, 6);
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(!rows[usize::from(top) + 4].contains('▼'), "{rows:#?}");
