@@ -492,6 +492,12 @@ pub enum AppIntent {
     ConfirmCheckoutCommit,
     /// Make a commit that undoes the selected one.
     RevertCommit,
+    /// Add the selected commit to the copied set, or take it out.
+    CopyCommit,
+    /// Empty the copied set.
+    ClearCopied,
+    /// Cherry-pick the copied commits onto the current branch.
+    PasteCommits,
     /// Reset the current branch to the selected commit. A hard reset asks
     /// first.
     ResetTo(ResetMode),

@@ -747,7 +747,8 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
         spans.push(Span::raw(format!(" {cancel}")));
     }
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    if let Some(notice) = state.notice.or(remote_notice) {
+    let notice = state.notice.or(state.notice_text.as_deref());
+    if let Some(notice) = notice.or(remote_notice) {
         spans.push(Span::styled(
             elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
