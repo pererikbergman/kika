@@ -250,7 +250,9 @@ other options before it: `["csh", "-f", "-c", "…", "csh", "{path}"]`.
 file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
 `bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
 `pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
-such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
+such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`, with or without
+`.exe` and with any trailing dots or spaces, which Windows drops when it starts
+a program: `bash.`, `bash.exe.` and `bash ` all count), Kika rejects a
 placeholder in the script, in any argument before it, or in the slot right
 after it (`$0`, or `$1` in csh and tcsh).
 The check is cautious: it assumes the last option before the first
@@ -264,13 +266,52 @@ around `-c`:
 `["bash", "-o", "pipefail", "{path}"]` is rejected too: it would run the
 selected file as a script.
 
-That check looks only at the program name in `command[0]`. It does not see a
-shell started through another program, such as `env sh -c`, `busybox sh -c`,
-`xargs sh -c`, `exec`, `nice` or `timeout`, or `cmd /c` and `pwsh -c` on
-Windows, and it cannot check other interpreters either. For all of those,
-and for `python -c`, `perl -e`, `node -e` and the like, the rule is yours to
-keep: pass values as arguments after the code, and read them from there
-(`"$1"`, `sys.argv`, `@ARGV`, `process.argv`).
+The same check applies to a shell started through one of these launchers in
+`command[0]`: `env`, `busybox`, `toybox`, `nice`, `nohup`, `timeout`, `xargs`,
+`exec`, `command`, `stdbuf`, `setsid`, `ionice`, `chrt`, `taskset`, `time`,
+`sudo`, `doas`, `caffeinate` and `arch` (named the same ways as a shell: any
+path, any case, with or without `.exe`, with trailing dots or spaces). Kika does
+not read the launcher's options. It takes the first shell name among the
+launcher's arguments as the shell, rejects any placeholder before it, and
+checks the rest as if that shell were `command[0]`. If that shell name may be
+an option's value or an assignment, because the argument before it starts with
+`-` or `+` (other than `--`) or because it contains `=` (`-u SH`,
+`SHELL=/bin/bash`), Kika also checks the next shell name the same way, and so
+on. So `["env", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` is accepted, and
+`["env", "bash", "-c", "x {path}"]` and `["env", "-u", "SH", "bash", "{path}"]`
+are not.
+
+This can refuse a safe command:
+
+- In `["timeout", "5", "grep", "sh", "{path}"]` the pattern `sh` is taken as
+  the shell, so `{path}` is rejected.
+- In `["env", "-i", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` the first `sh`
+  might be the value of `-i`, so the second `sh` is checked as a shell too.
+  Put `--` before the shell, where the launcher accepts it:
+  `["env", "-i", "--", "sh", …]`.
+
+Otherwise, call the launcher from a shell and pass the value as `"$1"`:
+`["sh", "-c", "timeout 5 grep sh -- \"$1\"", "sh", "{path}"]`.
+
+`env -S` (or `--split-string`) splits one argument into several. When any word
+of it names a shell, or holds a `$` variable that could, Kika cannot tell where
+the script ends, so it rejects every placeholder in that command. A placeholder
+inside the `-S` string itself is rejected too, since env would split the value
+into a program and its arguments.
+
+**Not checked.** The guard cannot see a shell or interpreter started any other
+way, so for these the rule is yours to keep:
+
+- a launcher that is not on the list above, for example `ssh`, `su -c`,
+  `find -exec`, `watch`, `flock` or `systemd-run`;
+- `sudo -s`, `sudo -i` and `doas -s`, which start a shell without naming one;
+- a placeholder that becomes the launcher's program, as in
+  `["env", "{prompt1}", …]`;
+- `cmd /c`, `pwsh -c` and `powershell` on Windows;
+- interpreters such as `python -c`, `perl -e` and `node -e`.
+
+Pass values as arguments after the code, and read them from there (`"$1"`,
+`sys.argv`, `@ARGV`, `process.argv`).
 
 ### Keys
 
