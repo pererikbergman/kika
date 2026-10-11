@@ -2,7 +2,7 @@ use crate::commit_editor::CommitEditor;
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
-use crate::git::diff::{DiffChunk, DiffRequest, DiffSide};
+use crate::git::diff::{DiffChunk, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
@@ -89,6 +89,9 @@ pub struct AppState {
     /// Menus, questions, prompts and errors, drawn bottom to top. The top
     /// one takes the keys; closing it shows the one below again.
     pub popups: Vec<Popup>,
+    /// How diffs are drawn. Kept in memory for the session: it outlives file
+    /// selection, focus changes and reloads.
+    pub diff_options: DiffOptions,
 }
 
 impl AppState {
@@ -115,6 +118,7 @@ impl AppState {
             commit: CommitFlow::Closed,
             notice: None,
             popups: Vec::new(),
+            diff_options: DiffOptions::default(),
         }
     }
 
@@ -195,6 +199,26 @@ impl AppState {
             AppIntent::PrevLine { extend } => self.with_lines(|view| view.prev_line(extend)),
             AppIntent::ToggleLinesStage => return self.toggle_lines_stage(),
             AppIntent::ToggleDiffSide => return self.toggle_diff_side(),
+            AppIntent::MoreContext => {
+                let context = self.diff_options.context.saturating_add(1);
+                return self.set_diff_options(DiffOptions {
+                    context,
+                    ..self.diff_options
+                });
+            }
+            AppIntent::LessContext => {
+                let context = self.diff_options.context.saturating_sub(1);
+                return self.set_diff_options(DiffOptions {
+                    context,
+                    ..self.diff_options
+                });
+            }
+            AppIntent::ToggleWhitespace => {
+                return self.set_diff_options(DiffOptions {
+                    ignore_whitespace: !self.diff_options.ignore_whitespace,
+                    ..self.diff_options
+                });
+            }
             AppIntent::PatchLoaded { tag, result } => self.patch_loaded(tag, result),
             AppIntent::ToggleStage => {
                 let op = self
@@ -406,6 +430,9 @@ impl AppState {
             }
             Focus::Diff(view) => view,
         };
+        if self.diff_options.ignore_whitespace {
+            return Err(keymap::WHITESPACE_HIDDEN);
+        }
         if view.side == DiffSide::Index {
             return Err("Unstage first to discard");
         }
@@ -466,6 +493,10 @@ impl AppState {
             return vec![];
         };
         if view.lines.is_some() {
+            return vec![];
+        }
+        if self.diff_options.ignore_whitespace {
+            self.notice = Some(keymap::WHITESPACE_HIDDEN);
             return vec![];
         }
         if view.side == DiffSide::Index {
@@ -590,7 +621,7 @@ impl AppState {
     /// the same one.
     fn select(&mut self, index: usize) -> Vec<Effect> {
         self.selected = Some(index);
-        let request = DiffRequest::for_entry(&self.files[index]);
+        let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
         let seq = self.take_seq();
         let want = self.diff.begin(seq, &request.path, self.pane_rows());
         // Diff streams report many times, so they stay out of the busy count.
@@ -619,12 +650,30 @@ impl AppState {
         effects
     }
 
+    /// Take new diff options, with the context clamped to its limits, and
+    /// reload the selected file's diff with them. `select` keeps the scroll
+    /// and the hunk cursor, since the file is the same one.
+    fn set_diff_options(&mut self, options: DiffOptions) -> Vec<Effect> {
+        let options = DiffOptions {
+            context: options.context.clamp(MIN_CONTEXT, MAX_CONTEXT),
+            ..options
+        };
+        if options == self.diff_options {
+            return vec![];
+        }
+        self.diff_options = options;
+        match self.selected {
+            Some(index) if index < self.files.len() => self.select(index),
+            _ => vec![],
+        }
+    }
+
     /// Focus the Diff pane on the selected file, on the side its diff shows.
     fn focus_diff(&mut self) -> Vec<Effect> {
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
             return vec![];
         };
-        let request = DiffRequest::for_entry(entry);
+        let request = DiffRequest::for_entry(entry, self.diff_options);
         self.focus = Focus::Diff(HunkView::new(request.path, request.side));
         self.load_patch()
     }
@@ -648,6 +697,7 @@ impl AppState {
             path: view.path.clone(),
             orig_path: None,
             side: view.side,
+            options: self.diff_options,
         };
         vec![Effect::LoadPatch { tag, request }]
     }
@@ -710,6 +760,10 @@ impl AppState {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
+        if self.diff_options.ignore_whitespace {
+            self.notice = Some(keymap::WHITESPACE_HIDDEN);
+            return vec![];
+        }
         let Some(file_patch) = &view.patch else {
             return vec![];
         };
@@ -1321,6 +1375,7 @@ mod tests {
                     path: "a.rs".into(),
                     orig_path: None,
                     side: DiffSide::Worktree,
+                    options: Default::default(),
                 },
                 want: 21 + DIFF_PREFETCH,
             }
@@ -1342,7 +1397,10 @@ mod tests {
         assert_eq!(state.selected, Some(1));
         match &effects[0] {
             Effect::LoadDiff { request, .. } => {
-                assert_eq!(request, &DiffRequest::for_entry(&state.files[1]))
+                assert_eq!(
+                    request,
+                    &DiffRequest::for_entry(&state.files[1], DiffOptions::default())
+                )
             }
             other => panic!("{other:?}"),
         }
@@ -1848,6 +1906,7 @@ mod tests {
                     path: "b.rs".into(),
                     orig_path: None,
                     side: DiffSide::Worktree,
+                    options: Default::default(),
                 }
             ),
             other => panic!("{other:?}"),
@@ -2516,6 +2575,7 @@ mod tests {
                 path: "a.rs".into(),
                 orig_path: None,
                 side: DiffSide::Worktree,
+                options: Default::default(),
             }
         );
         assert_eq!(view(&state).side, DiffSide::Worktree);
@@ -3353,5 +3413,253 @@ mod tests {
         }
         assert_eq!(review.popups, []);
         assert_eq!(review.notice, None);
+    }
+
+    /// The `LoadDiff` request among `effects`, checking it comes with its delay.
+    fn diff_request(effects: &[Effect]) -> DiffRequest {
+        diff_tag(&effects[..2]);
+        match &effects[0] {
+            Effect::LoadDiff { request, .. } => request.clone(),
+            other => panic!("expected LoadDiff, got {other:?}"),
+        }
+    }
+
+    fn press_char(state: &mut AppState, c: char) -> Vec<Effect> {
+        press(state, KeyCode::Char(c))
+    }
+
+    #[test]
+    fn more_and_less_context_reload_the_selected_diff_with_the_new_size() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let effects = state.update(AppIntent::MoreContext);
+        assert_eq!(state.diff_options.context, 4);
+        assert_eq!(effects.len(), 2, "{effects:?}");
+        assert_eq!(diff_request(&effects).options.context, 4);
+
+        let effects = state.update(AppIntent::LessContext);
+        let effects2 = state.update(AppIntent::LessContext);
+        assert_eq!(state.diff_options.context, 2);
+        assert_eq!(diff_request(&effects).options.context, 3);
+        assert_eq!(diff_request(&effects2).options.context, 2);
+    }
+
+    #[test]
+    fn a_context_change_in_diff_focus_reloads_the_patch_with_the_same_options() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        let effects = state.update(AppIntent::MoreContext);
+        let (_, patch) = patch_load(&effects);
+        assert_eq!(diff_request(&effects).options, state.diff_options);
+        assert_eq!(patch.options, state.diff_options);
+        assert_eq!(patch.options.context, 4);
+        assert_eq!(view(&state).seq, Some(patch_load(&effects).0.seq));
+    }
+
+    #[test]
+    fn context_stops_at_its_limits_and_the_keys_say_why() {
+        use crate::git::diff::{MAX_CONTEXT, MIN_CONTEXT};
+        let (mut state, _) = with_files(three_files(), 24);
+        state.diff_options.context = MAX_CONTEXT;
+        for c in ['+', '='] {
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some("Already at the most context"));
+        }
+        assert_eq!(state.update(AppIntent::MoreContext), vec![]);
+        assert_eq!(state.diff_options.context, MAX_CONTEXT);
+
+        state.diff_options.context = MIN_CONTEXT;
+        assert_eq!(press_char(&mut state, '-'), vec![]);
+        assert_eq!(state.notice, Some("Already at the least context"));
+        assert_eq!(state.update(AppIntent::LessContext), vec![]);
+        assert_eq!(state.diff_options.context, MIN_CONTEXT);
+    }
+
+    #[test]
+    fn the_keys_change_context_and_whitespace_from_files_diff_and_lines() {
+        let (mut state, _) = with_files(three_files(), 24);
+        assert_eq!(
+            diff_request(&press_char(&mut state, '+')).options.context,
+            4
+        );
+        assert_eq!(
+            diff_request(&press_char(&mut state, '=')).options.context,
+            5
+        );
+        assert_eq!(
+            diff_request(&press_char(&mut state, '-')).options.context,
+            4
+        );
+        let request = diff_request(&press_char(&mut state, 'w'));
+        assert!(request.options.ignore_whitespace);
+
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press_char(&mut state, 'v');
+        assert_eq!(state.panel_focus(), KeyScope::Lines);
+        let effects = press_char(&mut state, '+');
+        assert_eq!(patch_load(&effects).1.options.context, 4);
+        let effects = press_char(&mut state, 'w');
+        assert!(patch_load(&effects).1.options.ignore_whitespace);
+    }
+
+    #[test]
+    fn without_a_selected_file_the_options_change_but_nothing_loads() {
+        let (mut state, _) = with_files(vec![], 24);
+        assert_eq!(state.update(AppIntent::MoreContext), vec![]);
+        assert_eq!(state.update(AppIntent::ToggleWhitespace), vec![]);
+        assert_eq!(state.update(AppIntent::LessContext), vec![]);
+        assert_eq!(state.update(AppIntent::LessContext), vec![]);
+        assert_eq!(
+            state.diff_options,
+            DiffOptions {
+                context: 2,
+                ignore_whitespace: true
+            }
+        );
+    }
+
+    #[test]
+    fn toggling_whitespace_flips_it_and_reloads() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        let effects = state.update(AppIntent::ToggleWhitespace);
+        assert!(state.diff_options.ignore_whitespace);
+        assert!(diff_request(&effects).options.ignore_whitespace);
+        assert!(patch_load(&effects).1.options.ignore_whitespace);
+
+        let effects = state.update(AppIntent::ToggleWhitespace);
+        assert!(!state.diff_options.ignore_whitespace);
+        assert!(!patch_load(&effects).1.options.ignore_whitespace);
+    }
+
+    #[test]
+    fn hidden_whitespace_refuses_every_key_that_applies_a_patch() {
+        const REASON: &str = "Whitespace is hidden; press w to stage";
+        let mut state = focused(three_files(), TWO_HUNKS);
+        let effects = state.update(AppIntent::ToggleWhitespace);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        for c in [' ', 'v', 'd', 'e'] {
+            assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
+            assert_eq!(state.notice, Some(REASON), "{c:?}");
+            assert_eq!(state.popups, [], "{c:?}");
+            assert_eq!(state.panel_focus(), KeyScope::Diff, "{c:?}");
+        }
+
+        // Line mode, entered before whitespace was hidden.
+        state.update(AppIntent::ToggleWhitespace);
+        let (tag, _) = patch_load(&state.update(AppIntent::FocusDiff));
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        press_char(&mut state, 'v');
+        assert_eq!(state.panel_focus(), KeyScope::Lines);
+        let (tag, _) = patch_load(&state.update(AppIntent::ToggleWhitespace));
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        for c in [' ', 'd'] {
+            assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
+            assert_eq!(state.notice, Some(REASON), "{c:?}");
+            assert_eq!(state.popups, [], "{c:?}");
+        }
+
+        // The intents themselves refuse too, whatever sent them.
+        for intent in [
+            AppIntent::ToggleHunkStage,
+            AppIntent::ToggleLinesStage,
+            AppIntent::Discard,
+            AppIntent::EditHunk,
+        ] {
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+        }
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn hidden_whitespace_leaves_file_level_stage_and_discard_alone() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::ToggleWhitespace);
+        let effects = press_char(&mut state, ' ');
+        assert!(
+            matches!(effects.as_slice(), [Effect::RunOp { .. }]),
+            "{effects:?}"
+        );
+        state.op_seq = None;
+        press_char(&mut state, 'd');
+        assert!(
+            matches!(state.popups.as_slice(), [Popup::Discard(_)]),
+            "{:?}",
+            state.popups
+        );
+    }
+
+    #[test]
+    fn a_context_change_keeps_the_scroll_of_the_streamed_diff() {
+        let (mut state, effects) = with_files(three_files(), 24);
+        state.update(chunk(diff_tag(&effects), 50, true));
+        for _ in 0..7 {
+            state.update(AppIntent::ScrollDiff(Scroll::LineDown));
+        }
+        assert_eq!(state.diff.scroll, 7);
+
+        let effects = state.update(AppIntent::MoreContext);
+        assert_eq!(state.diff.scroll, 7);
+        let tag = diff_tag(&effects);
+        state.update(chunk(tag, 8, true));
+        assert_eq!(state.diff.scroll, 7);
+    }
+
+    const THREE_HUNKS: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+        @@ -1 +1 @@\n-a\n+b\n\
+        @@ -9 +9 @@\n-e\n+f\n\
+        @@ -20 +20 @@\n-g\n+h\n";
+
+    #[test]
+    fn a_context_change_keeps_the_selected_hunk() {
+        let mut state = focused(three_files(), THREE_HUNKS);
+        state.update(AppIntent::NextHunk);
+        state.update(AppIntent::NextHunk);
+        assert_eq!(view(&state).hunk, 2);
+
+        let effects = state.update(AppIntent::MoreContext);
+        assert_eq!(view(&state).hunk, 2);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(THREE_HUNKS)),
+        });
+        assert_eq!(view(&state).hunk, 2);
+    }
+
+    #[test]
+    fn changed_options_last_for_the_session() {
+        let (mut state, _) = with_files(three_files(), 24);
+        state.update(AppIntent::MoreContext);
+        state.update(AppIntent::ToggleWhitespace);
+        let changed = state.diff_options;
+        assert_ne!(changed, DiffOptions::default());
+
+        assert_eq!(
+            diff_request(&state.update(AppIntent::SelectNext)).options,
+            changed
+        );
+        let (_, request) = patch_load(&state.update(AppIntent::FocusDiff));
+        assert_eq!(request.options, changed);
+        state.update(AppIntent::FocusFiles);
+        assert_eq!(
+            diff_request(&state.update(AppIntent::SelectPrev)).options,
+            changed
+        );
+
+        let tag = refresh_tag(&mut state);
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(three_files())),
+        });
+        assert_eq!(diff_request(&effects).options, changed);
+        assert_eq!(state.diff_options, changed);
     }
 }

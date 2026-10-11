@@ -392,6 +392,7 @@ mod tests {
         "diff",
         "--no-color",
         "--no-ext-diff",
+        "-U3",
         "--no-index",
         "--",
         "/dev/null",
@@ -403,6 +404,7 @@ mod tests {
             path: path.into(),
             orig_path: None,
             side: DiffSide::Untracked,
+            options: Default::default(),
         }
     }
 
@@ -425,7 +427,7 @@ mod tests {
     }
 
     fn worktree_argv(path: &str) -> Vec<&str> {
-        vec!["diff", "--no-color", "--no-ext-diff", "--", path]
+        vec!["diff", "--no-color", "--no-ext-diff", "-U3", "--", path]
     }
 
     fn worktree(path: &str) -> DiffRequest {
@@ -433,6 +435,7 @@ mod tests {
             path: path.into(),
             orig_path: None,
             side: DiffSide::Worktree,
+            options: Default::default(),
         }
     }
 

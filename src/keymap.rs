@@ -3,7 +3,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::git::diff::DiffSide;
+use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::EntryKind;
 use crate::hunk_view::NO_CHANGES;
@@ -280,6 +280,24 @@ pub(crate) fn never(_: &AppState) -> Option<&'static str> {
 
 const OP_RUNNING: &str = "An operation is running";
 
+/// A diff made with `-w` can differ from the file, so a patch built from it
+/// can fail to apply or stage the wrong lines.
+pub(crate) const WHITESPACE_HIDDEN: &str = "Whitespace is hidden; press w to stage";
+
+/// The Diff pane shows a `-w` diff, which hunk and line keys cannot apply.
+fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
+    let in_diff = matches!(state.focus, Focus::Diff(_));
+    (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
+}
+
+fn most_context(state: &AppState) -> Option<&'static str> {
+    (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context")
+}
+
+fn least_context(state: &AppState) -> Option<&'static str> {
+    (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
+}
+
 pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
@@ -306,6 +324,9 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
+    if let Some(reason) = whitespace_hidden(state) {
+        return Some(reason);
+    }
     if view.loading() {
         return Some("Loading…");
     }
@@ -364,6 +385,9 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
     }
+    if let Some(reason) = whitespace_hidden(state) {
+        return Some(reason);
+    }
     match &state.focus {
         Focus::Diff(view) if view.loading() => Some("Loading…"),
         _ => no_file_selected(state),
@@ -387,6 +411,9 @@ fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
+    if let Some(reason) = whitespace_hidden(state) {
+        return Some(reason);
+    }
     if view.lines.is_some() {
         return Some("Press Esc to edit the whole hunk");
     }
@@ -472,6 +499,38 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::ScrollDiff(Scroll::PageUp),
         description: "Scroll the diff up a page",
         label: "",
+        bar: false,
+        disabled: never,
+    },
+    // Diff settings, in Workspace so they work from Files, Diff and Lines.
+    // Left out of the bar until the layout review (#10).
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Char('+')),
+            KeyPattern::exact(KeyCode::Char('='), NONE),
+        ],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::MoreContext,
+        description: "Show more context lines in the diff",
+        label: "more context",
+        bar: false,
+        disabled: most_context,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('-'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::LessContext,
+        description: "Show fewer context lines in the diff",
+        label: "less context",
+        bar: false,
+        disabled: least_context,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('w'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::ToggleWhitespace,
+        description: "Hide or show whitespace-only changes",
+        label: "whitespace",
         bar: false,
         disabled: never,
     },
@@ -1625,5 +1684,98 @@ mod tests {
         assert_eq!(label(KeyPattern::any(KeyCode::PageDown)), "PgDn");
         assert_eq!(label(KeyPattern::any(KeyCode::PageUp)), "PgUp");
         assert_eq!(label(KeyPattern::any(KeyCode::Char('J'))), "J");
+    }
+
+    #[test]
+    fn diff_option_keys_work_from_files_diff_and_lines() {
+        use AppIntent::*;
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
+            assert_eq!(from(scope, plain('+')), Some(MoreContext), "{scope:?}");
+            assert_eq!(
+                from(scope, key(KeyCode::Char('+'), KeyModifiers::SHIFT)),
+                Some(MoreContext),
+                "{scope:?}"
+            );
+            assert_eq!(from(scope, plain('=')), Some(MoreContext), "{scope:?}");
+            assert_eq!(from(scope, plain('-')), Some(LessContext), "{scope:?}");
+            assert_eq!(from(scope, plain('w')), Some(ToggleWhitespace), "{scope:?}");
+        }
+        for k in [plain('+'), plain('='), plain('-'), plain('w')] {
+            let binding = registry().iter().find(|b| b.matches(k)).expect("bound");
+            assert_eq!(binding.scope, KeyScope::Workspace, "{k:?}");
+            assert!(!binding.bar, "{k:?} stays out of the bar");
+        }
+    }
+
+    #[test]
+    fn context_keys_are_disabled_at_the_limits() {
+        let reason =
+            |state: &AppState, c| match resolve(registry(), KeyScope::Files, state, plain(c)) {
+                Resolution::Disabled(reason) => Some(reason),
+                Resolution::Run(_) => None,
+                Resolution::Unbound => panic!("{c} is unbound"),
+            };
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(reason(&state, '+'), None);
+        assert_eq!(reason(&state, '-'), None);
+        state.diff_options.context = MAX_CONTEXT;
+        assert_eq!(reason(&state, '+'), Some("Already at the most context"));
+        assert_eq!(reason(&state, '='), Some("Already at the most context"));
+        assert_eq!(reason(&state, '-'), None);
+        state.diff_options.context = MIN_CONTEXT;
+        assert_eq!(reason(&state, '-'), Some("Already at the least context"));
+        assert_eq!(reason(&state, '+'), None);
+    }
+
+    #[test]
+    fn hidden_whitespace_disables_the_patch_keys_in_the_diff_only() {
+        use crate::git::patch::parse;
+        use crate::hunk_view::{HunkView, LineCursor};
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state.diff_options.ignore_whitespace = true;
+        let reason = |state: &AppState, scope, c| match resolve(registry(), scope, state, plain(c))
+        {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
+        };
+        // Whole-file keys are unaffected.
+        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
+        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
+
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.patch =
+            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
+        state.focus = Focus::Diff(view.clone());
+        for c in [' ', 'v', 'd', 'e'] {
+            assert_eq!(
+                reason(&state, KeyScope::Diff, c),
+                Some(WHITESPACE_HIDDEN),
+                "{c:?}"
+            );
+        }
+        view.lines = Some(LineCursor {
+            anchor: 0,
+            cursor: 0,
+        });
+        state.focus = Focus::Diff(view);
+        for c in [' ', 'd'] {
+            assert_eq!(
+                reason(&state, KeyScope::Lines, c),
+                Some(WHITESPACE_HIDDEN),
+                "{c:?}"
+            );
+        }
+        state.diff_options.ignore_whitespace = false;
+        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
     }
 }
