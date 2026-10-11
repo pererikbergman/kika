@@ -568,6 +568,9 @@ an older git refuses them and changes nothing.
 | `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
 | `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
 | `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
+| `commits.copy` | `c` | Add the selected commit to the copied set, or take it out | |
+| `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
+| `commits.clear_copied` | `C` | Clear the copied set | |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -596,6 +599,21 @@ for squash and fixup the commit below must be loaded: moving down to the end of
 the log loads it. A rebase that stops on conflicts can be
 continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
+
+`c` copies the selected commit, or takes it out of the copied set; mark each
+commit you want in turn. Copied rows show `+` before their hash, and the
+panel's title and the bottom bar count them; in the Commits panel the bar
+puts `v` and `C` first while anything is copied. Check out another branch and press `v` to
+cherry-pick the copied commits onto it with one `git cherry-pick` on the
+terminal, so hooks and signing work as on the command line. They are picked
+parents first, whatever order you copied them in. A merge commit cannot be
+copied, a commit already on the current branch is refused before git runs, and
+`v` waits for a clean worktree (untracked files may stay) and for an operation
+in progress to finish. A pick that stops on conflicts, or on a commit the
+branch already has (an empty pick), is resolved, continued, skipped or aborted
+from the Status panel. The set stays after a paste, so it
+can be pasted onto another branch too; `C` clears it, and so does switching
+to another repository. The commits a paste makes can be undone with `ctrl-z`.
 
 ### Reflog (the Commits panel's Reflog tab)
 

@@ -73,6 +73,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::InteractiveRebase(_)
         | GitOp::CheckoutCommit(_)
         | GitOp::Revert(_)
+        | GitOp::CherryPick(_)
         | GitOp::Reset { .. }
         | GitOp::Continue(_)
         | GitOp::Skip(_)
@@ -240,6 +241,7 @@ mod tests {
         let ops = [
             GitOp::CheckoutCommit(oid()),
             GitOp::Revert(oid()),
+            GitOp::CherryPick(vec![oid()]),
             GitOp::Reset {
                 to: oid(),
                 mode: ResetMode::Hard,
