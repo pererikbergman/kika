@@ -620,6 +620,7 @@ mod tests {
             orig_path: None,
             side: DiffSide::Worktree,
             options: Default::default(),
+            commit: None,
         };
         let argv = ["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"];
         let runner = FakeRunner::new().expect(&argv, ok(b"diff\n"));

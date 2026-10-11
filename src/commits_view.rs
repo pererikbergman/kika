@@ -7,8 +7,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, Marker};
+use crate::git::commit_files::CommitFile;
 use crate::model::AppState;
 use crate::view::{PanelLook, elide_right, reversed, width_of};
 
@@ -27,6 +29,9 @@ pub(crate) fn render_commits_panel(
     area: Rect,
 ) {
     let panel = &state.commits;
+    if let Some(open) = panel.open.as_ref().filter(|_| expanded) {
+        return render_commit_files(open, look, frame, area);
+    }
     let block = look.block(look.title("Commits"));
     let inner = block.inner(area);
     let dim = Style::new().fg(Color::DarkGray);
@@ -49,6 +54,66 @@ pub(crate) fn render_commits_panel(
         Paragraph::new(window(panel, inner))
     };
     frame.render_widget(paragraph.block(block), area);
+}
+
+/// A commit's files in place of the log: a placeholder until they load,
+/// then one row per file, scrolled so the cursor shows.
+fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Frame, area: Rect) {
+    let block = look.block(look.title(&format!("Commit {}", open.short_oid)));
+    let inner = block.inner(area);
+    let (height, width) = (usize::from(inner.height), usize::from(inner.width));
+    let paragraph = match &open.error {
+        _ if !open.loaded => Paragraph::new("Loading…"),
+        Some(error) => {
+            let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
+            if let Some(first) = lines.first_mut() {
+                first.spans.insert(0, Span::raw("! "));
+            }
+            Paragraph::new(lines).wrap(Wrap { trim: false })
+        }
+        None if open.files.is_empty() => Paragraph::new(Line::styled(
+            "No files changed",
+            Style::new().fg(Color::DarkGray),
+        )),
+        None => {
+            let start = (open.selected + 1).saturating_sub(height.max(1));
+            let end = (start + height).min(open.files.len());
+            Paragraph::new(
+                (start..end)
+                    .map(|i| {
+                        let line = commit_file_line(&open.files[i], width);
+                        if i == open.selected {
+                            reversed(line, width)
+                        } else {
+                            line
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+    };
+    frame.render_widget(paragraph.block(block), area);
+}
+
+/// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
+/// cut to `width`.
+fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
+    let colour = match file.status {
+        'A' => Color::Green,
+        'D' => Color::Red,
+        'M' => Color::Yellow,
+        'R' | 'C' => Color::Cyan,
+        _ => Color::Reset,
+    };
+    let path = match &file.orig_path {
+        Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
+        None => file.path.display().to_string(),
+    };
+    Line::from(vec![
+        Span::styled(file.status.to_string(), Style::new().fg(colour)),
+        Span::raw(" "),
+        Span::raw(elide_right(&path, width.saturating_sub(2))),
+    ])
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
@@ -597,6 +662,146 @@ mod tests {
         let rows = buffer_rows(&draw(&state, 100, 30));
         let root = rows.iter().position(|r| r.contains("Root")).unwrap();
         assert!(rows[root + 1].contains("Loading more…"), "{rows:#?}");
+    }
+
+    // --- A commit's files ---
+
+    use crate::commit_files::CommitFilesList;
+    use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+    use crate::git::diff::{DiffLine, LineKind};
+
+    fn commit_file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
+        CommitFile {
+            status,
+            path: path.into(),
+            orig_path: orig.map(Into::into),
+        }
+    }
+
+    /// `showing(merge_rows())` with `a000000` opened, its files answered
+    /// with `result` unless it is `None`.
+    fn opened(result: Option<Result<Vec<CommitFile>, String>>) -> AppState {
+        let mut state = showing(merge_rows());
+        let range = CommitRange {
+            oid: CommitId::parse("a000000").unwrap(),
+            parent: None,
+        };
+        let mut open = CommitFilesList::begin(range, "a000000".into(), 3);
+        if let Some(result) = result {
+            open.loaded(3, result);
+        }
+        state.commits.open = Some(open);
+        state
+    }
+
+    fn five_files() -> Vec<CommitFile> {
+        vec![
+            commit_file('A', "added.rs", None),
+            commit_file('D', "deleted.rs", None),
+            commit_file('M', "modified.rs", None),
+            commit_file('R', "old.rs", Some("older.rs")),
+            commit_file('T', "typed", None),
+        ]
+    }
+
+    #[test]
+    fn an_open_commit_lists_its_files_with_coloured_letters_and_renames_as_arrows() {
+        let mut state = opened(Some(Ok(five_files())));
+        state.commits.open.as_mut().unwrap().move_by(3);
+        let buffer = draw(&state, 80, 20);
+        let rows = buffer_rows(&buffer);
+
+        assert!(rows[0].contains("Commit a000000"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("Main work")), "{rows:#?}");
+        line_with(&rows, "R older.rs → old.rs");
+        for (needle, colour) in [
+            ("A added.rs", Color::Green),
+            ("D deleted.rs", Color::Red),
+            ("M modified.rs", Color::Yellow),
+            ("R older.rs", Color::Cyan),
+            ("T typed", Color::Reset),
+        ] {
+            let y = rows.iter().position(|r| r.contains(needle)).unwrap() as u16;
+            let x = column_of(&rows, needle) as u16;
+            assert_eq!(buffer[(x, y)].style().fg, Some(colour), "{needle}");
+        }
+        let reversed = |needle: &str| {
+            let y = rows.iter().position(|r| r.contains(needle)).unwrap() as u16;
+            let x = column_of(&rows, needle) as u16 + 2;
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(reversed("R older.rs"));
+        assert!(!reversed("A added.rs"));
+    }
+
+    #[test]
+    fn the_file_list_scrolls_to_keep_the_cursor_on_screen() {
+        let files = (0..40)
+            .map(|i| commit_file('M', &format!("file{i:02}"), None))
+            .collect();
+        let mut state = opened(Some(Ok(files)));
+        state.commits.open.as_mut().unwrap().move_by(30);
+        let rows = buffer_rows(&draw(&state, 80, 12));
+        line_with(&rows, "M file30");
+        assert!(!rows.iter().any(|r| r.contains("file00")), "{rows:#?}");
+    }
+
+    #[test]
+    fn an_open_commit_says_loading_failed_or_empty() {
+        for (result, needle) in [
+            (None, "Loading…"),
+            (
+                Some(Err("fatal: bad object".to_string())),
+                "! fatal: bad object",
+            ),
+            (Some(Ok(vec![])), "No files changed"),
+        ] {
+            let rows = buffer_rows(&draw(&opened(result), 80, 12));
+            line_with(&rows, needle);
+            line_with(&rows, "Commit a000000");
+        }
+    }
+
+    #[test]
+    fn collapsed_with_a_commit_open_the_panel_still_shows_head() {
+        let mut state = opened(Some(Ok(five_files())));
+        state.screen_mode = ScreenMode::Normal;
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "Merge side");
+        assert!(!rows.iter().any(|r| r.contains("added.rs")), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_diff_pane_draws_the_open_commits_file_diff() {
+        let mut state = opened(Some(Ok(five_files())));
+        state.screen_mode = ScreenMode::Normal;
+        let seq = 9;
+        state.diff.begin(seq, &"added.rs".into(), 20);
+        state.diff.apply(
+            seq,
+            Ok(crate::git::diff::DiffChunk {
+                lines: vec![
+                    DiffLine {
+                        kind: LineKind::Hunk,
+                        text: "@@ -0,0 +1 @@".into(),
+                    },
+                    DiffLine {
+                        kind: LineKind::Added,
+                        text: "+fn added() {}".into(),
+                    },
+                ],
+                done: true,
+            }),
+        );
+        let rows = buffer_rows(&draw(&state, 120, 20));
+        line_with(&rows, "+fn added() {}");
+        line_with(&rows, "added.rs");
+        line_with(&rows, "Commit a000000");
     }
 
     #[test]

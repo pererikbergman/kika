@@ -3,6 +3,7 @@
 
 pub mod blame;
 pub mod branches;
+pub mod commit_files;
 pub mod diff;
 #[cfg(test)]
 pub mod fake;
