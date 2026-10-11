@@ -28,7 +28,8 @@ impl RepoPath {
         &self.raw
     }
 
-    /// For drawing only: invalid UTF-8 and control characters are replaced.
+    /// For drawing only: invalid UTF-8 and control characters are replaced, and
+    /// bidi or zero-width characters are shown as `<U+XXXX>` escapes.
     pub fn display(&self) -> &str {
         &self.display
     }
@@ -87,5 +88,16 @@ mod tests {
         assert_eq!(raw.as_os_str().as_bytes(), b"x\xff");
         assert_eq!(raw.display(), look_alike.display());
         assert_ne!(raw, look_alike);
+    }
+
+    #[test]
+    fn names_that_differ_only_by_an_invisible_character_display_differently() {
+        let pairs = [("ab", "a\u{200B}b"), ("a\u{200B}b", "a\u{200C}b")];
+        for (left, right) in pairs {
+            let (l, r) = (RepoPath::from(left), RepoPath::from(right));
+            assert_ne!(l.display(), r.display(), "{left:?} vs {right:?}");
+            assert_eq!(l.as_os_str(), left);
+            assert_eq!(r.as_os_str(), right);
+        }
     }
 }

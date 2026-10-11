@@ -476,6 +476,16 @@ mod tests {
     }
 
     #[test]
+    fn branch_names_show_bidi_escapes() {
+        let branch = branch_of(
+            "# branch.oid 1234567\0# branch.head evil\u{202E}gnp\0# branch.upstream o/a\u{200B}b\0"
+                .as_bytes(),
+        );
+        assert_eq!(branch.head, Head::Branch("evil<U+202E>gnp".into()));
+        assert_eq!(branch.upstream.as_deref(), Some("o/a<U+200B>b"));
+    }
+
+    #[test]
     fn malformed_ahead_behind_is_an_error() {
         assert!(parse_status(b"# branch.ab +x -1\0").is_err());
         assert!(parse_status(b"# branch.ab +1\0").is_err());
