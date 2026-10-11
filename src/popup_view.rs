@@ -1,6 +1,8 @@
 //! Draws the popup stack, bottom to top, so a submenu sits on its parent.
 //! Reads state only.
 
+use std::path::Path;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -11,6 +13,7 @@ use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+use crate::recent_list::{RecentList, RecentRow};
 use crate::submodule_list::SubmoduleList;
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
@@ -43,6 +46,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 render_question(&format!(" {} ", what.title()), &text, frame, area)
             }
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
+            Popup::Recent(list) => render_recent(state, list, top, frame, area),
         }
     }
 }
@@ -171,6 +175,75 @@ fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: R
                 Style::new()
             };
             Line::styled(text, style)
+        })
+        .collect();
+    let popup = centered(
+        area,
+        u16::try_from(width + 2).unwrap_or(u16::MAX),
+        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, popup);
+    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
+    let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((first, 0))
+            .block(Block::bordered().title(title)),
+        popup,
+    );
+}
+
+/// A path as one safe row: control characters, newlines included, cannot
+/// reach the terminal.
+fn path_text(path: &Path) -> String {
+    sanitize(path.as_os_str().as_encoded_bytes())
+}
+
+/// The recent repositories, one per row, with "Initialise a repository
+/// here" first when Kika started outside one, and that said above them.
+/// Long paths lose their start to `…`, where the name that tells them
+/// apart is not. The cursor row is reversed while the list is on top.
+fn render_recent(state: &AppState, list: &RecentList, top: bool, frame: &mut Frame, area: Rect) {
+    let title = " Recent repositories ";
+    let room = usize::from(area.width.saturating_sub(2));
+    let fit = |text: &str| format!(" {} ", elide_left(text, room.saturating_sub(2).max(1)));
+    let mut header = Vec::new();
+    if state.repo.is_none() {
+        // The path gives way, never the words that say what is wrong.
+        let said = "Not a git repository: ";
+        let path_room = room.saturating_sub(2 + width_of(said)).max(1);
+        let path = elide_left(&path_text(&state.launch), path_room);
+        header.push(format!(" {said}{path} "));
+    }
+    let rows = list.rows(&state.recent, state.repo.as_deref());
+    let mut lines_text: Vec<String> = header.clone();
+    lines_text.extend(rows.iter().map(|row| match row {
+        RecentRow::Init => fit("Initialise a repository here"),
+        RecentRow::Repo(path) => fit(&path_text(path)),
+    }));
+    if !rows.iter().any(|row| matches!(row, RecentRow::Repo(_))) {
+        lines_text.push(fit("No recent repositories"));
+    }
+    let cursor = (top && list.cursor < rows.len()).then_some(header.len() + list.cursor);
+    let width = lines_text
+        .iter()
+        .map(|row| width_of(row))
+        .chain([width_of(title)])
+        .max()
+        .unwrap_or(0)
+        .min(room);
+    let lines: Vec<Line> = lines_text
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let pad = width.saturating_sub(width_of(row));
+            let style = if Some(i) == cursor {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            Line::styled(format!("{row}{}", " ".repeat(pad)), style)
         })
         .collect();
     let popup = centered(
@@ -514,9 +587,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 6,
+            cursor: 7,
         }];
-        // Six rows: the bar leaves five, so three of the seven items show.
+        // Six rows: the bar leaves five, so three of the eight items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
@@ -741,5 +814,65 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (10, 2), (20, 6), (80, 24)] {
             draw(&state, w, h);
         }
+    }
+
+    #[test]
+    fn the_welcome_says_where_and_offers_init_then_the_recent_paths() {
+        use crate::recent_list::RecentList;
+
+        let mut state = AppState::new(Context::Workspace).with_location(None, "/home/me/x".into());
+        state.recent = vec!["/work/alpha".into(), "/work/b\x1b[2Jeta".into()];
+        state.popups = vec![Popup::Recent(RecentList::new(true))];
+
+        let (buffer, rows) = draw(&state, 80, 24);
+
+        assert!(contains(&rows, " Recent repositories "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Not a git repository: /home/me/x"),
+            "{rows:#?}"
+        );
+        assert!(reversed(
+            &buffer,
+            find(&rows, "Initialise a repository here")
+        ));
+        assert!(contains(&rows, "/work/alpha"), "{rows:#?}");
+        // Drawn safe: the escape byte never reaches the terminal.
+        assert!(contains(&rows, "/work/b\u{fffd}[2Jeta"), "{rows:#?}");
+        let (_, title) = find(&rows, " Recent repositories ");
+        let (_, said) = find(&rows, "Not a git repository");
+        let (_, init) = find(&rows, "Initialise");
+        let (_, alpha) = find(&rows, "/work/alpha");
+        assert!(title < said && said < init && init < alpha, "{rows:#?}");
+    }
+
+    #[test]
+    fn inside_a_repository_the_list_leaves_it_out_and_an_empty_one_says_so() {
+        use crate::recent_list::RecentList;
+
+        let mut state =
+            workspace(&["a.rs"]).with_location(Some("/work/a".into()), "/work/a".into());
+        state.recent = vec!["/work/a".into()];
+        state.popups = vec![Popup::Recent(RecentList::new(false))];
+
+        let (_, rows) = draw(&state, 80, 24);
+
+        assert!(contains(&rows, "No recent repositories"), "{rows:#?}");
+        assert!(!contains(&rows, "Not a git repository"), "{rows:#?}");
+        assert!(!contains(&rows, "Initialise"), "{rows:#?}");
+        assert!(!contains(&rows, "/work/a "), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_long_launch_path_loses_its_start_but_not_the_words() {
+        use crate::recent_list::RecentList;
+
+        let long = format!("/{}/end", "d".repeat(200));
+        let mut state = AppState::new(Context::Workspace).with_location(None, long.into());
+        state.popups = vec![Popup::Recent(RecentList::new(true))];
+
+        let (_, rows) = draw(&state, 60, 24);
+
+        assert!(contains(&rows, " Not a git repository: …"), "{rows:#?}");
+        assert!(contains(&rows, "d/end "), "{rows:#?}");
     }
 }

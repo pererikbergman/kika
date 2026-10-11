@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::effect::Tag;
@@ -210,6 +212,27 @@ pub enum AppIntent {
     ScrollCommit(Scroll),
     /// Back from the blame to the Files panel.
     CloseBlame,
+    /// The first intent: record the repository Kika started in and load
+    /// it, or, outside one, welcome the user with the recent list.
+    Start,
+    /// Show the recent repositories, to switch to one.
+    OpenRecent,
+    /// The recent list as now recorded on disk.
+    RecentLoaded(Vec<PathBuf>),
+    /// Move the recent list's cursor down or up.
+    RecentNext,
+    RecentPrev,
+    /// Open the row under the recent list's cursor.
+    RecentSelect,
+    /// Switch the whole workspace to the repository at this top level.
+    OpenRepo(PathBuf),
+    /// Make the launch directory a repository.
+    InitRepo,
+    /// `git init` finished: the new top level, or why it failed.
+    RepoInitialised {
+        tag: Tag,
+        result: Result<PathBuf, String>,
+    },
 }
 
 /// How far to scroll the diff pane.

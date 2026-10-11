@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use super::diff::terminal_safe;
 use super::path::path_from_stdout;
 use super::runner::{GitCommand, GitRunner};
 
@@ -22,15 +23,39 @@ pub fn toplevel_from(stdout: &[u8]) -> Option<PathBuf> {
     (!path.as_os_str().is_empty()).then_some(path)
 }
 
-/// The directory to run every git command in: the worktree's top level,
-/// because status paths are root-relative. When there is none (outside a
-/// repo, in a bare repo or inside `.git`), `launch` is kept, so the first
-/// status fails and shows git's own message.
-pub fn resolve_workdir(runner: &dyn GitRunner, launch: PathBuf) -> PathBuf {
+/// The top level of the worktree `runner` is in, or `None` outside one
+/// (outside a repo, in a bare repo or inside `.git`).
+pub fn find_toplevel(runner: &dyn GitRunner) -> Option<PathBuf> {
     match runner.run(&toplevel_command()) {
-        Ok(output) if output.success => toplevel_from(&output.stdout).unwrap_or(launch),
-        _ => launch,
+        Ok(output) if output.success => toplevel_from(&output.stdout),
+        _ => None,
     }
+}
+
+/// The directory to run every git command in: the worktree's top level,
+/// because status paths are root-relative. When there is none, `launch`
+/// is kept.
+#[cfg(test)]
+pub fn resolve_workdir(runner: &dyn GitRunner, launch: PathBuf) -> PathBuf {
+    find_toplevel(runner).unwrap_or(launch)
+}
+
+/// Make the runner's directory a new repository and return its top level.
+/// `git init` takes no path here: it acts where the runner runs, which is
+/// the launch directory whenever there is no repository to offer.
+pub fn init_repo(runner: &dyn GitRunner) -> Result<PathBuf, String> {
+    let output = runner
+        .run(&GitCommand::new("init").arg("-q").env("LC_ALL", "C"))
+        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    if !output.success {
+        let message = terminal_safe(&output.stderr);
+        return Err(if message.is_empty() {
+            "git init failed".into()
+        } else {
+            message
+        });
+    }
+    find_toplevel(runner).ok_or_else(|| "git init made no worktree here".into())
 }
 
 #[cfg(test)]
@@ -113,6 +138,43 @@ mod tests {
         let runner = FakeRunner::new().expect(TOPLEVEL, ok(b""));
         assert_eq!(resolve_workdir(&runner, launch()), launch());
         runner.assert_done();
+    }
+
+    #[test]
+    fn find_toplevel_is_none_outside_a_worktree() {
+        let runner = FakeRunner::new().expect(TOPLEVEL, fail("fatal: not a git repository"));
+        assert_eq!(find_toplevel(&runner), None);
+        let runner = FakeRunner::new().expect(TOPLEVEL, ok(b"/r/top\n"));
+        assert_eq!(find_toplevel(&runner), Some(PathBuf::from("/r/top")));
+    }
+
+    #[test]
+    fn init_runs_git_init_then_reads_the_new_toplevel() {
+        let runner = FakeRunner::new()
+            .expect(&["init", "-q"], ok(b""))
+            .expect(TOPLEVEL, ok(b"/r/new\n"));
+        assert_eq!(init_repo(&runner), Ok(PathBuf::from("/r/new")));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_init_returns_gits_words() {
+        let runner = FakeRunner::new().expect(&["init", "-q"], fail("fatal: cannot mkdir \x1b[2J"));
+        let error = init_repo(&runner).unwrap_err();
+        assert!(error.starts_with("fatal: cannot mkdir"), "{error:?}");
+        assert!(!error.contains(char::is_control), "{error:?}");
+    }
+
+    #[test]
+    fn real_git_init_makes_the_launch_dir_a_repository() {
+        let tmp = TempDir::new("init");
+        let runner = CliRunner::isolated(tmp.path());
+        let top = init_repo(&runner).unwrap();
+        assert_eq!(
+            top.canonicalize().unwrap(),
+            tmp.path().canonicalize().unwrap()
+        );
+        assert!(tmp.path().join(".git").is_dir());
     }
 
     #[test]

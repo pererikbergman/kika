@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
+use crate::git::repo_root::find_toplevel;
 use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
@@ -57,8 +58,11 @@ impl Harness {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
         let runtime = Runtime::new(runner.clone(), tx);
+        // As `main` does, so submodule paths start from the right root.
+        let launch = runner.workdir();
+        let repo = find_toplevel(runner.as_ref());
         let mut harness = Self {
-            state: AppState::new(Context::Workspace),
+            state: AppState::new(Context::Workspace).with_location(repo, launch),
             rx,
             runtime,
             runner,
