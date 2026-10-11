@@ -20,12 +20,13 @@
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
 //! ```
 //!
-//! `[watch]` and `[diff]` are read from the global file only, at startup. A
-//! repository file arrives with a clone and is not trusted: it may hold
-//! `[keys]` and nothing else, so it can never turn on fetching or name a
-//! program to run, and it cannot change the
-//! bindings in [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be
-//! a plain file, not a symlink. Either file must be a regular file of at most
+//! `[watch]` and `[diff]` are read from the global file only, at startup.
+//! `[[commands]]` is read from the global file only. A repository file
+//! arrives with a clone and is not trusted: it may hold `[keys]` and
+//! nothing else, so it can never turn on fetching, name a program to run or
+//! run one, and it cannot change the bindings in
+//! [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be a plain
+//! file, not a symlink. Either file must be a regular file of at most
 //! 64 KiB. A file with any error is ignored as a whole, and the layer below
 //! it applies.
 //!
@@ -40,6 +41,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::custom_command::CommandTable;
 use crate::external_diff::parse_command;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
@@ -126,6 +128,8 @@ struct GlobalFile {
     watch: WatchTable,
     #[serde(default)]
     diff: DiffTable,
+    #[serde(default)]
+    commands: Vec<CommandTable>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -142,9 +146,9 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]` or `[diff]` table here is
-/// an unknown field, so a cloned repository can neither turn on fetching
-/// nor name a program to run.
+/// A repository's file: keys only. A `[watch]` or `[diff]` table, or
+/// `[[commands]]`, here is an unknown field, so a cloned repository can
+/// neither turn on fetching nor name or run a program.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -248,7 +252,7 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
 /// `keymap` and `watch` with the global file's text applied, and its pager.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
-    let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?;
+    let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
     let seconds = |name: &str, value: Option<u64>| match value {
         // A zero interval would poll without pause.
         Some(0) => Err(format!("watch.{name} must be at least 1 second")),
@@ -631,6 +635,91 @@ mod tests {
         let loaded = files.load();
         assert_eq!(loaded.errors, []);
         assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+    }
+
+    const COPY_COMMAND: &str = r#"
+[[commands]]
+context = "files"
+keys = ["ctrl-t"]
+description = "Copy the file to…"
+command = ["cp", "--", "{path}", "{prompt1}"]
+prompts = ["Copy to"]
+output = "none"
+"#;
+
+    #[test]
+    fn a_global_command_loads_into_the_keymap() {
+        use crate::custom_command::{OutputMode, Part};
+        let files = Files::new("commands");
+        files.global(COPY_COMMAND);
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        let [command] = loaded.keymap.commands.as_slice() else {
+            panic!("expected one command: {:?}", loaded.keymap.commands);
+        };
+        assert_eq!(command.scope, crate::keymap::KeyScope::Files);
+        assert_eq!(command.keys, [key("ctrl-t")]);
+        assert_eq!(command.description, "Copy the file to…");
+        assert_eq!(command.argv[2], [Part::Path]);
+        assert_eq!(command.prompts, ["Copy to"]);
+        assert_eq!(command.output, OutputMode::None);
+    }
+
+    #[test]
+    fn a_repository_file_cannot_define_commands_and_the_global_ones_stay() {
+        let files = Files::new("repo-commands");
+        files.global(COPY_COMMAND).repo(&format!(
+            "[keys]\n\"files.commit\" = [\"C\"]\n{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(
+            loaded.errors[0]
+                .message
+                .contains("unknown field `commands`"),
+            "{:?}",
+            loaded.errors
+        );
+        // Ignored as a whole: its `[keys]` did not apply either.
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-t")]);
+    }
+
+    #[test]
+    fn a_bad_command_drops_the_global_file() {
+        let err = |text: &str| global(text).unwrap_err();
+        assert_eq!(
+            err(&COPY_COMMAND.replace("ctrl-t", "q")),
+            r#"command 1: key "q" would hide "global.quit""#
+        );
+        assert_eq!(
+            err(&COPY_COMMAND.replace("ctrl-t", "c")),
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        let shell = err(&COPY_COMMAND.replace(
+            r#"["cp", "--", "{path}", "{prompt1}"]"#,
+            r#"["sh", "-c", "cp {path} x"]"#,
+        ));
+        assert!(shell.starts_with("command 1: "), "{shell}");
+        let typo = err(&COPY_COMMAND.replace("output", "shell = true\noutput"));
+        assert!(typo.contains("unknown field `shell`"), "{typo}");
+    }
+
+    #[test]
+    fn a_repository_file_cannot_move_a_binding_onto_a_command_key() {
+        let files = Files::new("repo-onto-command");
+        files
+            .global(COPY_COMMAND)
+            .repo("[keys]\n\"files.stage\" = [\"ctrl-t\"]\n");
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors[0].message,
+            r#"key "ctrl-t" is bound to both "files.stage" and command 1"#
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("space")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
     }
 
     #[test]

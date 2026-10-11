@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,7 +6,9 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ansi;
+use crate::captured_command::run_captured;
 use crate::config::{self, ConfigPaths};
+use crate::custom_command::OutputMode;
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
@@ -136,6 +139,14 @@ pub enum Effect {
     /// level is `repo`; answered by one `ConfigLoaded` for the same `repo`.
     LoadConfig {
         repo: Option<PathBuf>,
+    },
+    /// Run the user's command in the background, in the repository's
+    /// workdir, with its output captured; always answered by one
+    /// `CommandFinished`.
+    RunCommand {
+        title: String,
+        argv: Vec<OsString>,
+        output: OutputMode,
     },
 }
 
@@ -386,6 +397,33 @@ impl Runtime {
                             errors: loaded.errors,
                         });
                     }
+                });
+            }
+            Effect::RunCommand {
+                title,
+                argv,
+                output,
+            } => {
+                // Taken now: a `SetRepo` after this must not move the command.
+                let workdir = self.runner.workdir();
+                tokio::spawn(async move {
+                    // A panic still reports back, or `command_running` would stay set.
+                    let result = tokio::spawn(run_captured(argv, workdir))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("The command crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let result = match output {
+                        OutputMode::Popup => result,
+                        OutputMode::Terminal | OutputMode::None => result.map(|_| String::new()),
+                    };
+                    let _ = tx.send(AppIntent::CommandFinished {
+                        title,
+                        output,
+                        result,
+                    });
                 });
             }
             // The loop takes these out before spawning; without a terminal
@@ -1290,6 +1328,64 @@ mod tests {
             other => panic!("expected a diff chunk, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_reports_a_failure_with_its_status_and_output() {
+        let tmp = crate::git::fake::TempDir::new("effect-command");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runner = Arc::new(crate::git::CliRunner::new(tmp.path()));
+        let runtime = Runtime::new(runner, tx);
+        let run = |argv: &[&str], output| Effect::RunCommand {
+            title: "Try".into(),
+            argv: argv.iter().map(OsString::from).collect(),
+            output,
+        };
+
+        runtime.spawn(run(&["sh", "-c", "printf hi; exit 3"], OutputMode::Popup));
+        match rx.recv().await {
+            Some(AppIntent::CommandFinished {
+                title,
+                output: OutputMode::Popup,
+                result: Err(e),
+            }) => {
+                assert_eq!(title, "Try");
+                assert!(e.contains('3') && e.contains("hi"), "{e}");
+            }
+            other => panic!("expected a failed CommandFinished, got {other:?}"),
+        }
+
+        // `none` drops the output of a success; `popup` keeps it.
+        runtime.spawn(run(&["sh", "-c", "printf hi"], OutputMode::None));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommandFinished {
+                title: "Try".into(),
+                output: OutputMode::None,
+                result: Ok(String::new()),
+            })
+        );
+        runtime.spawn(run(&["sh", "-c", "pwd"], OutputMode::Popup));
+        match rx.recv().await {
+            Some(AppIntent::CommandFinished {
+                result: Ok(cwd), ..
+            }) => assert_eq!(
+                std::fs::canonicalize(cwd).unwrap(),
+                std::fs::canonicalize(tmp.path()).unwrap()
+            ),
+            other => panic!("expected the workdir, got {other:?}"),
+        }
+
+        // A program that cannot start still answers, once.
+        runtime.spawn(run(&["kika-no-such-program"], OutputMode::None));
+        match rx.recv().await {
+            Some(AppIntent::CommandFinished { result: Err(e), .. }) => {
+                assert!(e.starts_with("Could not start"), "{e}")
+            }
+            other => panic!("expected a start failure, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
     }
 
     #[cfg(unix)]
