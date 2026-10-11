@@ -27,6 +27,7 @@ use crate::git::log::{log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
+use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::remotes::list_remotes;
@@ -222,6 +223,11 @@ pub enum Effect {
     /// Read which commits are unpushed or unmerged; always answered by
     /// one `MarkersLoaded`.
     LoadMarkers {
+        tag: Tag,
+    },
+    /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
+    /// `ReflogLoaded`.
+    LoadReflog {
         tag: Tag,
     },
     /// Fetch every remote; always answered by one `FetchFinished`.
@@ -684,6 +690,17 @@ impl Runtime {
                             ))
                         });
                     let _ = tx.send(AppIntent::MarkersLoaded { tag, result });
+                });
+            }
+            Effect::LoadReflog { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or an undo would wait forever.
+                    let result = tokio::task::spawn_blocking(move || read_reflog(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(format!("git reflog crashed: {e}").as_bytes()))
+                        });
+                    let _ = tx.send(AppIntent::ReflogLoaded { tag, result });
                 });
             }
             Effect::Fetch { tag } => {
@@ -2567,5 +2584,59 @@ mod tests {
         }
         // With nothing running, an answer goes nowhere.
         runtime.spawn(Effect::AnswerCredential(None));
+    }
+
+    #[tokio::test]
+    async fn load_reflog_reports_the_reflog_with_the_same_tag_even_after_a_panic() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &[
+                        "reflog",
+                        "show",
+                        "-z",
+                        "-n",
+                        "1000",
+                        "--format=%H %T %gs",
+                        "HEAD",
+                    ],
+                    ok(b"abc 123 commit: x\0"),
+                )
+                .expect(&["rev-parse", "-q", "--verify", "HEAD"], ok(b"abc\n"))
+                .expect(&["symbolic-ref", "-q", "HEAD"], fail("")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadReflog { tag: background(8) });
+        match rx.recv().await {
+            Some(AppIntent::ReflogLoaded {
+                tag,
+                result: Ok(reflog),
+            }) => {
+                assert_eq!(tag, background(8));
+                assert_eq!(reflog.entries.len(), 1);
+                assert_eq!(
+                    reflog.head.map(|h| h.as_str().to_string()),
+                    Some("abc".into())
+                );
+            }
+            other => panic!("expected a loaded reflog, got {other:?}"),
+        }
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadReflog { tag: background(9) });
+        match rx.recv().await {
+            Some(AppIntent::ReflogLoaded {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, background(9));
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed ReflogLoaded, got {other:?}"),
+        }
     }
 }
