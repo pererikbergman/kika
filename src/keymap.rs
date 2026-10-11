@@ -705,6 +705,10 @@ pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+fn no_command_running(state: &AppState) -> Option<&'static str> {
+    (!state.command_running).then_some("No command is running")
+}
+
 fn no_file_selected(state: &AppState) -> Option<&'static str> {
     let selected = state.selected.and_then(|i| state.files.get(i));
     selected.is_none().then_some("No file selected")
@@ -1120,6 +1124,18 @@ static REGISTRY: &[Binding] = &[
         label: "zoom",
         bar: false,
         disabled: never,
+    },
+    Binding {
+        id: "workspace.cancel_command",
+        keys: &[KeyPattern::exact(KeyCode::Char('x'), KeyModifiers::CONTROL)],
+        // Not `esc` or `ctrl-c`, which quit; the bar shows it only while a
+        // command runs.
+        scope: KeyScope::Workspace,
+        intent: AppIntent::CancelCommand,
+        description: "Stop the running command",
+        label: "cancel command",
+        bar: false,
+        disabled: no_command_running,
     },
     Binding {
         id: "files.next",
@@ -3561,6 +3577,26 @@ mod tests {
             ),
             Resolution::Disabled("Already in a repository")
         ));
+    }
+
+    #[test]
+    fn ctrl_x_cancels_a_running_command_from_every_command_panel() {
+        let ctrl_x = key(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        let mut state = AppState::new(Context::Workspace);
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Blame] {
+            let at =
+                |state: &AppState| resolve(registry(), &Keymap::default(), scope, state, ctrl_x);
+            state.command_running = false;
+            assert!(
+                matches!(at(&state), Resolution::Disabled("No command is running")),
+                "{scope:?}"
+            );
+            state.command_running = true;
+            assert!(
+                matches!(at(&state), Resolution::Run(b) if b.intent == AppIntent::CancelCommand),
+                "{scope:?}"
+            );
+        }
     }
 
     fn commands(tables: &[CommandTable]) -> Result<Keymap, String> {

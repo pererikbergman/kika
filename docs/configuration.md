@@ -324,6 +324,8 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - A repository's `.kika.toml` cannot move a binding onto a command's key.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
+- A `"popup"` or `"none"` command that is still running can be stopped with
+  `ctrl-x` (`workspace.cancel_command`).
 
 ## Global-only settings and trust
 
@@ -389,6 +391,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.next_panel` | `tab` | Focus the next panel | |
 | `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
 | `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
+| `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
 
 ### File list
 

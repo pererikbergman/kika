@@ -655,17 +655,24 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
     lines
 }
 
-/// The busy indicator, then why the last key did nothing, else the last
-/// operation's error, else the key hints. The indicator goes first so a
-/// narrow bar clips the rest, not it. Hints come from the keymap, so the bar
-/// always matches what the keys do; disabled ones are dimmed. An error
-/// wider than the bar's `width` columns ends in `…`.
+/// The busy indicator and, while a command runs, the key that stops it;
+/// then why the last key did nothing, else the last operation's error, else
+/// the key hints. The indicator goes first so a narrow bar clips the rest,
+/// not it. Hints come from the keymap, so the bar always matches what the
+/// keys do; disabled ones are dimmed. An error wider than the bar's `width`
+/// columns ends in `…`.
 fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
     let mut room = usize::from(width);
     if state.busy > 0 {
         spans.push(Span::raw(" loading… "));
         room = room.saturating_sub(width_of(" loading… "));
+    }
+    if state.command_running
+        && let Some(cancel) = cancel_hint(state)
+    {
+        room = room.saturating_sub(width_of(&cancel) + 1);
+        spans.push(Span::raw(format!(" {cancel}")));
     }
     if let Some(notice) = state.notice {
         spans.push(Span::styled(
@@ -704,6 +711,16 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
         }
     }
     Line::from(spans)
+}
+
+/// The cancel key's hint, if the keymap leaves it a key. Shown only while a
+/// command runs, so it is not a `bar` binding.
+fn cancel_hint(state: &AppState) -> Option<String> {
+    let binding = registry()
+        .iter()
+        .find(|b| b.id == "workspace.cancel_command")?;
+    let key = state.keymap.keys(binding).first()?;
+    Some(format!("{} {}", key.label(), binding.label))
 }
 
 /// Help and quit: the hints that must stay in the bar, however narrow.
@@ -756,21 +773,23 @@ fn dimmed_if(disabled: bool) -> Style {
 }
 
 /// A popup over `area` listing every key the focused panel answers to,
-/// the user's own commands after the built-in ones. A list taller than the
-/// screen scrolls; `▲`/`▼` on the border say rows are cut, and the bottom
-/// one says which key scrolls.
+/// the user's own commands after the built-in ones, below a rule. A list
+/// taller than the screen scrolls; `▲`/`▼` on the border say rows are cut,
+/// and the bottom one says which key scrolls.
 fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
     let focus = state.panel_focus();
     let labels = |keys: &[KeyPattern]| {
         let labels: Vec<String> = keys.iter().map(KeyPattern::label).collect();
         labels.join("/")
     };
-    let builtin = available(registry(), &state.keymap, focus, state)
+    let builtin: Vec<_> = available(registry(), &state.keymap, focus, state)
         .into_iter()
         .map(|(binding, disabled)| {
             let keys = labels(state.keymap.keys(binding));
             (keys, binding.description.to_string(), disabled.is_some())
-        });
+        })
+        .collect();
+    let builtin_count = builtin.len();
     // The description is the user's text: one line, safe to draw.
     let commands = available_commands(&state.keymap, focus)
         .into_iter()
@@ -778,13 +797,13 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
             let description = sanitize(command.description.as_bytes());
             (labels(&command.keys), description, false)
         });
-    let entries: Vec<(String, String, bool)> = builtin.chain(commands).collect();
+    let entries: Vec<(String, String, bool)> = builtin.into_iter().chain(commands).collect();
     let key_width = entries
         .iter()
         .map(|(k, _, _)| width_of(k))
         .max()
         .unwrap_or(0);
-    let lines: Vec<Line> = entries
+    let mut lines: Vec<Line> = entries
         .iter()
         .map(|(keys, description, disabled)| {
             let pad = key_width - width_of(keys);
@@ -801,6 +820,12 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
         .chain([width_of(&title)])
         .max()
         .unwrap_or(0);
+    if entries.len() > builtin_count {
+        lines.insert(
+            builtin_count,
+            Line::styled("─".repeat(content_width), Style::new().fg(Color::DarkGray)),
+        );
+    }
     let popup = centered(
         area,
         u16::try_from(content_width + 2).unwrap_or(u16::MAX),
@@ -2969,6 +2994,112 @@ mod tests {
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "Tidy the file"), "{rows:#?}");
         assert!(!contains(&rows, "more ▼"), "{rows:#?}");
+    }
+
+    /// Whether `row` holds a help popup's `─` rule: a run of them between
+    /// the popup's side borders.
+    fn is_rule(row: &str) -> bool {
+        row.split('│')
+            .any(|cell| cell.chars().count() >= 10 && cell.chars().all(|c| c == '─'))
+    }
+
+    #[test]
+    fn a_rule_separates_the_users_commands_from_the_built_in_keys() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "Tidy the file");
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        let tidy = rows.iter().position(|r| r.contains("Tidy")).unwrap();
+        assert!(is_rule(&rows[tidy - 1]), "{rows:#?}");
+        assert!(!is_rule(&rows[tidy - 2]), "{rows:#?}");
+        // Quit is the Files panel's last built-in row.
+        assert!(rows[tidy - 2].contains("Quit Kika"), "{rows:#?}");
+        assert_eq!(rows.iter().filter(|r| is_rule(r)).count(), 1, "{rows:#?}");
+
+        let mut plain = loaded(vec![file("a.rs")]);
+        plain.selected = Some(0);
+        plain.help_open = true;
+        let rows = draw(&plain, 100, 60);
+        assert!(!rows.iter().any(|r| is_rule(r)), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_bar_offers_the_cancel_key_only_while_a_command_runs() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let rows = draw(&state, 100, 20);
+        assert!(!contains(&rows, "cancel command"), "{rows:#?}");
+
+        state.command_running = true;
+        state.busy = 1;
+        let rows = draw(&state, 100, 20);
+        assert!(
+            rows[19].starts_with(" loading…  ctrl-x cancel command"),
+            "{rows:#?}"
+        );
+
+        let state = remapped(state, &[("workspace.cancel_command", &["ctrl-k"])]);
+        let rows = draw(&state, 100, 20);
+        assert!(rows[19].contains("ctrl-k cancel command"), "{rows:#?}");
+        assert!(!contains(&rows, "ctrl-x"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_lists_the_cancel_key() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        let row = rows
+            .iter()
+            .find(|row| row.contains("Stop the running command"))
+            .unwrap_or_else(|| panic!("no cancel row in {rows:#?}"));
+        assert!(row.contains(" ctrl-x "), "{row:?}");
+    }
+
+    #[test]
+    fn a_bidi_character_in_a_command_description_is_shown_escaped() {
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::effect::Effect;
+        use crate::intent::AppIntent;
+        use crate::keymap::KeyPress;
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut state = with_files_command(state, "evil\u{202E}txt");
+        state.help_open = true;
+        let rows = draw(&state, 100, 60);
+        assert!(contains(&rows, "evil<U+202E>txt"), "{rows:#?}");
+        assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
+
+        // Its output popup is titled with the same description.
+        state.help_open = false;
+        let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::Popup);
+        table.description = "evil\u{202E}txt".into();
+        let keymap = crate::keymap::Keymap::default()
+            .with_commands(&[table])
+            .unwrap();
+        state.update(AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![],
+        });
+        let effects = state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('t'),
+            KeyModifiers::CONTROL,
+        )));
+        let [Effect::RunCommand { title, .. }] = effects.as_slice() else {
+            panic!("expected RunCommand, got {effects:?}");
+        };
+        state.update(AppIntent::CommandFinished {
+            title: title.clone(),
+            output: OutputMode::Popup,
+            result: Ok("done".into()),
+        });
+        let rows = draw(&state, 100, 30);
+        assert!(contains(&rows, "evil<U+202E>txt"), "{rows:#?}");
+        assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
     }
 
     #[test]

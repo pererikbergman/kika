@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::CommitEditor;
 use crate::config::ConfigError;
-use crate::custom_command::{CustomCommand, OutputMode, Target};
+use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
@@ -544,6 +544,12 @@ impl AppState {
                 output,
                 result,
             } => return self.command_finished(&title, output, result),
+            AppIntent::CancelCommand => {
+                // The flag stays set until the command answers.
+                if self.command_running {
+                    return vec![Effect::CancelCommand];
+                }
+            }
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
@@ -664,9 +670,13 @@ impl AppState {
     fn scroll_help(&mut self, by: Scroll) {
         let rows = self.pane_rows();
         let focus = self.panel_focus();
-        // As help lists them: the built-in keys, then the user's commands.
+        // As help lists them: the built-in keys, then a rule and the
+        // user's commands, if there are any.
+        let commands = keymap::available_commands(&self.keymap, focus).len();
+        let rule = usize::from(commands > 0);
         let total = keymap::available(keymap::registry(), &self.keymap, focus, self).len()
-            + keymap::available_commands(&self.keymap, focus).len();
+            + rule
+            + commands;
         let scroll = match by {
             Scroll::LineDown => self.help_scroll.saturating_add(1),
             Scroll::LineUp => self.help_scroll.saturating_sub(1),
@@ -1260,23 +1270,30 @@ impl AppState {
     }
 
     /// Show what the command printed or why it failed, then reload: it
-    /// may have changed the repository.
+    /// may have changed the repository. Only a command that could not run
+    /// points at the config file.
     fn command_finished(
         &mut self,
         title: &str,
         output: OutputMode,
-        result: Result<String, String>,
+        result: Result<String, CommandFailure>,
     ) -> Vec<Effect> {
         if output != OutputMode::Terminal && self.command_running {
             self.command_running = false;
             self.busy = self.busy.saturating_sub(1);
         }
         match result {
-            Err(message) => self.push_error(ErrorPopup::new(
+            Err(CommandFailure::Launch(message)) => self.push_error(ErrorPopup::new(
                 format!("{title} failed"),
                 &message,
                 "Check the command in your config file, then try again.",
             )),
+            Err(CommandFailure::Exited(message)) => self.push_error(ErrorPopup::new(
+                format!("{title} failed"),
+                &message,
+                "Press Esc to close",
+            )),
+            Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled"),
             Ok(text) if output == OutputMode::Popup => {
                 let text = if text.is_empty() {
                     "(no output)"
@@ -7495,7 +7512,7 @@ mod tests {
 
     // --- Custom commands ---
 
-    use crate::custom_command::{CommandTable, Panel, test_table};
+    use crate::custom_command::{CommandFailure, CommandTable, Panel, test_table};
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
@@ -7745,12 +7762,16 @@ mod tests {
         assert!(state.popups.is_empty());
     }
 
-    fn command_finished(output: OutputMode, result: Result<&str, &str>) -> AppIntent {
+    fn command_finished(output: OutputMode, result: Result<&str, CommandFailure>) -> AppIntent {
         AppIntent::CommandFinished {
             title: "Show it".into(),
             output,
-            result: result.map(String::from).map_err(String::from),
+            result: result.map(String::from),
         }
+    }
+
+    fn exited(text: &str) -> CommandFailure {
+        CommandFailure::Exited(text.into())
     }
 
     fn is_status_load(effects: &[Effect]) -> bool {
@@ -7791,23 +7812,89 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_command_says_so_and_still_reloads() {
+    fn a_command_that_exited_non_zero_says_so_and_still_reloads() {
         let mut state = hostile_file();
         for output in [OutputMode::None, OutputMode::Popup, OutputMode::Terminal] {
             state.popups.clear();
             let effects = state.update(command_finished(
                 output,
-                Err("exited with exit status: 3\nno"),
+                Err(exited("exited with exit status: 3\nno")),
             ));
             assert!(is_status_load(&effects), "{effects:?}");
             match state.popups.as_slice() {
                 [Popup::Error(popup)] => {
                     assert_eq!(popup.title, "Show it failed");
                     assert_eq!(popup.message, "exited with exit status: 3\nno");
+                    // It ran as configured: the config is not to blame.
+                    assert_eq!(popup.next, "Press Esc to close");
                 }
                 other => panic!("expected the failure popup, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_command_that_could_not_launch_points_at_the_config() {
+        let mut state = hostile_file();
+        let effects = state.update(command_finished(
+            OutputMode::None,
+            Err(CommandFailure::Launch(
+                "Could not start nope: not found".into(),
+            )),
+        ));
+        assert!(is_status_load(&effects), "{effects:?}");
+        match state.popups.as_slice() {
+            [Popup::Error(popup)] => {
+                assert_eq!(popup.title, "Show it failed");
+                assert_eq!(popup.message, "Could not start nope: not found");
+                assert_eq!(
+                    popup.next,
+                    "Check the command in your config file, then try again."
+                );
+            }
+            other => panic!("expected the failure popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_cancel_key_stops_only_a_running_command() {
+        let mut state = hostile_file();
+        assert_eq!(state.update(AppIntent::CancelCommand), []);
+
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        assert_eq!(
+            state.update(AppIntent::CancelCommand),
+            [Effect::CancelCommand]
+        );
+        // Still running until the command answers.
+        assert!(state.command_running);
+    }
+
+    #[test]
+    fn a_cancelled_command_says_so_without_a_popup_and_reloads() {
+        let mut state = hostile_file();
+        with_commands(
+            &mut state,
+            &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
+        );
+        ctrl_t(&mut state);
+        let busy = state.busy;
+
+        let effects = state.update(command_finished(
+            OutputMode::Popup,
+            Err(CommandFailure::Cancelled),
+        ));
+
+        assert!(is_status_load(&effects), "{effects:?}");
+        assert!(!state.command_running);
+        // One down for the command, one up for the reload.
+        assert_eq!(state.busy, busy);
+        assert!(state.popups.is_empty(), "{:?}", state.popups);
+        assert_eq!(state.notice, Some("Command cancelled"));
     }
 
     #[test]
