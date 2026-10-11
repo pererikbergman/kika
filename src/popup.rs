@@ -96,7 +96,7 @@ impl DeleteBranchConfirm {
         if self.force() {
             format!(
                 "{name} is not fully merged; its commits may be lost.\n\
-                 Press D to force delete, Esc to cancel"
+                 Press D to force delete, n or Esc to cancel"
             )
         } else {
             format!("Delete branch {name}? (y/n)")
@@ -330,7 +330,7 @@ mod tests {
         assert_eq!(
             ask(true).question(),
             "topic is not fully merged; its commits may be lost.\n\
-             Press D to force delete, Esc to cancel"
+             Press D to force delete, n or Esc to cancel"
         );
     }
 

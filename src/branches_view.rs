@@ -100,8 +100,14 @@ fn branch_row(branch: &Branch, width: usize) -> String {
 /// log's own scroll.
 pub fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, area: Rect) {
     let log = &panel.log;
+    // Where in the log the pane is, as the Diff pane says it.
+    let position = if log.rows.is_empty() || log.error.is_some() {
+        String::new()
+    } else {
+        format!(" · {}/{}", log.scroll + 1, log.rows.len())
+    };
     let title = match &log.for_name {
-        Some(name) => look.title(&format!("Commits · {}", name.display())),
+        Some(name) => look.title(&format!("Commits · {}{position}", name.display())),
         None => look.title("Commits"),
     };
     let block = look.block(title);
@@ -310,13 +316,37 @@ mod tests {
         );
         assert!(contains(&rows, "First"), "{rows:#?}");
 
+        assert!(contains(&rows, "[0] Commits · main · 1/2 "), "{rows:#?}");
+
         state.branches.log.scroll = 1;
         let rows = draw(&state, 100, 24);
         assert!(!contains(&rows, "Second"), "{rows:#?}");
+        assert!(contains(&rows, "[0] Commits · main · 2/2 "), "{rows:#?}");
 
         state.focus = Focus::Files;
         let rows = draw(&state, 100, 24);
         assert!(!contains(&rows, "Commits · main"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wide_author_and_subject_are_clipped_to_the_pane() {
+        let mut state = focused(vec![branch("main", true, None, Track::None)]);
+        state.branches.log.begin(1, BranchName::from("main"));
+        let wide = LogRow {
+            author: "山田太郎山田太郎山田太郎".into(),
+            subject: "日本語".repeat(30),
+            ..log_row_of("")
+        };
+        state.branches.log.apply(1, Ok(vec![wide]));
+        let rows = draw(&state, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("abc1234"))
+            .expect("the commit row");
+        // Sixteen columns of author: eight wide glyphs, elided to fit.
+        assert!(row.contains("山田太郎山田太…"), "{row:?}");
+        assert_eq!(crate::view::width_of(row), 80, "{rows:#?}");
+        assert!(row.ends_with('│') || row.ends_with('┃'), "{row:?}");
     }
 
     #[test]

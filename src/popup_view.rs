@@ -572,7 +572,7 @@ mod tests {
             "{rows:#?}"
         );
         assert!(
-            contains(&rows, "Press D to force delete, Esc to cancel"),
+            contains(&rows, "Press D to force delete, n or Esc to cancel"),
             "{rows:#?}"
         );
     }

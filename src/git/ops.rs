@@ -197,11 +197,20 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         )
         .env("GIT_TERMINAL_PROMPT", "0"),
         // A short name, since a full ref would detach `HEAD`; `--` keeps
-        // it from being read as a path.
-        GitOp::Checkout(name) => GitCommand::new("checkout")
-            .arg("-q")
-            .arg(name.as_os_string())
-            .arg("--"),
+        // it from being read as a path. A ref made outside git's porcelain
+        // can be named like an option, such as `-f`, which would force the
+        // checkout and lose the worktree's changes; `--end-of-options`
+        // keeps it a name. Only then: it needs git 2.24, newer than Kika
+        // requires, and an older git fails on it without touching anything.
+        GitOp::Checkout(name) => {
+            let cmd = GitCommand::new("checkout").arg("-q");
+            let cmd = if name.0.starts_with(b"-") {
+                cmd.arg("--end-of-options")
+            } else {
+                cmd
+            };
+            cmd.arg(name.as_os_string()).arg("--")
+        }
         // The start point as a full ref, so a tag of the same name, or a
         // name like an option, cannot stand in for it.
         GitOp::CreateBranch { name, from } => GitCommand::new("checkout")
@@ -414,10 +423,20 @@ mod tests {
 
     #[test]
     fn branch_ops_issue_exact_argv_with_the_separator_and_full_refs() {
-        let cases: [(GitOp, &[&str]); 5] = [
+        let cases: [(GitOp, &[&str]); 7] = [
             (
                 GitOp::Checkout("feature".into()),
                 &["checkout", "-q", "feature", "--"],
+            ),
+            // A ref made outside git's porcelain can look like an option;
+            // it must stay a branch name, never become `-f`.
+            (
+                GitOp::Checkout("-f".into()),
+                &["checkout", "-q", "--end-of-options", "-f", "--"],
+            ),
+            (
+                GitOp::Checkout("--force".into()),
+                &["checkout", "-q", "--end-of-options", "--force", "--"],
             ),
             (
                 GitOp::CreateBranch {
@@ -470,6 +489,73 @@ mod tests {
             force: true,
         });
         assert_eq!(delete.args()[3].as_bytes(), b"x\xff");
+    }
+
+    /// A repo on `main` with `a.txt` committed and then changed in the
+    /// worktree, so a forced checkout would lose the change.
+    fn dirty_repo() -> crate::git::fake::TempDir {
+        let tmp = crate::git::fake::TempDir::new("branch-dash");
+        let dir = tmp.path();
+        crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        crate::git::fake::git(dir, &["add", "-A"]);
+        crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn checking_out_a_branch_named_like_an_option_keeps_the_worktree_in_real_git() {
+        let tmp = dirty_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        // `git branch` refuses such names; plumbing does not.
+        crate::git::fake::git(dir, &["update-ref", "refs/heads/-f", "HEAD"]);
+        crate::git::fake::git(dir, &["update-ref", "refs/heads/--force", "HEAD"]);
+        use crate::git::version::{GitVersion, parse_version};
+        let version = parse_version(&crate::git::fake::git(dir, &["--version"]));
+        // Older git has no `--end-of-options`: the checkout fails instead.
+        let modern = version.is_some_and(|v| {
+            v >= GitVersion {
+                major: 2,
+                minor: 24,
+                patch: 0,
+            }
+        });
+
+        for name in ["-f", "--force"] {
+            let result = run_op(&runner, &GitOp::Checkout(name.into()));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+                "work in progress\n",
+                "{name}: the change survives"
+            );
+            if modern {
+                assert_eq!(result, Ok(()), "{name}");
+                let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+                assert_eq!(head, format!("refs/heads/{name}\n").as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_branch_named_like_an_option_is_refused_by_git_in_real_git() {
+        let tmp = dirty_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        for name in ["-f", "--orphan"] {
+            let create = GitOp::CreateBranch {
+                name: name.into(),
+                from: "main".into(),
+            };
+            assert!(run_op(&runner, &create).is_err(), "{name}");
+            let head = crate::git::fake::git(dir, &["symbolic-ref", "HEAD"]);
+            assert_eq!(head, b"refs/heads/main\n", "{name}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+                "work in progress\n"
+            );
+        }
     }
 
     #[test]
