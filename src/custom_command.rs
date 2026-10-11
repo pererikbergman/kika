@@ -305,10 +305,7 @@ fn placeholder_named(name: &str) -> Option<Part> {
 /// The placeholder must come after it. This can refuse a safe command,
 /// never accept one that runs a value as code.
 fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
-    let program = command[0].rsplit(['/', '\\']).next().unwrap_or_default();
-    let program = program.to_ascii_lowercase();
-    let program = program.strip_suffix(".exe").unwrap_or(&program);
-    if !SHELLS.contains(&program) {
+    if !is_shell(&command[0]) {
         return Ok(());
     }
     let Some((first, part)) = argv.iter().enumerate().skip(1).find_map(|(i, parts)| {
@@ -328,6 +325,24 @@ fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether `program`, a path or a bare name, is one of `SHELLS`. A trailing
+/// version (`bash5`, `bash-5.2`) counts, because distributions install
+/// shells under such names.
+fn is_shell(program: &str) -> bool {
+    let name = program.rsplit(['/', '\\']).next().unwrap_or_default();
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    if SHELLS.contains(&name) {
+        return true;
+    }
+    let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
+    if !name[base.len()..].contains(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let base = base.strip_suffix('-').unwrap_or(base);
+    SHELLS.contains(&base)
 }
 
 /// A `[[commands]]` entry, for tests elsewhere.
@@ -524,6 +539,13 @@ mod tests {
             &["mksh", "-c", "x {path}"],
             &["tcsh", "-c", "x {path}"],
             &["sh", "-{path}"],
+            // Versioned names, as distributions install them.
+            &["bash5", "-c", "x {path}"],
+            &["zsh5", "-c", "x {path}"],
+            &["bash-5.2", "-c", "x {path}"],
+            &["bash5.2", "-c", "x {path}"],
+            &["/usr/local/bin/bash5", "-c", "x {path}"],
+            &["BASH-5.2.exe", "-c", "x {path}"],
         ] {
             let e = error(Panel::Files, command, &[]);
             assert!(
@@ -551,6 +573,46 @@ mod tests {
         assert!(parse(Panel::Files, &["sh", "-c", "x", "sh", "--to={path}"], &[]).is_ok());
         // Not a shell: the value is an argument like any other.
         assert!(parse(Panel::Files, &["shellcheck", "{path}"], &[]).is_ok());
+        let versioned = ["bash5", "-c", "x \"$1\"", "bash5", "{path}"];
+        assert!(parse(Panel::Files, &versioned, &[]).is_ok());
+    }
+
+    #[test]
+    fn versioned_names_of_other_programs_are_not_shells() {
+        for program in [
+            "python3",
+            "gcc-12",
+            "lua5.4",
+            "x264",
+            "md5",
+            "shellcheck",
+            "bash-",
+            "bash_5",
+            "5",
+        ] {
+            let command = [program, "-c", "x {path}"];
+            assert!(parse(Panel::Files, &command, &[]).is_ok(), "{program}");
+        }
+    }
+
+    #[test]
+    fn a_shell_name_with_a_version_suffix_is_a_shell() {
+        for program in [
+            "sh",
+            "ksh93",
+            "bash5",
+            "bash-5.2",
+            "bash-5.2.1",
+            "zsh5.9",
+            r"C:\x\Bash5.EXE",
+        ] {
+            assert!(is_shell(program), "{program}");
+        }
+        for program in [
+            "bash-", "bash_5", "5", "-5", "bash.", "bash--5", "python3", "sh2x",
+        ] {
+            assert!(!is_shell(program), "{program}");
+        }
     }
 
     /// The forms the guard accepts, run by the real shells on a hostile

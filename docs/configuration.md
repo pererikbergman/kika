@@ -228,8 +228,10 @@ The `"sh"` after the script becomes `$0`; `{path}` becomes `$1`.
 **Never put a placeholder inside the script text.** The shell would read a
 file name such as `$(rm -rf ~)` as code. When `command[0]` is a shell (`sh`,
 `bash`, `rbash`, `zsh`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `lksh`, `oksh`,
-`pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`), Kika rejects a placeholder
-in the script, in any argument before it, or in the `$0` slot right after it.
+`pdksh`, `yash`, `posh`, `fish`, `csh` or `tcsh`, or a versioned name of one
+such as `bash5`, `zsh5`, `bash-5.2` or `/usr/local/bin/bash5`), Kika rejects a
+placeholder in the script, in any argument before it, or in the `$0` slot
+right after it.
 The check is cautious: it assumes the last option before the first
 placeholder takes a value, so write the script, then a name for `$0`, then
 the values. Options work in either order around `-c`:
