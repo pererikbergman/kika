@@ -10,6 +10,7 @@ use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
+use crate::git::branch_tips::Tip;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::CommitFile;
 use crate::git::diff::{DiffChunk, DiffLine};
@@ -18,7 +19,7 @@ use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
-use crate::git::rebase_plan::Edit;
+use crate::git::rebase_plan::{Direction, Edit};
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::repo_state::Operation;
@@ -28,6 +29,7 @@ use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
+use crate::rebase_todo::TodoFile;
 use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
@@ -432,8 +434,30 @@ pub enum AppIntent {
     ResetTo(ResetMode),
     /// Reset hard, as the question asked.
     ConfirmResetHard,
-    /// Rewrite the selected commit with git's interactive rebase.
+    /// Rewrite the selected commit with git's interactive rebase, or
+    /// change the selected todo row's action while a rebase is stopped.
     RewriteCommit(Edit),
+    /// Move the selected commit or todo row up (newer) or down (older).
+    MoveCommit(Direction),
+    /// Stop the rebase after the selected commit, or toggle the stop
+    /// after the selected todo row.
+    InsertBreak,
+    /// The branch tips were read; `tag` says which load.
+    BranchTipsLoaded {
+        tag: Tag,
+        result: Result<Vec<Tip>, String>,
+    },
+    /// The stopped rebase's todo list was read; `None` when there is none
+    /// to edit, as in a rebase that is not interactive.
+    RebaseTodoLoaded {
+        tag: Tag,
+        result: Result<Option<TodoFile>, String>,
+    },
+    /// An edited todo list was written, or why not.
+    RebaseTodoWritten {
+        tag: Tag,
+        result: Result<(), String>,
+    },
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

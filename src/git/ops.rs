@@ -333,16 +333,20 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
         GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
         // The plan goes to the sequence editor, which `handoff` names; the
-        // base is hex digits only. The two keys are newer config that an
-        // older git ignores; they keep the todo list to picks, which is all
-        // the sequence editor accepts.
+        // base is hex digits only. The keys are newer config that an older
+        // git ignores; they keep the todo list to what the sequence editor
+        // accepts. `--update-refs` (git 2.38) or the key turning it off
+        // always wins over the user's `rebase.updateRefs`.
         GitOp::InteractiveRebase(plan) => {
-            return GitCommand::new("-c")
-                .arg("rebase.updateRefs=false")
-                .arg("-c")
-                .arg("rebase.rebaseMerges=false")
-                .arg("rebase")
-                .arg("-i")
+            let mut cmd = GitCommand::new("-c");
+            if !plan.update_refs {
+                cmd = cmd.arg("rebase.updateRefs=false").arg("-c");
+            }
+            cmd = cmd.arg("rebase.rebaseMerges=false").arg("rebase").arg("-i");
+            if plan.update_refs {
+                cmd = cmd.arg("--update-refs");
+            }
+            return cmd
                 .arg("--autostash")
                 .arg("--no-autosquash")
                 .arg("--keep-empty")
@@ -794,6 +798,28 @@ mod tests {
         let encoded = format!("drop {}\npick {}\n", "b".repeat(40), "a".repeat(40));
         assert_eq!(envs, [("KIKA_REBASE_PLAN", encoded.as_str())]);
         assert_eq!(cmd.input(), None);
+        assert_eq!(cmd.subcommand(), "rebase");
+    }
+
+    #[test]
+    fn with_update_refs_the_rebase_passes_the_flag_and_not_the_key() {
+        let mut plan = crate::git::rebase_plan::sample();
+        plan.update_refs = true;
+        let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
+        assert_eq!(
+            argv(&cmd),
+            [
+                "-c",
+                "rebase.rebaseMerges=false",
+                "rebase",
+                "-i",
+                "--update-refs",
+                "--autostash",
+                "--no-autosquash",
+                "--keep-empty",
+                plan.base.as_str(),
+            ]
+        );
         assert_eq!(cmd.subcommand(), "rebase");
     }
 

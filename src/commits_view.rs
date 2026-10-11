@@ -11,6 +11,8 @@ use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, Marker};
 use crate::git::commit_files::CommitFile;
+use crate::git::diff::terminal_safe;
+use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
 use crate::view::{PanelLook, elide_right, reversed, width_of};
 
@@ -117,7 +119,8 @@ fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
-/// row saying a page is loading or failed.
+/// row saying a page is loading or failed. A stopped rebase's todo list
+/// comes first, right above the log it will extend.
 fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
     let height = usize::from(area.height);
     let width = usize::from(area.width);
@@ -138,13 +141,90 @@ fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
     } else {
         height
     };
-    let start = (panel.selected + 1).saturating_sub(room);
-    let end = (start + room).min(panel.rows.len());
-    let mut lines = commit_lines(panel, start..end, Some(panel.selected), width);
+    let head = todo_lines(panel, width);
+    let cursor = match (panel.todo_selected, head.len()) {
+        // Below the heading, the list in reverse: row 0 is the lowest.
+        (Some(i), len) if len > 0 => len - 1 - i,
+        (_, len) => len + panel.selected,
+    };
+    let start = (cursor + 1).saturating_sub(room);
+    let skip = head.len();
+    let mut lines: Vec<Line> = head.into_iter().skip(start).take(room).collect();
+    let log_start = start.saturating_sub(skip).min(panel.rows.len());
+    let end = (start + room)
+        .saturating_sub(skip)
+        .clamp(log_start, panel.rows.len());
+    let selected = panel.todo_selected.is_none().then_some(panel.selected);
+    lines.extend(commit_lines(panel, log_start..end, selected, width));
     if end == panel.rows.len() {
         lines.extend(note);
     }
     lines
+}
+
+/// The todo list as rows: a dim heading, then one row per step with the
+/// last to run at the top, so it reads like the history it will make.
+/// Empty when no rebase is stopped.
+fn todo_lines(panel: &CommitsPanel, width: usize) -> Vec<Line<'static>> {
+    let Some(todo) = &panel.todo else {
+        return Vec::new();
+    };
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut rows: Vec<Line<'static>> = match todo.editable {
+        Ok(()) => todo
+            .entries
+            .iter()
+            .map(|entry| todo_line(entry, width))
+            .collect(),
+        Err(_) => todo
+            .raw_lines()
+            .into_iter()
+            .map(|line| Line::raw(elide_right(&terminal_safe(line), width)))
+            .collect(),
+    };
+    let left = match todo.editable {
+        Ok(()) => todo
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, TodoEntry::Commit { .. }))
+            .count(),
+        Err(_) => rows.len(),
+    };
+    if let Some(i) = panel.todo_selected.filter(|&i| i < rows.len()) {
+        rows[i] = reversed(std::mem::take(&mut rows[i]), width);
+    }
+    rows.reverse();
+    let heading = format!("Rebase todo ({left} left)");
+    let mut lines = vec![Line::styled(elide_right(&heading, width), dim)];
+    lines.extend(rows);
+    lines
+}
+
+/// `<action> <hash> <subject>`, or a dim `break` or `→ <branch>`.
+fn todo_line(entry: &TodoEntry, width: usize) -> Line<'static> {
+    let dim = Style::new().fg(Color::DarkGray);
+    match entry {
+        TodoEntry::Commit { action, oid, rest } => {
+            let colour = match action {
+                TodoAction::Pick => Color::Reset,
+                TodoAction::Drop => Color::Red,
+                _ => Color::Yellow,
+            };
+            let short: String = oid.chars().take(7).collect();
+            let mut spans = vec![
+                Span::styled(format!("{:<6} ", action.word()), Style::new().fg(colour)),
+                Span::styled(format!("{short} "), Style::new().fg(Color::Cyan)),
+            ];
+            let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
+            let subject = elide_right(&terminal_safe(rest), width.saturating_sub(used));
+            spans.push(Span::raw(subject));
+            Line::from(spans)
+        }
+        TodoEntry::Break => Line::styled("break", dim),
+        TodoEntry::UpdateRef(name) => {
+            Line::styled(elide_right(&format!("→ {}", branch_name(name)), width), dim)
+        }
+    }
 }
 
 /// Which columns a row has room for, worked out once per draw so every row
@@ -455,6 +535,89 @@ mod tests {
         let y = rows.iter().position(|r| r.contains("Merge side")).unwrap() as u16;
         let x = column_of(&rows, "↑") as u16;
         assert_ne!(buffer[(x, y)].style().fg, buffer[(x + 2, y)].style().fg);
+    }
+
+    fn stopped_rebase(state: &mut AppState) {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        let todo = b"pick 1111111aaa first step\nbreak\nreword 2222222bbb second \x1b[31mstep\n\
+                     update-ref refs/heads/stack\n# help\n";
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: todo.to_vec(),
+            done: Some(b"pick 0000000 done\n".to_vec()),
+        })));
+    }
+
+    #[test]
+    fn a_stopped_rebase_shows_its_todo_above_the_log_last_to_run_first() {
+        let mut state = showing(merge_rows());
+        stopped_rebase(&mut state);
+        state.commits.todo_selected = Some(0);
+        let buffer = draw(&state, 100, 30);
+        let rows = buffer_rows(&buffer);
+        let at = |needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")))
+        };
+        let heading = at("Rebase todo (2 left)");
+        assert_eq!(at("→ stack"), heading + 1);
+        assert_eq!(at("reword 2222222 second"), heading + 2);
+        assert_eq!(at("break"), heading + 3);
+        assert_eq!(at("pick   1111111 first step"), heading + 4);
+        assert_eq!(at("Merge side"), heading + 5);
+        assert!(!rows.iter().any(|r| r.contains('\x1b')));
+        let x = column_of(&rows, "1111111") as u16;
+        let y = at("first step") as u16;
+        assert!(
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        // The log's cursor is not drawn while the todo has it.
+        let x = column_of(&rows, "m000000") as u16;
+        let y = at("Merge side") as u16;
+        assert!(
+            !buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        let y = at("Rebase todo") as u16;
+        assert_eq!(buffer[(1, y)].style().fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn the_window_scrolls_from_the_todo_into_the_log() {
+        let mut state = showing(merge_rows());
+        stopped_rebase(&mut state);
+        // Six rows inside the borders: the heading scrolls away.
+        state.commits.selected = 3;
+        let rows = buffer_rows(&draw(&state, 100, 8));
+        assert!(rows.iter().any(|r| r.contains("Root")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("Rebase todo")), "{rows:#?}");
+        state.commits.todo_selected = Some(3);
+        let rows = buffer_rows(&draw(&state, 100, 8));
+        assert!(rows.iter().any(|r| r.contains("Rebase todo")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_todo_kika_does_not_edit_shows_its_lines_as_they_are() {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        let mut state = showing(merge_rows());
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: b"pick 1111111 one\nexec make test\n".to_vec(),
+            done: None,
+        })));
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        let heading = rows
+            .iter()
+            .position(|r| r.contains("Rebase todo (2 left)"))
+            .unwrap();
+        assert!(rows[heading + 1].contains("exec make test"));
+        assert!(rows[heading + 2].contains("pick 1111111 one"));
     }
 
     #[test]

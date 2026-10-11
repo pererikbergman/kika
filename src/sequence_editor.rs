@@ -5,11 +5,11 @@
 //! the autostash and leaves history as it was.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
 use crate::git::rebase_plan::{apply, decode, parse_todo};
+use crate::worktree_file::{read_file, replace_file};
 
 /// The plan, as [`crate::git::rebase_plan::encode`] writes it. A repo
 /// cannot set Kika's env, and `GIT_SEQUENCE_EDITOR` wins over any
@@ -20,15 +20,21 @@ pub const PLAN_ENV: &str = "KIKA_REBASE_PLAN";
 /// Run the hidden mode if Kika was started as a sequence editor, and say
 /// how to exit; `None` starts Kika as usual.
 pub fn dispatch() -> Option<ExitCode> {
-    let plan = std::env::var_os(PLAN_ENV)?;
+    std::env::var_os(PLAN_ENV)?;
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    Some(match run(&args, &plan) {
+    Some(dispatch_with(&args))
+}
+
+/// The hidden mode on `args`, with the plan from the env.
+pub fn dispatch_with(args: &[OsString]) -> ExitCode {
+    let plan = std::env::var_os(PLAN_ENV).unwrap_or_default();
+    match run(args, &plan) {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
             eprintln!("kika: not rewriting the rebase todo list: {reason}");
             ExitCode::FAILURE
         }
-    })
+    }
 }
 
 /// Rewrite the todo file in `args` with `plan`. Reads and writes that one
@@ -45,16 +51,16 @@ fn run(args: &[OsString], plan: &OsStr) -> Result<(), String> {
     if path.file_name() != Some(OsStr::new("git-rebase-todo")) || !in_rebase_dir {
         return Err(format!("not a rebase todo list: {}", path.display()));
     }
-    let meta = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if !meta.file_type().is_file() {
-        return Err(format!("not a regular file: {}", path.display()));
-    }
     let plan = plan.to_str().ok_or("the plan is not UTF-8")?;
     let steps = decode(plan)?;
-    let todo = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let todo = read_file(path, MAX_TODO)?;
     let rewritten = apply(&steps, &parse_todo(&todo)?)?;
-    fs::write(path, rewritten).map_err(|e| format!("{}: {e}", path.display()))
+    replace_file(path, &todo, &rewritten)
 }
+
+/// The largest todo list read: a plan of at most `MAX_STEPS` lines, each
+/// with its subject, fits with room to spare.
+pub const MAX_TODO: u64 = 1024 * 1024;
 
 /// The `GIT_SEQUENCE_EDITOR` value that runs `exe`. Git runs it through
 /// `sh`, so the path is single-quoted, each `'` in it written as `'\''`.
@@ -102,6 +108,8 @@ fn quote<T: Copy + PartialEq + From<u8>>(units: &[T]) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::git::fake::TempDir;
 
@@ -193,7 +201,8 @@ mod tests {
         let path = todo_file(&tmp, &todo());
         for bad in [
             format!("reword {}\n", id('b')),
-            format!("pick {}\nreword {}\n", id('a'), id('b')),
+            format!("pick {}\nreword {}\n", id('b'), id('b')),
+            format!("pick {}\nbreak\nbreak\npick {}\n", id('b'), id('a')),
             format!("pick {}\npick {}\n", id('b'), id('c')),
             "nonsense".into(),
             String::new(),
@@ -209,6 +218,64 @@ mod tests {
         todo.extend_from_slice(b"exec rm -rf /\n");
         fs::write(&path, todo).unwrap();
         refused(&[path.clone().into()], &plan(), &path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_rebase_dir_is_refused_and_its_todo_left_alone() {
+        let tmp = TempDir::new("seq-editor");
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let target = real.join("git-rebase-todo");
+        fs::write(&target, todo()).unwrap();
+        let dir = tmp.path().join("rebase-merge");
+        std::os::unix::fs::symlink(&real, &dir).unwrap();
+        refused(&[dir.join("git-rebase-todo").into()], &plan(), &target);
+    }
+
+    #[test]
+    fn a_rewrite_leaves_no_temp_file_beside_the_todo() {
+        let tmp = TempDir::new("seq-editor");
+        let path = todo_file(&tmp, &todo());
+        assert_eq!(run(&[path.clone().into()], &plan()), Ok(()));
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [OsString::from("git-rebase-todo")]);
+    }
+
+    #[test]
+    fn edit_break_and_moves_are_written_and_update_refs_stay_after_their_commits() {
+        let tmp = TempDir::new("seq-editor");
+        let todo = format!(
+            "pick {} third\nupdate-ref refs/heads/x\n\npick {} second\npick {} first\n",
+            &id('c')[..7],
+            &id('b')[..7],
+            &id('a')[..7]
+        );
+        let path = todo_file(&tmp, todo.as_bytes());
+        let plan = format!(
+            "edit {}\nbreak\npick {}\npick {}\n",
+            id('c'),
+            id('a'),
+            id('b')
+        );
+        assert_eq!(run(&[path.clone().into()], OsStr::new(&plan)), Ok(()));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            format!(
+                "edit {} third\nbreak\nupdate-ref refs/heads/x\npick {} first\npick {} second\n",
+                id('c'),
+                id('a'),
+                id('b')
+            )
+        );
+        // Moving a commit across the branch is refused.
+        let tmp = TempDir::new("seq-editor");
+        let path = todo_file(&tmp, todo.as_bytes());
+        let across = format!("pick {}\npick {}\npick {}\n", id('b'), id('c'), id('a'));
+        refused(&[path.clone().into()], OsStr::new(&across), &path);
     }
 
     #[cfg(unix)]

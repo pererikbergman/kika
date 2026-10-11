@@ -10,16 +10,19 @@ use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
-use crate::git::rebase_plan::{self, Edit};
+use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
+use crate::git::{branch_tips, version};
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
+use crate::reason;
+use crate::rebase_todo::Rewrite;
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,7 @@ impl KeyPattern {
         };
         match self.mods {
             Mods::Exact(mods) if mods.contains(KeyModifiers::CONTROL) => format!("ctrl-{key}"),
+            Mods::Exact(mods) if mods.contains(KeyModifiers::ALT) => format!("alt-{key}"),
             _ => key,
         }
     }
@@ -118,16 +122,22 @@ impl KeyPattern {
 
 /// Read a key as a config file writes it: the names [`KeyPattern::label`]
 /// uses where they are ASCII, any letter case, plus `up`, `down`, `left` and
-/// `right` for the arrows. A `ctrl-` prefix wants exactly Ctrl.
+/// `right` for the arrows. A `ctrl-` prefix wants exactly Ctrl, an `alt-`
+/// prefix exactly Alt (Option, where the terminal sends it as Meta).
 pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
-    if let Some(rest) = text.strip_prefix("ctrl-") {
-        if rest.chars().any(|c| c.is_uppercase()) {
-            return Err(format!(
-                "bad key \"{text}\": write ctrl- keys in lower case"
-            ));
+    for (prefix, mods) in [
+        ("ctrl-", KeyModifiers::CONTROL),
+        ("alt-", KeyModifiers::ALT),
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            if rest.chars().any(|c| c.is_uppercase()) {
+                return Err(format!(
+                    "bad key \"{text}\": write {prefix} keys in lower case"
+                ));
+            }
+            let key = parse_key(rest).map_err(|_| bad_key(text))?;
+            return Ok(KeyPattern::exact(key.code, mods));
         }
-        let key = parse_key(rest).map_err(|_| bad_key(text))?;
-        return Ok(KeyPattern::exact(key.code, KeyModifiers::CONTROL));
     }
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
@@ -162,7 +172,7 @@ pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
 fn bad_key(text: &str) -> String {
     format!(
         "bad key \"{}\": use one character, or space, esc, enter, tab, shift-tab, bksp, up, \
-         down, left, right, pgup, pgdn, home or end, with an optional ctrl- prefix",
+         down, left, right, pgup, pgdn, home or end, with an optional ctrl- or alt- prefix",
         text.escape_debug()
     )
 }
@@ -437,6 +447,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "commits.fixup",
     "commits.drop",
     "commits.reword",
+    "commits.move_up",
+    "commits.move_down",
+    "commits.edit",
+    "commits.break",
+    "commits.pick",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -750,7 +765,12 @@ fn least_context(state: &AppState) -> Option<&'static str> {
 }
 
 /// Enter has no commit to open before the log has rows.
+/// Why a key that acts on a log commit does nothing: there is none, or
+/// the cursor is on the rebase's todo list above the log.
 fn no_commit(state: &AppState) -> Option<&'static str> {
+    if state.commits.todo_selected.is_some() {
+        return Some("Select a commit in the log first");
+    }
     state.commits.rows.is_empty().then_some("No commits")
 }
 
@@ -1119,29 +1139,134 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
         })
 }
 
-/// Why the selected commit cannot be rewritten with `edit` now: one
-/// operation at a time, none in progress, and a history the planner can
-/// rewrite.
-pub(crate) fn rewrite_disabled(state: &AppState, edit: Edit) -> Option<&'static str> {
+/// Why the selected commit or todo row cannot be rewritten now. On a log
+/// row: one operation at a time, none in progress, and a history the
+/// planner can rewrite. On a todo row: one write at a time, and an edit
+/// the list allows.
+pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<&'static str> {
+    if state.commits.todo_selected.is_some() {
+        return todo_disabled(state, rewrite);
+    }
     commit_action_disabled(state)
         .or_else(|| in_progress_disabled(state))
-        .or_else(|| rebase_plan::plan(&state.commits.rows, state.commits.selected, edit).err())
+        .or_else(|| log_plan(state, rewrite).err())
+}
+
+/// Why `break` cannot be used: the todo command is newer than Kika's
+/// minimum git.
+pub(crate) const NEEDS_BREAK: &str = "Needs Git 2.20 or newer";
+
+/// Why a rewrite waits: whether a branch sits on its commits is not known
+/// yet.
+pub(crate) const TIPS_UNKNOWN: &str = "Reading the branches; try again in a moment";
+
+/// Why a todo edit waits for the last one to be written.
+pub(crate) const TODO_SAVING: &str = "Saving the todo list";
+
+/// The plan for `rewrite` on the selected log row, as it will run. With
+/// git 2.38 or newer branches stacked on the rewritten commits move along
+/// (`--update-refs`), so only a move that would change what one holds is
+/// refused; with an older git any stacked branch would be left behind, so
+/// the rewrite is refused.
+pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan, &'static str> {
+    if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
+        return Err(NEEDS_BREAK);
+    }
+    let commits = &state.commits;
+    let (rows, selected) = (commits.rows.as_slice(), commits.selected);
+    let mut plan = match rewrite {
+        Rewrite::Edit(edit) => rebase_plan::plan(rows, selected, edit),
+        Rewrite::Move(direction) => rebase_plan::plan_move(rows, selected, direction),
+        Rewrite::Break => rebase_plan::plan_break(rows, selected),
+    }?;
+    plan.update_refs = state.git_has(version::UPDATE_REFS);
+    let head = match state.branch.as_ref().map(|b| &b.head) {
+        Some(Head::Branch(name)) => Some(format!("refs/heads/{name}").into_bytes()),
+        _ => None,
+    };
+    let stacked =
+        |tips, from: usize, len| branch_tips::stacked(&rows[from..], len, tips, head.as_deref());
+    if !plan.update_refs {
+        let tips = commits.tips.as_deref().ok_or(TIPS_UNKNOWN)?;
+        if let Some(name) = stacked(tips, 0, plan.steps.len()).first() {
+            return Err(reason::intern(branch_tips::left_behind(name)));
+        }
+    } else if let (Rewrite::Move(direction), Some(tips)) = (rewrite, &commits.tips) {
+        // A branch on the older of the two would end up holding the other.
+        // Unknown tips are left to the sequence editor, which checks too.
+        let older = match direction {
+            Direction::Up => selected,
+            Direction::Down => selected + 1,
+        };
+        if let Some(name) = stacked(tips, older, 1).first() {
+            let oid = &rows[selected].oid;
+            return Err(reason::intern(rebase_plan::crossing(oid, name)));
+        }
+    }
+    Ok(plan)
+}
+
+/// The todo list after `rewrite` on the selected todo row, and where the
+/// cursor goes, or why it cannot be made.
+pub(crate) fn todo_edit(
+    state: &AppState,
+    rewrite: Rewrite,
+) -> Result<(Vec<TodoEntry>, usize), &'static str> {
+    let commits = &state.commits;
+    let (Some(todo), Some(i)) = (&commits.todo, commits.todo_selected) else {
+        return Err("No todo row selected");
+    };
+    todo.edit(i, rewrite).map_err(reason::intern)
+}
+
+fn todo_disabled(state: &AppState, rewrite: Rewrite) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    // The list shown is what was written only once it is read back.
+    if state.commits.todo_write_seq.is_some() || state.commits.todo_seq.is_some() {
+        return Some(TODO_SAVING);
+    }
+    if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
+        return Some(NEEDS_BREAK);
+    }
+    todo_edit(state, rewrite).err()
 }
 
 fn squash_disabled(state: &AppState) -> Option<&'static str> {
-    rewrite_disabled(state, Edit::Squash)
+    rewrite_disabled(state, Rewrite::Edit(Edit::Squash))
 }
 
 fn fixup_disabled(state: &AppState) -> Option<&'static str> {
-    rewrite_disabled(state, Edit::Fixup)
+    rewrite_disabled(state, Rewrite::Edit(Edit::Fixup))
 }
 
 fn drop_disabled(state: &AppState) -> Option<&'static str> {
-    rewrite_disabled(state, Edit::Drop)
+    rewrite_disabled(state, Rewrite::Edit(Edit::Drop))
 }
 
 fn reword_disabled(state: &AppState) -> Option<&'static str> {
-    rewrite_disabled(state, Edit::Reword)
+    rewrite_disabled(state, Rewrite::Edit(Edit::Reword))
+}
+
+fn stop_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Rewrite::Edit(Edit::Stop))
+}
+
+fn todo_pick_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Rewrite::Edit(Edit::Pick))
+}
+
+fn break_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Rewrite::Break)
+}
+
+fn move_up_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Rewrite::Move(Direction::Up))
+}
+
+fn move_down_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Rewrite::Move(Direction::Down))
 }
 
 pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
@@ -1493,9 +1618,10 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "commits.next",
+        // Not any modifiers on the arrow: Alt+Down moves the commit.
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
+            KeyPattern::exact(KeyCode::Down, NONE),
         ],
         scope: KeyScope::Commits,
         intent: AppIntent::CommitNext,
@@ -1508,7 +1634,7 @@ static REGISTRY: &[Binding] = &[
         id: "commits.prev",
         keys: &[
             KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
+            KeyPattern::exact(KeyCode::Up, NONE),
         ],
         scope: KeyScope::Commits,
         intent: AppIntent::CommitPrev,
@@ -1598,6 +1724,64 @@ static REGISTRY: &[Binding] = &[
         label: "reword",
         bar: true,
         disabled: reword_disabled,
+    },
+    // `J` and `K` scroll the diff from the Workspace.
+    Binding {
+        id: "commits.move_up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), KeyModifiers::ALT),
+            KeyPattern::exact(KeyCode::Up, KeyModifiers::ALT),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::MoveCommit(Direction::Up),
+        description: "Move the selected commit or todo row up, above the newer one",
+        label: "move up",
+        bar: true,
+        disabled: move_up_disabled,
+    },
+    Binding {
+        id: "commits.move_down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), KeyModifiers::ALT),
+            KeyPattern::exact(KeyCode::Down, KeyModifiers::ALT),
+        ],
+        scope: KeyScope::Commits,
+        intent: AppIntent::MoveCommit(Direction::Down),
+        description: "Move the selected commit or todo row down, below the older one",
+        label: "move down",
+        bar: true,
+        disabled: move_down_disabled,
+    },
+    Binding {
+        id: "commits.edit",
+        keys: &[KeyPattern::any(KeyCode::Char('E'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Stop),
+        description: "Stop the rebase at the selected commit, to amend it, then continue from Status",
+        label: "edit",
+        bar: true,
+        disabled: stop_disabled,
+    },
+    Binding {
+        id: "commits.break",
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::InsertBreak,
+        description: "Stop the rebase right after the selected commit, or toggle the stop after a todo row",
+        label: "break",
+        bar: true,
+        disabled: break_disabled,
+    },
+    // `p` is pull; a pick is git's "use commit".
+    Binding {
+        id: "commits.pick",
+        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Pick),
+        description: "Pick the selected todo row as it is, undoing its other action",
+        label: "pick",
+        bar: true,
+        disabled: todo_pick_disabled,
     },
     Binding {
         id: "commit_files.next",
@@ -4075,28 +4259,84 @@ mod tests {
                 subject: "s".into(),
             })
             .collect();
-        let commits = |key| match resolve(
+        state.commits.tips = Some(vec![]);
+        state.git_version = Some(version::BREAK);
+        let on = |state: &AppState, key| match resolve(
             registry(),
             &Keymap::default(),
             KeyScope::Commits,
-            &state,
+            state,
             key,
         ) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(commits(plain('s')), Some(RewriteCommit(Edit::Squash)));
+        assert_eq!(on(&state, plain('s')), Some(RewriteCommit(Edit::Squash)));
         assert_eq!(
-            commits(key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            on(&state, key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
             Some(RewriteCommit(Edit::Fixup))
         );
-        assert_eq!(commits(plain('d')), Some(RewriteCommit(Edit::Drop)));
-        assert_eq!(commits(plain('e')), Some(RewriteCommit(Edit::Reword)));
+        assert_eq!(on(&state, plain('d')), Some(RewriteCommit(Edit::Drop)));
+        assert_eq!(on(&state, plain('e')), Some(RewriteCommit(Edit::Reword)));
+        assert_eq!(
+            on(&state, key(KeyCode::Char('E'), KeyModifiers::SHIFT)),
+            Some(RewriteCommit(Edit::Stop))
+        );
+        assert_eq!(on(&state, plain('b')), Some(AppIntent::InsertBreak));
+        let alt = KeyModifiers::ALT;
+        let (up, down) = (
+            Some(AppIntent::MoveCommit(Direction::Up)),
+            Some(AppIntent::MoveCommit(Direction::Down)),
+        );
+        state.commits.selected = 1;
+        assert_eq!(on(&state, key(KeyCode::Char('k'), alt)), up);
+        assert_eq!(on(&state, key(KeyCode::Up, alt)), up);
+        state.commits.selected = 0;
+        assert_eq!(on(&state, key(KeyCode::Char('j'), alt)), down);
+        assert_eq!(on(&state, key(KeyCode::Down, alt)), down);
+        // Plain arrows still move the cursor.
+        assert_eq!(
+            on(&state, key(KeyCode::Down, KeyModifiers::NONE)),
+            Some(AppIntent::CommitNext)
+        );
+        assert_eq!(
+            on(&state, key(KeyCode::Up, KeyModifiers::NONE)),
+            Some(AppIntent::CommitPrev)
+        );
+        // A log row is a pick already; `p` stays pull.
+        assert!(matches!(
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Commits,
+                &state,
+                plain('u')
+            ),
+            Resolution::Disabled("Already a pick")
+        ));
+        assert!(matches!(
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Commits,
+                &state,
+                plain('p')
+            ),
+            Resolution::Run(Binding {
+                id: "workspace.pull",
+                ..
+            }) | Resolution::Disabled(_)
+        ));
         for id in [
             "commits.squash",
             "commits.fixup",
             "commits.drop",
             "commits.reword",
+            "commits.move_up",
+            "commits.move_down",
+            "commits.edit",
+            "commits.break",
+            "commits.pick",
         ] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
             assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
@@ -4119,8 +4359,10 @@ mod tests {
             fixup_disabled,
             drop_disabled,
             reword_disabled,
+            stop_disabled,
         ];
         let mut state = AppState::new(Context::Workspace);
+        state.commits.tips = Some(vec![]);
         for disabled in all {
             assert_eq!(disabled(&state), Some("No commits"));
         }
@@ -4507,6 +4749,17 @@ mod tests {
             parse_key("ctrl-up"),
             Ok(KeyPattern::exact(KeyCode::Up, ctrl))
         );
+        let alt = KeyModifiers::ALT;
+        assert_eq!(
+            parse_key("alt-k"),
+            Ok(KeyPattern::exact(KeyCode::Char('k'), alt))
+        );
+        assert_eq!(
+            parse_key("alt-down"),
+            Ok(KeyPattern::exact(KeyCode::Down, alt))
+        );
+        assert_eq!(KeyPattern::exact(KeyCode::Char('j'), alt).label(), "alt-j");
+        assert!(parse_key("alt-K").is_err());
         for (name, code) in [
             ("up", KeyCode::Up),
             ("down", KeyCode::Down),
@@ -4693,6 +4946,8 @@ mod tests {
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard
                     | RewriteCommit(_)
+                    | MoveCommit(_)
+                    | InsertBreak
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

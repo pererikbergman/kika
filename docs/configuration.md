@@ -69,7 +69,9 @@ Key names:
   case-sensitive: `J` is Shift+J;
 - or one of `space`, `esc`, `enter`, `tab`, `shift-tab`, `bksp`, `up`, `down`,
   `left`, `right`, `pgup`, `pgdn`, `home`, `end`;
-- either with an optional `ctrl-` prefix, written in lower case: `ctrl-s`.
+- either with an optional `ctrl-` or `alt-` prefix, written in lower case:
+  `ctrl-s`, `alt-k`. Some macOS terminals send Option as Alt only once
+  "Use Option as Meta" is turned on.
 
 Key changes are picked up when Kika regains focus and when you switch
 repository, so you can edit a file in another window and come back.
@@ -487,6 +489,11 @@ an older git refuses them and changes nothing.
 | `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
 | `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
 | `commits.reword` | `e` | Write a new message for the selected commit | locked |
+| `commits.move_up` | `alt-k`, `alt-up` | Move the selected commit or todo row up, above the newer one | locked |
+| `commits.move_down` | `alt-j`, `alt-down` | Move the selected commit or todo row down, below the older one | locked |
+| `commits.edit` | `E` | Stop the rebase at the selected commit, to amend it, then continue from Status | locked |
+| `commits.break` | `b` | Stop the rebase right after the selected commit, or toggle the stop after a todo row | locked |
+| `commits.pick` | `u` | Pick the selected todo row as it is, undoing its other action | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -510,6 +517,24 @@ for squash and fixup the commit below must be loaded: moving down to the end of
 the log loads it. A rebase that stops on conflicts can be
 continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
+
+`alt-k` and `alt-j` move the selected commit above the newer one or below the
+older one, the same way. `E` stops the rebase at the selected commit so you
+can amend it, and `b` stops it right after the selected commit (`b` needs Git
+2.20 or newer); continue from the Status panel to finish. With Git 2.38 or
+newer every rewrite passes `--update-refs`, so other branches that point at
+rewritten commits move to their new copies; a move that would change which
+commits such a branch holds is refused. With an older Git, a rewrite that
+would leave another branch behind is refused and names the branch.
+
+While a rebase is stopped, its remaining steps show above the log under
+"Rebase todo", the last to run at the top. `j` and `k` move through them and
+on into the log. On a todo row, `alt-k` and `alt-j` move it, `s`, `F`, `d`,
+`e`, `E` and `u` (pick) change its action, and `b` adds or removes a stop
+after it. Each change is checked and written to git's todo list at once,
+only if the list on disk is still the one shown; git's help comments are not
+kept. A commit never moves past another branch's update line. A todo list
+holding commands Kika does not edit, such as `exec`, is shown but not edited.
 
 ### Commit files (a commit opened from the Commits panel)
 

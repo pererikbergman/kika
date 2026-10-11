@@ -4,6 +4,7 @@
 pub mod askpass;
 pub mod attr;
 pub mod blame;
+pub mod branch_tips;
 pub mod branches;
 pub mod commit_files;
 pub mod diff;

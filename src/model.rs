@@ -26,12 +26,13 @@ use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
-use crate::git::rebase_plan::{self, Edit};
+use crate::git::rebase_plan;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
+use crate::git::version::GitVersion;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
@@ -42,12 +43,14 @@ use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,
     LineInput, Popup, PromptKind, ResetHardConfirm,
 };
+use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::remote_run::RemoteRun;
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
 use crate::watch::{WatchEvent, WatchState};
+use crate::worktree_file::CHANGED_ON_DISK;
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +262,9 @@ pub struct AppState {
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
+    /// The installed git, read at startup; `None` when it could not be
+    /// read, which counts as older than any feature needs.
+    pub git_version: Option<GitVersion>,
 }
 
 impl AppState {
@@ -308,7 +314,21 @@ impl AppState {
             branches: BranchesPanel::default(),
             remote: None,
             commits: CommitsPanel::default(),
+            git_version: None,
         }
+    }
+
+    /// The git `main` found installed.
+    pub fn with_git_version(self, git_version: Option<GitVersion>) -> Self {
+        Self {
+            git_version,
+            ..self
+        }
+    }
+
+    /// Whether git has `version` or newer. An unknown git has nothing.
+    pub fn git_has(&self, version: GitVersion) -> bool {
+        self.git_version.is_some_and(|found| found >= version)
     }
 
     /// Where Kika runs: the repository's top level, if it started in one,
@@ -630,10 +650,10 @@ impl AppState {
                 }
             }
             AppIntent::CommitNext => {
-                self.commits.move_by(1);
+                self.commits.step(1);
                 return self.more_commits();
             }
-            AppIntent::CommitPrev => self.commits.move_by(-1),
+            AppIntent::CommitPrev => self.commits.step(-1),
             AppIntent::OpenCommitFiles => return self.open_commit_files(),
             AppIntent::CloseCommitFiles => return self.close_commit_files(),
             AppIntent::CommitFileNext => return self.move_commit_file(1),
@@ -805,7 +825,18 @@ impl AppState {
             AppIntent::RevertCommit => return self.revert_commit(),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
-            AppIntent::RewriteCommit(edit) => return self.rewrite_commit(edit),
+            AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
+            AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
+            AppIntent::InsertBreak => return self.rewrite(Rewrite::Break),
+            AppIntent::BranchTipsLoaded { tag, result } => {
+                if tag.generation == self.generation {
+                    self.commits.tips_loaded(tag.seq, result);
+                }
+            }
+            AppIntent::RebaseTodoLoaded { tag, result } => self.rebase_todo_loaded(tag, result),
+            AppIntent::RebaseTodoWritten { tag, result } => {
+                return self.rebase_todo_written(tag, result);
+            }
         }
         vec![]
     }
@@ -2253,7 +2284,7 @@ impl AppState {
         effects
     }
 
-    /// Load the log from the top, and the markers with it. What is shown
+    /// Load the log from the top, and the markers and branch tips with it. What is shown
     /// stays until the new page lands, which supersedes any page in flight.
     fn reload_commits(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
@@ -2261,8 +2292,10 @@ impl AppState {
         }
         let page = self.background_tag();
         let markers = self.background_tag();
+        let tips = self.background_tag();
         self.commits.begin_page(page.seq, 0);
         self.commits.markers_seq = Some(markers.seq);
+        self.commits.tips_seq = Some(tips.seq);
         vec![
             Effect::LoadCommits {
                 tag: page,
@@ -2270,6 +2303,7 @@ impl AppState {
                 skip: 0,
             },
             Effect::LoadMarkers { tag: markers },
+            Effect::LoadBranchTips { tag: tips },
         ]
     }
 
@@ -2705,11 +2739,20 @@ impl AppState {
                     .and_then(|i| self.files.get(i))
                     .map(|f| f.path.clone());
                 self.files = status.files;
+                let rebasing = status.branch.in_progress.contains(&Operation::Rebase);
                 self.branch = Some(status.branch);
                 self.status_error = None;
-                match self.status_selection {
+                let mut effects = match self.status_selection {
                     Selection::KeepPath => self.reselect(old_path),
+                };
+                // The todo list shows while a rebase is stopped, and only then.
+                if rebasing && self.context == Context::Workspace {
+                    effects.extend(self.reload_rebase_todo());
+                } else {
+                    self.commits.todo_seq = None;
+                    self.commits.set_todo(None);
                 }
+                effects
             }
             Err(message) => {
                 self.push_error(ErrorPopup::new(
@@ -3177,22 +3220,102 @@ impl AppState {
 
     /// Rewrite the selected commit on the terminal: squash and reword open
     /// git's editor, and hooks, signing and conflict stops work as on the
-    /// command line.
-    fn rewrite_commit(&mut self, edit: Edit) -> Vec<Effect> {
+    /// command line. On a todo row, edit the stopped rebase's todo list
+    /// instead.
+    fn rewrite(&mut self, rewrite: Rewrite) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        if let Some(reason) = keymap::rewrite_disabled(self, edit) {
+        if let Some(reason) = keymap::rewrite_disabled(self, rewrite) {
             self.notice = Some(reason);
             return vec![];
         }
-        match rebase_plan::plan(&self.commits.rows, self.commits.selected, edit) {
-            Ok(plan) => self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan)),
+        if self.commits.todo_selected.is_some() {
+            return self.edit_todo(rewrite);
+        }
+        match keymap::log_plan(self, rewrite) {
+            Ok(plan) => {
+                // The cursor follows the moved commit.
+                match rewrite {
+                    Rewrite::Move(rebase_plan::Direction::Up) => self.commits.selected -= 1,
+                    Rewrite::Move(rebase_plan::Direction::Down) => self.commits.selected += 1,
+                    _ => {}
+                }
+                self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan))
+            }
             Err(reason) => {
                 self.notice = Some(reason);
                 vec![]
             }
         }
+    }
+
+    /// Write the todo list with `rewrite` made on the selected row. The
+    /// list shows the edit at once; the reload after the write shows what
+    /// git has.
+    fn edit_todo(&mut self, rewrite: Rewrite) -> Vec<Effect> {
+        let (entries, cursor) = match keymap::todo_edit(self, rewrite) {
+            Ok(edited) => edited,
+            Err(reason) => {
+                self.notice = Some(reason);
+                return vec![];
+            }
+        };
+        let Some(todo) = self.commits.todo.as_mut() else {
+            return vec![];
+        };
+        let content = rebase_todo::serialize(&entries);
+        let (path, expected) = (todo.path.clone(), todo.original.clone());
+        todo.entries = entries;
+        self.commits.todo_selected = Some(cursor);
+        let seq = self.take_seq();
+        self.commits.todo_write_seq = Some(seq);
+        self.busy += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::WriteRebaseTodo {
+            tag,
+            path,
+            expected,
+            content,
+        }]
+    }
+
+    /// An edited todo list was written, or not; either way, reload it so
+    /// the panel shows what git will run.
+    fn rebase_todo_written(&mut self, tag: Tag, result: Result<(), String>) -> Vec<Effect> {
+        self.busy = self.busy.saturating_sub(1);
+        if tag.generation != self.generation || self.commits.todo_write_seq != Some(tag.seq) {
+            return vec![];
+        }
+        self.commits.todo_write_seq = None;
+        match result {
+            Ok(()) => {}
+            Err(message) if message == CHANGED_ON_DISK => self.notice = Some(TODO_CHANGED),
+            Err(message) => self.op_error = Some(message),
+        }
+        self.reload_rebase_todo()
+    }
+
+    /// Read the stopped rebase's todo list.
+    fn reload_rebase_todo(&mut self) -> Vec<Effect> {
+        let tag = self.background_tag();
+        self.commits.todo_seq = Some(tag.seq);
+        vec![Effect::LoadRebaseTodo { tag }]
+    }
+
+    /// Show the todo list read, if it is the load in flight.
+    fn rebase_todo_loaded(&mut self, tag: Tag, result: Result<Option<TodoFile>, String>) {
+        if tag.generation != self.generation || self.commits.todo_seq != Some(tag.seq) {
+            return;
+        }
+        self.commits.todo_seq = None;
+        // Unreadable counts as none: nothing is edited that was not read.
+        let todo = result.ok().flatten().map(RebaseTodo::load);
+        self.commits.set_todo(todo);
     }
 
     /// Reset hard as the open question asked, and only if one is open.
@@ -3717,6 +3840,7 @@ mod tests {
                 Effect::LoadBranches { tag: list },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
             ] => {
                 let (tag, list) = (*tag, *list);
                 state.update(AppIntent::BranchesLoaded {
@@ -3770,12 +3894,13 @@ mod tests {
                 user: true
             }
         );
-        // Seq 1 went to the branch list `r` reloads too, 2 and 3 to the commits.
+        // Seq 1 went to the branch list `r` reloads too, 2 to 4 to the
+        // commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 4,
+                seq: 5,
                 user: true
             }
         );
@@ -4324,8 +4449,9 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        // The status, the branch list, then the commits and their markers.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 4);
+        // The status, the branch list, then the commits, their markers and
+        // the branch tips.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 5);
         assert_eq!(state.busy, 2, "the status and the branch list");
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
@@ -4897,6 +5023,7 @@ mod tests {
                     Effect::LoadBranches { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
+                    Effect::LoadBranchTips { .. },
                 ]
             ),
             "{effects:?}"
@@ -4917,6 +5044,7 @@ mod tests {
                     Effect::LoadBranches { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
+                    Effect::LoadBranchTips { .. },
                 ]
             ),
             "{effects:?}"
@@ -7547,6 +7675,7 @@ mod tests {
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
             ] => {
                 assert_eq!(set_repo(set), [RepoPath::from("sub")]);
                 assert_eq!(tag.generation, state.generation);
@@ -7615,6 +7744,7 @@ mod tests {
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
             ] => {
                 assert_eq!(set_repo(set), []);
                 assert_eq!(request.path, "b.rs".into());
@@ -7705,6 +7835,7 @@ mod tests {
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
             ] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
@@ -7867,6 +7998,7 @@ mod tests {
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!((root.as_path(), nested.len()), (Path::new("/w"), 0));
@@ -7941,6 +8073,7 @@ mod tests {
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!(repo.as_deref(), Some(Path::new("/r/b")), "its own keys");
@@ -7988,12 +8121,13 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 5..],
+            effects[effects.len() - 6..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
                 Effect::LoadConfig { .. }
             ]
         ));
@@ -8693,6 +8827,7 @@ mod tests {
                 Effect::LoadBranches { tag },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadBranchTips { .. },
             ] => assert!(!tag.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
@@ -11524,6 +11659,8 @@ mod tests {
             row.oid = ids[i].clone();
             row.parents = vec![ids[i + 1].clone()];
         }
+        // No other branch; an unknown git, so no `--update-refs`.
+        state.commits.tips = Some(vec![]);
         state
     }
 
@@ -11531,6 +11668,7 @@ mod tests {
         rebase_plan::Step {
             action,
             commit: cid(&digit.to_string().repeat(40)),
+            break_after: false,
         }
     }
 
@@ -11544,10 +11682,12 @@ mod tests {
                 rebase_step(action, 'b'),
                 rebase_step(A::Pick, 'a'),
             ],
+            update_refs: false,
         };
         let alone = |action| RebasePlan {
             base: cid(&"c".repeat(40)),
             steps: vec![rebase_step(action, 'b'), rebase_step(A::Pick, 'a')],
+            update_refs: false,
         };
         let cases = [
             ('s', fold(A::Squash)),
@@ -11612,7 +11752,10 @@ mod tests {
     fn the_intent_outside_the_workspace_starts_nothing() {
         let mut state = on_linear_log();
         state.context = Context::Review { number: 1 };
-        assert_eq!(state.update(AppIntent::RewriteCommit(Edit::Drop)), vec![]);
+        assert_eq!(
+            state.update(AppIntent::RewriteCommit(rebase_plan::Edit::Drop)),
+            vec![]
+        );
         assert_eq!(state.op_seq, None);
     }
 
@@ -11624,5 +11767,429 @@ mod tests {
             failure_next(&op),
             "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
         );
+    }
+
+    // --- Moves, edit, break and the stopped rebase's todo list ---
+
+    fn alt(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+        state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::ALT)))
+    }
+
+    fn version(minor: u32) -> Option<GitVersion> {
+        Some(GitVersion {
+            major: 2,
+            minor,
+            patch: 0,
+        })
+    }
+
+    fn picks(digits: &[char]) -> Vec<rebase_plan::Step> {
+        digits
+            .iter()
+            .map(|&d| rebase_step(rebase_plan::TodoAction::Pick, d))
+            .collect()
+    }
+
+    #[test]
+    fn alt_k_and_alt_j_move_the_commit_and_the_cursor_follows_it() {
+        let mut state = on_linear_log();
+        let (_, op) = attached_of(&alt(&mut state, KeyCode::Char('k')));
+        let GitOp::InteractiveRebase(plan) = op else {
+            panic!("{op:?}")
+        };
+        assert_eq!(plan.base, cid(&"c".repeat(40)));
+        assert_eq!(plan.steps, picks(&['a', 'b']));
+        assert!(!plan.update_refs);
+        assert_eq!(state.commits.selected, 0);
+
+        let mut state = on_linear_log();
+        state.git_version = version(38);
+        let (_, op) = attached_of(&alt(&mut state, KeyCode::Down));
+        let GitOp::InteractiveRebase(plan) = op else {
+            panic!("{op:?}")
+        };
+        assert_eq!(plan.base, cid(&"d".repeat(40)));
+        assert_eq!(plan.steps, picks(&['b', 'c', 'a']));
+        assert!(plan.update_refs);
+        assert_eq!(state.commits.selected, 2);
+    }
+
+    #[test]
+    fn capital_e_stops_at_the_commit_and_b_after_it() {
+        use rebase_plan::TodoAction as A;
+        let mut state = on_linear_log();
+        let (_, op) = attached_of(&press_char(&mut state, 'E'));
+        let GitOp::InteractiveRebase(plan) = op else {
+            panic!("{op:?}")
+        };
+        assert_eq!(
+            plan.steps,
+            [rebase_step(A::Edit, 'b'), rebase_step(A::Pick, 'a')]
+        );
+
+        let mut state = on_linear_log();
+        assert_eq!(press_char(&mut state, 'b'), vec![]);
+        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK));
+        state.git_version = version(20);
+        let (_, op) = attached_of(&press_char(&mut state, 'b'));
+        let GitOp::InteractiveRebase(plan) = op else {
+            panic!("{op:?}")
+        };
+        let mut stop = rebase_step(A::Pick, 'b');
+        stop.break_after = true;
+        assert_eq!(plan.steps, [stop, rebase_step(A::Pick, 'a')]);
+    }
+
+    /// `on_linear_log` with branch `stack` on `bbb…` and `main` checked out
+    /// at `aaa…`.
+    fn with_stacked_branch(minor: u32) -> AppState {
+        let mut state = on_linear_log();
+        state.git_version = version(minor);
+        state.branch = Some(on_branch("main"));
+        state.commits.tips = Some(vec![
+            (cid(&"a".repeat(40)), b"refs/heads/main".to_vec()),
+            (cid(&"b".repeat(40)), b"refs/heads/stack".to_vec()),
+        ]);
+        state
+    }
+
+    #[test]
+    fn an_older_git_refuses_every_rewrite_that_would_leave_a_branch_behind() {
+        let reason = "Branch stack sits on these commits; Git 2.38 or newer moves it along";
+        let mut state = with_stacked_branch(37);
+        for key in ['s', 'F', 'd', 'e', 'E', 'b'] {
+            let mut state = state.clone();
+            assert_eq!(press_char(&mut state, key), vec![], "{key}");
+            assert_eq!(state.notice, Some(reason), "{key}");
+            assert_eq!(state.op_seq, None, "{key}");
+        }
+        for code in [KeyCode::Char('k'), KeyCode::Char('j')] {
+            let mut state = state.clone();
+            assert_eq!(alt(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.notice, Some(reason), "{code:?}");
+        }
+        // Rewriting only the head commit leaves `stack` where it is.
+        state.commits.selected = 0;
+        assert!(matches!(
+            press_char(&mut state, 'e').as_slice(),
+            [Effect::HandOff(_)]
+        ));
+        // Unknown tips count as a branch that may be there.
+        let mut unknown = on_linear_log();
+        unknown.commits.tips = None;
+        assert_eq!(press_char(&mut unknown, 'd'), vec![]);
+        assert_eq!(unknown.notice, Some(keymap::TIPS_UNKNOWN));
+    }
+
+    #[test]
+    fn with_update_refs_only_a_move_that_changes_a_stacked_branch_is_refused() {
+        let state = with_stacked_branch(38);
+        for key in ['s', 'd', 'e', 'E', 'b'] {
+            let mut state = state.clone();
+            let (_, op) = attached_of(&press_char(&mut state, key));
+            assert!(
+                matches!(op, GitOp::InteractiveRebase(ref plan) if plan.update_refs),
+                "{key}"
+            );
+        }
+        // `bbb…` moving above `aaa…` would leave `stack` holding `aaa…`.
+        let mut up = state.clone();
+        assert_eq!(alt(&mut up, KeyCode::Char('k')), vec![]);
+        assert_eq!(
+            up.notice,
+            Some("Moving bbbbbbb past branch stack would change what it holds")
+        );
+        let mut from_head = state.clone();
+        from_head.commits.selected = 0;
+        assert_eq!(alt(&mut from_head, KeyCode::Char('j')), vec![]);
+        assert_eq!(
+            from_head.notice,
+            Some("Moving aaaaaaa past branch stack would change what it holds")
+        );
+        // Moving `bbb…` below `ccc…` is fine: `stack` holds both either way.
+        let mut down = state.clone();
+        assert!(matches!(
+            alt(&mut down, KeyCode::Char('j')).as_slice(),
+            [Effect::HandOff(_)]
+        ));
+    }
+
+    /// A rebase stopped with `todo` left, read from `/r/.git/rebase-merge`,
+    /// its row `selected` under the cursor.
+    fn stopped(todo: &[u8], selected: usize) -> AppState {
+        let mut state = on_linear_log();
+        state.git_version = version(38);
+        let mut branch = on_branch("main");
+        branch.in_progress = vec![Operation::Rebase];
+        state.branch = Some(branch);
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+            todo: todo.to_vec(),
+            done: Some(b"pick 0000 x\n".to_vec()),
+        })));
+        state.commits.todo_selected = Some(selected);
+        state
+    }
+
+    const TODO: &[u8] = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\npick 3333 three\n";
+
+    /// The one todo write in `effects`: what it expects on disk and writes.
+    fn todo_write(effects: &[Effect]) -> (Vec<u8>, String) {
+        match effects {
+            [
+                Effect::WriteRebaseTodo {
+                    path,
+                    expected,
+                    content,
+                    ..
+                },
+            ] => {
+                assert_eq!(path, Path::new("/r/.git/rebase-merge/git-rebase-todo"));
+                (
+                    expected.clone(),
+                    String::from_utf8(content.clone()).unwrap(),
+                )
+            }
+            other => panic!("expected one todo write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keys_on_a_todo_row_write_the_edited_list() {
+        let head = "pick 1111 one\nupdate-ref refs/heads/x\n";
+        let with_alt = |code| KeyPress::new(code, KeyModifiers::ALT);
+        let plain = |c| KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE);
+        let cases: [(&str, KeyPress, String); 9] = [
+            (
+                "alt-k",
+                with_alt(KeyCode::Char('k')),
+                format!("{head}pick 3333 three\npick 2222 two\n"),
+            ),
+            (
+                "alt-j",
+                with_alt(KeyCode::Down),
+                format!("{head}pick 3333 three\npick 2222 two\n"),
+            ),
+            (
+                "E",
+                plain('E'),
+                format!("{head}edit 2222 two\npick 3333 three\n"),
+            ),
+            (
+                "b",
+                plain('b'),
+                format!("{head}pick 2222 two\nbreak\npick 3333 three\n"),
+            ),
+            (
+                "s",
+                plain('s'),
+                format!("{head}squash 2222 two\npick 3333 three\n"),
+            ),
+            (
+                "F",
+                plain('F'),
+                format!("{head}fixup 2222 two\npick 3333 three\n"),
+            ),
+            (
+                "d",
+                plain('d'),
+                format!("{head}drop 2222 two\npick 3333 three\n"),
+            ),
+            (
+                "e",
+                plain('e'),
+                format!("{head}reword 2222 two\npick 3333 three\n"),
+            ),
+            ("u", plain('u'), String::new()),
+        ];
+        for (name, press, written) in cases {
+            // `alt-j` from the row above, every other key on `two`.
+            let mut state = stopped(TODO, if name == "alt-j" { 3 } else { 2 });
+            let effects = state.update(AppIntent::Key(press));
+            if written.is_empty() {
+                assert_eq!(effects, vec![], "{name}");
+                assert_eq!(state.notice, Some("Already a pick"), "{name}");
+                continue;
+            }
+            let (expected, content) = todo_write(&effects);
+            assert_eq!(expected, TODO, "{name}");
+            assert_eq!(content, written, "{name}");
+            assert!(state.commits.todo_write_seq.is_some(), "{name}");
+            assert_eq!(state.op_seq, None, "{name}");
+        }
+        // Pick undoes another action.
+        let mut state = stopped(b"drop 1111 one\n", 0);
+        let (_, content) = todo_write(&press_char(&mut state, 'u'));
+        assert_eq!(content, "pick 1111 one\n");
+    }
+
+    #[test]
+    fn a_todo_move_follows_the_row_and_one_write_runs_at_a_time() {
+        let mut state = stopped(TODO, 2);
+        let tag = match alt(&mut state, KeyCode::Char('k')).as_slice() {
+            [Effect::WriteRebaseTodo { tag, .. }] => *tag,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(state.commits.todo_selected, Some(3));
+        assert_eq!(alt(&mut state, KeyCode::Char('j')), vec![]);
+        assert_eq!(state.notice, Some(keymap::TODO_SAVING));
+        // Until the written list is read back, too.
+        state.update(AppIntent::RebaseTodoWritten {
+            tag,
+            result: Ok(()),
+        });
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        assert_eq!(state.notice, Some(keymap::TODO_SAVING));
+    }
+
+    #[test]
+    fn a_todo_move_across_a_branch_update_is_refused_with_a_notice() {
+        let mut state = stopped(TODO, 2);
+        assert_eq!(alt(&mut state, KeyCode::Char('j')), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("Moving 2222 past branch x would change what it holds")
+        );
+        assert_eq!(state.commits.todo_write_seq, None);
+    }
+
+    #[test]
+    fn a_todo_kika_does_not_edit_writes_nothing() {
+        let todo = b"pick 1111 one\nexec make\n";
+        for key in ['s', 'F', 'd', 'e', 'E', 'b', 'u'] {
+            let mut state = stopped(todo, 0);
+            assert_eq!(press_char(&mut state, key), vec![], "{key}");
+            assert_eq!(state.notice, Some(rebase_todo::NOT_EDITABLE), "{key}");
+        }
+        let mut state = stopped(todo, 0);
+        assert_eq!(alt(&mut state, KeyCode::Char('k')), vec![]);
+    }
+
+    #[test]
+    fn b_on_a_todo_row_needs_git_2_20() {
+        let mut state = stopped(TODO, 2);
+        state.git_version = version(19);
+        assert_eq!(press_char(&mut state, 'b'), vec![]);
+        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK));
+    }
+
+    #[test]
+    fn j_and_k_move_through_the_todo_rows_and_on_into_the_log() {
+        let mut state = stopped(TODO, 0);
+        state.commits.todo_selected = None;
+        state.commits.selected = 1;
+        press_char(&mut state, 'k');
+        assert_eq!(state.commits.selected, 0);
+        press_char(&mut state, 'k');
+        assert_eq!(state.commits.todo_selected, Some(0));
+        for _ in 0..5 {
+            press_char(&mut state, 'k');
+        }
+        assert_eq!(state.commits.todo_selected, Some(3));
+        for _ in 0..4 {
+            press_char(&mut state, 'j');
+        }
+        assert_eq!(state.commits.todo_selected, None);
+        assert_eq!(state.commits.selected, 0);
+        // Log keys do not act on a todo row.
+        state.commits.todo_selected = Some(0);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Select a commit in the log first"));
+    }
+
+    #[test]
+    fn a_status_showing_a_rebase_loads_the_todo_and_one_without_clears_it() {
+        let mut state = on_linear_log();
+        let tag = refresh_tag(&mut state);
+        let mut status = repo(vec![]);
+        status.branch.in_progress = vec![Operation::Rebase];
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(status),
+        });
+        let load = match effects.as_slice() {
+            [.., Effect::LoadRebaseTodo { tag }] => *tag,
+            other => panic!("expected LoadRebaseTodo, got {other:?}"),
+        };
+        state.update(AppIntent::RebaseTodoLoaded {
+            tag: load,
+            result: Ok(Some(TodoFile {
+                path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+                todo: TODO.to_vec(),
+                done: None,
+            })),
+        });
+        assert_eq!(
+            state.commits.todo.as_ref().map(|t| t.entries.len()),
+            Some(4)
+        );
+        assert_eq!(state.commits.todo_seq, None);
+
+        state.commits.todo_selected = Some(2);
+        let tag = refresh_tag(&mut state);
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![])),
+        });
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadRebaseTodo { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(state.commits.todo, None);
+        assert_eq!(state.commits.todo_selected, None);
+    }
+
+    #[test]
+    fn a_written_todo_is_reloaded_and_a_changed_one_says_so() {
+        for (result, notice, error) in [
+            (Ok(()), None, None),
+            (Err(CHANGED_ON_DISK.to_string()), Some(TODO_CHANGED), None),
+            (
+                Err("disk full".to_string()),
+                None,
+                Some("disk full".to_string()),
+            ),
+        ] {
+            let mut state = stopped(TODO, 2);
+            let busy = state.busy;
+            let tag = match press_char(&mut state, 'd').as_slice() {
+                [Effect::WriteRebaseTodo { tag, .. }] => *tag,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(state.busy, busy + 1);
+            let effects = state.update(AppIntent::RebaseTodoWritten { tag, result });
+            assert!(
+                matches!(effects.as_slice(), [Effect::LoadRebaseTodo { .. }]),
+                "{effects:?}"
+            );
+            assert_eq!(state.busy, busy);
+            assert_eq!(state.commits.todo_write_seq, None);
+            assert_eq!(state.notice, notice);
+            assert_eq!(state.op_error, error);
+        }
+    }
+
+    #[test]
+    fn a_log_rewrite_still_waits_for_the_rebase_in_progress() {
+        let mut state = stopped(TODO, 0);
+        state.commits.todo_selected = None;
+        for key in ['d', 'E', 'b'] {
+            let mut state = state.clone();
+            assert_eq!(press_char(&mut state, key), vec![], "{key}");
+            assert_eq!(
+                state.notice,
+                Some("Finish or abort the operation in progress"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_git_version_records_what_main_found() {
+        let state = AppState::new(Context::Workspace).with_git_version(version(38));
+        assert!(state.git_has(crate::git::version::UPDATE_REFS));
+        assert!(!AppState::new(Context::Workspace).git_has(crate::git::version::BREAK));
     }
 }

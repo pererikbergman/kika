@@ -20,6 +20,7 @@ use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
 use crate::external_diff::ExternalRenderer;
 use crate::git::repo_root::find_toplevel;
+use crate::git::version;
 use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
@@ -42,6 +43,10 @@ pub struct Harness {
     /// Boot's renderer discovery has reported. It is not a user effect,
     /// so `busy` does not cover it.
     renderers_found: bool,
+    /// What git runs as the sequence editor of Kika's interactive rebase.
+    /// The test binary is not Kika, so a script runs it as Kika's hidden
+    /// mode instead (see [`use_test_binary_as_sequence_editor`]).
+    sequence_editor: Option<std::path::PathBuf>,
 }
 
 impl Harness {
@@ -67,13 +72,18 @@ impl Harness {
         // As `main` does, so submodule paths start from the right root.
         let launch = runner.workdir();
         let repo = find_toplevel(runner.as_ref());
+        // As `main` does, so features that need a newer git are gated alike.
+        let git_version = version::check(runner.as_ref()).ok().flatten();
         let mut harness = Self {
-            state: AppState::new(Context::Workspace).with_location(repo, launch),
+            state: AppState::new(Context::Workspace)
+                .with_location(repo, launch)
+                .with_git_version(git_version),
             rx,
             runtime,
             runner,
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
             renderers_found: false,
+            sequence_editor: None,
         };
         app::boot(&mut harness.state, &harness.runtime, width, height);
         harness.wait_idle().await;
@@ -119,11 +129,38 @@ impl Harness {
             self.renderers_found = true;
         }
         let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
+        let editor = self.sequence_editor.clone();
+        let exe = move || {
+            editor.clone().ok_or_else(|| {
+                std::io::Error::other("call use_test_binary_as_sequence_editor first")
+            })
+        };
         while let Some(job) = jobs.pop_front() {
             let workdir = self.runner.workdir();
-            let intent = handoff::execute_with(job, self.runner.as_ref(), &workdir, &|| {});
+            let intent = handoff::execute_as(job, self.runner.as_ref(), &workdir, &|| {}, &exe);
             jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
+    }
+
+    /// Let an interactive rebase run: git starts a script in `dir` that
+    /// runs this test binary's [`hidden_sequence_editor`] test, which is
+    /// Kika's hidden sequence-editor mode, on the todo file.
+    #[cfg(unix)]
+    pub fn use_test_binary_as_sequence_editor(&mut self, dir: &std::path::Path) {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let exe = std::env::current_exe().unwrap();
+        let quoted = crate::sequence_editor::editor_value(&exe);
+        let mut body = b"#!/bin/sh\nKIKA_E2E_TODO=\"$1\" exec ".to_vec();
+        body.extend_from_slice(quoted.as_bytes());
+        body.extend_from_slice(
+            b" --exact e2e::harness::hidden_sequence_editor --quiet --test-threads=1 >/dev/null\n",
+        );
+        let script = dir.join("kika-sequence-editor.sh");
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        self.sequence_editor = Some(script);
     }
 
     /// Type `text` key by key, as a terminal sends it: uppercase with
@@ -247,6 +284,25 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && diff_settled
         && state.commits.page_seq.is_none()
         && state.commits.markers_seq.is_none()
+        && state.commits.tips_seq.is_none()
+        && state.commits.todo_seq.is_none()
+}
+
+/// Kika's hidden sequence-editor mode, for the script
+/// [`Harness::use_test_binary_as_sequence_editor`] writes. Run as part of
+/// the suite it has no todo file and does nothing.
+#[cfg(unix)]
+#[test]
+fn hidden_sequence_editor() {
+    let (Some(todo), Some(_)) = (
+        std::env::var_os("KIKA_E2E_TODO"),
+        std::env::var_os(crate::sequence_editor::PLAN_ENV),
+    ) else {
+        return;
+    };
+    if crate::sequence_editor::dispatch_with(&[todo]) != std::process::ExitCode::SUCCESS {
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

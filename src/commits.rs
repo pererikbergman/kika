@@ -4,8 +4,10 @@
 
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
+use crate::git::branch_tips::Tip;
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, Markers};
+use crate::rebase_todo::RebaseTodo;
 
 /// Commits per page.
 pub const PAGE: usize = 200;
@@ -58,6 +60,19 @@ pub struct CommitsPanel {
     /// The commit an open question is about, kept from when it was asked,
     /// since the question itself carries no data.
     pub pending: Option<CommitId>,
+    /// Where every local branch points, to tell which sit on commits a
+    /// rewrite would replace. Loaded with page 0; `None` until it is, or
+    /// when it failed.
+    pub tips: Option<Vec<Tip>>,
+    pub tips_seq: Option<u64>,
+    /// The todo list of a stopped rebase, shown above the log.
+    pub todo: Option<RebaseTodo>,
+    pub todo_seq: Option<u64>,
+    /// The todo row under the cursor, by index into the list (the next to
+    /// run is 0); `None` while the cursor is on the log.
+    pub todo_selected: Option<usize>,
+    /// The write of an edited todo list in flight; one at a time.
+    pub todo_write_seq: Option<u64>,
 }
 
 impl CommitsPanel {
@@ -162,6 +177,42 @@ impl CommitsPanel {
         }
         self.markers_seq = None;
         self.markers = result.unwrap_or_default();
+    }
+
+    /// Apply branch tips if they are the load in flight. A failure leaves
+    /// them unknown, so no rewrite takes it that no branch is there.
+    pub fn tips_loaded(&mut self, seq: u64, result: Result<Vec<Tip>, String>) {
+        if self.tips_seq == Some(seq) {
+            self.tips_seq = None;
+            self.tips = result.ok();
+        }
+    }
+
+    /// Show `todo` above the log, or none. The cursor stays on its row
+    /// when there still is one.
+    pub fn set_todo(&mut self, todo: Option<RebaseTodo>) {
+        let rows = todo.as_ref().map_or(0, RebaseTodo::len);
+        self.todo_selected = self
+            .todo_selected
+            .filter(|_| rows > 0)
+            .map(|i| i.min(rows - 1));
+        self.todo = todo;
+    }
+
+    /// Move the cursor down (`1`) or up (`-1`) one row, through the todo
+    /// rows and on into the log, which starts right below them.
+    pub fn step(&mut self, delta: isize) {
+        let rows = self.todo.as_ref().map_or(0, RebaseTodo::len);
+        match (self.todo_selected, delta) {
+            (Some(0), 1) => {
+                self.todo_selected = None;
+                self.selected = 0;
+            }
+            (Some(i), 1) => self.todo_selected = Some(i - 1),
+            (Some(i), _) => self.todo_selected = Some((i + 1).min(rows.saturating_sub(1))),
+            (None, -1) if self.selected == 0 && rows > 0 => self.todo_selected = Some(0),
+            (None, _) => self.move_by(delta),
+        }
     }
 
     pub fn move_by(&mut self, delta: isize) {
