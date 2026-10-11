@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use crate::app;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
+use crate::git::repo_root::find_toplevel;
 use crate::git::{CliRunner, GitRunner};
 use crate::handoff;
 use crate::intent::AppIntent;
@@ -57,8 +58,11 @@ impl Harness {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
         let runtime = Runtime::new(runner.clone(), tx);
+        // As `main` does, so submodule paths start from the right root.
+        let launch = runner.workdir();
+        let repo = find_toplevel(runner.as_ref());
         let mut harness = Self {
-            state: AppState::new(Context::Workspace),
+            state: AppState::new(Context::Workspace).with_location(repo, launch),
             rx,
             runtime,
             runner,
@@ -97,6 +101,13 @@ impl Harness {
             let intent = handoff::execute(job, self.runner.as_ref(), &workdir);
             jobs.extend(app::dispatch(&mut self.state, &self.runtime, intent));
         }
+    }
+
+    /// Apply `intent` as if a task had sent it, then wait for idle. For
+    /// what no key can reach in a test, such as a recent list on disk.
+    pub async fn apply(&mut self, intent: AppIntent) {
+        self.dispatch(intent);
+        self.wait_idle().await;
     }
 
     /// Wait until the app is idle.

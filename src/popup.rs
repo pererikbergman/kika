@@ -10,6 +10,7 @@ use crate::git::ops::GitOp;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
+use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
 
 /// One entry on the popup stack. The top one takes the keys.
@@ -21,6 +22,7 @@ pub enum Popup {
     Error(ErrorPopup),
     Discard(DiscardConfirm),
     Submodules(SubmoduleList),
+    Recent(RecentList),
 }
 
 /// "Throw this work away?" Unlike [`ConfirmKind`], it carries the op chosen

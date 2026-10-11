@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -26,9 +26,10 @@ pub async fn run(
     mut terminal: DefaultTerminal,
     mut state: AppState,
     runner: Arc<dyn GitRunner>,
+    recent_store: Option<PathBuf>,
 ) -> color_eyre::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let runtime = Runtime::new(Arc::clone(&runner), tx.clone());
+    let runtime = Runtime::new(Arc::clone(&runner), tx.clone()).with_recent_store(recent_store);
     let input = Arc::new(InputGate::default());
     spawn_input_listener(tx, Arc::clone(&input));
 
@@ -57,15 +58,16 @@ pub async fn run(
     Ok(())
 }
 
-/// Size the state to the screen, then start the first status load. Shared
-/// with the headless harness so tests start the app exactly as `run` does.
+/// Size the state to the screen, then start: the first status load, or
+/// the welcome outside a repository. Shared with the headless harness so
+/// tests start the app exactly as `run` does.
 pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
     // Know the pane height before the first diff request sizes itself.
     // Neither intent asks for the terminal, so there is no hand-off to run.
     dispatch(state, runtime, AppIntent::Resize { width, height });
     // Start the first load before the first draw, so the frame shows "Loading…"
     // instead of waiting on git.
-    dispatch(state, runtime, AppIntent::RefreshStatus);
+    dispatch(state, runtime, AppIntent::Start);
 }
 
 /// Apply one intent and spawn the effects it asks for, except hand-offs:
