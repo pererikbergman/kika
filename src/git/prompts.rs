@@ -1,11 +1,11 @@
-//! Whether a commit may ask the user something on the terminal: a signing
-//! passphrase or a hook that reads a reply. Such a commit runs with the
-//! terminal handed over; every other git command runs detached.
+//! Whether a git command may ask the user something on the terminal: a
+//! signing passphrase, a hook that reads a reply or git's editor. Such a
+//! command runs with the terminal handed over; the rest run detached.
 
 use std::path::Path;
 
 use super::diff::terminal_safe;
-use super::ops::GitOp;
+use super::ops::{GitOp, MergeStrategy};
 use super::runner::{GitCommand, GitRunner};
 
 /// The hooks a commit can run. `pre-auto-gc` is left out: it runs only when
@@ -50,6 +50,18 @@ pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>) -> bool {
         "post-rewrite" => *amend,
         _ => true,
     })
+}
+
+/// Whether `op` always runs with the terminal handed over: it may make
+/// commits, so hooks, signing and git's editor for the message must work
+/// as on the command line. A fast-forward, a squash (which stops before
+/// committing) and an abort make none, so they run detached.
+pub fn runs_attached(op: &GitOp) -> bool {
+    match op {
+        GitOp::Merge { strategy, .. } => *strategy == MergeStrategy::NoFastForward,
+        GitOp::Rebase { .. } | GitOp::Continue(_) | GitOp::Skip(_) => true,
+        _ => false,
+    }
 }
 
 /// Read whether commits sign and which commit hooks are installed.
@@ -134,6 +146,36 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::repo_state::Operation;
+
+    #[test]
+    fn only_ops_that_can_commit_run_attached() {
+        let merge = |strategy| GitOp::Merge {
+            branch: "b".into(),
+            strategy,
+        };
+        let attached = [
+            merge(MergeStrategy::NoFastForward),
+            GitOp::Rebase { onto: "b".into() },
+            GitOp::Continue(Operation::Merge),
+            GitOp::Continue(Operation::Rebase),
+            GitOp::Skip(Operation::CherryPick),
+        ];
+        for op in attached {
+            assert!(runs_attached(&op), "{op:?}");
+        }
+        let detached = [
+            merge(MergeStrategy::FastForwardOnly),
+            merge(MergeStrategy::Squash),
+            GitOp::Abort(Operation::Merge),
+            GitOp::Abort(Operation::Rebase),
+            GitOp::Checkout("b".into()),
+            GitOp::StageAll,
+        ];
+        for op in detached {
+            assert!(!runs_attached(&op), "{op:?}");
+        }
+    }
     use crate::git::path::RepoPath;
 
     fn commit(amend: bool, no_verify: bool) -> GitOp {

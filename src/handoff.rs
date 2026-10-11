@@ -13,7 +13,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::diff::terminal_safe;
-use crate::git::ops::{GitOp, commit_command, run_op};
+use crate::git::ops::{GitOp, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
@@ -33,6 +33,11 @@ pub enum HandOff {
     /// Run a commit that may ask something on the terminal: a signing
     /// passphrase or a hook's question. Answered like a detached run.
     Commit { tag: Tag, op: GitOp },
+    /// Run a git op that may make commits on the terminal, so its hooks,
+    /// signing and git's editor work as on the command line: a merge
+    /// commit, a rebase, and continuing or skipping one. Answered like a
+    /// detached run.
+    Attached { tag: Tag, op: GitOp },
     /// Run the user's command, its argv already expanded, on the terminal.
     RunCommand { title: String, argv: Vec<OsString> },
 }
@@ -59,7 +64,7 @@ pub fn execute(job: HandOff, runner: &dyn GitRunner, workdir: &Path) -> AppInten
     execute_with(job, runner, workdir, &wait_for_enter)
 }
 
-/// [`execute`], with `pause` run after a failed commit so git's output
+/// [`execute`], with `pause` run after a failed attached git so its output
 /// stays readable; tests pass one that returns at once.
 pub fn execute_with(
     job: HandOff,
@@ -70,6 +75,11 @@ pub fn execute_with(
     match job {
         HandOff::Commit { tag, op } => AppIntent::OpFinished {
             result: commit_on_terminal(&op, runner, pause),
+            tag,
+            op,
+        },
+        HandOff::Attached { tag, op } => AppIntent::OpFinished {
+            result: run_on_terminal(op_command(&op), runner, pause),
             tag,
             op,
         },
@@ -139,8 +149,7 @@ fn editor(runner: &dyn GitRunner) -> Result<String, String> {
 }
 
 /// Run the commit `op` attached to the terminal, staging everything first
-/// when asked. On failure, `pause` keeps git's output on screen until the
-/// user is done reading it, since nothing of it is captured.
+/// when asked.
 fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> Result<(), String> {
     let GitOp::Commit {
         message,
@@ -168,19 +177,31 @@ fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> R
         }
         None => None,
     };
-    let mut cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    let cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    run_on_terminal(cmd, runner, pause)
+}
+
+/// Run `cmd` attached to the terminal, with `GPG_TTY` so signing can ask
+/// there. On failure, `pause` keeps git's output on screen until the user
+/// is done reading it, since nothing of it is captured.
+fn run_on_terminal(
+    mut cmd: GitCommand,
+    runner: &dyn GitRunner,
+    pause: &dyn Fn(),
+) -> Result<(), String> {
+    let subcommand = cmd.args()[0].to_string_lossy().into_owned();
     if let Some(tty) = gpg_tty(std::env::var_os("GPG_TTY"), stdin_tty()) {
         cmd = cmd.env("GPG_TTY", tty);
     }
     let exit = runner
         .run_attached(&cmd)
-        .map_err(|e| io_error("Could not start git commit", &e))?;
+        .map_err(|e| io_error(&format!("Could not start git {subcommand}"), &e))?;
     if exit.success {
         return Ok(());
     }
     pause();
     Err(format!(
-        "git commit exited with {}; its output was shown in the terminal",
+        "git {subcommand} exited with {}; its output was shown in the terminal",
         exit.status
     ))
 }
@@ -221,7 +242,7 @@ fn stdin_tty() -> Option<OsString> {
 /// Keep the terminal as git left it until the user presses Enter.
 fn wait_for_enter() {
     // On its own line, whatever git printed last.
-    print!("\ngit commit failed. Press Enter to return to Kika.");
+    print!("\ngit failed. Press Enter to return to Kika.");
     let _ = io::stdout().flush();
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
@@ -779,6 +800,53 @@ mod tests {
                 finished(
                     &op,
                     Err("git commit exited with status 1; \
+                         its output was shown in the terminal"
+                        .into())
+                ),
+                1
+            )
+        );
+        runner.assert_done();
+    }
+
+    /// Run `op` as an attached hand-off, counting the pauses.
+    fn attached_with(runner: &FakeRunner, op: &GitOp) -> (AppIntent, usize) {
+        let pauses = std::cell::Cell::new(0);
+        let job = HandOff::Attached {
+            tag: TAG,
+            op: op.clone(),
+        };
+        let intent = execute_with(job, runner, Path::new("/nowhere"), &|| {
+            pauses.set(pauses.get() + 1)
+        });
+        (intent, pauses.get())
+    }
+
+    #[test]
+    fn an_attached_op_runs_its_argv_on_the_terminal_and_reports_back() {
+        use crate::git::ops::MergeStrategy;
+        let op = GitOp::Merge {
+            branch: "feature".into(),
+            strategy: MergeStrategy::NoFastForward,
+        };
+        let runner =
+            FakeRunner::new().expect_attached(&["merge", "--no-ff", "refs/heads/feature"], true);
+        assert_eq!(attached_with(&runner, &op), (finished(&op, Ok(())), 0));
+        runner.assert_done();
+        // Stdin is the terminal's, so git's editor and prompts reach the user.
+        assert_eq!(runner.inputs(), [None]);
+    }
+
+    #[test]
+    fn a_failed_attached_op_pauses_once_and_says_where_its_output_went() {
+        let op = GitOp::Continue(crate::git::repo_state::Operation::Rebase);
+        let runner = FakeRunner::new().expect_attached(&["rebase", "--continue"], false);
+        assert_eq!(
+            attached_with(&runner, &op),
+            (
+                finished(
+                    &op,
+                    Err("git rebase exited with status 1; \
                          its output was shown in the terminal"
                         .into())
                 ),

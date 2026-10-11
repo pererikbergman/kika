@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::commit_editor::{byte_at, char_len};
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
+use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
@@ -108,30 +109,52 @@ impl DeleteBranchConfirm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
     Quit,
+    /// Abort this operation in progress. It names the operation found when
+    /// asked, so the answer aborts what the question said.
+    Abort(Operation),
 }
 
 impl ConfirmKind {
     pub fn title(self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit",
+            ConfirmKind::Abort(Operation::Merge) => "Abort merge",
+            ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
+            ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
+            ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
         }
     }
 
     pub fn question(self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit Kika? (y/n)",
+            ConfirmKind::Abort(Operation::Merge) => {
+                "Abort the merge and return to where it started? \
+                 Resolved conflicts are lost. (y/n)"
+            }
+            ConfirmKind::Abort(Operation::Rebase) => {
+                "Abort the rebase and return to where it started? \
+                 Resolved conflicts are lost. (y/n)"
+            }
+            ConfirmKind::Abort(Operation::CherryPick) => {
+                "Abort the cherry-pick and return to where it started? \
+                 Resolved conflicts are lost. (y/n)"
+            }
+            // Never asked: a bisect is not resumable.
+            ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
         }
     }
 
     pub fn yes(self) -> AppIntent {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
+            ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
         }
     }
 
     pub fn no(self) -> Option<AppIntent> {
         match self {
-            ConfirmKind::Quit => None,
+            ConfirmKind::Quit | ConfirmKind::Abort(_) => None,
         }
     }
 }
@@ -255,6 +278,24 @@ mod tests {
             press(&mut input, KeyCode::Char(c));
         }
         input
+    }
+
+    #[test]
+    fn the_abort_question_names_the_operation_and_yes_aborts_that_one() {
+        let ask = ConfirmKind::Abort(Operation::CherryPick);
+        assert_eq!(ask.title(), "Abort cherry-pick");
+        assert_eq!(
+            ask.question(),
+            "Abort the cherry-pick and return to where it started? \
+             Resolved conflicts are lost. (y/n)"
+        );
+        assert_eq!(ask.yes(), AppIntent::ConfirmAbort(Operation::CherryPick));
+        assert_eq!(ask.no(), None);
+        assert_eq!(ConfirmKind::Abort(Operation::Merge).title(), "Abort merge");
+        assert_eq!(
+            ConfirmKind::Abort(Operation::Rebase).title(),
+            "Abort rebase"
+        );
     }
 
     #[test]
