@@ -239,18 +239,30 @@ pub fn sanitize(raw: &[u8]) -> String {
     text
 }
 
-/// Format characters (not `is_control`) that reorder text or draw nothing.
+/// Format characters (not `is_control`) that reorder text or draw nothing:
+/// Unicode's Default_Ignorable_Code_Point set plus the interlinear annotation
+/// characters. U+FE0E and U+FE0F are left alone because emoji such as "❤️"
+/// need them; a name differing only by one of those is a narrow, accepted gap.
 fn is_invisible_or_bidi(c: char) -> bool {
     matches!(
         c,
-        '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{200E}'
-            | '\u{200F}'
+        '\u{00AD}'
+            | '\u{034F}'
             | '\u{061C}'
-            | '\u{200B}'..='\u{200D}'
-            | '\u{2060}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0D}'
             | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFFB}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
     )
 }
 
@@ -774,7 +786,7 @@ mod tests {
 
     #[test]
     fn bidi_and_invisible_characters_become_visible_escapes() {
-        let classes: [(&str, &[char]); 6] = [
+        let classes: [(&str, &[char]); 17] = [
             (
                 "embedding/override",
                 &['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'],
@@ -784,6 +796,38 @@ mod tests {
             ("zero-width", &['\u{200B}', '\u{200C}', '\u{200D}']),
             ("word joiner", &['\u{2060}']),
             ("byte order mark", &['\u{FEFF}']),
+            ("soft hyphen", &['\u{00AD}']),
+            ("combining grapheme joiner", &['\u{034F}']),
+            (
+                "hangul filler",
+                &['\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}'],
+            ),
+            ("khmer vowel inherent", &['\u{17B4}', '\u{17B5}']),
+            (
+                "mongolian format",
+                &['\u{180B}', '\u{180C}', '\u{180D}', '\u{180E}', '\u{180F}'],
+            ),
+            (
+                "invisible operator and deprecated format",
+                &['\u{2061}', '\u{2064}', '\u{2065}', '\u{206A}', '\u{206F}'],
+            ),
+            ("variation selector", &['\u{FE00}', '\u{FE0D}']),
+            (
+                "unassigned and interlinear annotation",
+                &['\u{FFF0}', '\u{FFF8}', '\u{FFF9}', '\u{FFFA}', '\u{FFFB}'],
+            ),
+            ("shorthand format", &['\u{1BCA0}', '\u{1BCA3}']),
+            ("musical format", &['\u{1D173}', '\u{1D17A}']),
+            (
+                "tag",
+                &[
+                    '\u{E0000}',
+                    '\u{E0001}',
+                    '\u{E0041}',
+                    '\u{E007F}',
+                    '\u{E0FFF}',
+                ],
+            ),
         ];
         for (class, chars) in classes {
             for &c in chars {
@@ -798,7 +842,15 @@ mod tests {
 
     #[test]
     fn ordinary_text_is_unchanged() {
-        for text in ["src/café.rs", "日本語", "🙂", "plain ascii"] {
+        // U+FE0E/U+FE0F are kept so emoji presentation still works.
+        for text in [
+            "src/café.rs",
+            "日本語",
+            "🙂",
+            "plain ascii",
+            "❤\u{FE0F}",
+            "\u{263A}\u{FE0E}",
+        ] {
             assert_eq!(sanitize(text.as_bytes()), text);
         }
     }
