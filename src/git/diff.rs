@@ -579,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "Windows forbids * and : in file names")]
     fn hostile_file_names_diff_only_themselves_in_real_git() {
         use crate::git::fake::git;
         let tmp = crate::git::fake::TempDir::new("pathspec");
