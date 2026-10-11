@@ -13,9 +13,9 @@ use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
-use crate::forge::ForgeHost;
 use crate::forge::ForgeStatus;
 use crate::forge::task::{ForgeContext, Load, run_load};
+use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
@@ -266,11 +266,13 @@ pub enum Effect {
     /// then, with `refresh`, ask the forge for `branches`. Answered by
     /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
     /// `PullRequestsFetched`. With no `hosts` it only answers `ForgeRepoNone`.
+    /// A `known` repository is used as is, without reading the remote.
     LoadPullRequests {
         tag: Tag,
         hosts: Vec<ForgeHost>,
         branches: Vec<BranchName>,
         refresh: bool,
+        known: Option<ForgeRepo>,
     },
 }
 
@@ -822,6 +824,7 @@ impl Runtime {
                 hosts,
                 branches,
                 refresh,
+                known,
             } => match self.forge.clone().filter(|_| !hosts.is_empty()) {
                 // Off: nothing is read, run or written.
                 None => {
@@ -836,6 +839,7 @@ impl Runtime {
                                 hosts: &hosts,
                                 branches: &branches,
                                 refresh,
+                                known: known.as_ref(),
                                 top: std::fs::canonicalize(runner.workdir()).ok(),
                                 now: unix_now(),
                             };
@@ -992,6 +996,7 @@ mod tests {
             hosts,
             branches: vec!["main".into()],
             refresh: true,
+            known: None,
         };
         runtime.spawn(load(vec![]));
         assert_eq!(
@@ -1044,6 +1049,7 @@ mod tests {
             hosts: vec![ForgeHost::parse("github.com").unwrap()],
             branches,
             refresh: true,
+            known: None,
         });
         assert!(matches!(
             rx.recv().await,

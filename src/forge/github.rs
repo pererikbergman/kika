@@ -23,6 +23,8 @@ pub const BATCH: usize = 50;
 pub const MAX_BRANCHES: usize = 500;
 /// How long one call may take before it counts as offline.
 pub const TIMEOUT: Duration = Duration::from_secs(20);
+/// How long the output may take to arrive once `gh` has ended.
+const DRAIN: Duration = Duration::from_secs(2);
 /// The most of `gh`'s output read; a real answer is far smaller.
 const MAX_OUTPUT: u64 = 8 * 1024 * 1024;
 
@@ -107,20 +109,23 @@ impl GhRunner for CliGh {
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
         let body = cmd.body.clone();
-        // Dropping the pipe after writing sends EOF.
-        let writer = std::thread::spawn(move || {
+        // Dropping the pipe after writing sends EOF. Never joined: a
+        // process that stops reading must not hold this call.
+        std::thread::spawn(move || {
             if let Some(mut pipe) = stdin {
                 let _ = pipe.write_all(&body);
             }
         });
         let reader = |pipe: Option<Box<dyn Read + Send>>| {
+            let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut bytes = Vec::new();
                 if let Some(pipe) = pipe {
                     let _ = pipe.take(MAX_OUTPUT).read_to_end(&mut bytes);
                 }
-                bytes
-            })
+                let _ = tx.send(bytes);
+            });
+            rx
         };
         let stdout = reader(child.stdout.take().map(|p| Box::new(p) as _));
         let stderr = reader(child.stderr.take().map(|p| Box::new(p) as _));
@@ -142,11 +147,17 @@ impl GhRunner for CliGh {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let _ = writer.join();
+        // `gh` has ended, but a process it started could still hold the
+        // pipes open; wait for the output only so long, then go without.
+        let drained = Instant::now() + DRAIN;
+        let collect = |rx: std::sync::mpsc::Receiver<Vec<u8>>| {
+            let left = drained.saturating_duration_since(Instant::now());
+            rx.recv_timeout(left).unwrap_or_default()
+        };
         Ok(GhOutput {
             exit: status.and_then(|s| s.code()),
-            stdout: stdout.join().unwrap_or_default(),
-            stderr: stderr.join().unwrap_or_default(),
+            stdout: collect(stdout),
+            stderr: collect(stderr),
             timed_out,
         })
     }

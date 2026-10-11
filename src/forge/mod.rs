@@ -130,6 +130,8 @@ pub struct ForgeState {
     pub seq: Option<u64>,
     /// The local branches last listed, UTF-8 names only.
     pub branches: Vec<BranchName>,
+    /// The last load found the remote on no configured host.
+    pub unmatched: bool,
 }
 
 impl Default for ForgeState {
@@ -149,6 +151,7 @@ impl ForgeState {
             refresh_wanted: true,
             seq: None,
             branches: Vec::new(),
+            unmatched: false,
         }
     }
 
@@ -174,7 +177,9 @@ impl ForgeState {
     /// The load to start under `tag`, or none: when off, or while a call
     /// runs (a wanted refresh then waits for it to end).
     pub fn load(&mut self, tag: Tag) -> Option<Effect> {
-        if !self.enabled() || self.in_flight {
+        // A repository on no configured host has nothing cached either;
+        // only a refresh looks at its remote again.
+        if !self.enabled() || self.in_flight || (self.unmatched && !self.refresh_wanted) {
             return None;
         }
         let refresh = std::mem::take(&mut self.refresh_wanted);
@@ -188,6 +193,8 @@ impl ForgeState {
             hosts: self.hosts.clone(),
             branches: self.branches.clone(),
             refresh,
+            // A refresh reads the remote again, in case its URL changed.
+            known: self.repo.clone().filter(|_| !refresh),
         })
     }
 
@@ -204,6 +211,7 @@ impl ForgeState {
         self.badges.clear();
         self.status = ForgeView::Off;
         self.in_flight = false;
+        self.unmatched = true;
     }
 
     /// The cache's badges, shown at once. A miss keeps what is shown.
@@ -217,6 +225,7 @@ impl ForgeState {
             return;
         }
         self.repo = Some(repo);
+        self.unmatched = false;
         if let Some(badges) = badges {
             self.badges = badges;
         }
@@ -530,6 +539,43 @@ pub(crate) mod tests {
             loads(&list_branches(&mut state, &["main"]))[..],
             [(_, true)]
         ));
+    }
+
+    #[test]
+    fn a_known_repository_is_reused_and_an_unmatched_one_is_not_looked_at_again() {
+        let mut state = in_repo(github());
+        let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
+            panic!()
+        };
+        state.update(AppIntent::PullRequestsCached {
+            tag,
+            repo: repo(),
+            badges: None,
+        });
+        state.update(AppIntent::PullRequestsFetched {
+            tag,
+            result: Ok(HashMap::new()),
+        });
+        let known = |effects: &[Effect]| {
+            effects.iter().find_map(|e| match e {
+                Effect::LoadPullRequests { known, refresh, .. } => Some((known.clone(), *refresh)),
+                _ => None,
+            })
+        };
+        // A cache-only reload names the repository, so no remote is read.
+        let effects = list_branches(&mut state, &["main"]);
+        assert_eq!(known(&effects), Some((Some(repo()), false)));
+        // A refresh reads the remote again.
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let (tag, _) = loads(&effects)[0];
+        assert_eq!(known(&effects), Some((None, true)));
+
+        // Once the remote matched no host, reloads start nothing, until a
+        // user fetch asks again.
+        state.update(AppIntent::ForgeRepoNone { tag });
+        assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        assert_eq!(known(&effects), Some((None, true)));
     }
 
     #[test]

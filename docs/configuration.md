@@ -191,8 +191,10 @@ github = ["github.com", "github.example.com"]
   (Windows). It holds the host, owner, repository name and path, and each
   branch's number, state and checks, nothing else. Only you can read it.
 - When GitHub cannot be reached, a line at the bottom of the Branches panel
-  says why (`GitHub: offline`, `GitHub: not logged in · …`, `GitHub: gh not
-  found · …`), and the cached badges stay. Nothing else waits on it.
+  says why (`GitHub: offline`, `GitHub: not logged in`, `GitHub: gh not
+  found`, …), and the badges already shown stay, marked `· cached`. Where
+  the panel is wide enough, the line also says what to do, such as
+  `run gh auth login --hostname github.com`. Nothing else waits on it.
 
 **Changes to `[forge]` take effect after a restart.**
 

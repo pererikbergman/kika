@@ -4,10 +4,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::ForgeHost;
 use super::cache::{self, CacheKey};
 use super::github::{GhRunner, fetch_badges};
 use super::remote::{matches, parse_remote};
+use super::{ForgeHost, ForgeRepo};
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
@@ -31,6 +31,8 @@ pub struct Load<'a> {
     pub hosts: &'a [ForgeHost],
     pub branches: &'a [BranchName],
     pub refresh: bool,
+    /// The repository an earlier load found; the remote is then not read.
+    pub known: Option<&'a ForgeRepo>,
     /// The repository's canonical top level, for the cache key.
     pub top: Option<PathBuf>,
     /// Seconds since the epoch, stored with the cache entry.
@@ -46,9 +48,11 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         send(AppIntent::ForgeRepoNone { tag });
         return;
     }
-    let found = read_remote_url(git)
-        .and_then(|url| parse_remote(&url))
-        .and_then(|repo| Some((matches(&repo, load.hosts)?, repo)));
+    let found = match load.known {
+        Some(repo) => Some(repo.clone()),
+        None => read_remote_url(git).and_then(|url| parse_remote(&url)),
+    }
+    .and_then(|repo| Some((matches(&repo, load.hosts)?, repo)));
     let Some((host, repo)) = found else {
         send(AppIntent::ForgeRepoNone { tag });
         return;
@@ -128,12 +132,25 @@ mod tests {
         refresh: bool,
         top: Option<PathBuf>,
     ) -> Vec<AppIntent> {
+        run_known(git, ctx, hosts, branches, refresh, top, None)
+    }
+
+    fn run_known(
+        git: &FakeRunner,
+        ctx: &ForgeContext,
+        hosts: &[ForgeHost],
+        branches: &[BranchName],
+        refresh: bool,
+        top: Option<PathBuf>,
+        known: Option<&ForgeRepo>,
+    ) -> Vec<AppIntent> {
         let sent = Mutex::new(Vec::new());
         let load = Load {
             tag: tag(),
             hosts,
             branches,
             refresh,
+            known,
             top,
             now: 42,
         };
@@ -208,9 +225,11 @@ mod tests {
         assert_eq!(gh.calls()[0].host, "github.com");
         assert_eq!(gh.calls()[0].cwd, cache_dir);
 
-        // The next load reads what that one stored, and asks nobody.
-        let git = origin(b"https://GitHub.com/acme/widgets.git");
-        let sent = run(&git, &ctx, &hosts(), &branches, false, top);
+        // The next load, knowing the repository, reads what that one
+        // stored and runs nothing: no git, no gh.
+        let git = FakeRunner::new();
+        let sent = run_known(&git, &ctx, &hosts(), &branches, false, top, Some(&repo));
+        git.assert_done();
         assert_eq!(
             sent,
             [AppIntent::PullRequestsCached {
@@ -270,6 +289,7 @@ mod tests {
                 hosts: &hosts(),
                 branches: &branches,
                 refresh: true,
+                known: None,
                 top: top.clone(),
                 now: 1,
             };
