@@ -804,13 +804,91 @@ async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
 
     let mut app = Harness::start_with(CliRunner::isolated(top), 80, 24).await;
 
+    // The welcome first, with no status asked for yet.
+    app.assert_screen_contains("Not a git repository");
+    app.assert_screen_contains("Initialise a repository here");
+    assert_eq!(app.state().status_error, None);
+
+    // Closed, git's own error shows as it always did.
+    app.press(KeyCode::Esc).await;
     let error = app.state().status_error.clone().expect("status failed");
     assert!(error.contains("not a git repository"), "{error}");
     app.assert_screen_contains("not a git repository");
     assert!(!app.state().should_quit);
+    app.press(KeyCode::Esc).await;
     app.press(KeyCode::Char('r')).await;
     assert!(!app.state().should_quit);
     app.assert_screen_contains("not a git repository");
+
+    // And O brings the welcome back.
+    app.press(KeyCode::Esc).await;
+    app.press_with(KeyCode::Char('O'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains("Initialise a repository here");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn started_outside_a_repository_i_initialises_it_and_the_files_load() {
+    let outside = crate::git::fake::TempDir::new("outside");
+    let launch = outside.path().to_path_buf();
+    std::fs::write(launch.join("notes.txt"), "hello\n").unwrap();
+
+    let mut app = Harness::start_with(CliRunner::isolated(&launch), 80, 24).await;
+    app.assert_screen_contains("Initialise a repository here");
+    app.press(KeyCode::Char('i')).await;
+
+    assert!(launch.join(".git").is_dir());
+    let repo = app.state().repo.clone().expect("a repository is open");
+    assert_eq!(repo.canonicalize().unwrap(), launch.canonicalize().unwrap());
+    assert!(app.state().popups.is_empty(), "{}", app.screen().join("\n"));
+    assert_eq!(app.state().status_error, None);
+    assert_eq!(app.selected_line().as_deref(), Some("?? notes.txt"));
+    app.assert_screen_contains("+hello");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recent_list_switches_repositories_and_back_restores_the_view() {
+    use crate::intent::AppIntent;
+    use crate::model::Focus;
+
+    let a = TestRepo::new()
+        .write("a1.txt", "one\n")
+        .write("a2.txt", "one\n")
+        .commit("init")
+        .write("a1.txt", "two\n")
+        .write("a2.txt", "two\n");
+    let b = TestRepo::new()
+        .write("b.txt", "one\n")
+        .commit("init")
+        .write("b.txt", "bee\n");
+    let mut app = Harness::start(&a).await;
+    let a_top = app.state().repo.clone().expect("started in a");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.selected_line().as_deref(), Some("M a2.txt"));
+
+    // O, with B on the list, then Enter: B's files.
+    app.press_with(KeyCode::Char('O'), KeyModifiers::SHIFT)
+        .await;
+    app.intent(AppIntent::RecentLoaded(vec![
+        a_top.clone(),
+        b.path().to_path_buf(),
+    ]))
+    .await;
+    app.assert_screen_contains(" Recent repositories ");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().repo.as_deref(), Some(b.path()));
+    assert_eq!(app.selected_line().as_deref(), Some("M b.txt"));
+    app.assert_screen_contains("+bee");
+    assert_eq!(app.state().focus, Focus::Files);
+
+    // Back to A: the same file, with the Diff pane focused.
+    app.intent(AppIntent::OpenRepo(a_top.clone())).await;
+    assert_eq!(app.state().repo, Some(a_top));
+    assert_eq!(app.selected_line().as_deref(), Some("M a2.txt"));
+    assert!(matches!(app.state().focus, Focus::Diff(_)));
+    app.assert_screen_contains("+two");
+    assert_eq!(app.state().status_error, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1040,10 +1118,10 @@ async fn a_line_is_staged_through_a_renderer_view() {
     }])
     .await;
 
+    app.press(KeyCode::Enter).await;
     app.press_with(KeyCode::Char('R'), KeyModifiers::SHIFT)
         .await;
-    app.assert_screen_contains(" Diff · cat ");
-    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains(" Unstaged · cat ");
     app.press(KeyCode::Char('v')).await;
     app.assert_screen_contains(" Unstaged · lines · cat ");
     let shown = app

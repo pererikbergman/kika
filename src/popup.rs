@@ -2,6 +2,8 @@
 //! one-line prompts and errors. Pure types; the model owns the stack and
 //! each popup hands its result back as an intent.
 
+use std::borrow::Cow;
+
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::commit_editor::{byte_at, char_len};
@@ -10,6 +12,7 @@ use crate::git::ops::GitOp;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
+use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
 
 /// One entry on the popup stack. The top one takes the keys.
@@ -21,6 +24,7 @@ pub enum Popup {
     Error(ErrorPopup),
     Discard(DiscardConfirm),
     Submodules(SubmoduleList),
+    Recent(RecentList),
 }
 
 /// "Throw this work away?" Unlike [`ConfirmKind`], it carries the op chosen
@@ -157,17 +161,22 @@ impl LineInput {
 pub struct ErrorPopup {
     pub title: String,
     pub message: String,
-    pub next: &'static str,
+    /// Usually fixed text; owned when it names a key from the user's keymap.
+    pub next: Cow<'static, str>,
 }
 
 impl ErrorPopup {
     /// The message is made safe to draw here, whatever its source, since it
     /// can quote repo-controlled paths.
-    pub fn new(title: impl Into<String>, message: &str, next: &'static str) -> Self {
+    pub fn new(
+        title: impl Into<String>,
+        message: &str,
+        next: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self {
             title: title.into(),
             message: terminal_safe(message.as_bytes()),
-            next,
+            next: next.into(),
         }
     }
 }

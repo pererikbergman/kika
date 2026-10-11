@@ -1,6 +1,9 @@
+use std::path::PathBuf;
+
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
+use crate::config::ConfigError;
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::blame::BlameLine;
@@ -10,7 +13,7 @@ use crate::git::patch::FilePatch;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
-use crate::keymap::KeyPress;
+use crate::keymap::{KeyPress, Keymap};
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::watch::WatchEvent;
@@ -221,6 +224,36 @@ pub enum AppIntent {
     DiffRendered {
         tag: Tag,
         result: Result<Vec<StyledRow>, String>,
+    },
+    /// The first intent: record the repository Kika started in and load
+    /// it, or, outside one, welcome the user with the recent list.
+    Start,
+    /// Show the recent repositories, to switch to one.
+    OpenRecent,
+    /// The recent list as now recorded on disk.
+    RecentLoaded(Vec<PathBuf>),
+    /// Move the recent list's cursor down or up.
+    RecentNext,
+    RecentPrev,
+    /// Open the row under the recent list's cursor.
+    RecentSelect,
+    /// Switch the whole workspace to the repository at this top level.
+    OpenRepo(PathBuf),
+    /// Make the launch directory a repository.
+    InitRepo,
+    /// `git init` finished: the new top level, or why it failed.
+    RepoInitialised {
+        tag: Tag,
+        result: Result<PathBuf, String>,
+    },
+    /// The config files were read: the keys now in force, and the files
+    /// that were ignored and why.
+    ConfigLoaded {
+        /// The top level the files were read for, so a result that
+        /// arrives after a repository switch can be told apart.
+        repo: Option<PathBuf>,
+        keymap: Keymap,
+        errors: Vec<ConfigError>,
     },
 }
 

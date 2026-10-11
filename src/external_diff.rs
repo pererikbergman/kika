@@ -26,7 +26,8 @@ pub struct ExternalRenderer {
 
 /// What `R` says when there is nothing to cycle through, and where
 /// renderers are found.
-pub const NO_RENDERER: &str = "No renderer: set KIKA_DIFF_PAGER or global pager.diff/core.pager";
+pub const NO_RENDERER: &str =
+    "No renderer: set [diff] pager in the global config or git core.pager";
 
 /// The most diff fed to a renderer, and the most output taken back.
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -68,37 +69,28 @@ pub fn parse_command(value: &str) -> Result<Vec<OsString>, &'static str> {
     Ok(argv)
 }
 
-/// The renderers to offer, in cycle order: `KIKA_DIFF_PAGER` (passed in as
-/// `env`), then the user's global `pager.diff` and `core.pager`. Only
-/// global config is read: a repository's own config can come with a copy
-/// from someone else, and renderers run without the user typing a command.
-pub fn discover(runner: &dyn GitRunner, env: Option<String>) -> Vec<ExternalRenderer> {
+/// The renderers to offer, in cycle order: `configured` (the global Kika
+/// config's `[diff] pager`), then the user's global git `pager.diff` and
+/// `core.pager`. Only global config is read: a repository's own config can
+/// come with a copy from someone else, and renderers run without the user
+/// typing a command. Switches and plain viewers are skipped from any source.
+pub fn discover(runner: &dyn GitRunner, configured: Option<String>) -> Vec<ExternalRenderer> {
+    let git = ["pager.diff", "core.pager"]
+        .into_iter()
+        .map(|key| global_config(runner, key));
     let mut found: Vec<ExternalRenderer> = Vec::new();
-    let mut add = |argv: Vec<OsString>| {
-        if !found.iter().any(|r| r.argv == argv) {
-            found.push(ExternalRenderer {
-                label: basename(&argv[0]),
-                argv,
-            });
-        }
-    };
-    if let Some(argv) = env.and_then(|value| parse_command(&value).ok()) {
-        add(argv);
-    }
-    for key in ["pager.diff", "core.pager"] {
-        let Some(value) = global_config(runner, key) else {
-            continue;
-        };
+    for value in std::iter::once(configured).chain(git).flatten() {
         if BOOLEANS.contains(&value.to_ascii_lowercase().as_str()) {
             continue;
         }
         let Ok(argv) = parse_command(&value) else {
             continue;
         };
-        if VIEWERS.contains(&basename(&argv[0]).as_str()) {
+        let label = basename(&argv[0]);
+        if VIEWERS.contains(&label.as_str()) || found.iter().any(|r| r.argv == argv) {
             continue;
         }
-        add(argv);
+        found.push(ExternalRenderer { label, argv });
     }
     found
 }
@@ -401,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_puts_the_env_first_then_pager_diff_then_core_pager() {
+    fn discover_puts_the_kika_pager_first_then_pager_diff_then_core_pager() {
         let runner = FakeRunner::new()
             .expect(&PAGER, ok(b"delta --dark\n"))
             .expect(&CORE, ok(b"/opt/bin/diff-so-fancy\n"));
@@ -436,6 +428,12 @@ mod tests {
                 .expect(&PAGER, ok(value))
                 .expect(&CORE, ok(b""));
             assert!(discover(&runner, None).is_empty(), "{value:?}");
+            // The same rules hold for Kika's own `[diff] pager`.
+            let runner = FakeRunner::new()
+                .expect(&PAGER, ok(b""))
+                .expect(&CORE, ok(b""));
+            let configured = String::from_utf8(value.to_vec()).unwrap();
+            assert!(discover(&runner, Some(configured)).is_empty(), "{value:?}");
         }
     }
 
