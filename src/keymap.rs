@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
-use crate::git::status::EntryKind;
+use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::menu::MenuId;
@@ -123,6 +123,8 @@ pub enum KeyScope {
     CommitError,
     /// "Discard the typed message?"
     CommitDiscard,
+    /// Reading the last commit's message to amend it.
+    CommitLoading,
     /// A menu on top of the popup stack.
     Menu,
     /// A yes/no question on top of the popup stack.
@@ -150,6 +152,7 @@ impl KeyScope {
             | KeyScope::CommitEditor
             | KeyScope::CommitError
             | KeyScope::CommitDiscard
+            | KeyScope::CommitLoading
             | KeyScope::Menu
             | KeyScope::Confirm
             | KeyScope::Prompt
@@ -172,6 +175,7 @@ impl KeyScope {
             KeyScope::CommitEditor => "Commit message",
             KeyScope::CommitError => "Commit failed",
             KeyScope::CommitDiscard => "Discard message",
+            KeyScope::CommitLoading => "Loading the last commit",
             KeyScope::Menu => "Menu",
             KeyScope::Confirm => "Question",
             KeyScope::Prompt => "Prompt",
@@ -374,6 +378,24 @@ pub(crate) fn commit_disabled(state: &AppState) -> Option<&'static str> {
         Some("Nothing to commit")
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
         Some("Resolve conflicts before committing")
+    } else {
+        None
+    }
+}
+
+/// Why the last commit cannot be amended right now. A clean tree is
+/// fine: amending then only changes the message.
+pub(crate) fn amend_disabled(state: &AppState) -> Option<&'static str> {
+    let no_commit = match &state.branch {
+        None => true,
+        Some(branch) => matches!(branch.head, Head::Unborn(_)),
+    };
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if no_commit {
+        Some("No commit to amend")
+    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+        Some("Resolve conflicts before amending")
     } else {
         None
     }
@@ -584,6 +606,16 @@ static REGISTRY: &[Binding] = &[
         label: "commit",
         bar: true,
         disabled: commit_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Char('A'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenAmend,
+        description: "Amend the last commit with the staged changes, or reword it",
+        label: "amend",
+        // Left out of the bar until the layout review (#10).
+        bar: false,
+        disabled: amend_disabled,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
@@ -848,6 +880,25 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: commit_editor_disabled,
     },
+    // Out of the bar, which is full at 80 columns; the help menu lists them.
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::ToggleNoVerify,
+        description: "Skip the pre-commit and commit-msg hooks for this commit",
+        label: "skip hooks",
+        bar: false,
+        disabled: commit_editor_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('e'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitEditor,
+        intent: AppIntent::EditCommitExternally,
+        description: "Write the message in your editor, then commit when it closes",
+        label: "editor",
+        bar: false,
+        disabled: commit_editor_disabled,
+    },
     Binding {
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitEditor,
@@ -896,6 +947,24 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::DismissCommitError,
         description: "Back to the message",
         label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::CommitLoading,
+        intent: AppIntent::CancelCommit,
+        description: "Do not amend",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitLoading,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
         bar: true,
         disabled: never,
     },
@@ -1409,6 +1478,92 @@ mod tests {
         state.op_seq = None;
         state.files.pop();
         assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
+    }
+
+    #[test]
+    fn shift_a_amends_unless_an_op_runs_there_is_no_commit_or_there_are_conflicts() {
+        use crate::git::status::{BranchStatus, Head};
+
+        let a = |state: &AppState| {
+            let k = key(KeyCode::Char('A'), KeyModifiers::SHIFT);
+            match resolve(registry(), KeyScope::Files, state, k) {
+                Resolution::Run(binding) => Ok(binding.intent.clone()),
+                Resolution::Disabled(reason) => Err(reason),
+                Resolution::Unbound => panic!("A is unbound"),
+            }
+        };
+        let branch = |head| BranchStatus {
+            head,
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![],
+        };
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(
+            a(&state),
+            Err("No commit to amend"),
+            "before the first load"
+        );
+        state.branch = Some(branch(Head::Unborn("main".into())));
+        assert_eq!(a(&state), Err("No commit to amend"));
+
+        // A clean tree with commits: nothing staged is a message-only amend.
+        state.branch = Some(branch(Head::Branch("main".into())));
+        assert!(state.files.is_empty());
+        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+        state.branch = Some(branch(Head::Detached("abc".into())));
+        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+
+        state.op_seq = Some(1);
+        assert_eq!(a(&state), Err(OP_RUNNING));
+        state.op_seq = None;
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: 'U',
+            worktree: 'U',
+            kind: EntryKind::Conflicted,
+        }];
+        assert_eq!(a(&state), Err("Resolve conflicts before amending"));
+    }
+
+    #[test]
+    fn the_commit_editor_binds_skip_hooks_and_the_external_editor() {
+        use AppIntent::*;
+        let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let editor = |k| from(KeyScope::CommitEditor, k);
+        assert_eq!(editor(ctrl('n')), Some(ToggleNoVerify));
+        assert_eq!(editor(ctrl('e')), Some(EditCommitExternally));
+        assert_eq!(editor(plain('n')), None, "n is typed");
+        assert_eq!(editor(plain('e')), None, "e is typed");
+
+        let mut state = AppState::new(Context::Workspace);
+        state.commit = CommitFlow::Running(crate::commit_editor::CommitEditor::new(false));
+        state.op_seq = Some(1);
+        for c in ['n', 'e'] {
+            assert!(matches!(
+                resolve(registry(), KeyScope::CommitEditor, &state, ctrl(c)),
+                Resolution::Disabled(OP_RUNNING)
+            ));
+        }
+    }
+
+    #[test]
+    fn loading_the_last_commit_only_cancels_or_quits() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::CommitLoading.parent(), None);
+        let loading = |k| from(KeyScope::CommitLoading, k);
+        assert_eq!(
+            loading(key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(CancelCommit)
+        );
+        assert_eq!(
+            loading(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Quit)
+        );
+        for k in [plain('q'), plain('?'), plain('A'), plain(' ')] {
+            assert_eq!(loading(k), None, "{k:?}");
+        }
     }
 
     #[test]

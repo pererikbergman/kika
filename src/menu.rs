@@ -2,7 +2,7 @@
 //! is an intent, and it can be disabled with a reason, as a key can.
 
 use crate::intent::AppIntent;
-use crate::keymap::{commit_disabled, never, stage_all_disabled, stage_disabled};
+use crate::keymap::{amend_disabled, commit_disabled, never, stage_all_disabled, stage_disabled};
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
 
@@ -44,6 +44,11 @@ static ACTIONS: &[MenuItem] = &[
         label: "Commit…",
         intent: AppIntent::OpenCommit,
         disabled: commit_disabled,
+    },
+    MenuItem {
+        label: "Amend last commit…",
+        intent: AppIntent::OpenAmend,
+        disabled: amend_disabled,
     },
     MenuItem {
         label: "Go to file…",

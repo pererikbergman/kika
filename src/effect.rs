@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
+use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
 use crate::git::status::read_status;
 use crate::handoff::HandOff;
@@ -25,6 +26,11 @@ pub struct Tag {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     LoadStatus {
+        tag: Tag,
+    },
+    /// Read `HEAD`'s message to amend it; always answered by one
+    /// `HeadMessageLoaded`.
+    LoadHeadMessage {
         tag: Tag,
     },
     /// Stream the diff for `request`, reading `want` lines before pausing.
@@ -98,6 +104,18 @@ impl Runtime {
                         .unwrap_or_else(|e| Err(format!("git status crashed: {e}")));
                     // A closed channel means the app is quitting; nothing to report to.
                     let _ = tx.send(AppIntent::StatusLoaded { tag, result });
+                });
+            }
+            Effect::LoadHeadMessage { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_head_message(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
+                            });
+                    let _ = tx.send(AppIntent::HeadMessageLoaded { tag, result });
                 });
             }
             Effect::LoadPatch { tag, request } => {
@@ -330,6 +348,57 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_head_message_reports_back_with_the_same_tag() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["log", "-1", "--format=%B", "HEAD", "--"],
+            ok(b"subj\n\nbody\n\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadHeadMessage { tag });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::HeadMessageLoaded {
+                tag,
+                result: Ok("subj\n\nbody".into()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_head_message_load_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 5,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadHeadMessage { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::HeadMessageLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git log crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed HeadMessageLoaded, got {other:?}"),
         }
     }
 

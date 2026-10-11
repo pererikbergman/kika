@@ -30,6 +30,10 @@ pub enum CommitFlow {
     Closed,
     /// Nothing is staged; asking whether to stage everything and commit.
     ConfirmStageAll,
+    /// Reading `HEAD`'s message to amend it; `seq` is the load's.
+    LoadingAmend {
+        seq: u64,
+    },
     Editing(CommitEditor),
     /// Asking whether to throw this typed message away.
     ConfirmDiscard(CommitEditor),
@@ -238,10 +242,15 @@ impl AppState {
             AppIntent::CancelCommit => {
                 let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
                 self.commit = match commit {
-                    CommitFlow::Editing(editor) if !editor.is_blank() => {
+                    // An untouched amend has nothing typed to lose.
+                    CommitFlow::Editing(editor)
+                        if !editor.is_blank() && !editor.message_unchanged() =>
+                    {
                         CommitFlow::ConfirmDiscard(editor)
                     }
-                    CommitFlow::ConfirmStageAll | CommitFlow::Editing(_) => CommitFlow::Closed,
+                    CommitFlow::ConfirmStageAll
+                    | CommitFlow::LoadingAmend { .. }
+                    | CommitFlow::Editing(_) => CommitFlow::Closed,
                     other => other,
                 };
             }
@@ -262,6 +271,22 @@ impl AppState {
                 if let CommitFlow::Editing(editor) = &mut self.commit {
                     editor.toggle_field();
                 }
+            }
+            AppIntent::OpenAmend => return self.open_amend(),
+            AppIntent::HeadMessageLoaded { tag, result } => self.head_message_loaded(tag, result),
+            AppIntent::ToggleNoVerify => {
+                if let CommitFlow::Editing(editor) = &mut self.commit {
+                    editor.no_verify = !editor.no_verify;
+                }
+            }
+            AppIntent::EditCommitExternally => {
+                if let CommitFlow::Editing(editor) = &self.commit {
+                    let initial = editor.message();
+                    return vec![Effect::HandOff(HandOff::EditCommitMessage { initial })];
+                }
+            }
+            AppIntent::CommitMessageEdited { result } => {
+                return self.commit_message_edited(result);
             }
             AppIntent::DismissCommitError => {
                 let commit = std::mem::replace(&mut self.commit, CommitFlow::Closed);
@@ -334,6 +359,7 @@ impl AppState {
         match self.commit {
             CommitFlow::Closed => {}
             CommitFlow::ConfirmStageAll => return KeyScope::CommitConfirm,
+            CommitFlow::LoadingAmend { .. } => return KeyScope::CommitLoading,
             CommitFlow::ConfirmDiscard(_) => return KeyScope::CommitDiscard,
             CommitFlow::Editing(_) | CommitFlow::Running(_) => return KeyScope::CommitEditor,
             CommitFlow::Failed { .. } => return KeyScope::CommitError,
@@ -872,6 +898,45 @@ impl AppState {
         };
     }
 
+    /// Open the popup to amend `HEAD`, once its message is read. Nothing
+    /// is asked about staging: with nothing staged, only the message changes.
+    fn open_amend(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
+            return vec![];
+        }
+        let seq = self.take_seq();
+        self.busy += 1;
+        self.commit = CommitFlow::LoadingAmend { seq };
+        vec![Effect::LoadHeadMessage {
+            tag: Tag {
+                generation: self.generation,
+                seq,
+                user: true,
+            },
+        }]
+    }
+
+    fn head_message_loaded(&mut self, tag: Tag, result: Result<String, String>) {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        let current = CommitFlow::LoadingAmend { seq: tag.seq };
+        if tag.generation != self.generation || self.commit != current {
+            return;
+        }
+        match result {
+            Ok(message) => self.commit = CommitFlow::Editing(CommitEditor::amend(&message)),
+            Err(message) => {
+                self.commit = CommitFlow::Closed;
+                self.push_error(ErrorPopup::new(
+                    "Could not read the last commit",
+                    &message,
+                    "Nothing was changed. Fix the cause above, then try again.",
+                ));
+            }
+        }
+    }
+
     fn submit_commit(&mut self) -> Vec<Effect> {
         let CommitFlow::Editing(editor) = &self.commit else {
             return vec![];
@@ -880,16 +945,60 @@ impl AppState {
             self.notice = Some("Write a subject first");
             return vec![];
         }
+        // Git keeps `HEAD`'s own message, byte for byte, when it is untouched.
+        let message = (!editor.message_unchanged()).then(|| editor.message());
+        self.start_commit(message)
+    }
+
+    /// Commit the editor's choices with `message`, and wait for git with
+    /// the text kept.
+    fn start_commit(&mut self, message: Option<String>) -> Vec<Effect> {
+        let CommitFlow::Editing(editor) = &self.commit else {
+            return vec![];
+        };
         let editor = editor.clone();
         let op = GitOp::Commit {
-            message: editor.message(),
+            message,
             stage_all: editor.stage_all,
+            amend: editor.amend.is_some(),
+            no_verify: editor.no_verify,
         };
         let effects = self.start_op(Ok(Some(op)));
         if !effects.is_empty() {
             self.commit = CommitFlow::Running(editor);
         }
         effects
+    }
+
+    /// Back from writing the message in the editor: commit it as written,
+    /// or keep the popup as it was when there is nothing to commit.
+    fn commit_message_edited(&mut self, result: Result<Option<String>, String>) -> Vec<Effect> {
+        let CommitFlow::Editing(editor) = &self.commit else {
+            return vec![];
+        };
+        match result {
+            Ok(Some(message)) => {
+                self.commit = CommitFlow::Editing(CommitEditor {
+                    stage_all: editor.stage_all,
+                    no_verify: editor.no_verify,
+                    amend: editor.amend.clone(),
+                    ..CommitEditor::from_message(&message)
+                });
+                self.start_commit(Some(message))
+            }
+            Ok(None) => {
+                self.notice = Some("Empty message; commit aborted");
+                vec![]
+            }
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not open the editor",
+                    &message,
+                    "Your message is kept. Check core.editor, $VISUAL or $EDITOR, then try again.",
+                ));
+                vec![]
+            }
+        }
     }
 
     fn op_finished(&mut self, tag: Tag, op: GitOp, result: Result<(), String>) -> Vec<Effect> {
@@ -1016,6 +1125,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Unstage(_) => "Could not unstage",
         GitOp::StageAll => "Could not stage everything",
         GitOp::UnstageAll => "Could not unstage everything",
+        GitOp::Commit { amend: true, .. } => "Could not amend",
         GitOp::Commit { .. } => "Could not commit",
         GitOp::ApplyCached { reverse: false, .. } => "Could not stage the change",
         GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the change",
@@ -2017,8 +2127,10 @@ mod tests {
         assert_eq!(
             op,
             GitOp::Commit {
-                message: "subj\n\nline 1\nline 2\n".into(),
+                message: Some("subj\n\nline 1\nline 2\n".into()),
                 stage_all: false,
+                amend: false,
+                no_verify: false,
             }
         );
         assert!(tag.user);
@@ -2052,8 +2164,10 @@ mod tests {
         assert_eq!(
             op,
             GitOp::Commit {
-                message: "all\n".into(),
+                message: Some("all\n".into()),
                 stage_all: true,
+                amend: false,
+                no_verify: false,
             }
         );
     }
@@ -2255,6 +2369,282 @@ mod tests {
         assert_eq!(editor(&state).subject, "subj");
     }
 
+    fn head_load(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::LoadHeadMessage { tag }] => *tag,
+            other => panic!("expected one LoadHeadMessage, got {other:?}"),
+        }
+    }
+
+    /// `A` on a clean tree with commits: the popup is loading HEAD's message.
+    fn loading_amend() -> (AppState, Tag) {
+        let (mut state, _) = with_files(vec![], 24);
+        let busy = state.busy;
+        let tag = head_load(&press(&mut state, KeyCode::Char('A')));
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.commit, CommitFlow::LoadingAmend { seq: tag.seq });
+        assert_eq!(state.key_focus(), KeyScope::CommitLoading);
+        (state, tag)
+    }
+
+    fn head_loaded(tag: Tag, result: Result<&str, &str>) -> AppIntent {
+        AppIntent::HeadMessageLoaded {
+            tag,
+            result: result.map(Into::into).map_err(Into::into),
+        }
+    }
+
+    /// Amending HEAD's "subj\n\nbody", the popup open on it.
+    fn amending() -> AppState {
+        let (mut state, tag) = loading_amend();
+        let busy = state.busy;
+        assert_eq!(state.update(head_loaded(tag, Ok("subj\n\nbody"))), vec![]);
+        assert_eq!(state.busy, busy - 1);
+        state
+    }
+
+    #[test]
+    fn a_shift_a_loads_heads_message_into_the_popup() {
+        let state = amending();
+        let editor = editor(&state);
+        assert_eq!(editor.subject, "subj");
+        assert_eq!(editor.body, ["body"]);
+        assert!(editor.amend.is_some());
+        assert!(!editor.stage_all, "an amend never stages everything");
+        assert_eq!(state.key_focus(), KeyScope::CommitEditor);
+    }
+
+    #[test]
+    fn an_untouched_amend_keeps_heads_message() {
+        let mut state = amending();
+        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: None,
+                stage_all: false,
+                amend: true,
+                no_verify: false,
+            }
+        );
+        assert!(matches!(state.commit, CommitFlow::Running(_)));
+    }
+
+    #[test]
+    fn an_edited_amend_commits_the_new_message() {
+        let mut state = amending();
+        type_text(&mut state, "!");
+        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: Some("subj!\n\nbody\n".into()),
+                stage_all: false,
+                amend: true,
+                no_verify: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_failed_head_load_closes_the_popup_and_says_why() {
+        let (mut state, tag) = loading_amend();
+        state.update(head_loaded(tag, Err("fatal: bad HEAD")));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        match state.popups.last() {
+            Some(Popup::Error(error)) => {
+                assert_eq!(error.title, "Could not read the last commit")
+            }
+            other => panic!("expected an error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_while_loading_closes_and_the_late_result_is_ignored() {
+        let (mut state, tag) = loading_amend();
+        let busy = state.busy;
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert!(!state.should_quit);
+
+        state.update(head_loaded(tag, Ok("late")));
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.busy, busy - 1);
+    }
+
+    #[test]
+    fn a_stale_head_load_is_ignored_but_still_lowers_busy() {
+        let (mut state, tag) = loading_amend();
+        // Another user load in flight, so two decrements stay above zero.
+        state.busy += 1;
+        let busy = state.busy;
+        state.update(head_loaded(
+            Tag {
+                seq: tag.seq + 99,
+                ..tag
+            },
+            Ok("other"),
+        ));
+        assert_eq!(state.commit, CommitFlow::LoadingAmend { seq: tag.seq });
+        state.update(head_loaded(
+            Tag {
+                generation: tag.generation + 1,
+                ..tag
+            },
+            Ok("other"),
+        ));
+        assert_eq!(state.commit, CommitFlow::LoadingAmend { seq: tag.seq });
+        assert_eq!(state.busy, busy - 2);
+    }
+
+    #[test]
+    fn esc_on_an_untouched_amend_closes_at_once() {
+        let mut state = amending();
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn a_shift_a_is_refused_on_an_unborn_branch_or_while_an_op_runs() {
+        let (mut state, _) = with_files(vec![], 24);
+        state.branch = Some(BranchStatus {
+            head: Head::Unborn("main".into()),
+            ..on_branch("main")
+        });
+        assert_eq!(press(&mut state, KeyCode::Char('A')), vec![]);
+        assert_eq!(state.notice, Some("No commit to amend"));
+        assert_eq!(state.commit, CommitFlow::Closed);
+
+        let (mut state, _) = with_files(three_files(), 24);
+        state.op_seq = Some(7);
+        assert_eq!(press(&mut state, KeyCode::Char('A')), vec![]);
+        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn open_amend_does_nothing_with_a_popup_already_open() {
+        let mut state = editing();
+        assert_eq!(state.update(AppIntent::OpenAmend), vec![]);
+        assert!(editor(&state).amend.is_none());
+    }
+
+    #[test]
+    fn ctrl_n_toggles_skipping_hooks_and_the_commit_carries_it() {
+        let mut state = editing();
+        assert!(!editor(&state).no_verify);
+        ctrl(&mut state, 'n');
+        assert!(editor(&state).no_verify);
+        ctrl(&mut state, 'n');
+        assert!(!editor(&state).no_verify);
+        ctrl(&mut state, 'n');
+        type_text(&mut state, "subj");
+        let (_, op) = op_of(&ctrl(&mut state, 's'));
+        assert!(
+            matches!(
+                op,
+                GitOp::Commit {
+                    no_verify: true,
+                    ..
+                }
+            ),
+            "{op:?}"
+        );
+
+        let (_, _, op) = submitted();
+        assert!(
+            matches!(
+                op,
+                GitOp::Commit {
+                    no_verify: false,
+                    ..
+                }
+            ),
+            "{op:?}"
+        );
+    }
+
+    #[test]
+    fn ctrl_e_hands_the_current_message_to_the_editor() {
+        let mut state = editing();
+        type_text(&mut state, "subj\nbody");
+        let before = state.commit.clone();
+        assert_eq!(
+            ctrl(&mut state, 'e'),
+            vec![Effect::HandOff(HandOff::EditCommitMessage {
+                initial: "subj\n\nbody\n".into()
+            })]
+        );
+        assert_eq!(state.commit, before);
+    }
+
+    #[test]
+    fn a_message_from_the_editor_commits_right_away_keeping_the_choices() {
+        let mut state = amending();
+        ctrl(&mut state, 'n');
+        let busy = state.busy;
+        let effects = state.update(AppIntent::CommitMessageEdited {
+            result: Ok(Some("x\n\ny\n".into())),
+        });
+        let (tag, op) = op_of(&effects);
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: Some("x\n\ny\n".into()),
+                stage_all: false,
+                amend: true,
+                no_verify: true,
+            }
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.busy, busy + 1);
+        match &state.commit {
+            CommitFlow::Running(editor) => {
+                assert_eq!(editor.subject, "x");
+                assert_eq!(editor.body, ["y"]);
+                assert!(editor.no_verify && editor.amend.is_some());
+            }
+            other => panic!("expected Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_emptied_message_aborts_the_commit_and_keeps_the_text() {
+        let mut state = editing();
+        type_text(&mut state, "keep me");
+        let before = state.commit.clone();
+        let effects = state.update(AppIntent::CommitMessageEdited { result: Ok(None) });
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.commit, before);
+        assert_eq!(state.notice, Some("Empty message; commit aborted"));
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn an_editor_failure_shows_an_error_over_the_kept_text() {
+        let mut state = editing();
+        type_text(&mut state, "keep me");
+        let effects = state.update(AppIntent::CommitMessageEdited {
+            result: Err("The editor exited with 3".into()),
+        });
+        assert_eq!(effects, vec![]);
+        assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(editor(&state).subject, "keep me");
+    }
+
+    #[test]
+    fn an_edited_message_with_no_popup_open_is_dropped() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let effects = state.update(AppIntent::CommitMessageEdited {
+            result: Ok(Some("x\n".into())),
+        });
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.commit, CommitFlow::Closed);
+        assert_eq!(state.op_seq, None);
+    }
+
     fn menu(id: MenuId, cursor: usize) -> Popup {
         Popup::Menu { id, cursor }
     }
@@ -2290,9 +2680,9 @@ mod tests {
         for _ in 0..10 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.popups, [menu(MenuId::Actions, 4)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 5)]);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.popups, [menu(MenuId::Actions, 3)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, 4)]);
         // The file selection did not move.
         assert_eq!(state.selected, Some(0));
     }
@@ -2329,10 +2719,32 @@ mod tests {
     }
 
     #[test]
+    fn the_amend_item_follows_commit_and_opens_the_amend() {
+        let (mut state, _) = with_files(vec![], 24);
+        let items = menu::items(MenuId::Actions);
+        assert_eq!(items[1].label, "Commit…");
+        assert_eq!(items[2].label, "Amend last commit…");
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        state.update(AppIntent::MenuNext);
+        state.update(AppIntent::MenuNext);
+        head_load(&state.update(AppIntent::MenuSelect));
+        assert_eq!(state.popups, []);
+        assert!(matches!(state.commit, CommitFlow::LoadingAmend { .. }));
+
+        state.branch = None;
+        state.commit = CommitFlow::Closed;
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        state.update(AppIntent::MenuNext);
+        state.update(AppIntent::MenuNext);
+        assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
+        assert_eq!(state.notice, Some("No commit to amend"));
+    }
+
+    #[test]
     fn the_quit_item_asks_first_and_y_quits() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..4 {
+        for _ in 0..5 {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);

@@ -23,9 +23,16 @@ pub enum GitOp {
     /// cached passphrase or a GUI pinentry), but a terminal pinentry is not
     /// supported: it fails, or blocks and shows as "Committing…" until git
     /// exits or Ctrl+C quits Kika, which stops git and its hooks.
+    ///
+    /// With `amend`, the staged changes are folded into `HEAD` instead; a
+    /// `None` message keeps `HEAD`'s, and is only valid with `amend`. With
+    /// `no_verify`, git skips the pre-commit and commit-msg hooks, and only
+    /// then, since a hook is the user's own check.
     Commit {
-        message: String,
+        message: Option<String>,
         stage_all: bool,
+        amend: bool,
+        no_verify: bool,
     },
     /// Apply `patch` to the index only, from stdin; with `reverse`, take it
     /// back out. How a hunk or some lines are staged or unstaged.
@@ -151,11 +158,23 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg("--whitespace=nowarn")
             .arg("-")
             .stdin(patch.clone()),
-        GitOp::Commit { message, .. } => {
-            return GitCommand::new("commit")
-                .arg("-F")
-                .arg("-")
-                .stdin(message.clone().into_bytes());
+        GitOp::Commit {
+            message,
+            amend,
+            no_verify,
+            ..
+        } => {
+            let cmd = GitCommand::new("commit");
+            let cmd = if *amend { cmd.arg("--amend") } else { cmd };
+            let cmd = if *no_verify {
+                cmd.arg("--no-verify")
+            } else {
+                cmd
+            };
+            return match message {
+                Some(message) => cmd.arg("-F").arg("-").stdin(message.clone().into_bytes()),
+                None => cmd.arg("--no-edit"),
+            };
         }
     };
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
@@ -858,9 +877,142 @@ mod tests {
 
     fn commit(message: &str, stage_all: bool) -> GitOp {
         GitOp::Commit {
-            message: message.into(),
+            message: Some(message.into()),
             stage_all,
+            amend: false,
+            no_verify: false,
         }
+    }
+
+    #[test]
+    fn amend_and_skip_hooks_add_their_flags_before_the_message_source() {
+        let op = |message: Option<&str>, amend, no_verify| GitOp::Commit {
+            message: message.map(Into::into),
+            stage_all: false,
+            amend,
+            no_verify,
+        };
+        /// The op, its argv and its stdin.
+        type Case = (GitOp, &'static [&'static str], Option<&'static [u8]>);
+        let cases: [Case; 5] = [
+            (
+                op(Some("m\n"), false, false),
+                &["commit", "-F", "-"],
+                Some(b"m\n"),
+            ),
+            (
+                op(Some("m\n"), true, false),
+                &["commit", "--amend", "-F", "-"],
+                Some(b"m\n"),
+            ),
+            (
+                op(None, true, false),
+                &["commit", "--amend", "--no-edit"],
+                None,
+            ),
+            (
+                op(Some("m\n"), false, true),
+                &["commit", "--no-verify", "-F", "-"],
+                Some(b"m\n"),
+            ),
+            (
+                op(None, true, true),
+                &["commit", "--amend", "--no-verify", "--no-edit"],
+                None,
+            ),
+        ];
+        for (op, argv, input) in cases {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+            assert_eq!(runner.envs(), [vec![]], "{op:?}");
+            assert_eq!(runner.inputs(), [input.map(<[u8]>::to_vec)], "{op:?}");
+        }
+    }
+
+    /// One commit of `a.txt` as `one`, with an identity, no signing and only
+    /// this repo's hooks, then `a.txt` changed to `two` and staged.
+    fn committed_and_staged_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("amend");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--template="]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".git/hooks"),
+        ] {
+            git(dir, &["config", key, value]);
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "first\n\nbody"]);
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        git(dir, &["add", "-A"]);
+        tmp
+    }
+
+    #[test]
+    fn amend_folds_the_staged_change_into_head_and_keeps_or_replaces_the_message_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = committed_and_staged_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let amend = |message: Option<&str>| GitOp::Commit {
+            message: message.map(Into::into),
+            stage_all: false,
+            amend: true,
+            no_verify: false,
+        };
+
+        run_op(&runner, &amend(None)).unwrap();
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"1\n");
+        assert_eq!(git(dir, &["show", "HEAD:a.txt"]), b"two\n");
+        assert_eq!(
+            git(dir, &["log", "-1", "--format=%B"]),
+            b"first\n\nbody\n\n"
+        );
+        assert_eq!(git(dir, &["diff", "--cached"]), b"");
+
+        run_op(&runner, &amend(Some("new\n"))).unwrap();
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"1\n");
+        assert_eq!(git(dir, &["log", "-1", "--format=%B"]), b"new\n\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_pre_commit_hook_blocks_a_commit_unless_hooks_are_skipped_in_real_git() {
+        use crate::git::fake::git;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = committed_and_staged_repo();
+        let dir = tmp.path();
+        let hooks = dir.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint failed'\nexit 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let commit = |no_verify| GitOp::Commit {
+            message: Some("second\n".into()),
+            stage_all: false,
+            amend: false,
+            no_verify,
+        };
+
+        let blocked = run_op(&runner, &commit(false));
+        assert!(
+            blocked.as_ref().is_err_and(|e| e.contains("lint failed")),
+            "{blocked:?}"
+        );
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"1\n");
+
+        run_op(&runner, &commit(true)).unwrap();
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"2\n");
+        assert_eq!(git(dir, &["log", "-1", "--format=%B"]), b"second\n\n");
     }
 
     #[test]

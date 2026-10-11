@@ -24,6 +24,9 @@ pub enum HandOff {
     /// Let the user edit one hunk before it is staged. `header` is the
     /// `diff --git`/`---`/`+++` lines, `hunk` the `@@` line and its lines.
     EditHunk { header: Vec<u8>, hunk: Vec<u8> },
+    /// Let the user write the commit message in their editor, starting
+    /// from `initial`, the popup's text.
+    EditCommitMessage { initial: String },
 }
 
 impl HandOff {
@@ -53,6 +56,9 @@ pub fn execute(job: HandOff, runner: &dyn GitRunner, workdir: &Path) -> AppInten
         }
         HandOff::EditHunk { header, hunk } => AppIntent::HunkEdited {
             result: edit_hunk(&header, &hunk, runner, workdir),
+        },
+        HandOff::EditCommitMessage { initial } => AppIntent::CommitMessageEdited {
+            result: edit_commit_message(&initial, runner, workdir),
         },
     }
 }
@@ -176,8 +182,8 @@ fn edit_hunk(
     workdir: &Path,
 ) -> Result<Option<Vec<u8>>, String> {
     let editor = editor(runner)?;
-    let (temp, mut file) =
-        TempFile::create().map_err(|e| io_error("Could not create the hunk file", &e))?;
+    let (temp, mut file) = TempFile::create("kika-hunk", "diff")
+        .map_err(|e| io_error("Could not create the hunk file", &e))?;
     let mut contents = hunk.to_vec();
     if !contents.is_empty() && !contents.ends_with(b"\n") {
         contents.push(b'\n');
@@ -190,6 +196,52 @@ fn edit_hunk(
     launch(&editor, &temp.path, None, workdir)?;
     let edited = fs::read(&temp.path).map_err(|e| io_error("Could not read the hunk file", &e))?;
     Ok(edited_patch(header, &edited))
+}
+
+/// Shown under the message in the editor; [`edited_message`] drops it.
+const COMMIT_HELP: &str = "\
+# Save and close to commit. Lines starting with '#' are ignored.
+# Empty the message to abort.
+";
+
+fn edit_commit_message(
+    initial: &str,
+    runner: &dyn GitRunner,
+    workdir: &Path,
+) -> Result<Option<String>, String> {
+    let editor = editor(runner)?;
+    let (temp, mut file) = TempFile::create("kika-commit", "txt")
+        .map_err(|e| io_error("Could not create the message file", &e))?;
+    let mut contents = initial.to_string();
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push('\n');
+    contents.push_str(COMMIT_HELP);
+    file.write_all(contents.as_bytes())
+        .map_err(|e| io_error("Could not write the message file", &e))?;
+    // Closed before the editor opens it.
+    drop(file);
+    launch(&editor, &temp.path, None, workdir)?;
+    let edited =
+        fs::read(&temp.path).map_err(|e| io_error("Could not read the message file", &e))?;
+    edited_message(&edited)
+}
+
+/// The message to commit after an edit: the lines not starting with `#`,
+/// without blank lines before them or whitespace after them. `None` when
+/// nothing is left, which is how the user aborts. Git keeps `#` lines
+/// given with `-F -`, so they are dropped here.
+pub fn edited_message(edited: &[u8]) -> Result<Option<String>, String> {
+    let text =
+        std::str::from_utf8(edited).map_err(|_| "The message is not valid UTF-8".to_string())?;
+    let kept: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
+    let start = kept
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(kept.len());
+    let message = kept[start..].join("\n").trim_end().to_string();
+    Ok((!message.is_empty()).then_some(message))
 }
 
 fn io_error(what: &str, error: &io::Error) -> String {
@@ -225,14 +277,15 @@ struct TempFile {
 }
 
 impl TempFile {
-    /// A new file only this user can read, under a name no other file
-    /// has, open for writing.
-    fn create() -> io::Result<(Self, File)> {
+    /// A new file only this user can read, named `<prefix>-<pid>-<n>.<extension>`
+    /// so editors pick the right mode, and unlike any other file, open for
+    /// writing.
+    fn create(prefix: &str, extension: &str) -> io::Result<(Self, File)> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("kika-hunk-{}-{n}.diff", std::process::id()));
+            let path = std::env::temp_dir()
+                .join(format!("{prefix}-{}-{n}.{extension}", std::process::id()));
             match Self::open_new(&path) {
                 Ok(file) => return Ok((Self { path }, file)),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -350,6 +403,32 @@ mod tests {
     }
 
     #[test]
+    fn comment_lines_are_dropped_from_an_edited_message_and_its_end_trimmed() {
+        assert_eq!(
+            edited_message(b"subj\n# help\n\nbody  \n#x\n\n  \n"),
+            Ok(Some("subj\n\nbody".into()))
+        );
+        // Blank lines before the subject go too; indentation inside stays.
+        assert_eq!(
+            edited_message(b"\n \n# c\nsubj\n\n  indented\n"),
+            Ok(Some("subj\n\n  indented".into()))
+        );
+    }
+
+    #[test]
+    fn an_empty_or_all_comment_message_is_none() {
+        assert_eq!(edited_message(b""), Ok(None));
+        assert_eq!(edited_message(b"# a\n# b\n"), Ok(None));
+        assert_eq!(edited_message(b"\n  \n# a\n\t\n"), Ok(None));
+    }
+
+    #[test]
+    fn an_edited_message_that_is_not_utf8_is_an_error() {
+        let result = edited_message(b"subj \xff\n");
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
     fn a_patch_splits_at_its_first_hunk_line() {
         let patch = b"diff --git a/x@@ b/x@@\n--- a/x@@\n+++ b/x@@\n@@ -1 +1 @@\n-a\n+b\n";
         assert_eq!(
@@ -416,6 +495,64 @@ mod tests {
         let temp = Path::new(seen.trim_end());
         assert!(temp.starts_with(std::env::temp_dir()), "{seen}");
         assert!(!temp.exists(), "{seen} was left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_edited_commit_message_comes_back_and_the_temp_file_is_gone() {
+        let tmp = crate::git::fake::TempDir::new("handoff-commit");
+        let dir = tmp.path();
+        let editor = editor_script(
+            dir,
+            "echo \"$1\" > seen\ncp \"$1\" before\nprintf 'new subj\\n\\nnew body\\n' > \"$1\"",
+        );
+        let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
+        let job = HandOff::EditCommitMessage {
+            initial: "old subj\n\nold body\n".into(),
+        };
+
+        let intent = execute(job, &runner, dir);
+
+        assert_eq!(
+            intent,
+            AppIntent::CommitMessageEdited {
+                result: Ok(Some("new subj\n\nnew body".into()))
+            }
+        );
+        let before = fs::read_to_string(dir.join("before")).unwrap();
+        assert!(
+            before.starts_with("old subj\n\nold body\n\n# "),
+            "{before:?}"
+        );
+        assert!(before.contains("Empty the message to abort."), "{before:?}");
+        let seen = fs::read_to_string(dir.join("seen")).unwrap();
+        let temp = Path::new(seen.trim_end());
+        assert!(temp.starts_with(std::env::temp_dir()), "{seen}");
+        let name = temp.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.starts_with("kika-commit-") && name.ends_with(".txt"),
+            "{name}"
+        );
+        assert!(!temp.exists(), "{seen} was left behind");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_editor_is_an_error_for_a_commit_message() {
+        let tmp = crate::git::fake::TempDir::new("handoff-commit-fail");
+        let dir = tmp.path();
+        let editor = editor_script(dir, "exit 3");
+        let runner = FakeRunner::new().expect(&["var", "GIT_EDITOR"], ok(editor.as_bytes()));
+        let job = HandOff::EditCommitMessage {
+            initial: "subj\n".into(),
+        };
+
+        match execute(job, &runner, dir) {
+            AppIntent::CommitMessageEdited { result: Err(e) } => {
+                assert!(e.starts_with("The editor exited with"), "{e}")
+            }
+            other => panic!("expected a failed edit, got {other:?}"),
+        }
     }
 
     #[cfg(unix)]

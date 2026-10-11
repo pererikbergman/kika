@@ -846,3 +846,81 @@ async fn w_hides_a_change_that_only_touches_indentation_and_shows_it_again() {
         screen.join("\n")
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_a_then_ctrl_s_folds_the_staged_change_into_head_keeping_its_message() {
+    let repo = modified_repo().stage("a.txt");
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('A'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains(" Amend last commit ");
+    app.assert_screen_contains("init");
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
+    assert_eq!(repo.git(["show", "HEAD:a.txt"]), b"one\ntwo\n");
+    assert_eq!(repo.head_message(), "init\n\n");
+    assert!(repo.staged().is_empty());
+    assert_eq!(app.state().commit, crate::model::CommitFlow::Closed);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_n_skips_a_failing_hook_when_amending_with_a_new_message() {
+    let repo = modified_repo()
+        .stage("a.txt")
+        .hook("pre-commit", "#!/bin/sh\necho 'lint failed'\nexit 1\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('A'), KeyModifiers::SHIFT)
+        .await;
+    app.press_with(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains(" hooks skipped ");
+    app.type_text(" again").await;
+    app.press_with(KeyCode::Char('s'), KeyModifiers::CONTROL)
+        .await;
+
+    assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"1\n");
+    assert_eq!(repo.head_message(), "init again\n\n");
+    assert!(repo.staged().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_e_commits_the_message_written_in_the_editor() {
+    let repo = modified_repo().stage("a.txt").editor(
+        "grep -q '^# Save and close to commit' \"$1\" && \
+         printf 'From the editor\\n\\nWith a body.\\n# dropped\\n' > \"$1\"",
+    );
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('c')).await;
+    app.type_text("typed").await;
+    app.press_with(KeyCode::Char('e'), KeyModifiers::CONTROL)
+        .await;
+
+    assert_eq!(repo.head_message(), "From the editor\n\nWith a body.\n\n");
+    assert_eq!(repo.git(["rev-list", "--count", "HEAD"]), b"2\n");
+    assert!(repo.staged().is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn emptying_the_message_in_the_editor_aborts_and_keeps_the_popup() {
+    let repo = modified_repo().stage("a.txt").editor(": > \"$1\"");
+    let head = repo.head();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('c')).await;
+    app.type_text("typed").await;
+    app.press_with(KeyCode::Char('e'), KeyModifiers::CONTROL)
+        .await;
+
+    assert_eq!(repo.head(), head);
+    assert_eq!(repo.staged(), ["a.txt"]);
+    assert_eq!(app.state().notice, Some("Empty message; commit aborted"));
+    app.assert_screen_contains("typed");
+}

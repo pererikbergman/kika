@@ -1,0 +1,83 @@
+//! The last commit's message, for amending it.
+
+use super::diff::terminal_safe;
+use super::runner::{GitCommand, GitRunner};
+
+/// `HEAD`'s full message, as the commit popup shows it to be edited.
+/// Decoded lossily, without trailing newlines, and with every control
+/// character but `\n` dropped, because the text is drawn as it is.
+pub fn read_head_message(runner: &dyn GitRunner) -> Result<String, String> {
+    let cmd = GitCommand::new("log")
+        .arg("-1")
+        .arg("--format=%B")
+        .arg("HEAD")
+        .arg("--")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C");
+    let output = runner
+        .run(&cmd)
+        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    if !output.success {
+        let message = terminal_safe(&output.stderr);
+        return Err(if message.is_empty() {
+            "git log failed".into()
+        } else {
+            message
+        });
+    }
+    let message: String = String::from_utf8_lossy(&output.stdout)
+        .chars()
+        .filter(|&c| c == '\n' || !c.is_control())
+        .collect();
+    Ok(message.trim_end_matches('\n').to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::fake::{FakeRunner, fail, ok};
+
+    const ARGV: &[&str] = &["log", "-1", "--format=%B", "HEAD", "--"];
+
+    #[test]
+    fn the_message_comes_back_without_trailing_newlines() {
+        let runner = FakeRunner::new().expect(ARGV, ok(b"subj\n\nbody\nmore\n\n"));
+        assert_eq!(read_head_message(&runner), Ok("subj\n\nbody\nmore".into()));
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [None]);
+    }
+
+    #[test]
+    fn control_characters_are_dropped_but_newlines_kept_and_bad_utf8_decoded_lossily() {
+        let runner = FakeRunner::new().expect(ARGV, ok(b"s\x1b[2Jubj\r\n\n\tb\xffody\n"));
+        assert_eq!(
+            read_head_message(&runner),
+            Ok("s[2Jubj\n\nb\u{FFFD}ody".into())
+        );
+    }
+
+    #[test]
+    fn a_failure_returns_gits_message_made_safe() {
+        let runner = FakeRunner::new().expect(ARGV, fail("fatal: bad \x1b[31mHEAD\n"));
+        assert_eq!(
+            read_head_message(&runner),
+            Err("fatal: bad \u{FFFD}[31mHEAD".into())
+        );
+        let runner = FakeRunner::new().expect(ARGV, fail(""));
+        assert_eq!(read_head_message(&runner), Err("git log failed".into()));
+    }
+
+    #[test]
+    fn the_message_of_a_real_commit_is_read() {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("head");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "subj\n\nbody"]);
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(read_head_message(&runner), Ok("subj\n\nbody".into()));
+    }
+}
