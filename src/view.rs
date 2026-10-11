@@ -207,7 +207,8 @@ fn render_commit(commit: &CommitFlow, frame: &mut Frame, area: Rect) {
 /// A small popup asking `question`, wrapped to fit and grown to hold it,
 /// so the answer keys at its end are never cut off.
 pub(crate) fn render_question(title: &str, question: &str, frame: &mut Frame, area: Rect) {
-    let width = u16::try_from(width_of(question) + 4)
+    let widest = question.lines().map(width_of).max().unwrap_or(0);
+    let width = u16::try_from(widest + 4)
         .unwrap_or(u16::MAX)
         .min(area.width);
     // One column of padding on each side inside the border.
@@ -1259,7 +1260,8 @@ mod tests {
         assert!(contains(&rows, "│?? new_file "), "{rows:#?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
         assert!(
-            rows[23].starts_with(" space stage  a all  c commit  r refresh  ? keys  q quit"),
+            rows[23]
+                .starts_with(" space stage  a all  c commit  d discard  r refresh  ? keys  q quit"),
             "{rows:#?}"
         );
     }
@@ -2036,7 +2038,7 @@ mod tests {
         assert!(contains(&rows, " -old one"), "{rows:#?}");
         assert!(contains(&rows, "▌+new one"), "{rows:#?}");
         assert!(
-            rows[19].starts_with(" space lines  esc hunks  t staged/unstaged"),
+            rows[19].starts_with(" space lines  esc hunks  d discard  t staged/unstaged"),
             "{rows:#?}"
         );
     }
@@ -2080,7 +2082,9 @@ mod tests {
     fn the_bar_in_the_diff_focus_offers_the_hunk_keys() {
         let rows = draw(&hunks(DiffSide::Worktree, TWO_HUNKS), 100, 20);
         assert!(
-            rows[19].starts_with(" space hunk  v lines  t staged/unstaged  esc back  r refresh"),
+            rows[19].starts_with(
+                " space hunk  v lines  t staged/unstaged  d discard  esc back  r refresh"
+            ),
             "{rows:#?}"
         );
     }

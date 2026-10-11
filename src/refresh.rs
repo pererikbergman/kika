@@ -42,7 +42,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::Unstage(_)
         | GitOp::StageAll
         | GitOp::UnstageAll
-        | GitOp::ApplyCached { .. } => (&[Scope::Files][..], Selection::KeepPath),
+        | GitOp::ApplyCached { .. }
+        | GitOp::DiscardWorktree(_)
+        | GitOp::DeleteUntracked(_)
+        | GitOp::ApplyWorktree { .. } => (&[Scope::Files][..], Selection::KeepPath),
         GitOp::Commit { .. } => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
     };
     RefreshPlan {
@@ -75,7 +78,7 @@ mod tests {
     }
 
     #[test]
-    fn stage_ops_reload_files_and_diff_and_keep_the_path() {
+    fn stage_and_discard_ops_reload_files_and_diff_and_keep_the_path() {
         let ops = [
             GitOp::Stage(vec!["a".into()]),
             GitOp::Unstage(vec!["a".into()]),
@@ -84,6 +87,11 @@ mod tests {
             GitOp::ApplyCached {
                 patch: b"p".to_vec(),
                 reverse: true,
+            },
+            GitOp::DiscardWorktree(vec!["a".into()]),
+            GitOp::DeleteUntracked(vec!["a".into()]),
+            GitOp::ApplyWorktree {
+                patch: b"p".to_vec(),
             },
         ];
         for op in ops {

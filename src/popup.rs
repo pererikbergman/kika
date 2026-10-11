@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::commit_editor::{byte_at, char_len};
 use crate::git::diff::terminal_safe;
+use crate::git::ops::GitOp;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
@@ -17,6 +18,46 @@ pub enum Popup {
     Confirm(ConfirmKind),
     Prompt { kind: PromptKind, input: LineInput },
     Error(ErrorPopup),
+    Discard(DiscardConfirm),
+}
+
+/// "Throw this work away?" Unlike [`ConfirmKind`], it carries the op chosen
+/// when it was asked, so a refresh before the answer cannot change what goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardConfirm {
+    pub what: DiscardWhat,
+    /// The file's display path, already terminal-safe.
+    pub path: String,
+    pub op: GitOp,
+}
+
+/// What a discard throws away, so the question can say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardWhat {
+    File,
+    Untracked,
+    Hunk,
+    Lines,
+}
+
+impl DiscardWhat {
+    pub fn title(self) -> &'static str {
+        match self {
+            DiscardWhat::File => "Discard file",
+            DiscardWhat::Untracked => "Delete file",
+            DiscardWhat::Hunk => "Discard hunk",
+            DiscardWhat::Lines => "Discard lines",
+        }
+    }
+
+    pub fn question(self) -> &'static str {
+        match self {
+            DiscardWhat::File => "Discard all unstaged changes to this file? (y/n)",
+            DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)",
+            DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)",
+            DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)",
+        }
+    }
 }
 
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.

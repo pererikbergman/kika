@@ -131,6 +131,8 @@ pub enum KeyScope {
     Prompt,
     /// An error on top of the popup stack.
     Error,
+    /// "Discard this work?" on top of the popup stack.
+    DiscardConfirm,
 }
 
 impl KeyScope {
@@ -151,7 +153,8 @@ impl KeyScope {
             | KeyScope::Menu
             | KeyScope::Confirm
             | KeyScope::Prompt
-            | KeyScope::Error => None,
+            | KeyScope::Error
+            | KeyScope::DiscardConfirm => None,
         }
     }
 
@@ -173,6 +176,7 @@ impl KeyScope {
             KeyScope::Confirm => "Question",
             KeyScope::Prompt => "Prompt",
             KeyScope::Error => "Error",
+            KeyScope::DiscardConfirm => "Discard",
         }
     }
 
@@ -354,6 +358,18 @@ pub(crate) fn commit_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+/// Why `d` cannot ask right now. What it would discard, and why that is
+/// refused, is the model's call once it runs.
+pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    match &state.focus {
+        Focus::Diff(view) if view.loading() => Some("Loading…"),
+        _ => no_file_selected(state),
+    }
+}
+
 /// The editor's keys wait while the commit runs, so the message cannot change.
 fn commit_editor_disabled(state: &AppState) -> Option<&'static str> {
     let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_seq.is_some();
@@ -482,6 +498,15 @@ static REGISTRY: &[Binding] = &[
         disabled: commit_disabled,
     },
     Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::Discard,
+        description: "Discard the selected file's unstaged changes, or delete it if untracked",
+        label: "discard",
+        bar: true,
+        disabled: discard_disabled,
+    },
+    Binding {
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Files,
         intent: AppIntent::FocusDiff,
@@ -541,6 +566,15 @@ static REGISTRY: &[Binding] = &[
         label: "staged/unstaged",
         bar: true,
         disabled: side_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::Discard,
+        description: "Discard the selected hunk from the working tree",
+        label: "discard",
+        bar: true,
+        disabled: discard_disabled,
     },
     Binding {
         keys: &[
@@ -623,6 +657,15 @@ static REGISTRY: &[Binding] = &[
         label: "hunks",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Lines,
+        intent: AppIntent::Discard,
+        description: "Discard the selected lines from the working tree",
+        label: "discard",
+        bar: true,
+        disabled: discard_disabled,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -857,6 +900,38 @@ static REGISTRY: &[Binding] = &[
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Error,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Only `y` throws work away. Enter is left unbound on purpose: it
+    // answers yes elsewhere, and a discard cannot be undone.
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DiscardConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, throw it away",
+        label: "discard",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DiscardConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep it",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DiscardConfirm,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -1301,6 +1376,53 @@ mod tests {
                 assert_eq!(from(scope, k), None, "{scope:?} {k:?}");
             }
         }
+    }
+
+    #[test]
+    fn d_asks_to_discard_and_only_y_answers_yes() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
+            assert_eq!(from(scope, plain('d')), Some(Discard), "{scope:?}");
+            assert_eq!(
+                from(scope, key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                None,
+                "{scope:?}"
+            );
+        }
+
+        assert_eq!(KeyScope::DiscardConfirm.parent(), None);
+        assert_eq!(KeyScope::DiscardConfirm.title(), "Discard");
+        let confirm = |k| from(KeyScope::DiscardConfirm, k);
+        assert_eq!(confirm(plain('y')), Some(ConfirmYes));
+        assert_eq!(confirm(plain('n')), Some(ConfirmNo));
+        assert_eq!(confirm(key(KeyCode::Esc, none)), Some(ConfirmNo));
+        assert_eq!(
+            confirm(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Quit)
+        );
+        assert_eq!(
+            confirm(key(KeyCode::Enter, none)),
+            None,
+            "Enter never discards"
+        );
+        assert_eq!(confirm(key(KeyCode::Char('Y'), KeyModifiers::SHIFT)), None);
+        for k in [plain('q'), plain('?'), plain('d'), plain(' ')] {
+            assert_eq!(confirm(k), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn d_is_disabled_while_an_op_runs_or_without_a_file() {
+        let d = |state: &AppState| match resolve(registry(), KeyScope::Files, state, plain('d')) {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound => panic!("d is unbound"),
+        };
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(d(&state), Some("No file selected"));
+        state.op_seq = Some(1);
+        assert_eq!(d(&state), Some("An operation is running"));
     }
 
     #[test]

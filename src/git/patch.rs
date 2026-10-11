@@ -105,6 +105,8 @@ pub enum PatchSelection {
 
 /// Which way the patch goes into the index. `Unstage` patches are applied
 /// with `git apply --cached --reverse`, so git searches their new side.
+/// `Unstage` also serves worktree discards (`git apply --reverse`), whose
+/// new side is the worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Stage,
