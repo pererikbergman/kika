@@ -3,6 +3,7 @@
 //! argv and identity always use the raw bytes.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 
 use super::diff::sanitize;
 
@@ -37,6 +38,14 @@ impl From<&str> for RepoPath {
     fn from(name: &str) -> Self {
         Self::from_bytes(name.as_bytes())
     }
+}
+
+/// A path git printed on its own line, such as from `rev-parse`: exactly one
+/// trailing newline dropped, and the raw bytes kept so a directory name that
+/// is not UTF-8 survives.
+pub fn path_from_stdout(stdout: &[u8]) -> PathBuf {
+    let bytes = stdout.strip_suffix(b"\n").unwrap_or(stdout);
+    PathBuf::from(os_string(bytes))
 }
 
 #[cfg(unix)]
