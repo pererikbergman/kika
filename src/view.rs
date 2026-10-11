@@ -3520,8 +3520,9 @@ mod tests {
             _ => String::new(),
         };
         match (panel, &state.focus) {
-            // Expanded, the Branches panel names its tabs; at 80 columns
-            // they take the place of its name, the others shortened.
+            // Expanded, the Branches and Commits panels name their tabs; at
+            // 80 columns they take the place of the panel's name, the others
+            // shortened.
             (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
                 match state.screen_mode {
                     crate::layout::ScreenMode::Normal => format!(" [3] [Local] Rem Tag{mode} "),
@@ -3530,6 +3531,9 @@ mod tests {
                         format!(" [3] Branches · [Local] Remotes Tags{mode} ")
                     }
                 }
+            }
+            (Panel::Side(SidePanel::Commits), _) if state.expanded == SidePanel::Commits => {
+                format!("[Log] Reflog{mode} ")
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),

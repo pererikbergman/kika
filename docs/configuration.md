@@ -421,6 +421,26 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
 | `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
 | `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
+| `workspace.undo` | `ctrl-z` | Undo the last commit, checkout, reset or rebase, saying first what moves | locked |
+| `workspace.redo` | `ctrl-r` | Redo what the last undo reversed, saying first what moves | locked |
+
+`ctrl-z` and `ctrl-r` read `HEAD`'s reflog afresh, find the last action (a
+commit, an amend, a merge, a pull, a cherry-pick, a revert, a reset, a
+checkout or a whole rebase) and show what reversing it would do: which ref
+moves, from which commit to which, and whether the files change. Nothing moves
+until you press `y`. A branch moves with `git reset --keep`, so git itself
+refuses when a local change or an untracked file is in the way; Kika also
+refuses while tracked files have changes. Ignored files in the way are
+replaced, as git always treats them, and the question says so. A rebase is
+undone to where the rebased branch's own reflog says it was. If `HEAD` moves
+while the question is open, `y` changes nothing and says so. Undo and redo refuse while `HEAD`
+points at a ref that is not a local branch, such as a remote-tracking ref. A checkout is reversed with a
+checkout, which carries uncommitted changes over. Undo and redo wait while an
+operation (a merge, rebase, cherry-pick, revert or bisect) is in progress.
+Kika marks its own steps in the reflog as `kika undo` and `kika redo`, so
+pressing `ctrl-z` again goes one action further back, and any new action of
+your own ends what `ctrl-r` can redo. Only the newest 1000 reflog entries are
+read. A stash, a branch deletion and an aborted rebase cannot be undone.
 
 ### File list
 
@@ -555,6 +575,7 @@ can be reset, but not marked from Kika.
 | `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
 | `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
 | `commits.reword` | `e` | Write a new message for the selected commit | locked |
+| `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
 | `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
 | `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
@@ -593,6 +614,18 @@ for squash and fixup the commit below must be loaded: moving down to the end of
 the log loads it. A rebase that stops on conflicts can be
 continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
+
+### Reflog (the Commits panel's Reflog tab)
+
+Each row is one place `HEAD` has been, newest first: its commit, what moved
+it, and git's message. The list is read-only; `ctrl-z` and `ctrl-r` undo and
+redo from it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `reflog.next` | `j`, `down` | Select the next reflog entry | |
+| `reflog.prev` | `k`, `up` | Select the previous reflog entry | |
+| `reflog.switch_tab` | `[`, `]` | Show the log | |
 
 ### Commit files (a commit opened from the Commits panel)
 
@@ -805,6 +838,17 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.yes` | `y` | Yes, reset and throw away every uncommitted change | locked |
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Undo or redo?
+
+The question lists what would happen. An undo can move a branch away from
+commits, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `travel.yes` | `y` | Yes, do what the question says | locked |
+| `travel.no` | `n`, `esc` | No, leave everything where it is | locked |
+| `travel.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 

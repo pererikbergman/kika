@@ -81,6 +81,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
             }
             Popup::Credential(prompt) => render_credential(prompt, top, frame, area),
+            Popup::Travel(confirm) => render_question(
+                &format!(" {} ", confirm.title),
+                &confirm.question(),
+                frame,
+                area,
+            ),
         }
     }
 }
@@ -690,6 +696,46 @@ mod tests {
         );
         assert!(
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::undo::{Direction, Expected, Step};
+        use crate::popup::TravelConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Travel(TravelConfirm {
+            title: "Undo",
+            preview: vec![
+                "Undo: commit: second".into(),
+                "Branch main moves from ccccccc to bbbbbbb.".into(),
+                "Files change to match bbbbbbb.".into(),
+                "Commits after bbbbbbb leave main; redo brings them back.".into(),
+            ],
+            op: GitOp::Travel {
+                direction: Direction::Undo,
+                step: Step::MoveTo(CommitId::parse("bbb").unwrap()),
+                expect: Expected {
+                    head_ref: Some(b"refs/heads/main".to_vec()),
+                    oid: CommitId::parse("ccc").unwrap(),
+                },
+            },
+        })];
+        let (_, rows) = draw(&state, 100, 14);
+        assert!(contains(&rows, " Undo "), "{rows:#?}");
+        for line in [
+            "Undo: commit: second",
+            "Branch main moves from ccccccc to bbbbbbb.",
+            "Files change to match bbbbbbb.",
+            "Commits after bbbbbbb leave main; redo brings them back.",
+            "(y/n)",
+        ] {
+            assert!(contains(&rows, line), "{line:?} in {rows:#?}");
+        }
+        assert!(
+            rows[13].starts_with(" y yes  n no  ctrl-c quit"),
             "{rows:#?}"
         );
     }
