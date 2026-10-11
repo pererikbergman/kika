@@ -12,6 +12,7 @@ use crate::git::diff::{
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
+use crate::git::refs::RefsSnapshot;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
 use crate::handoff::HandOff;
@@ -24,6 +25,7 @@ use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
 use crate::view;
+use crate::watch::{WatchEvent, WatchState};
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +122,8 @@ pub struct AppState {
     /// How diffs are drawn. Kept in memory for the session: it outlives file
     /// selection, focus changes and reloads.
     pub diff_options: DiffOptions,
+    /// Background loads that notice changes made outside Kika.
+    pub watch: WatchState,
     /// The repositories entered from, outermost first; the current one is
     /// a submodule of the last. Empty in the launch repository.
     pub repo_stack: Vec<ParentRepo>,
@@ -157,6 +161,7 @@ impl AppState {
             notice: None,
             popups: Vec::new(),
             diff_options: DiffOptions::default(),
+            watch: WatchState::default(),
             repo_stack: Vec::new(),
             renderers: Vec::new(),
             renderer: None,
@@ -385,6 +390,9 @@ impl AppState {
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
             AppIntent::HunkEdited { result } => return self.hunk_edited(result),
+            AppIntent::Watch(event) => return self.watch(event),
+            AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
+            AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
             AppIntent::OpenSubmodules => return self.open_submodules(),
             AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
             AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
@@ -1605,6 +1613,9 @@ impl AppState {
         self.status_error = None;
         self.op_error = None;
         self.status_selection = Selection::KeepPath;
+        // The refs seen belong to the repository being left; the next
+        // snapshot is the new one's baseline, not a change.
+        self.watch.refs = None;
     }
 
     fn refresh_status(&mut self) -> Vec<Effect> {
@@ -1629,9 +1640,20 @@ impl AppState {
         // decrement before the staleness check or the counter would leak.
         if tag.user {
             self.busy = self.busy.saturating_sub(1);
+        } else {
+            self.watch.status_pending = false;
         }
         if tag.generation != self.generation || Some(tag.seq) != self.status_seq {
             return vec![];
+        }
+        // Nobody asked for a background load, so it neither interrupts with
+        // an error nor reloads a diff that has not changed.
+        if !tag.user {
+            match &result {
+                Err(_) => return vec![],
+                Ok(status) if self.status_unchanged(status) => return vec![],
+                Ok(_) => {}
+            }
         }
         self.files_loaded = true;
         match result {
@@ -1657,6 +1679,98 @@ impl AppState {
                 vec![]
             }
         }
+    }
+}
+
+/// Watching for changes made outside Kika. None of it counts as busy.
+impl AppState {
+    fn watch(&mut self, event: WatchEvent) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        match event {
+            WatchEvent::PollRefs => self.snapshot_refs(),
+            WatchEvent::PollFiles => self.background_status(),
+            WatchEvent::FocusGained => {
+                let mut effects = self.background_status();
+                effects.extend(self.snapshot_refs());
+                effects
+            }
+            WatchEvent::Fetch => {
+                if !self.watch.start_fetch() {
+                    return vec![];
+                }
+                vec![Effect::Fetch {
+                    tag: self.background_tag(),
+                }]
+            }
+        }
+    }
+
+    fn snapshot_refs(&mut self) -> Vec<Effect> {
+        if !self.watch.start_refs() {
+            return vec![];
+        }
+        vec![Effect::SnapshotRefs {
+            tag: self.background_tag(),
+        }]
+    }
+
+    /// Moved refs mean a commit, checkout or fetch happened elsewhere.
+    fn refs_loaded(&mut self, tag: Tag, result: Result<RefsSnapshot, String>) -> Vec<Effect> {
+        self.watch.refs_pending = false;
+        // A failed snapshot is tried again on the next poll.
+        let Ok(snapshot) = result else {
+            return vec![];
+        };
+        if tag.generation != self.generation || !self.watch.refs_changed(snapshot) {
+            return vec![];
+        }
+        self.background_status()
+    }
+
+    /// A fetch can move remote refs and so ahead/behind. A failed one,
+    /// say offline, is tried again on the next interval.
+    fn fetch_finished(&mut self, tag: Tag, result: Result<(), String>) -> Vec<Effect> {
+        self.watch.fetch_pending = false;
+        if tag.generation != self.generation || result.is_err() {
+            return vec![];
+        }
+        self.background_status()
+    }
+
+    /// Reload `git status` quietly. Skipped while the user is waiting on
+    /// git, whose own reload is coming, or while one is already running.
+    /// It takes `status_seq`, so a user refresh started later wins.
+    fn background_status(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace
+            || self.busy > 0
+            || self.op_seq.is_some()
+            || self.watch.status_pending
+        {
+            return vec![];
+        }
+        let tag = self.background_tag();
+        self.status_seq = Some(tag.seq);
+        self.status_selection = Selection::KeepPath;
+        self.watch.status_pending = true;
+        vec![Effect::LoadStatus { tag }]
+    }
+
+    fn background_tag(&mut self) -> Tag {
+        Tag {
+            generation: self.generation,
+            seq: self.take_seq(),
+            user: false,
+        }
+    }
+
+    /// Whether `status` shows what is already on screen. After an error
+    /// the screen is out of date, so anything is news.
+    fn status_unchanged(&self, status: &RepoStatus) -> bool {
+        self.status_error.is_none()
+            && self.files == status.files
+            && self.branch.as_ref() == Some(&status.branch)
     }
 }
 
@@ -5239,6 +5353,372 @@ mod tests {
         state.update(loaded(parent, &["parent.txt"]));
         assert_eq!(state.files, []);
         assert!(!state.files_loaded);
+    }
+
+    // --- Watching for outside changes ---
+
+    use crate::git::refs::RefsSnapshot;
+    use crate::watch::WatchEvent;
+
+    fn watch(state: &mut AppState, event: WatchEvent) -> Vec<Effect> {
+        state.update(AppIntent::Watch(event))
+    }
+
+    /// The tag of the one background status load in `effects`.
+    fn background_status_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::LoadStatus { tag }] => {
+                assert!(!tag.user, "background loads stay out of the busy count");
+                *tag
+            }
+            other => panic!("expected one background LoadStatus, got {other:?}"),
+        }
+    }
+
+    fn snapshot_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::SnapshotRefs { tag }] => {
+                assert!(!tag.user);
+                *tag
+            }
+            other => panic!("expected one SnapshotRefs, got {other:?}"),
+        }
+    }
+
+    fn refs_loaded(tag: Tag, bytes: &[u8]) -> AppIntent {
+        AppIntent::RefsLoaded {
+            tag,
+            result: Ok(RefsSnapshot::of(bytes)),
+        }
+    }
+
+    /// An idle workspace showing `three_files` with its diff settled.
+    fn idle_with_files() -> AppState {
+        let (state, _) = with_files(three_files(), 24);
+        assert_eq!(state.busy, 0);
+        state
+    }
+
+    #[test]
+    fn poll_refs_asks_for_one_snapshot_until_it_reports() {
+        let mut state = idle_with_files();
+        let tag = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        assert_eq!(tag.generation, state.generation);
+        assert!(watch(&mut state, WatchEvent::PollRefs).is_empty());
+
+        state.update(refs_loaded(tag, b"a"));
+        snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+    }
+
+    #[test]
+    fn the_first_or_an_equal_snapshot_starts_nothing_and_a_changed_one_a_background_status() {
+        let mut state = idle_with_files();
+        let first = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        assert!(state.update(refs_loaded(first, b"a")).is_empty());
+
+        let equal = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        assert!(state.update(refs_loaded(equal, b"a")).is_empty());
+
+        let moved = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        let tag = background_status_tag(&state.update(refs_loaded(moved, b"b")));
+        assert_eq!(state.status_seq, Some(tag.seq));
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn stale_or_failed_snapshots_are_dropped_but_free_the_slot() {
+        let mut state = idle_with_files();
+        let tag = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        state.update(refs_loaded(tag, b"a"));
+
+        let stale = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        state.generation += 1;
+        assert!(state.update(refs_loaded(stale, b"b")).is_empty());
+        assert_eq!(state.watch.refs, Some(RefsSnapshot::of(b"a")));
+
+        let failed = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        let effects = state.update(AppIntent::RefsLoaded {
+            tag: failed,
+            result: Err("boom".into()),
+        });
+        assert!(effects.is_empty());
+        assert!(state.popups.is_empty());
+        assert!(!state.watch.refs_pending);
+    }
+
+    #[test]
+    fn poll_files_starts_a_background_status_that_never_touches_busy() {
+        let mut state = idle_with_files();
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        assert_eq!(state.busy, 0);
+        assert_eq!(state.status_seq, Some(tag.seq));
+        assert!(state.watch.status_pending);
+
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(three_files())),
+        });
+        assert_eq!(state.busy, 0);
+        assert!(!state.watch.status_pending);
+    }
+
+    #[test]
+    fn focus_gained_starts_a_background_status_and_a_snapshot() {
+        let mut state = idle_with_files();
+        let effects = watch(&mut state, WatchEvent::FocusGained);
+        match effects.as_slice() {
+            [
+                Effect::LoadStatus { tag: status },
+                Effect::SnapshotRefs { tag: refs },
+            ] => {
+                assert!(!status.user && !refs.user);
+            }
+            other => panic!("expected a status and a snapshot, got {other:?}"),
+        }
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn background_status_is_skipped_while_busy_an_op_runs_or_one_is_pending() {
+        let mut state = idle_with_files();
+        state.busy = 1;
+        assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
+        assert_eq!(state.busy, 1);
+
+        let mut state = idle_with_files();
+        state.op_seq = Some(42);
+        assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
+
+        let mut state = idle_with_files();
+        background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        let seq = state.status_seq;
+        for _ in 0..3 {
+            assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
+        }
+        assert_eq!(state.status_seq, seq);
+    }
+
+    #[test]
+    fn focus_gained_while_busy_still_takes_a_snapshot() {
+        let mut state = idle_with_files();
+        state.busy = 1;
+        snapshot_tag(&watch(&mut state, WatchEvent::FocusGained));
+    }
+
+    #[test]
+    fn an_equal_background_status_returns_no_effects() {
+        let mut state = idle_with_files();
+        let before = state.clone();
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(three_files())),
+        });
+
+        assert!(
+            effects.is_empty(),
+            "no diff reload and no CancelDiff: {effects:?}"
+        );
+        assert_eq!(state.diff, before.diff);
+        assert_eq!(state.selected, before.selected);
+    }
+
+    #[test]
+    fn a_changed_background_status_applies_like_a_refresh_keeping_the_path() {
+        let mut state = idle_with_files();
+        select_path(&mut state, "b.rs");
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![
+                changed("b.rs", 'M', '.'),
+                untracked("c.txt"),
+                untracked("d.txt"),
+            ])),
+        });
+
+        assert_eq!(state.files.len(), 3);
+        assert_eq!(state.selected, Some(0));
+        diff_tag(&effects);
+    }
+
+    #[test]
+    fn a_background_status_that_empties_the_list_cancels_the_diff() {
+        let mut state = idle_with_files();
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![])),
+        });
+        assert_eq!(effects, [Effect::CancelDiff]);
+        assert!(state.files.is_empty());
+    }
+
+    #[test]
+    fn a_failed_background_status_is_dropped_without_a_popup() {
+        let mut state = idle_with_files();
+        let files = state.files.clone();
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Err("fatal: index file corrupt".into()),
+        });
+
+        assert!(effects.is_empty());
+        assert!(state.popups.is_empty());
+        assert_eq!(state.status_error, None);
+        assert_eq!(state.files, files);
+        assert!(!state.watch.status_pending);
+    }
+
+    #[test]
+    fn a_user_refresh_supersedes_a_background_status() {
+        let mut state = idle_with_files();
+        let background = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        let user = refresh_tag(&mut state);
+
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag: background,
+            result: Ok(repo(vec![untracked("other.txt")])),
+        });
+
+        assert!(effects.is_empty());
+        assert_eq!(state.files, three_files());
+        assert!(!state.watch.status_pending);
+        assert_eq!(state.busy, 1);
+        state.update(loaded(user, &["x.txt"]));
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn a_changed_background_status_keeps_an_open_blame_like_a_refresh_does() {
+        let mut state = blamed(3, 24);
+        let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![changed("a.rs", '.', 'M'), untracked("new.txt")])),
+        });
+        assert_eq!(blame(&state).path, RepoPath::from("a.rs"));
+        assert_eq!(state.files.len(), 2);
+    }
+
+    #[test]
+    fn entering_a_submodule_makes_its_first_snapshot_a_baseline() {
+        let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
+        state.watch.refs = Some(RefsSnapshot::of(b"parent"));
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [_, Effect::LoadStatus { tag }] => *tag,
+            other => panic!("expected SetRepo and LoadStatus, got {other:?}"),
+        };
+        state.update(loaded(tag, &[]));
+        assert_eq!(state.busy, 0);
+
+        let refs = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
+        assert!(state.update(refs_loaded(refs, b"sub")).is_empty());
+        assert_eq!(state.watch.refs, Some(RefsSnapshot::of(b"sub")));
+    }
+
+    #[test]
+    fn watch_events_do_nothing_in_review() {
+        let mut state = AppState::new(Context::Review { number: 1 });
+        for event in [
+            WatchEvent::PollRefs,
+            WatchEvent::PollFiles,
+            WatchEvent::FocusGained,
+            WatchEvent::Fetch,
+        ] {
+            assert!(watch(&mut state, event).is_empty(), "{event:?}");
+        }
+        assert!(!state.watch.is_pending());
+    }
+
+    /// An idle workspace whose user opted in to auto-fetch.
+    fn idle_with_fetch() -> AppState {
+        let mut state = idle_with_files();
+        state.watch.fetch_enabled = true;
+        state
+    }
+
+    #[test]
+    fn auto_fetch_does_nothing_by_default() {
+        let mut state = idle_with_files();
+        assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
+        assert!(!state.watch.fetch_pending);
+    }
+
+    fn fetch_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::Fetch { tag }] => *tag,
+            other => panic!("expected one Fetch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_fetch_is_a_background_effect_that_runs_one_at_a_time() {
+        let mut state = idle_with_fetch();
+        let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
+        assert!(!tag.user);
+        assert_eq!(state.busy, 0);
+        assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
+    }
+
+    #[test]
+    fn auto_fetch_does_nothing_when_disabled() {
+        let mut state = idle_with_fetch();
+        state.watch.fetch_enabled = false;
+        assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
+        assert!(!state.watch.fetch_pending);
+    }
+
+    #[test]
+    fn a_successful_fetch_starts_a_background_status() {
+        let mut state = idle_with_fetch();
+        let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
+
+        let effects = state.update(AppIntent::FetchFinished {
+            tag,
+            result: Ok(()),
+        });
+
+        background_status_tag(&effects);
+        assert!(!state.watch.fetch_pending);
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn a_failed_or_stale_fetch_is_dropped_but_frees_the_slot() {
+        let mut state = idle_with_fetch();
+        let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
+        let effects = state.update(AppIntent::FetchFinished {
+            tag,
+            result: Err("fatal: unable to access remote".into()),
+        });
+        assert!(effects.is_empty());
+        assert!(state.popups.is_empty());
+
+        let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
+        state.generation += 1;
+        let effects = state.update(AppIntent::FetchFinished {
+            tag,
+            result: Ok(()),
+        });
+        assert!(effects.is_empty());
+        assert!(!state.watch.fetch_pending);
+    }
+
+    #[test]
+    fn a_fetch_finishing_while_an_op_runs_starts_no_status() {
+        let mut state = idle_with_fetch();
+        let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
+        state.op_seq = Some(9);
+        let effects = state.update(AppIntent::FetchFinished {
+            tag,
+            result: Ok(()),
+        });
+        assert!(effects.is_empty());
     }
 
     fn renderer(label: &str) -> ExternalRenderer {

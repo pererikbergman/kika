@@ -10,9 +10,11 @@ use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
+use crate::git::fetch::run_fetch;
 use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
+use crate::git::refs::read_refs;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::handoff::HandOff;
@@ -105,6 +107,14 @@ pub enum Effect {
     /// Hand the terminal to another process. Run by the loop, which owns
     /// the terminal, never by [`Runtime`].
     HandOff(HandOff),
+    /// Read the refs snapshot; always answered by one `RefsLoaded`.
+    SnapshotRefs {
+        tag: Tag,
+    },
+    /// Fetch every remote; always answered by one `FetchFinished`.
+    Fetch {
+        tag: Tag,
+    },
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -273,6 +283,30 @@ impl Runtime {
                                 Err(terminal_safe(format!("git crashed: {e}").as_bytes()))
                             });
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
+                });
+            }
+            Effect::SnapshotRefs { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the watch would never poll again.
+                    let result = tokio::task::spawn_blocking(move || read_refs(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git for-each-ref crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::RefsLoaded { tag, result });
+                });
+            }
+            Effect::Fetch { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or auto-fetch would stop for good.
+                    let result = tokio::task::spawn_blocking(move || run_fetch(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(format!("git fetch crashed: {e}").as_bytes()))
+                        });
+                    let _ = tx.send(AppIntent::FetchFinished { tag, result });
                 });
             }
             // The loop takes these out before spawning; without a terminal
@@ -896,6 +930,101 @@ mod tests {
 
         assert_eq!(rx.recv().await, Some(AppIntent::DiffSlow { tag }));
         assert!(start.elapsed() >= DIFF_LOADING_DELAY);
+    }
+
+    fn background(seq: u64) -> Tag {
+        Tag {
+            generation: 1,
+            seq,
+            user: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_refs_reports_back_with_the_same_tag() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["for-each-ref", "--format=%(objectname) %(refname)"],
+                    ok(b"1 refs/heads/main\n"),
+                )
+                .expect(&["symbolic-ref", "-q", "HEAD"], ok(b"refs/heads/main\n"))
+                .expect(&["rev-parse", "-q", "--verify", "HEAD"], ok(b"1\n")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::SnapshotRefs { tag: background(3) });
+
+        match rx.recv().await {
+            Some(AppIntent::RefsLoaded { tag, result: Ok(_) }) => assert_eq!(tag, background(3)),
+            other => panic!("expected a loaded snapshot, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_snapshot_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+
+        runtime.spawn(Effect::SnapshotRefs { tag: background(4) });
+
+        match rx.recv().await {
+            Some(AppIntent::RefsLoaded {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, background(4));
+                assert!(
+                    message.starts_with("git for-each-ref crashed: "),
+                    "{message:?}"
+                );
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed RefsLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_back_with_the_same_tag() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["fetch", "--all", "--quiet", "--no-write-fetch-head"],
+            ok(b""),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::Fetch { tag: background(5) });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::FetchFinished {
+                tag: background(5),
+                result: Ok(()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_fetch_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+
+        runtime.spawn(Effect::Fetch { tag: background(6) });
+
+        match rx.recv().await {
+            Some(AppIntent::FetchFinished {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, background(6));
+                assert!(message.starts_with("git fetch crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed FetchFinished, got {other:?}"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
