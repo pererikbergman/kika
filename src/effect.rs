@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::config::{self, ConfigPaths};
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
@@ -118,6 +119,11 @@ pub enum Effect {
     Fetch {
         tag: Tag,
     },
+    /// Read the global config file and that of the repository whose top
+    /// level is `repo`; answered by one `ConfigLoaded`.
+    LoadConfig {
+        repo: Option<PathBuf>,
+    },
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -129,6 +135,9 @@ pub struct Runtime {
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
     diff: DiffStreamer,
+    /// The global config file `LoadConfig` reads; none unless
+    /// `with_global_config` names one, so only `main` reads the user's.
+    global_config: Option<PathBuf>,
     /// The recent-repositories file. `None` keeps the list empty and
     /// unwritten, so only `main` touches the user's real one.
     recent_store: Option<PathBuf>,
@@ -140,6 +149,7 @@ impl Runtime {
             diff: DiffStreamer::new(Arc::clone(&runner), tx.clone()),
             runner,
             tx,
+            global_config: None,
             recent_store: None,
         }
     }
@@ -147,6 +157,13 @@ impl Runtime {
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
         Self {
             recent_store,
+            ..self
+        }
+    }
+
+    pub fn with_global_config(self, global_config: Option<PathBuf>) -> Self {
+        Self {
+            global_config,
             ..self
         }
     }
@@ -301,6 +318,20 @@ impl Runtime {
                     let _ = tx.send(AppIntent::FetchFinished { tag, result });
                 });
             }
+            Effect::LoadConfig { repo } => {
+                let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
+                tokio::spawn(async move {
+                    // `load` reports its own errors; a panic leaves the keys as they were.
+                    if let Ok(loaded) =
+                        tokio::task::spawn_blocking(move || config::load(&paths)).await
+                    {
+                        let _ = tx.send(AppIntent::ConfigLoaded {
+                            keymap: loaded.keymap,
+                            errors: loaded.errors,
+                        });
+                    }
+                });
+            }
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
@@ -343,6 +374,48 @@ mod tests {
     use crate::git::fake::{FakeChild, FakeRunner, ok};
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
+
+    #[tokio::test]
+    async fn load_config_reads_the_files_again_each_time() {
+        use crate::keymap::{KeyPattern, parse_key, registry};
+
+        let dir = std::env::temp_dir().join(format!("kika-load-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let global = dir.join("config.toml");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // No git calls are expected.
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_global_config(Some(global.clone()));
+        let stage = registry().iter().find(|b| b.id == "files.stage").unwrap();
+        let commit = registry().iter().find(|b| b.id == "files.commit").unwrap();
+        let mut load = async |text: &str, repo: Option<PathBuf>| -> Vec<KeyPattern> {
+            std::fs::write(&global, text).unwrap();
+            runtime.spawn(Effect::LoadConfig { repo });
+            match rx.recv().await {
+                Some(AppIntent::ConfigLoaded { keymap, errors }) => {
+                    assert_eq!(errors, []);
+                    [keymap.keys(stage), keymap.keys(commit)].concat()
+                }
+                other => panic!("expected ConfigLoaded, got {other:?}"),
+            }
+        };
+
+        let first = load("[keys]\n\"files.stage\" = [\"x\"]\n", None).await;
+        let second = load("[keys]\n\"files.stage\" = [\"y\"]\n", None).await;
+        // The repository named in the effect is the one whose file is read.
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(".kika.toml"),
+            "[keys]\n\"files.commit\" = [\"C\"]\n",
+        )
+        .unwrap();
+        let in_repo = load("", Some(repo)).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(first, [parse_key("x").unwrap(), parse_key("c").unwrap()]);
+        assert_eq!(second, [parse_key("y").unwrap(), parse_key("c").unwrap()]);
+        assert_eq!(in_repo, [stage.keys[0], parse_key("C").unwrap()]);
+    }
 
     #[tokio::test]
     async fn load_status_reports_back_with_the_same_tag() {
