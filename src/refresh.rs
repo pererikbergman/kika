@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use crate::git::ops::GitOp;
+use crate::git::remote::RemoteOp;
 
 /// A piece of loaded data that can go stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -69,15 +70,27 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // These move HEAD, rewrite the worktree and index, and start or
         // end an operation the Status panel shows. A detached checkout
         // also changes what the Status panel says HEAD is.
+        GitOp::CheckoutCommit(_) | GitOp::Revert(_) | GitOp::Reset { .. } => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
+        // As above, and they may autostash: the interactive rebase always,
+        // the others under the user's `rebase.autoStash` or
+        // `merge.autoStash`. When the autostash cannot go back cleanly,
+        // or the operation ends, git keeps it in the stash list.
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
-        | GitOp::CheckoutCommit(_)
-        | GitOp::Revert(_)
-        | GitOp::Reset { .. }
+        | GitOp::InteractiveRebase(_)
         | GitOp::Continue(_)
         | GitOp::Skip(_)
         | GitOp::Abort(_) => (
-            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            &[
+                Scope::Files,
+                Scope::Branch,
+                Scope::Branches,
+                Scope::Commits,
+                Scope::Stash,
+            ][..],
             Selection::KeepPath,
         ),
         // Renaming or deleting a branch leaves HEAD's commits where they are.
@@ -106,6 +119,30 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
         selection,
+    }
+}
+
+/// What a fetch, pull or push makes stale. Each moves remote refs, so
+/// ahead/behind and the log's markers; a pull also moves `HEAD` and
+/// changes the worktree.
+pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
+    let scopes: &[Scope] = match op {
+        // A pull under the user's `rebase.autoStash` or `merge.autoStash`
+        // can leave its autostash in the stash list.
+        RemoteOp::Pull => &[
+            Scope::Files,
+            Scope::Branch,
+            Scope::Branches,
+            Scope::Commits,
+            Scope::Stash,
+        ],
+        RemoteOp::Fetch | RemoteOp::Push { .. } => {
+            &[Scope::Branch, Scope::Branches, Scope::Commits]
+        }
+    };
+    RefreshPlan {
+        scopes: expand(scopes.iter().copied().collect()),
+        selection: Selection::KeepPath,
     }
 }
 
@@ -283,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_rebase_and_their_controls_reload_everything_head_touches() {
+    fn merge_rebases_and_their_controls_reload_everything_head_touches_and_the_stashes() {
         use crate::git::ops::MergeStrategy;
         use crate::git::repo_state::Operation;
         let ops = [
@@ -292,10 +329,12 @@ mod tests {
                 strategy: MergeStrategy::Squash,
             },
             GitOp::Rebase { onto: "b".into() },
+            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
             GitOp::Continue(Operation::Merge),
             GitOp::Skip(Operation::Rebase),
             GitOp::Abort(Operation::CherryPick),
         ];
+        // An autostash git could not put back is left in the stash list.
         for op in ops {
             assert_eq!(
                 plan(&op),
@@ -305,7 +344,8 @@ mod tests {
                         Scope::Branch,
                         Scope::Diff,
                         Scope::Branches,
-                        Scope::Commits
+                        Scope::Commits,
+                        Scope::Stash
                     ]),
                     selection: Selection::KeepPath,
                 },
@@ -335,6 +375,31 @@ mod tests {
             force: true,
         };
         assert_eq!(plan(&delete).scopes, set(&[Scope::Branches]));
+    }
+
+    #[test]
+    fn remote_ops_reload_the_branch_the_lists_and_a_pull_the_files_too() {
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        for op in [RemoteOp::Fetch, push] {
+            assert_eq!(
+                remote_plan(op).scopes,
+                set(&[Scope::Branch, Scope::Branches, Scope::Commits]),
+                "{op:?}"
+            );
+        }
+        assert_eq!(
+            remote_plan(RemoteOp::Pull).scopes,
+            set(&[
+                Scope::Files,
+                Scope::Branch,
+                Scope::Diff,
+                Scope::Branches,
+                Scope::Commits,
+                Scope::Stash
+            ])
+        );
     }
 
     #[test]

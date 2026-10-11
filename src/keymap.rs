@@ -10,6 +10,7 @@ use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::rebase_plan::{self, Edit};
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
 use crate::git::submodule::SubmoduleState;
@@ -249,6 +250,8 @@ pub enum KeyScope {
     Submodules,
     /// The recent repositories on top of the popup stack.
     Recent,
+    /// Git or ssh asking for a username, password or passphrase.
+    Credential,
 }
 
 impl KeyScope {
@@ -286,7 +289,8 @@ impl KeyScope {
             | KeyScope::ResetHard
             | KeyScope::DropStash
             | KeyScope::Submodules
-            | KeyScope::Recent => None,
+            | KeyScope::Recent
+            | KeyScope::Credential => None,
         }
     }
 
@@ -324,6 +328,7 @@ impl KeyScope {
             KeyScope::DropStash => "Drop stash",
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
+            KeyScope::Credential => "Git is asking",
         }
     }
 
@@ -331,7 +336,7 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor => Some("q and ? are typed"),
+            KeyScope::CommitEditor | KeyScope::Credential => Some("q and ? are typed"),
             _ => None,
         }
     }
@@ -383,8 +388,8 @@ pub enum Trust {
 
 /// Bindings a repository file may not change: they quit, start other
 /// programs (an editor, a diff renderer, a merge tool), reach the network,
-/// destroy or write work, answer a question, create a
-/// repository or switch to another one. Moving
+/// destroy or write work, answer a question, create a repository or switch
+/// to another one. Moving
 /// one onto an innocent key, taking quit away, or letting the key that
 /// asks also answer, would let a cloned repository trap or trick the user.
 pub const REPO_LOCKED: &[&str] = &[
@@ -424,6 +429,12 @@ pub const REPO_LOCKED: &[&str] = &[
     "delete_branch.force",
     "delete_branch.no",
     "delete_branch.quit",
+    "workspace.fetch",
+    "workspace.pull",
+    "workspace.push",
+    "credential.answer",
+    "credential.cancel",
+    "credential.quit",
     "files.mergetool",
     "conflict.mergetool",
     "conflict.ours",
@@ -443,6 +454,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "drop_stash.yes",
     "drop_stash.no",
     "drop_stash.quit",
+    "commits.squash",
+    "commits.fixup",
+    "commits.drop",
+    "commits.reword",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -1146,6 +1161,31 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
         })
 }
 
+/// Why the selected commit cannot be rewritten with `edit` now: one
+/// operation at a time, none in progress, and a history the planner can
+/// rewrite.
+pub(crate) fn rewrite_disabled(state: &AppState, edit: Edit) -> Option<&'static str> {
+    commit_action_disabled(state)
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| rebase_plan::plan(&state.commits.rows, state.commits.selected, edit).err())
+}
+
+fn squash_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Squash)
+}
+
+fn fixup_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Fixup)
+}
+
+fn drop_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Drop)
+}
+
+fn reword_disabled(state: &AppState) -> Option<&'static str> {
+    rewrite_disabled(state, Edit::Reword)
+}
+
 pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
@@ -1170,6 +1210,41 @@ fn force_delete_disabled(state: &AppState) -> Option<&'static str> {
     delete_question(state)
         .is_some_and(|c| !c.force())
         .then_some("Fully merged: press y to delete")
+}
+
+/// Why no fetch, pull or push may start: one needs a repository, and git
+/// one operation at a time.
+pub(crate) fn remote_disabled(state: &AppState) -> Option<&'static str> {
+    if state.repo.is_none() {
+        Some("Not in a repository")
+    } else if state.op_seq.is_some() || state.remote.is_some() {
+        Some(REMOTE_BUSY)
+    } else {
+        None
+    }
+}
+
+pub(crate) const REMOTE_BUSY: &str = "Another operation is running";
+
+/// A fetch also waits for auto-fetch, which would race it for the same refs.
+pub(crate) fn fetch_disabled(state: &AppState) -> Option<&'static str> {
+    remote_disabled(state).or_else(|| {
+        state
+            .watch
+            .fetch_pending
+            .then_some("A background fetch is running")
+    })
+}
+
+/// Pull and push work on the current branch, so they need one.
+pub(crate) fn pull_push_disabled(state: &AppState) -> Option<&'static str> {
+    remote_disabled(state).or_else(|| {
+        let detached = state
+            .branch
+            .as_ref()
+            .is_some_and(|b| matches!(b.head, Head::Detached(_)));
+        detached.then_some("HEAD is detached")
+    })
 }
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
@@ -1208,6 +1283,36 @@ static REGISTRY: &[Binding] = &[
         label: "refresh",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "workspace.fetch",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Fetch,
+        description: "Fetch every remote",
+        label: "fetch",
+        bar: false,
+        disabled: fetch_disabled,
+    },
+    Binding {
+        id: "workspace.pull",
+        keys: &[KeyPattern::exact(KeyCode::Char('p'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Pull,
+        description: "Pull into the current branch",
+        label: "pull",
+        bar: false,
+        disabled: pull_push_disabled,
+    },
+    Binding {
+        id: "workspace.push",
+        keys: &[KeyPattern::any(KeyCode::Char('P'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Push,
+        description: "Push the current branch",
+        label: "push",
+        bar: false,
+        disabled: pull_push_disabled,
     },
     Binding {
         id: "workspace.scroll_down",
@@ -1493,6 +1598,48 @@ static REGISTRY: &[Binding] = &[
         label: "reset",
         bar: true,
         disabled: reset_disabled,
+    },
+    Binding {
+        id: "commits.squash",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Squash),
+        description: "Squash the selected commit into the one below, combining their messages",
+        label: "squash",
+        bar: true,
+        disabled: squash_disabled,
+    },
+    // `f` is fetch.
+    Binding {
+        id: "commits.fixup",
+        keys: &[KeyPattern::any(KeyCode::Char('F'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Fixup),
+        description: "Fold the selected commit into the one below, keeping that one's message",
+        label: "fixup",
+        bar: true,
+        disabled: fixup_disabled,
+    },
+    Binding {
+        id: "commits.drop",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Drop),
+        description: "Drop the selected commit and its change from the history",
+        label: "drop",
+        bar: true,
+        disabled: drop_disabled,
+    },
+    // `r` is refresh.
+    Binding {
+        id: "commits.reword",
+        keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RewriteCommit(Edit::Reword),
+        description: "Write a new message for the selected commit",
+        label: "reword",
+        bar: true,
+        disabled: reword_disabled,
     },
     Binding {
         id: "commit_files.next",
@@ -2510,6 +2657,36 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Prompt,
         intent: AppIntent::Quit,
         description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.answer",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::SubmitCredential,
+        description: "Send the typed answer to git",
+        label: "send",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::CredentialAnswered(None),
+        description: "Cancel the question, which fails the operation",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::Quit,
+        description: "Cancel the question and quit Kika",
         label: "quit",
         bar: true,
         disabled: never,
@@ -4208,6 +4385,105 @@ mod tests {
     }
 
     #[test]
+    fn the_commits_panel_squashes_fixes_up_drops_and_rewords() {
+        use AppIntent::RewriteCommit;
+        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
+        let mut state = AppState::new(Context::Workspace);
+        state.commits.rows = (0..2)
+            .map(|i| crate::git::log::CommitRow {
+                oid: ids[i].clone(),
+                short_oid: "x".into(),
+                parents: vec![ids[i + 1].clone()],
+                author: "Ann".into(),
+                time: 0,
+                subject: "s".into(),
+            })
+            .collect();
+        let commits = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Commits,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(commits(plain('s')), Some(RewriteCommit(Edit::Squash)));
+        assert_eq!(
+            commits(key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
+            Some(RewriteCommit(Edit::Fixup))
+        );
+        assert_eq!(commits(plain('d')), Some(RewriteCommit(Edit::Drop)));
+        assert_eq!(commits(plain('e')), Some(RewriteCommit(Edit::Reword)));
+        for id in [
+            "commits.squash",
+            "commits.fixup",
+            "commits.drop",
+            "commits.reword",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
+        }
+    }
+
+    #[test]
+    fn rewrites_say_why_they_cannot_run() {
+        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
+        let row = |i: usize, parents: Vec<String>| crate::git::log::CommitRow {
+            oid: ids[i].clone(),
+            short_oid: "x".into(),
+            parents,
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        };
+        let all = [
+            squash_disabled,
+            fixup_disabled,
+            drop_disabled,
+            reword_disabled,
+        ];
+        let mut state = AppState::new(Context::Workspace);
+        for disabled in all {
+            assert_eq!(disabled(&state), Some("No commits"));
+        }
+        // `a` on `b`, the root.
+        state.commits.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
+        assert_eq!(drop_disabled(&state), None);
+        assert_eq!(reword_disabled(&state), None);
+        let below_is_root = Some("The commit below is the first commit");
+        assert_eq!(squash_disabled(&state), below_is_root);
+        assert_eq!(fixup_disabled(&state), below_is_root);
+        state.commits.selected = 1;
+        for disabled in all {
+            assert_eq!(disabled(&state), Some("Cannot rewrite the first commit"));
+        }
+
+        state.commits.selected = 0;
+        state.commits.rows[1].parents = vec![ids[2].clone()];
+        for disabled in all {
+            assert_eq!(disabled(&state), None);
+        }
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Rebase],
+        });
+        for disabled in all {
+            assert_eq!(
+                disabled(&state),
+                Some("Finish or abort the operation in progress")
+            );
+        }
+        state.op_seq = Some(1);
+        for disabled in all {
+            assert_eq!(disabled(&state), Some(OP_RUNNING));
+        }
+    }
+
+    #[test]
     fn the_hard_reset_question_has_no_enter_and_n_or_esc_keeps_the_work() {
         let state = AppState::new(Context::Workspace);
         let resolve_in = |key| match resolve(
@@ -4251,7 +4527,7 @@ mod tests {
             assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
         }
         assert!(!REPO_LOCKED.contains(&"commits.checkout"));
-        assert!(build(&[("commits.checkout", &["F"])], Trust::Repo).is_ok());
+        assert!(build(&[("commits.checkout", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -4499,6 +4775,7 @@ mod tests {
             KeyScope::DropStash => "drop_stash",
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
+            KeyScope::Credential => "credential",
         }
     }
 
@@ -4691,14 +4968,14 @@ mod tests {
                 registry().iter().any(|b| b.id == *id),
                 "{id} is not a binding"
             );
-            let moved = build(&[(id, &["F"])], Trust::Repo).unwrap_err();
+            let moved = build(&[(id, &["Z"])], Trust::Repo).unwrap_err();
             assert_eq!(
                 moved,
                 format!("\"{id}\" can only be changed in the global config file")
             );
             assert!(build(&[(id, &[])], Trust::Repo).is_err(), "{id}");
             if *id != "global.quit" {
-                assert!(build(&[(id, &["F"])], Trust::Global).is_ok(), "{id}");
+                assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
                 assert!(build(&[(id, &[])], Trust::Global).is_ok(), "{id}");
             }
         }
@@ -4727,6 +5004,12 @@ mod tests {
                     | RecentSelect
                     | DeleteBranch
                     | ConfirmDeleteBranch { .. }
+                    | Fetch
+                    | Pull
+                    | Push
+                    | ForcePush
+                    | SubmitCredential
+                    | CredentialAnswered(_)
                     | OpenMenu(MenuId::Merge)
                     | ContinueOperation
                     | SkipOperation
@@ -4743,6 +5026,7 @@ mod tests {
                     | DropStash
                     | RenameStash
                     | ConfirmDropStash
+                    | RewriteCommit(_)
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

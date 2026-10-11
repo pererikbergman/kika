@@ -33,6 +33,12 @@ fetch = 300     # leave out to keep auto-fetch off
 pager = "delta --paging=never"   # a program that draws the Diff pane
 ```
 
+Earlier versions of this example bound `files.stage` to `s`. `s` now opens
+the Stash menu in the Files panel (`files.stash`), so a file that still binds
+`s` to `files.stage` is ignored with the error `key "s" is bound to both
+"files.stash" and "files.stage"`. Pick another key, as the example does with
+`x`, or move `files.stash` off `s` in the same file.
+
 ## Layering
 
 Settings are applied in three layers, each on top of the one before:
@@ -88,6 +94,32 @@ Each value must be at least 1.
 
 **Changes to `[watch]` take effect after a restart.** Kika reads them once,
 when it starts.
+
+## Fetch, pull and push
+
+`f`, `p` and `P` run plain `git fetch --all`, `git pull` and `git push`, so
+your upstream, `push.default`, `pull.rebase`, credential helpers, ssh-agent
+and ssh config apply as they do on the command line. They reach the network
+only when you press them; nothing here changes auto-fetch.
+
+When git or ssh still needs an answer (a username, password, 2FA code, key
+passphrase or a new host key), Kika shows it in a popup and hands back what
+you type. A password or passphrase is drawn as dots. Kika never logs, stores
+or shows it; it goes only to the process that asked. Git asks your credential
+helper and ssh asks ssh-agent first, so the popup only appears when they had
+nothing. This works by making Kika git's and ssh's askpass program:
+
+- If you set `GIT_ASKPASS` or `core.askPass` yourself, git keeps using yours.
+- OpenSSH 8.4 and later always ask through Kika. Older ssh versions use an
+  askpass program only when `DISPLAY` is set; without it, a passphrase or
+  host-key question fails with ssh's message instead. Load the key into
+  ssh-agent, or answer the host-key question once in a terminal.
+- On Windows there is no popup: git and ssh fail instead of asking, so use a
+  credential helper or ssh-agent there.
+
+A push the remote rejects because it has commits your branch lacks offers to
+push again with `--force-with-lease`, which replaces them only if nobody
+pushed since your last fetch. Nothing is forced unless you press `y`.
 
 ## `[diff]` (global file only)
 
@@ -373,6 +405,9 @@ means a repository's `.kika.toml` cannot change it.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `workspace.refresh` | `r` | Reload the changed files and the branches | |
+| `workspace.fetch` | `f` | Fetch every remote | locked |
+| `workspace.pull` | `p` | Pull into the current branch | locked |
+| `workspace.push` | `P` | Push the current branch | locked |
 | `workspace.scroll_down` | `J` | Scroll the diff down a line | |
 | `workspace.scroll_up` | `K` | Scroll the diff up a line | |
 | `workspace.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -461,6 +496,10 @@ an older git refuses them and changes nothing.
 | `commits.checkout` | `space` | Check out the selected commit as a detached HEAD, asking first | |
 | `commits.revert` | `R` | Make a commit that undoes the selected one | locked |
 | `commits.reset` | `X` | Reset the current branch to the selected commit: soft, mixed or hard | locked |
+| `commits.squash` | `s` | Squash the selected commit into the one below, combining their messages | locked |
+| `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
+| `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
+| `commits.reword` | `e` | Write a new message for the selected commit | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -470,6 +509,20 @@ merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
 the worktree, mixed keeps the worktree and resets the index, and hard throws
 away every uncommitted change, so it asks first. Revert and reset wait until
 an operation in progress is finished or aborted.
+
+`s`, `F`, `d` and `e` rewrite history with `git rebase -i --autostash` on the
+terminal: uncommitted changes are stashed and put back (as git's autostash
+does, a staged change to a tracked file comes back unstaged), git's editor opens for
+a squash's combined message or a new message, and hooks and signing work as on
+the command line. Squash and fixup fold the selected commit into the one below
+it. Kika acts as the rebase's sequence editor and checks git's todo list
+against what you asked for; on any difference git aborts and nothing changes.
+The commits from `HEAD` down to the one rewritten must be one line of history:
+no merges, not the first commit, at most 1000 commits (400 on Windows), and
+for squash and fixup the commit below must be loaded: moving down to the end of
+the log loads it. A rebase that stops on conflicts can be
+continued, skipped or aborted from the Status panel. Drop does not ask first;
+the dropped commit stays in git's reflog.
 
 ### Commit files (a commit opened from the Commits panel)
 
@@ -649,6 +702,16 @@ picked yet keep their markers. Once every block is picked, Kika offers to stage 
 | `prompt.ok` | `enter` | Use the typed text | |
 | `prompt.cancel` | `esc` | Close without using the text | |
 | `prompt.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Git is asking (a credential or other question)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `credential.answer` | `enter` | Send the typed answer to git | locked |
+| `credential.cancel` | `esc` | Cancel the question, which fails the operation | locked |
+| `credential.quit` | `ctrl-c` | Cancel the question and quit Kika | locked |
+
+A yes/no question from ssh uses the yes/no keys above instead.
 
 ### Error messages
 

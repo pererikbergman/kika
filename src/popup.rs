@@ -3,10 +3,12 @@
 //! each popup hands its result back as an intent.
 
 use std::borrow::Cow;
+use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::commit_editor::{byte_at, char_len};
+use crate::git::askpass::Secret;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
 use crate::git::repo_state::Operation;
@@ -19,9 +21,15 @@ use crate::submodule_list::SubmoduleList;
 /// One entry on the popup stack. The top one takes the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Popup {
-    Menu { id: MenuId, cursor: usize },
+    Menu {
+        id: MenuId,
+        cursor: usize,
+    },
     Confirm(ConfirmKind),
-    Prompt { kind: PromptKind, input: LineInput },
+    Prompt {
+        kind: PromptKind,
+        input: LineInput,
+    },
     Error(ErrorPopup),
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
@@ -29,6 +37,64 @@ pub enum Popup {
     DropStash(DropStashConfirm),
     Submodules(SubmoduleList),
     Recent(RecentList),
+    /// Git or ssh asks something for a running fetch, pull or push.
+    Credential(CredentialPrompt),
+}
+
+/// A question from git or ssh, and what the user has typed so far. The
+/// text leaves only in the answer; it is never kept anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialPrompt {
+    /// Git's or ssh's words, terminal-safe.
+    pub prompt: String,
+    /// Typed text is drawn as dots, unless the answer is a name or a yes/no.
+    pub masked: bool,
+    /// Ssh's yes/no kind, answered with y or n instead of text.
+    pub confirm: bool,
+    pub input: SecretInput,
+}
+
+impl CredentialPrompt {
+    /// Only git's username question and ssh's new-host-key question are
+    /// shown as typed, matched on their exact words, so a prompt a server
+    /// chose cannot ask for a secret with the text in sight.
+    pub fn new(prompt: String, confirm: bool) -> Self {
+        let in_clear = prompt.starts_with("Username for '")
+            || prompt.contains("want to continue connecting (yes/no");
+        let masked = !in_clear;
+        Self {
+            prompt,
+            masked,
+            confirm,
+            input: SecretInput::default(),
+        }
+    }
+}
+
+/// A [`LineInput`] that may hold a password, so its `Debug` hides the text.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretInput(LineInput);
+
+impl SecretInput {
+    pub fn edit(&mut self, key: KeyPress) {
+        self.0.edit(key);
+    }
+
+    /// The typed text and cursor, only for drawing it.
+    pub fn line(&self) -> &LineInput {
+        &self.0
+    }
+
+    /// The typed text, as the answer to send.
+    pub fn secret(&self) -> Secret {
+        Secret::new(self.0.text.clone())
+    }
+}
+
+impl fmt::Debug for SecretInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretInput(..)")
+    }
 }
 
 /// "Throw this work away?" Unlike [`ConfirmKind`], it carries the op chosen
@@ -158,6 +224,8 @@ impl DropStashConfirm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
     Quit,
+    /// A plain push was rejected because the remote moved on.
+    ForcePush,
     /// Abort this operation in progress. It names the operation found when
     /// asked, so the answer aborts what the question said.
     Abort(Operation),
@@ -173,6 +241,7 @@ impl ConfirmKind {
     pub fn title(self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit",
+            ConfirmKind::ForcePush => "Push rejected",
             ConfirmKind::Abort(Operation::Merge) => "Abort merge",
             ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
@@ -186,6 +255,11 @@ impl ConfirmKind {
     pub fn question(self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit Kika? (y/n)",
+            ConfirmKind::ForcePush => {
+                "The remote has commits this branch does not. Push with \
+                 --force-with-lease, replacing them only if nobody pushed since \
+                 your last fetch? (y/n)"
+            }
             ConfirmKind::Abort(Operation::Merge) => {
                 "Abort the merge and return to where it started? \
                  Resolved conflicts are lost. (y/n)"
@@ -220,6 +294,7 @@ impl ConfirmKind {
     pub fn yes(self) -> AppIntent {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
+            ConfirmKind::ForcePush => AppIntent::ForcePush,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
@@ -229,6 +304,7 @@ impl ConfirmKind {
     pub fn no(self) -> Option<AppIntent> {
         match self {
             ConfirmKind::Quit
+            | ConfirmKind::ForcePush
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout => None,
@@ -550,6 +626,50 @@ mod tests {
     fn an_error_keeps_the_lines_of_git_message() {
         let error = ErrorPopup::new("t", "fatal: one\nhint: two\n", "n");
         assert_eq!(error.message, "fatal: one\nhint: two");
+    }
+
+    #[test]
+    fn a_credential_prompt_masks_all_but_names_and_yes_no_questions() {
+        let masked = |prompt: &str| CredentialPrompt::new(prompt.into(), false).masked;
+        assert!(masked("Password for 'https://u@h':"));
+        assert!(masked(
+            "Enter passphrase for key '/home/u/.ssh/id_ed25519':"
+        ));
+        assert!(!masked("Username for 'https://h':"));
+        assert!(!masked(
+            "The authenticity of host 'h' can't be established.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])?"
+        ));
+        // Older ssh asks without the fingerprint choice.
+        assert!(!masked(
+            "Are you sure you want to continue connecting (yes/no)?"
+        ));
+        // A server's own prompt that only looks like one stays masked.
+        assert!(masked("Username and token:"));
+        assert!(masked("Token (yes/no is fine):"));
+    }
+
+    #[test]
+    fn typed_credential_text_never_prints() {
+        let mut prompt = CredentialPrompt::new("Password:".into(), false);
+        for c in "hunter2".chars() {
+            prompt
+                .input
+                .edit(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(prompt.input.line().text, "hunter2");
+        assert_eq!(prompt.input.secret().expose(), "hunter2");
+        let printed = format!("{:?}", Popup::Credential(prompt));
+        assert!(!printed.contains("hunter2"), "{printed}");
+    }
+
+    #[test]
+    fn a_rejected_push_asks_before_forcing_with_a_lease() {
+        assert_eq!(ConfirmKind::ForcePush.yes(), AppIntent::ForcePush);
+        assert_eq!(ConfirmKind::ForcePush.no(), None);
+        assert!(ConfirmKind::ForcePush.question().starts_with(
+            "The remote has commits this branch does not. Push with --force-with-lease"
+        ));
     }
 
     #[test]

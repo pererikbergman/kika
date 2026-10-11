@@ -1,6 +1,7 @@
 //! Everything that talks to Git. Commands go through a [`GitRunner`] so tests
 //! can swap the real `git` binary for a fake.
 
+pub mod askpass;
 pub mod attr;
 pub mod blame;
 pub mod branches;
@@ -16,7 +17,9 @@ pub mod ops;
 pub mod patch;
 pub mod path;
 pub mod prompts;
+pub mod rebase_plan;
 pub mod refs;
+pub mod remote;
 pub mod repo_root;
 pub mod repo_state;
 pub mod retry;
