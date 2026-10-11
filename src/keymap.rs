@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::{EntryKind, Head};
+use crate::git::submodule::SubmoduleState;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::menu::MenuId;
@@ -91,6 +92,8 @@ impl KeyPattern {
             KeyCode::Down => "↓".to_string(),
             KeyCode::Up => "↑".to_string(),
             KeyCode::Left => "←".to_string(),
+            // Some platforms call it Delete, and the bar is short of room.
+            KeyCode::Backspace => "bksp".to_string(),
             KeyCode::PageDown => "PgDn".to_string(),
             KeyCode::PageUp => "PgUp".to_string(),
             other => other.to_string(),
@@ -139,6 +142,8 @@ pub enum KeyScope {
     Error,
     /// "Discard this work?" on top of the popup stack.
     DiscardConfirm,
+    /// The submodule list on top of the popup stack.
+    Submodules,
 }
 
 impl KeyScope {
@@ -163,7 +168,8 @@ impl KeyScope {
             | KeyScope::Confirm
             | KeyScope::Prompt
             | KeyScope::Error
-            | KeyScope::DiscardConfirm => None,
+            | KeyScope::DiscardConfirm
+            | KeyScope::Submodules => None,
         }
     }
 
@@ -189,6 +195,7 @@ impl KeyScope {
             KeyScope::Prompt => "Prompt",
             KeyScope::Error => "Error",
             KeyScope::DiscardConfirm => "Discard",
+            KeyScope::Submodules => "Submodules",
         }
     }
 
@@ -487,6 +494,52 @@ fn commit_editor_disabled(state: &AppState) -> Option<&'static str> {
     running.then_some(OP_RUNNING)
 }
 
+fn no_submodule(state: &AppState) -> Option<&'static str> {
+    state
+        .selected_submodule()
+        .is_none()
+        .then_some("No submodule selected")
+}
+
+/// Why `i` or `u` cannot run on the selected submodule right now.
+fn submodule_op_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    no_submodule(state)
+}
+
+/// Why the selected submodule cannot be entered: it must be surely checked
+/// out, and an operation must not be running in the repository being left.
+pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some("Wait for the operation to finish");
+    }
+    match state.selected_submodule() {
+        None => Some("No submodule selected"),
+        Some(sub) if sub.state == SubmoduleState::Uninitialized => {
+            Some("Update the submodule first")
+        }
+        // Git marks a conflict before it looks for a checkout, so the
+        // directory may hold none, and git there would find the parent.
+        Some(sub) if sub.state == SubmoduleState::Conflicted => {
+            Some("Resolve the submodule conflict first")
+        }
+        Some(_) => None,
+    }
+}
+
+/// Why there is no parent to go back to right now.
+pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<&'static str> {
+    if state.repo_stack.is_empty() {
+        Some("Not in a submodule")
+    } else if state.op_seq.is_some() {
+        Some("Wait for the operation to finish")
+    } else {
+        None
+    }
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -556,6 +609,15 @@ static REGISTRY: &[Binding] = &[
         label: "",
         bar: false,
         disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Backspace)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::LeaveSubmodule,
+        description: "Back to the parent repository",
+        label: "parent",
+        bar: true,
+        disabled: leave_submodule_disabled,
     },
     // Diff settings, in Workspace so they work from Files, Diff and Lines.
     // Left out of the bar until the layout review (#10).
@@ -668,6 +730,15 @@ static REGISTRY: &[Binding] = &[
         // Left out of the bar until the layout review (#10).
         bar: false,
         disabled: open_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Char('S'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenSubmodules,
+        description: "Show submodules",
+        label: "submodules",
+        bar: false,
+        disabled: never,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
@@ -1296,6 +1367,78 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::SubmoduleNext,
+        description: "Select the next submodule",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::SubmodulePrev,
+        description: "Select the previous submodule",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::EnterSubmodule,
+        description: "Work in the selected submodule",
+        label: "enter",
+        bar: true,
+        disabled: enter_submodule_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::UpdateSubmodule,
+        description: "Clone or check out the selected submodule at the recorded commit",
+        label: "update",
+        bar: true,
+        disabled: submodule_op_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::InitSubmodule,
+        description: "Record the selected submodule's URL without cloning it",
+        label: "init",
+        bar: true,
+        disabled: submodule_op_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('q'), NONE),
+        ],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::PopPopup,
+        description: "Close the list",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Submodules,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
 ];
 
 /// The application's keymap.
@@ -1826,6 +1969,103 @@ mod tests {
                 assert_eq!(from(scope, k), None, "{scope:?} {k:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_submodule_list_has_its_own_keys_and_never_reaches_global_ones() {
+        use crate::git::submodule::{Submodule, SubmoduleState};
+        use crate::popup::Popup;
+        use crate::submodule_list::SubmoduleList;
+        use AppIntent::*;
+
+        let none = KeyModifiers::NONE;
+        let shift = KeyModifiers::SHIFT;
+        assert_eq!(
+            from(KeyScope::Files, key(KeyCode::Char('S'), shift)),
+            Some(OpenSubmodules)
+        );
+        assert_eq!(KeyScope::Submodules.parent(), None);
+        assert_eq!(KeyScope::Submodules.title(), "Submodules");
+
+        let mut state = AppState::new(Context::Workspace);
+        let mut list = SubmoduleList::loading(0);
+        list.loaded(Ok(vec![Submodule {
+            path: "sub".into(),
+            oid: "abc".into(),
+            state: SubmoduleState::UpToDate,
+        }]));
+        state.popups = vec![Popup::Submodules(list)];
+        assert_eq!(state.key_focus(), KeyScope::Submodules);
+        let run = |k| match resolve(registry(), KeyScope::Submodules, &state, k) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
+            Resolution::Unbound => None,
+        };
+        assert_eq!(run(plain('j')), Some(SubmoduleNext));
+        assert_eq!(run(key(KeyCode::Down, none)), Some(SubmoduleNext));
+        assert_eq!(run(plain('k')), Some(SubmodulePrev));
+        assert_eq!(run(key(KeyCode::Up, none)), Some(SubmodulePrev));
+        assert_eq!(run(key(KeyCode::Enter, none)), Some(EnterSubmodule));
+        assert_eq!(run(plain('i')), Some(InitSubmodule));
+        assert_eq!(run(plain('u')), Some(UpdateSubmodule));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(plain('q')), Some(PopPopup));
+        assert_eq!(
+            run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(Quit)
+        );
+        for k in [
+            plain('?'),
+            plain('r'),
+            plain(' '),
+            key(KeyCode::Backspace, none),
+        ] {
+            assert_eq!(run(k), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn backspace_leaves_a_submodule_from_every_workspace_panel_once_inside_one() {
+        let backspace = key(KeyCode::Backspace, KeyModifiers::NONE);
+        let mut state = AppState::new(Context::Workspace);
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
+            assert!(
+                matches!(
+                    resolve(registry(), scope, &state, backspace),
+                    Resolution::Disabled("Not in a submodule")
+                ),
+                "{scope:?}"
+            );
+        }
+        state.repo_stack.push(crate::model::ParentRepo {
+            path: "sub".into(),
+            files: vec![],
+            files_loaded: true,
+            branch: None,
+            selected: None,
+        });
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
+            assert!(
+                matches!(
+                    resolve(registry(), scope, &state, backspace),
+                    Resolution::Run(Binding {
+                        intent: AppIntent::LeaveSubmodule,
+                        ..
+                    })
+                ),
+                "{scope:?}"
+            );
+        }
+        state.op_seq = Some(1);
+        assert!(matches!(
+            resolve(registry(), KeyScope::Files, &state, backspace),
+            Resolution::Disabled("Wait for the operation to finish")
+        ));
+        assert_eq!(
+            KeyPattern::any(KeyCode::Backspace).label(),
+            "bksp",
+            "the same on every platform"
+        );
     }
 
     #[test]

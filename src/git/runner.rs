@@ -1,9 +1,9 @@
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// A `git` invocation as argv plus environment, and optionally bytes for its
@@ -75,6 +75,15 @@ pub trait GitRunner: Send + Sync {
     /// Start a command whose stdout is read as it arrives. The pipe and the
     /// handle are separate so one thread can kill while another is blocked reading.
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild>;
+
+    /// The directory commands run in. Empty for runners with no directory.
+    fn workdir(&self) -> PathBuf {
+        PathBuf::new()
+    }
+
+    /// Run later commands in `dir` instead, such as a submodule's top
+    /// level. Commands already started keep theirs.
+    fn set_workdir(&self, _dir: PathBuf) {}
 }
 
 /// A running `git` process: its stdout pipe, plus a handle to kill or reap it.
@@ -95,7 +104,8 @@ pub trait ChildHandle: Send + Sync {
 
 /// The real runner: spawns the `git` binary in a working directory.
 pub struct CliRunner {
-    workdir: PathBuf,
+    /// Behind a lock so entering a submodule can move every later command.
+    workdir: RwLock<PathBuf>,
     /// Added to every command; lets tests shut out the host's git config.
     env: Vec<(OsString, OsString)>,
     /// Removed from every command's environment, for the same reason.
@@ -108,7 +118,7 @@ pub struct CliRunner {
 impl CliRunner {
     pub fn new(workdir: impl Into<PathBuf>) -> Self {
         Self {
-            workdir: workdir.into(),
+            workdir: RwLock::new(workdir.into()),
             env: Vec::new(),
             env_remove: Vec::new(),
             running: Mutex::new(Vec::new()),
@@ -129,9 +139,12 @@ impl CliRunner {
         }
     }
 
-    /// The directory every command runs in: the repository's top level.
-    pub fn workdir(&self) -> &Path {
-        &self.workdir
+    /// Add `key=value` to every command, for test setups that need more
+    /// than the isolated config.
+    #[cfg(test)]
+    pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 
     fn command(&self, cmd: &GitCommand) -> Command {
@@ -140,7 +153,7 @@ impl CliRunner {
             command.env_remove(key);
         }
         command
-            .current_dir(&self.workdir)
+            .current_dir(&*self.workdir.read().unwrap_or_else(|e| e.into_inner()))
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .args(cmd.args())
             .envs(cmd.envs().iter().map(|(k, v)| (k, v)))
@@ -228,6 +241,18 @@ fn terminate(child: &mut Child) {
 }
 
 impl GitRunner for CliRunner {
+    /// The repository's top level, or the submodule's once one is entered.
+    fn workdir(&self) -> PathBuf {
+        self.workdir
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn set_workdir(&self, dir: PathBuf) {
+        *self.workdir.write().unwrap_or_else(|e| e.into_inner()) = dir;
+    }
+
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
         let mut command = self.command(cmd);
         if cmd.input().is_some() {
@@ -371,6 +396,8 @@ mod tests {
             GitOp::ApplyEdited {
                 patch: b"patch".to_vec(),
             },
+            GitOp::SubmoduleInit(RepoPath::from("sub")),
+            GitOp::SubmoduleUpdate(RepoPath::from("sub")),
         ];
         let commands = [
             status_command(),
@@ -381,6 +408,7 @@ mod tests {
             patch_diff_command(&staged),
             patch_diff_command(&untracked),
             git_dir_command(),
+            crate::git::submodule::status_command(),
         ]
         .into_iter()
         .chain(ops.iter().map(op_command));
