@@ -269,26 +269,44 @@ selected file as a script.
 The same check applies to a shell started through one of these launchers in
 `command[0]`: `env`, `busybox`, `toybox`, `nice`, `nohup`, `timeout`, `xargs`,
 `exec`, `command`, `stdbuf`, `setsid`, `ionice`, `chrt`, `taskset`, `time`,
-`sudo` and `doas` (named the same ways as a shell: any path, any case, with or
-without `.exe`, with trailing dots or spaces). Kika does not read the
-launcher's options. It takes the first shell name among the launcher's
-arguments as the shell, rejects any placeholder before it, and checks the rest
-as if that shell were `command[0]`. So `["env", "sh", "-c", "… \"$1\" …",
-"sh", "{path}"]` is accepted and `["env", "bash", "-c", "x {path}"]` is not.
-This can refuse a safe command: in `["timeout", "5", "grep", "sh", "{path}"]`
-the pattern `sh` is taken as the shell, so `{path}` is rejected. If that
-happens, call the launcher from a shell and pass the value as `"$1"`:
+`sudo`, `doas`, `caffeinate` and `arch` (named the same ways as a shell: any
+path, any case, with or without `.exe`, with trailing dots or spaces). Kika does
+not read the launcher's options. It takes the first shell name among the
+launcher's arguments as the shell, rejects any placeholder before it, and
+checks the rest as if that shell were `command[0]`. If that shell name may be
+an option's value or an assignment, because the argument before it starts with
+`-` or `+` (other than `--`) or because it contains `=` (`-u SH`,
+`SHELL=/bin/bash`), Kika also checks the next shell name the same way, and so
+on. So `["env", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` is accepted, and
+`["env", "bash", "-c", "x {path}"]` and `["env", "-u", "SH", "bash", "{path}"]`
+are not.
+
+This can refuse a safe command:
+
+- In `["timeout", "5", "grep", "sh", "{path}"]` the pattern `sh` is taken as
+  the shell, so `{path}` is rejected.
+- In `["env", "-i", "sh", "-c", "… \"$1\" …", "sh", "{path}"]` the first `sh`
+  might be the value of `-i`, so the second `sh` is checked as a shell too.
+  Put `--` before the shell, where the launcher accepts it:
+  `["env", "-i", "--", "sh", …]`.
+
+Otherwise, call the launcher from a shell and pass the value as `"$1"`:
 `["sh", "-c", "timeout 5 grep sh -- \"$1\"", "sh", "{path}"]`.
 
 `env -S` (or `--split-string`) splits one argument into several. When any word
 of it names a shell, or holds a `$` variable that could, Kika cannot tell where
-the script ends, so it rejects every placeholder in that command.
+the script ends, so it rejects every placeholder in that command. A placeholder
+inside the `-S` string itself is rejected too, since env would split the value
+into a program and its arguments.
 
 **Not checked.** The guard cannot see a shell or interpreter started any other
 way, so for these the rule is yours to keep:
 
-- a launcher that is not on the list above, and `sudo -s`, `sudo -i` or
-  `doas -s`, which start a shell without naming one;
+- a launcher that is not on the list above, for example `ssh`, `su -c`,
+  `find -exec`, `watch`, `flock` or `systemd-run`;
+- `sudo -s`, `sudo -i` and `doas -s`, which start a shell without naming one;
+- a placeholder that becomes the launcher's program, as in
+  `["env", "{prompt1}", …]`;
 - `cmd /c`, `pwsh -c` and `powershell` on Windows;
 - interpreters such as `python -c`, `perl -e` and `node -e`.
 

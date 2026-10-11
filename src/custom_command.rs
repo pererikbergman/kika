@@ -120,7 +120,7 @@ impl CustomCommand {
         let keys = table
             .keys
             .iter()
-            .map(|text| parse_key(text).map_err(&fail))
+            .map(|text| parse_key(text).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         if keys.is_empty() {
             return Err(fail("needs at least one key".into()));
@@ -131,7 +131,7 @@ impl CustomCommand {
         let argv = table
             .command
             .iter()
-            .map(|element| parse_element(element).map_err(&fail))
+            .map(|element| parse_element(element).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         let program = match argv.first() {
             None => return Err(fail("`command` is empty".into())),
@@ -304,33 +304,49 @@ fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     if !is_launcher(&command[0]) {
         return Ok(());
     }
-    if is_env(&command[0]) && env_splits_a_shell(command) {
-        return match first_value(&argv[1..]) {
-            Some(part) => Err(format!(
-                "\"{}\" is in a command where env -S starts a shell; Kika cannot tell \
-                 where the script ends, so pass no placeholders",
-                placeholder(part)
-            )),
-            None => Ok(()),
+    if is_env(&command[0]) {
+        let message = match env_split(command, argv) {
+            EnvSplit::None => None,
+            EnvSplit::Shell => Some(
+                "is in a command where env -S starts a shell; Kika cannot tell where the \
+                 script ends, so pass no placeholders",
+            ),
+            EnvSplit::Value => Some(
+                "is in the string that env -S splits into a command, where it could become \
+                 the program or its options; pass no placeholders",
+            ),
         };
+        if let Some(message) = message {
+            return match first_value(&argv[1..]) {
+                Some(part) => Err(format!("\"{}\" {message}", placeholder(part))),
+                None => Ok(()),
+            };
+        }
     }
     // Options are not parsed: the first shell name among the arguments is
-    // taken as the shell. This can refuse a safe command, never accept one
-    // the shell would run a value of as code.
-    let shell = (1..command.len())
-        .find(|&k| argv[k].iter().all(|p| matches!(p, Part::Text(_))) && is_shell(&command[k]));
-    let Some(k) = shell else {
-        return Ok(());
-    };
-    if let Some(part) = first_value(&argv[1..k]) {
-        return Err(format!(
-            "\"{}\" is before the shell that {} starts, where it could become the program \
-             or its options; pass it after the script and read it as \"$1\"",
-            placeholder(part),
-            command[0]
-        ));
+    // taken as the shell. If it may be an option's value or an assignment
+    // (`-u SH`, `SHELL=/bin/bash`), the next shell name is checked too, and
+    // so on. This can refuse a safe command, never accept one the shell
+    // would run a value of as code.
+    let shells = (1..command.len())
+        .filter(|&k| argv[k].iter().all(|p| matches!(p, Part::Text(_))) && is_shell(&command[k]));
+    for k in shells {
+        if let Some(part) = first_value(&argv[1..k]) {
+            return Err(format!(
+                "\"{}\" is before the shell that {} starts, where it could become the \
+                 program or its options; pass it after the script and read it as \"$1\"",
+                placeholder(part),
+                command[0]
+            ));
+        }
+        check_shell_at(&command[k..], &argv[k..])?;
+        let before = &command[k - 1];
+        let option_value = k > 1 && before.starts_with(['-', '+']) && before != "--";
+        if !option_value && !command[k].contains('=') {
+            break;
+        }
     }
-    check_shell_at(&command[k..], &argv[k..])
+    Ok(())
 }
 
 /// The first placeholder in `argv`, in order.
@@ -369,46 +385,88 @@ fn check_shell_at(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> 
     Ok(())
 }
 
-/// Whether env's `-S`/`--split-string` value names a shell. The value is
-/// split into words, so the script's position cannot be known. env also
-/// unquotes the words, reads `\_` as a space and expands `${VAR}`, so
-/// quotes and backslashes are dropped before the lookup, and a variable
-/// counts as a shell, since it could hold one.
-fn env_splits_a_shell(command: &[String]) -> bool {
+/// What env's `-S`/`--split-string` string may start.
+enum EnvSplit {
+    /// No such string, or one with no shell or placeholder in it.
+    None,
+    /// A word names a shell, so the script's position cannot be known.
+    Shell,
+    /// The string holds a placeholder, which env splits into words.
+    Value,
+}
+
+/// env unquotes the `-S` words, reads `\_` as a space and expands
+/// `${VAR}`, so quotes and backslashes are dropped before the lookup, and
+/// a variable counts as a shell, since it could hold one.
+fn env_split(command: &[String], argv: &[Vec<Part>]) -> EnvSplit {
     let names_a_shell = |value: &str| {
         let words = value.replace("\\_", " ").replace(['\'', '"', '\\'], "");
         words
             .split_ascii_whitespace()
             .any(|word| word.contains('$') || is_shell(word))
     };
-    let next = |i: usize| command.get(i + 1).map(String::as_str).unwrap_or_default();
-    command.iter().enumerate().skip(1).any(|(i, element)| {
-        if let Some(long) = element.strip_prefix("--") {
+    let has_value = |i: usize| argv[i].iter().any(|p| !matches!(p, Part::Text(_)));
+    let mut found = EnvSplit::None;
+    for (i, element) in command.iter().enumerate().skip(1) {
+        // The string is attached (`-Sx`, `--split-string=x`) or the next element.
+        let attached = if let Some(long) = element.strip_prefix("--") {
             // Long options may be abbreviated, down to `--s`.
             let (name, value) = match long.split_once('=') {
                 Some((name, value)) => (name, Some(value)),
                 None => (long, None),
             };
-            !name.is_empty()
-                && "split-string".starts_with(name)
-                && names_a_shell(value.unwrap_or_else(|| next(i)))
+            if name.is_empty() || !"split-string".starts_with(name) {
+                continue;
+            }
+            value
         } else if let Some(group) = element.strip_prefix('-') {
             match group.split_once('S') {
-                Some((_, "")) => names_a_shell(next(i)),
-                Some((_, attached)) => names_a_shell(attached),
-                None => false,
+                Some((_, "")) => None,
+                Some((_, attached)) => Some(attached),
+                None => continue,
             }
         } else {
-            false
+            continue;
+        };
+        let (text, index) = match attached {
+            Some(text) => (text, i),
+            None => match command.get(i + 1) {
+                Some(next) => (next.as_str(), i + 1),
+                None => continue,
+            },
+        };
+        if names_a_shell(text) {
+            return EnvSplit::Shell;
         }
-    })
+        if has_value(index) {
+            found = EnvSplit::Value;
+        }
+    }
+    found
 }
 
 /// Programs that start the program named among their arguments, which may
 /// be a shell.
 const LAUNCHERS: &[&str] = &[
-    "env", "busybox", "toybox", "nice", "nohup", "timeout", "xargs", "exec", "command", "stdbuf",
-    "setsid", "ionice", "chrt", "taskset", "time", "sudo", "doas",
+    "env",
+    "busybox",
+    "toybox",
+    "nice",
+    "nohup",
+    "timeout",
+    "xargs",
+    "exec",
+    "command",
+    "stdbuf",
+    "setsid",
+    "ionice",
+    "chrt",
+    "taskset",
+    "time",
+    "sudo",
+    "doas",
+    "caffeinate",
+    "arch",
 ];
 
 /// The last component of `program`, lowercased, without the trailing dots
@@ -793,6 +851,8 @@ mod tests {
             &["xargs", "-0", "sh", "-c", "x {path}"],
             &["env", "nice", "bash", "-c", "x {path}"],
             &["ENV.EXE.", "sh", "-c", "x {path}"],
+            &["caffeinate", "bash", "-c", "x {path}"],
+            &["/usr/bin/arch", "-arm64", "bash", "-c", "x {path}"],
             // Refused although safe: the first shell name is taken as the shell.
             &["timeout", "5", "grep", "sh", "{path}"],
         ] {
@@ -839,6 +899,41 @@ mod tests {
                 "{command:?}: {e}"
             );
         }
+        // env splits a value in its -S string into a program and arguments.
+        for command in [
+            &["env", "-S", "{path}"][..],
+            &["env", "-S{path}"],
+            &["env", "--split-string={prompt1}"],
+            &["env", "-S", "x{path}"],
+        ] {
+            let e = error(Panel::Files, command, &["Q"]);
+            assert!(
+                e.contains(r#"" is in the string that env -S splits into a command"#),
+                "{command:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shell_name_that_may_be_an_option_value_does_not_hide_the_shell() {
+        for command in [
+            &["env", "-u", "SH", "bash", "{path}"][..],
+            &["env", "SHELL=/bin/bash", "bash", "{path}"],
+            &["sudo", "-u", "ash", "bash", "{path}"],
+            &["env", "-C", "/tmp/sh", "bash", "{path}"],
+            &["xargs", "-a", "sh", "bash", "{path}"],
+            &["env", "-u", "SH", "-u", "ZSH", "bash", "{path}"],
+            // Refused although safe; `--` before the shell avoids it.
+            &["env", "-i", "sh", "-c", "x \"$1\"", "sh", "{path}"],
+        ] {
+            let e = error(Panel::Files, command, &[]);
+            assert!(
+                e.starts_with(r#"command 2: "{path}" is in the shell script or before it"#),
+                "{command:?}: {e}"
+            );
+        }
+        let marked = ["env", "-i", "--", "sh", "-c", "x \"$1\"", "sh", "{path}"];
+        assert!(parse(Panel::Files, &marked, &[]).is_ok());
     }
 
     #[test]
