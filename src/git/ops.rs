@@ -124,6 +124,9 @@ pub enum GitOp {
         name: BranchName,
         force: bool,
     },
+    /// Resolve this conflicted file in the user's merge tool, on the
+    /// terminal. The tool may ask which one to use or wait for Enter.
+    MergeTool(RepoPath),
 }
 
 /// How a merge records the other branch's commits.
@@ -358,6 +361,12 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
         GitOp::Abort(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--abort");
+        }
+        // The user's tool runs on the terminal and keeps their locale, so
+        // no `LC_ALL`; the name is still read literally.
+        GitOp::MergeTool(path) => {
+            return with_paths(GitCommand::new("mergetool"), std::slice::from_ref(path))
+                .env("GIT_LITERAL_PATHSPECS", "1");
         }
         GitOp::Commit {
             message,
@@ -675,6 +684,17 @@ mod tests {
             assert_eq!(argv(&cmd), expected, "{op:?}");
             assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
         }
+    }
+
+    #[test]
+    fn the_merge_tool_reads_the_path_literally_and_keeps_the_users_locale() {
+        let cmd = op_command(&GitOp::MergeTool("-x".into()));
+        assert_eq!(argv(&cmd), ["mergetool", "--", "-x"]);
+        assert_eq!(
+            cmd.envs(),
+            [("GIT_LITERAL_PATHSPECS".into(), "1".into())],
+            "no LC_ALL"
+        );
     }
 
     #[test]

@@ -2,13 +2,14 @@ use crate::blame_view::{BlameView, CommitView};
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
+use crate::conflict_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
-use crate::git::status::Head;
+use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
 use crate::layout::{Panel, SidePanel, workspace_layout};
@@ -100,6 +101,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             render_hunk_view(view, options, &suffix, &look, frame, area)
         }
         (Focus::Diff(view), ..) => render_hunk_view(view, options, "", &look, frame, area),
+        (Focus::Conflict(view), ..) => {
+            conflict_view::render(view, &state.keymap, &look, frame, area)
+        }
         (Focus::Blame(view), ..) => match &view.commit {
             Some(commit) => render_commit_view(commit, &look, frame, area),
             None => render_blame(view, &look, frame, area),
@@ -169,7 +173,7 @@ impl PanelLook {
 
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
     /// the rest of the title fits.
-    fn path_title(&self, head: &str, path: &str, tail: &str) -> String {
+    pub(crate) fn path_title(&self, head: &str, path: &str, tail: &str) -> String {
         let padded = width_of(&format!(" [{}] {head} {tail}{} ", self.number, self.mode));
         // With no room for even `…` beside the padding, `title` drops the
         // padding; give the path that room.
@@ -1360,9 +1364,15 @@ fn styled_diff_line(line: &DiffLine, width: usize) -> Line<'static> {
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`
 /// columns. Paths lose their start first, since the file name is at the end;
-/// for renames the new path keeps as much room as it can.
+/// for renames the new path keeps as much room as it can. A conflict reads
+/// `! XY path` in red bold, so it stands out without colour too.
 fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
-    let letters = entry.status_letters();
+    let conflicted = entry.kind == EntryKind::Conflicted;
+    let letters = if conflicted {
+        format!("! {}", entry.status_letters())
+    } else {
+        entry.status_letters()
+    };
     let prefix = width_of(&letters) + 1;
     let text = match &entry.orig_path {
         None => {
@@ -1380,7 +1390,14 @@ fn file_line(entry: &FileEntry, width: usize) -> Line<'static> {
             format!("{letters} {orig} → {path}")
         }
     };
-    Line::from(text)
+    if conflicted {
+        Line::styled(
+            text,
+            Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Line::from(text)
+    }
 }
 
 /// Fit `text` into `max` columns by replacing its start with `…`.
@@ -2063,6 +2080,34 @@ mod tests {
             ),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn a_conflicted_row_is_marked_and_red_bold() {
+        let mut state = loaded(vec![file("a.txt")]);
+        state.files.insert(
+            0,
+            FileEntry {
+                path: "both.txt".into(),
+                orig_path: None,
+                index: 'U',
+                worktree: 'U',
+                kind: EntryKind::Conflicted,
+            },
+        );
+        state.selected = Some(1);
+        let buffer = draw_buffer(&state, 80, 24);
+        let rows = thin(buffer_rows(&buffer));
+        assert!(contains(&rows, "│! UU both.txt "), "{rows:#?}");
+        assert!(contains(&rows, "│ M a.txt "), "{rows:#?}");
+        let (x, y) = find(&buffer, "! UU both.txt");
+        for x in x..x + 13 {
+            let style = buffer[(x, y)].style();
+            assert_eq!(style.fg, Some(Color::Red), "{x}");
+            assert!(style.add_modifier.contains(Modifier::BOLD), "{x}");
+        }
+        let (x, y) = find(&buffer, " M a.txt");
+        assert_ne!(buffer[(x + 1, y)].style().fg, Some(Color::Red));
     }
 
     #[test]

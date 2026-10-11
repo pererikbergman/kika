@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::conflict::Choice;
 use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -210,6 +211,8 @@ pub enum KeyScope {
     Blame,
     /// The commit opened from a blame line.
     BlameCommit,
+    /// A conflicted file's blocks, with a cursor on one.
+    Conflict,
     Review,
     Help,
     /// "Stage everything and commit?"
@@ -257,7 +260,8 @@ impl KeyScope {
             | KeyScope::Status
             | KeyScope::Diff
             | KeyScope::Blame
-            | KeyScope::BlameCommit => Some(KeyScope::Workspace),
+            | KeyScope::BlameCommit
+            | KeyScope::Conflict => Some(KeyScope::Workspace),
             KeyScope::Lines => Some(KeyScope::Diff),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
@@ -292,6 +296,7 @@ impl KeyScope {
             KeyScope::Lines => "Lines",
             KeyScope::Blame => "Blame",
             KeyScope::BlameCommit => "Commit",
+            KeyScope::Conflict => "Conflict",
             KeyScope::Review => "Review",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
@@ -366,7 +371,8 @@ pub enum Trust {
 }
 
 /// Bindings a repository file may not change: they quit, start other
-/// programs (an editor, a diff renderer), reach the network, destroy work, answer a question, create a
+/// programs (an editor, a diff renderer, a merge tool), reach the network,
+/// destroy or write work, answer a question, create a
 /// repository or switch to another one. Moving
 /// one onto an innocent key, taking quit away, or letting the key that
 /// asks also answer, would let a cloned repository trap or trick the user.
@@ -407,6 +413,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "delete_branch.force",
     "delete_branch.no",
     "delete_branch.quit",
+    "files.mergetool",
+    "conflict.mergetool",
+    "conflict.ours",
+    "conflict.theirs",
+    "conflict.both",
     "commits.revert",
     "commits.reset",
     "reset_hard.yes",
@@ -708,14 +719,22 @@ fn blame_open(state: &AppState) -> Option<&'static str> {
     matches!(state.focus, Focus::Blame(_)).then_some(BLAME_OPEN)
 }
 
-fn most_context(state: &AppState) -> Option<&'static str> {
+/// The diff settings reach the conflict view the same way, and the diff
+/// is just as hidden.
+fn diff_hidden(state: &AppState) -> Option<&'static str> {
     blame_open(state).or_else(|| {
+        matches!(state.focus, Focus::Conflict(_)).then_some("Close the conflict view first")
+    })
+}
+
+fn most_context(state: &AppState) -> Option<&'static str> {
+    diff_hidden(state).or_else(|| {
         (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context")
     })
 }
 
 fn least_context(state: &AppState) -> Option<&'static str> {
-    blame_open(state).or_else(|| {
+    diff_hidden(state).or_else(|| {
         (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
     })
 }
@@ -740,6 +759,33 @@ pub(crate) fn blame_disabled(state: &AppState) -> Option<&'static str> {
             Some("The file is deleted: nothing to blame")
         }
         Some(_) => None,
+    }
+}
+
+/// Why the conflict view cannot pick a side now: one write at a time, and
+/// only in a file whose blocks were read.
+pub(crate) fn pick_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    match &state.focus {
+        Focus::Conflict(view) if view.loaded.is_some() => None,
+        _ => Some("Nothing to pick"),
+    }
+}
+
+/// Why the merge tool cannot start now: in the conflict view it is for
+/// that file; from Files, only for a conflicted one.
+pub(crate) fn mergetool_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    if matches!(state.focus, Focus::Conflict(_)) {
+        return None;
+    }
+    match state.selected.and_then(|i| state.files.get(i)) {
+        Some(file) if file.kind == EntryKind::Conflicted => None,
+        _ => Some("Not a conflicted file"),
     }
 }
 
@@ -1234,7 +1280,7 @@ static REGISTRY: &[Binding] = &[
         description: "Hide or show whitespace-only changes",
         label: "whitespace",
         bar: false,
-        disabled: blame_open,
+        disabled: diff_hidden,
     },
     // Moving between panels and zooming. Out of the bar, which is full at
     // 80 columns; the help menu lists them.
@@ -1616,11 +1662,22 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Files,
         intent: AppIntent::FocusDiff,
-        description: "Work on the hunks of the selected file",
+        description: "Work on the hunks of the selected file, or resolve its conflicts",
         label: "hunks",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: no_file_selected,
+    },
+    Binding {
+        id: "files.mergetool",
+        keys: &[KeyPattern::any(KeyCode::Char('M'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenMergeTool,
+        description: "Resolve the selected conflicted file in your merge tool",
+        label: "merge tool",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: mergetool_disabled,
     },
     Binding {
         id: "diff.next",
@@ -1896,6 +1953,82 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Blame,
         intent: AppIntent::CloseBlame,
         description: "Back to the file list",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "conflict.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::ConflictNext,
+        description: "Move to the next conflict",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "conflict.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::ConflictPrev,
+        description: "Move to the previous conflict",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "conflict.ours",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::PickConflict(Choice::Ours),
+        description: "Keep our side of this conflict and write the file",
+        label: "ours",
+        bar: true,
+        disabled: pick_disabled,
+    },
+    Binding {
+        id: "conflict.theirs",
+        keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::PickConflict(Choice::Theirs),
+        description: "Keep their side of this conflict and write the file",
+        label: "theirs",
+        bar: true,
+        disabled: pick_disabled,
+    },
+    Binding {
+        id: "conflict.both",
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::PickConflict(Choice::Both),
+        description: "Keep both sides of this conflict, ours first, and write the file",
+        label: "both",
+        bar: true,
+        disabled: pick_disabled,
+    },
+    Binding {
+        id: "conflict.mergetool",
+        keys: &[KeyPattern::any(KeyCode::Char('M'))],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::OpenMergeTool,
+        description: "Resolve this file in your merge tool instead",
+        label: "merge tool",
+        bar: true,
+        disabled: mergetool_disabled,
+    },
+    Binding {
+        id: "conflict.back",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Conflict,
+        intent: AppIntent::FocusLeft,
+        description: "Back to the file list; picks already written stay",
         label: "back",
         bar: true,
         disabled: never,
@@ -4193,6 +4326,7 @@ mod tests {
             KeyScope::Lines => "lines",
             KeyScope::Blame => "blame",
             KeyScope::BlameCommit => "blame_commit",
+            KeyScope::Conflict => "conflict",
             KeyScope::Review => "review",
             KeyScope::Help => "help",
             KeyScope::CommitConfirm => "commit_confirm",
@@ -4441,6 +4575,8 @@ mod tests {
                     | ContinueOperation
                     | SkipOperation
                     | AbortOperation
+                    | PickConflict(_)
+                    | OpenMergeTool
                     | RevertCommit
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard

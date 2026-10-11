@@ -354,9 +354,9 @@ global file.
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
 then its enclosing scopes: the status, file list, branch list, commits, commit
-files, diff and blame panels fall back to Workspace, and Workspace falls back to Global. Popups,
-menus and the commit editor do not fall back, so `q` and `?` do not quit or
-open help there; each popup that can stay open has its own `ctrl-c` to quit.
+files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
+back to Global. Popups, menus and the commit editor do not fall back, so `q` and
+`?` do not quit or open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
 `(none)` means a binding has no default keys. `locked` in the last column
 means a repository's `.kika.toml` cannot change it.
@@ -368,7 +368,7 @@ means a repository's `.kika.toml` cannot change it.
 | `global.help` | `?` | Show the keys for this panel | |
 | `global.quit` | `q`, `esc`, `ctrl-c` | Quit Kika | locked |
 
-### Workspace (every panel: Status, Files, Branches, Commits, Stash, diff and blame)
+### Workspace (every panel: Status, Files, Branches, Commits, Stash, diff, blame and conflict)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -407,7 +407,8 @@ means a repository's `.kika.toml` cannot change it.
 | `files.open` | `o` | Open the selected file in your editor | locked |
 | `files.submodules` | `S` | Show submodules | |
 | `files.blame` | `b` | Blame the selected file | |
-| `files.hunks` | `enter` | Work on the hunks of the selected file | |
+| `files.hunks` | `enter` | Work on the hunks of the selected file, or resolve its conflicts | |
+| `files.mergetool` | `M` | Resolve the selected conflicted file in your merge tool | locked |
 | `files.menu` | `m` | Open the actions menu | |
 
 ### Branches
@@ -541,6 +542,21 @@ goes back to the log.
 | `blame_commit.page_down` | `pgdn` | Scroll the commit down a page | |
 | `blame_commit.page_up` | `pgup` | Scroll the commit up a page | |
 | `blame_commit.back` | `esc`, `h`, `left` | Back to the blame, at the same line | |
+
+### Conflict view
+
+Enter on a conflicted file opens it here. Each pick writes the file at once; blocks not
+picked yet keep their markers. Once every block is picked, Kika offers to stage the file.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `conflict.next` | `j`, `down` | Move to the next conflict | |
+| `conflict.prev` | `k`, `up` | Move to the previous conflict | |
+| `conflict.ours` | `o` | Keep our side of this conflict and write the file | locked |
+| `conflict.theirs` | `t` | Keep their side of this conflict and write the file | locked |
+| `conflict.both` | `b` | Keep both sides of this conflict, ours first, and write the file | locked |
+| `conflict.mergetool` | `M` | Resolve this file in your merge tool instead | locked |
+| `conflict.back` | `esc` | Back to the file list; picks already written stay | |
 
 ### Stage all and commit?
 
