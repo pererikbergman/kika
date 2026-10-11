@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -13,7 +13,7 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
-use crate::config::{ConfigPaths, Loaded};
+use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
 use crate::git::GitRunner;
 use crate::handoff::{self, HandOff};
@@ -29,11 +29,14 @@ pub async fn run(
     mut terminal: DefaultTerminal,
     mut state: AppState,
     runner: Arc<dyn GitRunner>,
-    config_paths: ConfigPaths,
+    recent_store: Option<PathBuf>,
+    global_config: Option<PathBuf>,
     config: Loaded,
 ) -> color_eyre::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let runtime = Runtime::new(Arc::clone(&runner), tx.clone()).with_config(config_paths);
+    let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
+        .with_recent_store(recent_store)
+        .with_global_config(global_config);
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);
@@ -70,15 +73,16 @@ pub async fn run(
     Ok(())
 }
 
-/// Size the state to the screen, then start the first status load. Shared
-/// with the headless harness so tests start the app exactly as `run` does.
+/// Size the state to the screen, then start: the first status load, or
+/// the welcome outside a repository. Shared with the headless harness so
+/// tests start the app exactly as `run` does.
 pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
     // Know the pane height before the first diff request sizes itself.
     // Neither intent asks for the terminal, so there is no hand-off to run.
     dispatch(state, runtime, AppIntent::Resize { width, height });
     // Start the first load before the first draw, so the frame shows "Loading…"
     // instead of waiting on git.
-    dispatch(state, runtime, AppIntent::RefreshStatus);
+    dispatch(state, runtime, AppIntent::Start);
 }
 
 /// Apply one intent and spawn the effects it asks for, except hand-offs:

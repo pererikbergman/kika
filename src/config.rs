@@ -4,8 +4,9 @@
 //! - global: `$XDG_CONFIG_HOME/kika/config.toml`, else
 //!   `~/.config/kika/config.toml` (Linux and macOS), or
 //!   `%APPDATA%\kika\config.toml` on Windows;
-//! - per repository: `.kika.toml` at the root of the repository Kika
-//!   started in. It overrides the global file.
+//! - per repository: `.kika.toml` at the top level of the repository open
+//!   now (an entered submodule keeps its parent's). It overrides the global
+//!   file. Outside a repository there is none.
 //!
 //! ```toml
 //! [keys]
@@ -43,31 +44,37 @@ pub struct ConfigPaths {
     pub repo: Option<PathBuf>,
 }
 
-impl ConfigPaths {
-    /// The files for a Kika started in the repository at `workdir`.
-    pub fn from_env(workdir: &Path) -> Self {
-        Self::locate(|name| std::env::var_os(name), cfg!(windows), workdir)
-    }
+/// The per-repository file's name, at the repository's top level.
+pub const REPO_FILE: &str = ".kika.toml";
 
-    /// `from_env` with the environment passed in, so tests set their own.
-    fn locate(
-        var: impl Fn(&str) -> Option<std::ffi::OsString>,
-        windows: bool,
-        workdir: &Path,
-    ) -> Self {
-        // A relative base would depend on where Kika started; the XDG spec
-        // says to ignore one.
-        let absolute = |name| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
-        let base = if windows {
-            absolute("APPDATA")
-        } else {
-            absolute("XDG_CONFIG_HOME").or_else(|| absolute("HOME").map(|h| h.join(".config")))
-        };
+impl ConfigPaths {
+    /// The `global` file, and the file of the repository whose top level
+    /// is `repo`. Outside a repository there is no repository file: a
+    /// stray one in some directory is not a repository's.
+    pub fn new(global: Option<PathBuf>, repo: Option<&Path>) -> Self {
         Self {
-            global: base.map(|b| b.join("kika").join("config.toml")),
-            repo: Some(workdir.join(".kika.toml")),
+            global,
+            repo: repo.map(|top| top.join(REPO_FILE)),
         }
     }
+}
+
+/// Where this user's global file is, from the environment.
+pub fn global_path_from_env() -> Option<PathBuf> {
+    global_path(|name| std::env::var_os(name), cfg!(windows))
+}
+
+/// `global_path_from_env` with the environment passed in, so tests set their own.
+fn global_path(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) -> Option<PathBuf> {
+    // A relative base would depend on where Kika started; the XDG spec
+    // says to ignore one.
+    let absolute = |name| var(name).map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = if windows {
+        absolute("APPDATA")
+    } else {
+        absolute("XDG_CONFIG_HOME").or_else(|| absolute("HOME").map(|h| h.join(".config")))
+    };
+    base.map(|b| b.join("kika").join("config.toml"))
 }
 
 /// A config file that was ignored, and why.
@@ -292,30 +299,31 @@ mod tests {
                     .map(|(_, v)| OsString::from(v))
             }
         };
-        let root = Path::new("/work/repo");
-        let paths = ConfigPaths::locate(env(&[("HOME", "/home/me")]), false, root);
+        let home = global_path(env(&[("HOME", "/home/me")]), false);
+        assert_eq!(home, Some("/home/me/.config/kika/config.toml".into()));
+        let xdg = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/xdg")]);
+        assert_eq!(
+            global_path(xdg, false),
+            Some("/xdg/kika/config.toml".into())
+        );
+        let relative = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "rel")]);
+        assert_eq!(global_path(relative, false), home);
+        assert_eq!(global_path(env(&[]), false), None);
+        #[cfg(windows)]
+        assert_eq!(
+            global_path(env(&[("APPDATA", r"C:\Users\me\AppData")]), true),
+            Some(r"C:\Users\me\AppData\kika\config.toml".into())
+        );
+
+        let paths = ConfigPaths::new(home.clone(), Some(Path::new("/work/repo")));
         assert_eq!(
             paths,
             ConfigPaths {
-                global: Some("/home/me/.config/kika/config.toml".into()),
+                global: home.clone(),
                 repo: Some("/work/repo/.kika.toml".into()),
             }
         );
-        let xdg = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "/xdg")]);
-        let paths = ConfigPaths::locate(xdg, false, root);
-        assert_eq!(paths.global, Some("/xdg/kika/config.toml".into()));
-        let relative = env(&[("HOME", "/home/me"), ("XDG_CONFIG_HOME", "rel")]);
-        let paths = ConfigPaths::locate(relative, false, root);
-        assert_eq!(
-            paths.global,
-            Some("/home/me/.config/kika/config.toml".into())
-        );
-        assert_eq!(ConfigPaths::locate(env(&[]), false, root).global, None);
-        #[cfg(windows)]
-        assert_eq!(
-            ConfigPaths::locate(env(&[("APPDATA", r"C:\Users\me\AppData")]), true, root).global,
-            Some(r"C:\Users\me\AppData\kika\config.toml".into())
-        );
+        assert_eq!(ConfigPaths::new(home, None).repo, None);
     }
 
     #[test]

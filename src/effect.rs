@@ -14,10 +14,12 @@ use crate::git::head::read_head_message;
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::refs::read_refs;
+use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
+use crate::recent;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
 /// `generation` changes when the repository changes; `seq` orders loads of the
@@ -77,10 +79,23 @@ pub enum Effect {
         tag: Tag,
     },
     /// Point git at the repository `nested` names: each path is a
-    /// submodule of the one before, starting from the launch repository,
+    /// submodule of the one before, starting from the top-level `root`,
     /// which an empty list means. Runs before the next effect starts.
     SetRepo {
+        root: PathBuf,
         nested: Vec<RepoPath>,
+    },
+    /// Read the recent-repositories list; answered by `RecentLoaded`.
+    LoadRecent,
+    /// Put `path` first in the recent list; answered by `RecentLoaded`
+    /// with the new list.
+    RecordRecent {
+        path: PathBuf,
+    },
+    /// Make the runner's directory a repository; always answered by one
+    /// `RepoInitialised`.
+    InitRepo {
+        tag: Tag,
     },
     /// Blame `path` in the worktree; always answered by one `BlameLoaded`.
     LoadBlame {
@@ -104,8 +119,11 @@ pub enum Effect {
     Fetch {
         tag: Tag,
     },
-    /// Read the config files again; answered by one `ConfigLoaded`.
-    LoadConfig,
+    /// Read the global config file and that of the repository whose top
+    /// level is `repo`; answered by one `ConfigLoaded`.
+    LoadConfig {
+        repo: Option<PathBuf>,
+    },
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -115,29 +133,39 @@ pub const DIFF_LOADING_DELAY: Duration = Duration::from_millis(150);
 /// Makes no decisions: staleness and bookkeeping belong to the reducer.
 pub struct Runtime {
     runner: Arc<dyn GitRunner>,
-    /// The launch repository's top level, which `SetRepo` paths start from.
-    root: PathBuf,
     tx: UnboundedSender<AppIntent>,
     diff: DiffStreamer,
-    /// The files `LoadConfig` reads; none unless `with_config` is given some.
-    config: ConfigPaths,
+    /// The global config file `LoadConfig` reads; none unless
+    /// `with_global_config` names one, so only `main` reads the user's.
+    global_config: Option<PathBuf>,
+    /// The recent-repositories file. `None` keeps the list empty and
+    /// unwritten, so only `main` touches the user's real one.
+    recent_store: Option<PathBuf>,
 }
 
 impl Runtime {
     pub fn new(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>) -> Self {
         Self {
             diff: DiffStreamer::new(Arc::clone(&runner), tx.clone()),
-            root: runner.workdir(),
             runner,
             tx,
-            config: ConfigPaths::default(),
+            global_config: None,
+            recent_store: None,
         }
     }
 
-    /// Read the config files at `paths` on `LoadConfig`.
-    pub fn with_config(mut self, paths: ConfigPaths) -> Self {
-        self.config = paths;
-        self
+    pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
+        Self {
+            recent_store,
+            ..self
+        }
+    }
+
+    pub fn with_global_config(self, global_config: Option<PathBuf>) -> Self {
+        Self {
+            global_config,
+            ..self
+        }
     }
 
     /// Start an effect on tokio's blocking pool and return at once. The
@@ -184,12 +212,25 @@ impl Runtime {
             }
             // Synchronous, so no later effect runs in the old repository.
             // A diff still streaming belongs to the old one.
-            Effect::SetRepo { nested } => {
+            Effect::SetRepo { root, nested } => {
                 self.diff.cancel();
                 let dir = nested
                     .iter()
-                    .fold(self.root.clone(), |dir, path| dir.join(path.as_os_str()));
+                    .fold(root, |dir, path| dir.join(path.as_os_str()));
                 self.runner.set_workdir(dir);
+            }
+            Effect::LoadRecent => self.recent(None),
+            Effect::RecordRecent { path } => self.recent(Some(path)),
+            Effect::InitRepo { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || init_repo(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(format!("git init crashed: {e}").as_bytes()))
+                        });
+                    let _ = tx.send(AppIntent::RepoInitialised { tag, result });
+                });
             }
             Effect::LoadPatch { tag, request } => {
                 tokio::spawn(async move {
@@ -277,8 +318,8 @@ impl Runtime {
                     let _ = tx.send(AppIntent::FetchFinished { tag, result });
                 });
             }
-            Effect::LoadConfig => {
-                let paths = self.config.clone();
+            Effect::LoadConfig { repo } => {
+                let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
                 tokio::spawn(async move {
                     // `load` reports its own errors; a panic leaves the keys as they were.
                     if let Ok(loaded) =
@@ -295,6 +336,29 @@ impl Runtime {
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
         }
+    }
+
+    /// Load the recent list, recording `repo` first when given, and report
+    /// it. A list that cannot be written is still shown as it was read.
+    fn recent(&self, repo: Option<PathBuf>) {
+        let store = self.recent_store.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let list = tokio::task::spawn_blocking(move || {
+                let Some(store) = store else {
+                    return Vec::new();
+                };
+                match repo {
+                    Some(repo) => {
+                        recent::record(&store, &repo).unwrap_or_else(|_| recent::load(&store))
+                    }
+                    None => recent::load(&store),
+                }
+            })
+            .await
+            .unwrap_or_default();
+            let _ = tx.send(AppIntent::RecentLoaded(list));
+        });
     }
 }
 
@@ -313,37 +377,44 @@ mod tests {
 
     #[tokio::test]
     async fn load_config_reads_the_files_again_each_time() {
-        use crate::config::ConfigPaths;
         use crate::keymap::{KeyPattern, parse_key, registry};
 
         let dir = std::env::temp_dir().join(format!("kika-load-config-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let global = dir.join("config.toml");
-        let paths = ConfigPaths {
-            global: Some(global.clone()),
-            repo: None,
-        };
         let (tx, mut rx) = mpsc::unbounded_channel();
         // No git calls are expected.
-        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_config(paths);
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_global_config(Some(global.clone()));
         let stage = registry().iter().find(|b| b.id == "files.stage").unwrap();
-        let mut load = async |text: &str| -> Vec<KeyPattern> {
+        let commit = registry().iter().find(|b| b.id == "files.commit").unwrap();
+        let mut load = async |text: &str, repo: Option<PathBuf>| -> Vec<KeyPattern> {
             std::fs::write(&global, text).unwrap();
-            runtime.spawn(Effect::LoadConfig);
+            runtime.spawn(Effect::LoadConfig { repo });
             match rx.recv().await {
                 Some(AppIntent::ConfigLoaded { keymap, errors }) => {
                     assert_eq!(errors, []);
-                    keymap.keys(stage).to_vec()
+                    [keymap.keys(stage), keymap.keys(commit)].concat()
                 }
                 other => panic!("expected ConfigLoaded, got {other:?}"),
             }
         };
 
-        let first = load("[keys]\n\"files.stage\" = [\"x\"]\n").await;
-        let second = load("[keys]\n\"files.stage\" = [\"y\"]\n").await;
+        let first = load("[keys]\n\"files.stage\" = [\"x\"]\n", None).await;
+        let second = load("[keys]\n\"files.stage\" = [\"y\"]\n", None).await;
+        // The repository named in the effect is the one whose file is read.
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join(".kika.toml"),
+            "[keys]\n\"files.commit\" = [\"C\"]\n",
+        )
+        .unwrap();
+        let in_repo = load("", Some(repo)).await;
         let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(first, [parse_key("x").unwrap()]);
-        assert_eq!(second, [parse_key("y").unwrap()]);
+        assert_eq!(first, [parse_key("x").unwrap(), parse_key("c").unwrap()]);
+        assert_eq!(second, [parse_key("y").unwrap(), parse_key("c").unwrap()]);
+        assert_eq!(in_repo, [stage.keys[0], parse_key("C").unwrap()]);
     }
 
     #[tokio::test]
@@ -841,17 +912,29 @@ mod tests {
         let runtime = Runtime::new(runner.clone(), tx);
 
         runtime.spawn(Effect::SetRepo {
+            root: "/r/top".into(),
             nested: vec!["libs/a b".into()],
         });
         assert_eq!(runner.workdir(), Path::new("/r/top/libs/a b"));
 
         runtime.spawn(Effect::SetRepo {
+            root: "/r/top".into(),
             nested: vec!["libs/a b".into(), "inner".into()],
         });
         assert_eq!(runner.workdir(), Path::new("/r/top/libs/a b/inner"));
 
-        runtime.spawn(Effect::SetRepo { nested: vec![] });
+        runtime.spawn(Effect::SetRepo {
+            root: "/r/top".into(),
+            nested: vec![],
+        });
         assert_eq!(runner.workdir(), Path::new("/r/top"));
+
+        // Another repository altogether.
+        runtime.spawn(Effect::SetRepo {
+            root: "/other".into(),
+            nested: vec!["sub".into()],
+        });
+        assert_eq!(runner.workdir(), Path::new("/other/sub"));
     }
 
     #[cfg(unix)]
@@ -867,6 +950,7 @@ mod tests {
         let runtime = Runtime::new(runner.clone(), tx);
 
         runtime.spawn(Effect::SetRepo {
+            root: "/r".into(),
             nested: vec![RepoPath::from_bytes(b"x\xff")],
         });
         assert_eq!(runner.workdir().as_os_str().as_bytes(), b"/r/x\xff");
@@ -896,13 +980,77 @@ mod tests {
             want: 100,
         });
 
-        runtime.spawn(Effect::SetRepo { nested: vec![] });
+        runtime.spawn(Effect::SetRepo {
+            root: "/r".into(),
+            nested: vec![],
+        });
 
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !child.was_killed() {
             assert!(std::time::Instant::now() < deadline, "never killed");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn without_a_store_the_recent_list_is_empty_and_nothing_is_written() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
+
+        runtime.spawn(Effect::RecordRecent {
+            path: std::env::temp_dir(),
+        });
+        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![])));
+        runtime.spawn(Effect::LoadRecent);
+        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![])));
+    }
+
+    #[tokio::test]
+    async fn with_a_store_recording_reports_the_new_list_and_loading_reads_it() {
+        use crate::git::fake::TempDir;
+
+        let tmp = TempDir::new("store");
+        let store = tmp.path().join("kika").join("recent-repos");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime =
+            Runtime::new(Arc::new(FakeRunner::new()), tx).with_recent_store(Some(store.clone()));
+        let repo = tmp.path().to_path_buf();
+
+        runtime.spawn(Effect::RecordRecent { path: repo.clone() });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::RecentLoaded(vec![repo.clone()]))
+        );
+        assert!(store.is_file());
+        runtime.spawn(Effect::LoadRecent);
+        assert_eq!(rx.recv().await, Some(AppIntent::RecentLoaded(vec![repo])));
+    }
+
+    #[tokio::test]
+    async fn init_repo_reports_the_new_toplevel_with_the_same_tag() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(&["init", "-q"], ok(b""))
+                .expect(&["rev-parse", "--show-toplevel"], ok(b"/r/new\n")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 2,
+            user: true,
+        };
+
+        runtime.spawn(Effect::InitRepo { tag });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::RepoInitialised {
+                tag,
+                result: Ok("/r/new".into()),
+            })
+        );
+        runner.assert_done();
     }
 
     #[tokio::test]

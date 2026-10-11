@@ -17,11 +17,14 @@ mod menu;
 mod model;
 mod popup;
 mod popup_view;
+mod recent;
+mod recent_list;
 mod refresh;
 mod submodule_list;
 mod view;
 mod watch;
 
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,23 +35,32 @@ use crossterm::execute;
 use crate::cli::Cli;
 use crate::config::ConfigPaths;
 use crate::git::retry::RetryRunner;
-use crate::git::{CliRunner, repo_root};
+use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
 
-fn main() -> color_eyre::Result<()> {
+fn main() -> color_eyre::Result<ExitCode> {
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
+    let launch = std::env::current_dir()?;
+    let probe = CliRunner::new(&launch);
+    // Before the terminal is taken, so the refusal is plain text on exit.
+    if let Err(message) = version::check(&probe) {
+        eprintln!("{message}");
+        return Ok(ExitCode::FAILURE);
+    }
     // Once, before anything runs: status paths are root-relative, so every
     // git command runs at the top level whichever subdirectory Kika started in.
-    let launch = std::env::current_dir()?;
-    let workdir = repo_root::resolve_workdir(&CliRunner::new(&launch), launch);
-    let config_paths = ConfigPaths::from_env(&workdir);
+    let repo = repo_root::find_toplevel(&probe);
+    let workdir = repo.clone().unwrap_or_else(|| launch.clone());
+    let global_config = config::global_path_from_env();
     // Read once here; the loop reloads the keys on focus-in.
-    let config = config::load(&config_paths);
+    let config = config::load(&ConfigPaths::new(global_config.clone(), repo.as_deref()));
     let cli_runner = CliRunner::new(workdir);
     // Another process holding a lock for a moment is not worth an error.
     let runner = Arc::new(RetryRunner::new(Arc::new(cli_runner)));
+    let state = AppState::new(cli.context()).with_location(repo, launch);
+    let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();
@@ -57,9 +69,10 @@ fn main() -> color_eyre::Result<()> {
     let _ = execute!(std::io::stdout(), EnableFocusChange);
     let result = runtime.block_on(app::run(
         terminal,
-        AppState::new(cli.context()),
+        state,
         runner,
-        config_paths,
+        recent_store,
+        global_config,
         config,
     ));
     let _ = execute!(std::io::stdout(), DisableFocusChange);
@@ -67,5 +80,5 @@ fn main() -> color_eyre::Result<()> {
     // Quitting interrupts git, but a process that ignores it must not keep
     // Kika from exiting: dropping the runtime would wait for it forever.
     runtime.shutdown_timeout(Duration::from_secs(1));
-    result
+    result.map(|()| ExitCode::SUCCESS)
 }

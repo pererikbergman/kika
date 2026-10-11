@@ -66,6 +66,11 @@ static ACTIONS: &[MenuItem] = &[
         disabled: never,
     },
     MenuItem {
+        label: "Recent repositories…",
+        intent: AppIntent::OpenRecent,
+        disabled: never,
+    },
+    MenuItem {
         label: "Quit…",
         intent: AppIntent::Ask(ConfirmKind::Quit),
         disabled: never,
