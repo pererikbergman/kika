@@ -41,6 +41,9 @@ pub async fn run(
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);
+    // Before the first hand-off, whose guard keeps this as the action to restore.
+    #[cfg(unix)]
+    spawn_interrupt_listener(tx.clone())?;
     spawn_input_listener(tx, Arc::clone(&input));
     state.watch.fetch_enabled = config.watch.fetch.is_some();
     // Read by `main` for this repository, so it always applies.
@@ -119,7 +122,7 @@ fn suspend_and_run(
         let _paused = input.pause();
         let intent = {
             let _restore = Suspended::enter()?;
-            let _sigint = CatchInterrupts::new();
+            let _sigint = CatchInterrupts::new()?;
             handoff::execute(job, runner, workdir)
         };
         // The other process drew over everything; start from a blank
@@ -164,21 +167,81 @@ impl Drop for Suspended {
     }
 }
 
-/// While alive, Ctrl+C in the cooked terminal reaches only the other
-/// process: Kika handles SIGINT instead of dying of it. A handler, unlike
-/// ignoring the signal, is reset by `exec`, so the editor still gets it.
+/// For the length of a hand-off, Ctrl+C in the cooked terminal reaches
+/// only the other process: Kika's SIGINT goes to a handler that does
+/// nothing, so neither Kika nor its interrupt listener sees it. A handler,
+/// unlike ignoring the signal, is reset by `exec`, so the editor still gets
+/// it. Dropping the guard puts the previous action back exactly.
 struct CatchInterrupts {
     #[cfg(unix)]
-    _signal: Option<tokio::signal::unix::Signal>,
+    previous: libc::sigaction,
 }
 
 impl CatchInterrupts {
-    fn new() -> Self {
-        Self {
-            #[cfg(unix)]
-            _signal: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok(),
+    #[cfg(unix)]
+    fn new() -> io::Result<Self> {
+        // SAFETY: both actions are fully initialised, and the handler only
+        // returns, which is async-signal-safe.
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = ignore_interrupt_handler();
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { previous })
         }
     }
+
+    /// Raw mode reads Ctrl+C as a key here, so there is nothing to catch.
+    #[cfg(not(unix))]
+    fn new() -> io::Result<Self> {
+        Ok(Self {})
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CatchInterrupts {
+    fn drop(&mut self) {
+        // SAFETY: `previous` is the action `sigaction` handed back in `new`.
+        // It cannot fail for SIGINT with a valid action; nothing to report.
+        unsafe { libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut()) };
+    }
+}
+
+/// The hand-off's SIGINT handler: catching the signal is the whole job.
+#[cfg(unix)]
+extern "C" fn ignore_interrupt(_: libc::c_int) {}
+
+/// `ignore_interrupt` in the form `sigaction` stores, so it can be compared.
+#[cfg(unix)]
+fn ignore_interrupt_handler() -> libc::sighandler_t {
+    ignore_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t
+}
+
+/// Turn every SIGINT from outside into a quit, so Kika ends through the
+/// loop and the terminal is restored. Registered here, before the task, so
+/// a failure reaches the caller instead of leaving SIGINT unhandled.
+#[cfg(unix)]
+fn spawn_interrupt_listener(tx: UnboundedSender<AppIntent>) -> io::Result<()> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupts = signal(SignalKind::interrupt())?;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tx.closed() => break,
+                received = interrupts.recv() => {
+                    if received.is_none() || tx.send(AppIntent::Quit).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Lets the loop stop the input listener: the listener holds the lock
@@ -384,6 +447,79 @@ mod tests {
         })
         .await
         .expect("every timer task ends");
+    }
+
+    /// Signal actions belong to the whole process; tests that change them
+    /// take turns.
+    #[cfg(unix)]
+    static SIGNALS: Mutex<()> = Mutex::new(());
+
+    /// The current SIGINT action, read without changing it.
+    #[cfg(unix)]
+    fn sigint_action() -> libc::sigaction {
+        // SAFETY: a null new action only reads the current one into `old`.
+        unsafe {
+            let mut old: libc::sigaction = std::mem::zeroed();
+            assert_eq!(libc::sigaction(libc::SIGINT, std::ptr::null(), &mut old), 0);
+            old
+        }
+    }
+
+    /// The parts of an action that decide what a signal does.
+    #[cfg(unix)]
+    fn action_parts(action: &libc::sigaction) -> (libc::sighandler_t, libc::c_int, Vec<i32>) {
+        let mask = (1..32)
+            // SAFETY: `sa_mask` is a valid, initialised signal set.
+            .filter(|&sig| unsafe { libc::sigismember(&action.sa_mask, sig) } == 1)
+            .collect();
+        (action.sa_sigaction, action.sa_flags, mask)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sigint_is_held_back_during_a_hand_off_and_quits_after_it() {
+        let _turn = lock(&SIGNALS);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            spawn_interrupt_listener(tx).expect("listener installs");
+            let before = sigint_action();
+
+            let guard = CatchInterrupts::new().expect("guard installs");
+            let during = sigint_action();
+            assert_eq!(during.sa_sigaction, ignore_interrupt_handler());
+            // SAFETY: SIGINT now runs the guard's no-op handler.
+            unsafe { libc::raise(libc::SIGINT) };
+            let held = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
+            assert!(
+                held.is_err(),
+                "the listener saw {held:?} during the hand-off"
+            );
+
+            drop(guard);
+            assert_eq!(action_parts(&sigint_action()), action_parts(&before));
+            // SAFETY: SIGINT runs the listener's handler again.
+            unsafe { libc::raise(libc::SIGINT) };
+            let quit = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+            assert_eq!(quit, Ok(Some(AppIntent::Quit)));
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ctrl_c_during_a_hand_off_still_reaches_the_other_process() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let _turn = lock(&SIGNALS);
+        let _guard = CatchInterrupts::new().expect("guard installs");
+        let status = std::process::Command::new("sh")
+            .args(["-c", "kill -INT $$; sleep 1"])
+            .status()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGINT));
     }
 
     #[test]
