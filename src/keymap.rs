@@ -117,12 +117,16 @@ pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
                 "bad key \"{text}\": write ctrl- keys in lower case"
             ));
         }
-        let key = parse_key(rest).map_err(|_| format!("bad key \"{text}\""))?;
+        let key = parse_key(rest).map_err(|_| bad_key(text))?;
         return Ok(KeyPattern::exact(key.code, KeyModifiers::CONTROL));
     }
     let mut chars = text.chars();
     if let (Some(c), None) = (chars.next(), chars.next()) {
-        return Ok(char_pattern(c));
+        return if printable(c) {
+            Ok(char_pattern(c))
+        } else {
+            Err(bad_key(text))
+        };
     }
     let code = match text.to_ascii_lowercase().as_str() {
         "space" => return Ok(char_pattern(' ')),
@@ -138,9 +142,27 @@ pub fn parse_key(text: &str) -> Result<KeyPattern, String> {
         "pgdn" => KeyCode::PageDown,
         "home" => KeyCode::Home,
         "end" => KeyCode::End,
-        _ => return Err(format!("bad key \"{text}\"")),
+        _ => return Err(bad_key(text)),
     };
     Ok(KeyPattern::any(code))
+}
+
+/// Says what would have been accepted, since there is no list in Kika.
+fn bad_key(text: &str) -> String {
+    format!(
+        "bad key \"{}\": use one character, or space, esc, enter, tab, bksp, up, down, \
+         left, right, pgup, pgdn, home or end, with an optional ctrl- prefix",
+        text.escape_debug()
+    )
+}
+
+/// A character a key can type and the help menu can show. Control and
+/// format characters (bidi overrides, zero-width marks) could never be
+/// pressed, and would garble the help a repository file shows.
+fn printable(c: char) -> bool {
+    c.is_ascii_graphic()
+        || ('\u{a1}'..='\u{ff}').contains(&c) && c != '\u{ad}'
+        || c.is_alphanumeric()
 }
 
 /// A typed character as the built-in bindings declare it: keys typed
@@ -304,8 +326,9 @@ pub enum Trust {
 }
 
 /// Bindings a repository file may not change: they quit, start other
-/// programs or reach the network. Moving one onto an innocent key, or
-/// taking quit away, would let a cloned repository trap or trick the user.
+/// programs, reach the network, destroy work or answer a question. Moving
+/// one onto an innocent key, taking quit away, or letting the key that
+/// asks also answer, would let a cloned repository trap or trick the user.
 pub const REPO_LOCKED: &[&str] = &[
     "global.quit",
     "commit_editor.quit",
@@ -322,6 +345,14 @@ pub const REPO_LOCKED: &[&str] = &[
     "commit_editor.edit_externally",
     "submodules.init",
     "submodules.update",
+    "files.discard",
+    "diff.discard",
+    "lines.discard",
+    "commit_discard.discard",
+    "confirm.yes",
+    "confirm.no",
+    "discard_confirm.yes",
+    "discard_confirm.no",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -2840,8 +2871,25 @@ mod tests {
         ] {
             assert_eq!(parse_key(name), Ok(KeyPattern::any(code)), "{name}");
         }
-        for bad in ["", "ctrl-", "ctrl-S", "shift-x", "f1", "xy"] {
-            assert!(parse_key(bad).is_err(), "{bad:?}");
+        assert_eq!(parse_key("ä"), Ok(KeyPattern::any(KeyCode::Char('ä'))));
+        assert_eq!(parse_key("§"), Ok(KeyPattern::any(KeyCode::Char('§'))));
+        for bad in [
+            "",
+            "ctrl-",
+            "ctrl-S",
+            "shift-x",
+            "f1",
+            "xy",
+            " ",
+            "\t",
+            "\u{1b}",
+            "\u{202e}",
+            "\u{200b}",
+            "\u{ad}",
+            "ctrl-\u{202e}",
+        ] {
+            let err = parse_key(bad).unwrap_err();
+            assert!(err.starts_with("bad key"), "{bad:?}: {err}");
         }
     }
 
@@ -2915,9 +2963,10 @@ mod tests {
             err(&[("files.stag", &["s"])]),
             r#"unknown binding "files.stag""#
         );
-        assert_eq!(
-            err(&[("files.stage", &["shift-s"])]),
-            r#""files.stage": bad key "shift-s""#
+        let bad = err(&[("files.stage", &["shift-s"])]);
+        assert!(
+            bad.starts_with(r#""files.stage": bad key "shift-s": use one character, or space"#),
+            "{bad}"
         );
         assert_eq!(
             err(&[("files.stage", &["c"])]),
@@ -2958,7 +3007,7 @@ mod tests {
     }
 
     #[test]
-    fn every_binding_that_quits_or_starts_a_program_is_locked() {
+    fn every_binding_that_quits_starts_a_program_destroys_work_or_answers_is_locked() {
         use AppIntent::*;
         for b in registry() {
             let risky = matches!(
@@ -2968,9 +3017,28 @@ mod tests {
                     | EditCommitExternally
                     | InitSubmodule
                     | UpdateSubmodule
+                    | Discard
+                    | DiscardCommit
+                    | ConfirmYes
+                    | ConfirmNo
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_turn_a_navigation_key_into_a_confirmed_discard() {
+        let attack: &[(&str, &[&str])] = &[
+            ("files.next", &["down"]),
+            ("files.discard", &["j"]),
+            ("discard_confirm.yes", &["j", "y"]),
+        ];
+        assert_eq!(
+            build(attack, Trust::Repo).unwrap_err(),
+            r#""discard_confirm.yes" can only be changed in the global config file"#
+        );
+        assert!(build(&attack[..2], Trust::Repo).is_err());
+        assert!(build(attack, Trust::Global).is_ok());
     }
 
     #[test]

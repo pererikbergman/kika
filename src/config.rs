@@ -20,11 +20,14 @@
 //! `[watch]` is read from the global file only, at startup. A repository
 //! file arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, and it cannot change the
-//! bindings in [`REPO_LOCKED`](crate::keymap::REPO_LOCKED). A file with any
-//! error is ignored as a whole, and the layer below it applies.
+//! bindings in [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be
+//! a plain file, not a symlink. Either file must be a regular file of at most
+//! 64 KiB. A file with any error is ignored as a whole, and the layer below
+//! it applies.
 
 use std::fmt;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -124,13 +127,13 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         watch: DEFAULT_WATCH,
         errors: Vec::new(),
     };
-    let global = layer(&paths.global, &mut loaded.errors, |text| {
+    let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
     if let Some((keymap, watch)) = global {
         (loaded.keymap, loaded.watch) = (keymap, watch);
     }
-    let repo = layer(&paths.repo, &mut loaded.errors, |text| {
+    let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
     });
     if let Some(keymap) = repo {
@@ -143,11 +146,12 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
 /// recorded in `errors` and gives `None`, like a missing file.
 fn layer<T>(
     path: &Option<PathBuf>,
+    trust: Trust,
     errors: &mut Vec<ConfigError>,
     apply: impl FnOnce(&str) -> Result<T, String>,
 ) -> Option<T> {
     let path = path.as_deref()?;
-    match read(path).and_then(|text| text.as_deref().map(apply).transpose()) {
+    match read(path, trust).and_then(|text| text.as_deref().map(apply).transpose()) {
         Ok(applied) => applied,
         Err(message) => {
             errors.push(ConfigError {
@@ -159,13 +163,51 @@ fn layer<T>(
     }
 }
 
+/// A config file holds a few hundred bytes; anything far larger is not one.
+const MAX_FILE_BYTES: u64 = 64 * 1024;
+
 /// The file's text, or `None` when there is no file: that is not an error.
-fn read(path: &Path) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("cannot read the file: {e}")),
+/// Only a regular file is opened: a FIFO or a device such as `/dev/zero`
+/// could block Kika or never end. A repository file must not be a symlink
+/// either, since a clone controls where it points; the user's own global
+/// file may be one, as dotfile managers make.
+fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
+    let cannot = |e: io::Error| format!("cannot read the file: {e}");
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(cannot(e)),
+    };
+    let target = if meta.file_type().is_symlink() {
+        if trust == Trust::Repo {
+            return Err("a symbolic link; a repository's config file must be a plain file".into());
+        }
+        fs::metadata(path).map_err(cannot)?
+    } else {
+        meta
+    };
+    let not_regular = || "not a regular file".to_string();
+    if !target.is_file() {
+        return Err(not_regular());
     }
+    let file = File::open(path).map_err(cannot)?;
+    // It may have been swapped since the check; ask the open handle.
+    if !file.metadata().map_err(cannot)?.is_file() {
+        return Err(not_regular());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(cannot)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "too large: a config file may hold at most {} KiB",
+            MAX_FILE_BYTES / 1024
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "not UTF-8 text".to_string())
 }
 
 /// `keymap` and `watch` with the global file's text applied.
@@ -310,9 +352,10 @@ mod tests {
             err("[keys]\n\"files.stag\" = [\"x\"]\n"),
             r#"unknown binding "files.stag""#
         );
-        assert_eq!(
-            err("[keys]\n\"files.stage\" = [\"hyper-x\"]\n"),
-            r#""files.stage": bad key "hyper-x""#
+        let bad = err("[keys]\n\"files.stage\" = [\"hyper-x\"]\n");
+        assert!(
+            bad.starts_with(r#""files.stage": bad key "hyper-x": use one character"#),
+            "{bad}"
         );
         assert_eq!(
             err("[keys]\n\"files.stage\" = [\"c\"]\n"),
@@ -441,6 +484,66 @@ mod tests {
         assert_eq!(loaded.watch, DEFAULT_WATCH);
         assert_eq!(loaded.errors.len(), 2);
         assert!(loaded.errors[0].message.starts_with("line 1, column "));
+    }
+
+    #[test]
+    fn only_a_regular_file_of_sane_size_is_read() {
+        let files = Files::new("odd");
+        let repo = files.dir.join(".kika.toml");
+        let only_error = |files: &Files| {
+            let loaded = files.load();
+            assert_eq!(loaded.keymap, Keymap::default());
+            match loaded.errors.as_slice() {
+                [error] => error.message.clone(),
+                other => panic!("expected one error, got {other:?}"),
+            }
+        };
+
+        std::fs::create_dir(&repo).unwrap();
+        assert_eq!(only_error(&files), "not a regular file");
+        std::fs::remove_dir(&repo).unwrap();
+
+        let big = format!(
+            "[keys]\n\"files.stage\" = [\"x\"]\n#{}\n",
+            "a".repeat(64 * 1024)
+        );
+        files.repo(&big);
+        assert_eq!(
+            only_error(&files),
+            "too large: a config file may hold at most 64 KiB"
+        );
+
+        std::fs::write(&repo, b"[keys]\n\xff\n").unwrap();
+        assert_eq!(only_error(&files), "not UTF-8 text");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_repository_file_is_refused_but_a_symlinked_global_one_is_read() {
+        let files = Files::new("symlink");
+        let target = files.dir.join("target.toml");
+        std::fs::write(&target, "[keys]\n\"files.stage\" = [\"x\"]\n").unwrap();
+        std::os::unix::fs::symlink(&target, files.dir.join(".kika.toml")).unwrap();
+        let loaded = files.load();
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+        assert_eq!(
+            loaded.errors[0].message,
+            "a symbolic link; a repository's config file must be a plain file"
+        );
+
+        std::fs::remove_file(files.dir.join(".kika.toml")).unwrap();
+        std::os::unix::fs::symlink(&target, files.dir.join("config.toml")).unwrap();
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
+
+        // A link to a device is not a regular file, and is never opened.
+        std::fs::remove_file(files.dir.join("config.toml")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", files.dir.join("config.toml")).unwrap();
+        let loaded = files.load();
+        assert_eq!(loaded.errors.len(), 1);
+        assert_eq!(loaded.errors[0].message, "not a regular file");
     }
 
     #[test]
