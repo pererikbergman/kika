@@ -36,7 +36,8 @@ pub async fn run(
     let (tx, mut rx) = mpsc::unbounded_channel();
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
-        .with_global_config(global_config);
+        .with_global_config(global_config)
+        .with_diff_pager(config.diff_pager.clone());
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);
@@ -85,6 +86,9 @@ pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
     // Start the first load before the first draw, so the frame shows "Loading…"
     // instead of waiting on git.
     dispatch(state, runtime, AppIntent::Start);
+    // Renderers only matter once the user cycles to one, so the first
+    // frame never waits on them.
+    runtime.spawn(Effect::FindRenderers);
 }
 
 /// Apply one intent and spawn the effects it asks for, except hand-offs:

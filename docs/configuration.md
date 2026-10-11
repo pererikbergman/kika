@@ -1,13 +1,14 @@
 # Configuration
 
 Kika works without any configuration. Two optional TOML files let you remap
-keys and tune how often Kika looks for changes made outside it.
+keys, tune how often Kika looks for changes made outside it, and choose a
+program to draw the Diff pane.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]` and `[watch]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]` and `[diff]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -27,6 +28,9 @@ A global file that uses every setting:
 refs = 2        # seconds
 files = 5
 fetch = 300     # leave out to keep auto-fetch off
+
+[diff]
+pager = "delta --paging=never"   # a program that draws the Diff pane
 ```
 
 ## Layering
@@ -85,22 +89,56 @@ Each value must be at least 1.
 **Changes to `[watch]` take effect after a restart.** Kika reads them once,
 when it starts.
 
+## `[diff]` (global file only)
+
+`pager` names a program that draws the Diff pane in its own style, such as a
+diff highlighter. Press `R` in the Diff pane to cycle from the built-in view
+to each renderer and back. Hunk and line staging still work there: each
+rendered row is matched to the change it shows, and when the selection
+cannot be matched, the built-in view is drawn and the title says
+`(unmapped)`.
+
+```toml
+[diff]
+pager = "delta --paging=never"
+```
+
+- Kika runs the program itself, never through a shell. The value is split on
+  spaces into the program and its arguments. Quotes, `|`, `;`, `$`, `~`, `*`
+  and other shell syntax are refused, and the whole file is ignored with an
+  error.
+- The program must be a bare name, found on your `PATH`, or an absolute path.
+  A relative path such as `./delta` is refused.
+- The program reads the file's plain diff on standard input and gets the
+  pane's width in the `COLUMNS` environment variable. If it ignores
+  `COLUMNS`, give it a width option of its own.
+- It may run for at most 10 seconds and print at most 16 MiB.
+- After `pager`, `R` also offers your global git `pager.diff`, then
+  `core.pager`, under the same rules. Plain viewers (`less`, `more`, `most`,
+  `cat`) and `true`/`false` values are skipped, from either source. A
+  repository's own git config is never read for this.
+
+**Changes to `[diff]` take effect after a restart.**
+
 ## Global-only settings and trust
 
 - **Auto-fetch is off unless `fetch` is set in the global file.** Setting it
   is your explicit opt-in to network access.
 - **`[watch]`, and so auto-fetch, is allowed only in the global file.** A
   `[watch]` table in `.kika.toml` is an error, and the whole file is ignored.
+- **`[diff]` is allowed only in the global file**, since it names a program
+  for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
+  file is ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an
   enclosing scope. For example, it cannot bind `files.stage` to `q`, because
   in the file list that key would take over `global.quit`.
 
-Locked bindings quit, start other programs (your editor), reach the network,
-discard work, answer a confirmation, or create or switch repositories. A
-cloned repository could otherwise trap you in Kika, or move "discard" onto a
-key you press without thinking. Locked bindings can still be changed in the
+Locked bindings quit, start other programs (your editor or a diff renderer),
+reach the network, discard work, answer a confirmation, or create or switch
+repositories. A cloned repository could otherwise trap you in Kika, or move
+"discard" onto a key you press without thinking. Locked bindings can still be changed in the
 global file.
 
 ## Binding reference
@@ -165,6 +203,7 @@ means a repository's `.kika.toml` cannot change it.
 | `diff.discard` | `d` | Discard the selected hunk from the working tree | locked |
 | `diff.open` | `o` | Open the file in your editor at the selected hunk | locked |
 | `diff.edit_hunk` | `e` | Edit the selected hunk in your editor, then stage it | locked |
+| `diff.renderer` | `R` | Cycle diff renderer | locked |
 | `diff.back` | `esc`, `h`, `left` | Back to the file list | |
 
 ### Diff (lines)
