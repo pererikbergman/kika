@@ -58,7 +58,7 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
 |---|---|
 | `/factory <issue-number>` | Run that GitHub issue through the loop. |
 | `/factory <feature text>` | `gh issue create` with the text as title (and body), then run it. |
-| `/factory next` | Run the next **free** issue (see Picking the next issue). Stop and say so if there is none. |
+| `/factory next` | Run the next **free** issue (see Picking the next issue), then keep going (see Continuous run). Stop and say so if there is none. |
 | `/factory approve <job-id>` | Human sign-off on a `needs-human` job: merge its PR (step 7). |
 | `/factory rework <job-id> <note>` | Send a job back to the builder with human feedback (see Rework). |
 
@@ -74,6 +74,16 @@ Agents (in `.claude/agents/`): `spec-writer`, `builder`, `reviewer-security`,
      each with `gh issue view <n> --json state`. Any blocker not `CLOSED` means skip.
 3. Take the lowest remaining issue number. Tell the user which issue was picked and why the
    ones before it were skipped (one line each).
+
+### Continuous run
+
+`/factory next` does not stop after one job. When a job reaches `merged`, give the user a
+one-line note (job id, PR link) and immediately pick the next free issue and run it.
+Stop only when:
+- a job ends in `needs-human` (escalation, or CHANGES after 2 resumes): report it and wait;
+- no free issue is left: say so, and list what is blocked and by what.
+
+`/factory <issue-number>` runs that one issue only and does not continue.
 
 `ready-for-human` issues are never picked by `next`. Running one explicitly with
 `/factory <issue-number>` is allowed, but its job always ends in `needs-human` (tell the
