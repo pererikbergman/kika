@@ -1,0 +1,421 @@
+//! Bisecting from the Commits and Status panels: when a mark or a reset
+//! may run, which commit a mark is for, and the words shown for it. Pure;
+//! the model runs the ops and the view draws the state.
+
+use crate::git::bisect::{BisectMark, BisectState, elide};
+use crate::git::commit_files::CommitId;
+use crate::git::repo_state::Operation;
+use crate::git::status::{EntryKind, Head};
+use crate::keymap::{OP_RUNNING, resumable_operation};
+use crate::model::AppState;
+
+/// Where a mark is made: on the selected Commits row, or on the commit git
+/// checked out to test, from the Status panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Selected,
+    Head,
+}
+
+pub(crate) const NOT_TESTING: &str =
+    "Mark from the Commits panel until git checks out a commit to test";
+pub(crate) const CUSTOM_TERMS: &str =
+    "This bisect uses its own terms; mark it from the command line";
+pub(crate) const DIRTY: &str =
+    "Commit or stash your changes first: bisect checks out other commits";
+pub(crate) const NO_BISECT: &str = "No bisect in progress";
+/// Why continue does nothing while only a bisect is in progress.
+pub(crate) const MARK_INSTEAD: &str = "Mark the commit good or bad";
+
+/// Whether a bisect is in progress.
+pub(crate) fn bisecting(state: &AppState) -> bool {
+    state
+        .branch
+        .as_ref()
+        .is_some_and(|b| b.in_progress.contains(&Operation::Bisect))
+}
+
+/// The bisect read with the last status, if one is in progress.
+pub(crate) fn bisect_state(state: &AppState) -> Option<&BisectState> {
+    state
+        .branch
+        .as_ref()
+        .filter(|b| b.in_progress.contains(&Operation::Bisect))
+        .and_then(|b| b.bisect.as_ref())
+}
+
+/// A bisect is in progress and nothing that continue, skip and abort put
+/// first, so the Status panel's keys act on the bisect.
+pub(crate) fn bisect_only(state: &AppState) -> bool {
+    bisecting(state) && resumable_operation(state).is_none()
+}
+
+/// The commit git checked out to test: a detached `HEAD`, as hex.
+pub(crate) fn head_commit(state: &AppState) -> Option<CommitId> {
+    match &state.branch.as_ref()?.head {
+        Head::Detached(oid) => CommitId::parse(oid),
+        _ => None,
+    }
+}
+
+/// The selected Commits row's id, if it is one git can use.
+fn selected_commit(state: &AppState) -> Option<CommitId> {
+    let row = state.commits.rows.get(state.commits.selected)?;
+    CommitId::parse(&row.oid)
+}
+
+/// Why `mark` on `target` cannot run now, checked in a fixed order: one
+/// op at a time, a commit to mark, the default terms, and for a mark that
+/// would start a bisect, a repository it can start in.
+pub(crate) fn mark_disabled(
+    state: &AppState,
+    target: Target,
+    mark: BisectMark,
+) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    match target {
+        Target::Selected if selected_commit(state).is_none() => return Some("No commit"),
+        // Marking HEAD before git has checked one out would start a
+        // bisect from the panel that only follows one.
+        Target::Head if !bisecting(state) || head_commit(state).is_none() => {
+            return Some(NOT_TESTING);
+        }
+        _ => {}
+    }
+    if bisect_state(state).is_some_and(|b| !b.terms.is_default()) {
+        return Some(CUSTOM_TERMS);
+    }
+    if bisecting(state) {
+        return None;
+    }
+    if mark == BisectMark::Skip {
+        return Some(NO_BISECT);
+    }
+    start_disabled(state)
+}
+
+/// Why no bisect can start here now. The first mark moves nothing, so
+/// there is no question; instead tracked changes are refused up front.
+/// Untracked files are allowed: git refuses a checkout that would
+/// overwrite one.
+fn start_disabled(state: &AppState) -> Option<&'static str> {
+    let Some(branch) = &state.branch else {
+        return Some("Loading…");
+    };
+    if resumable_operation(state).is_some() {
+        Some("Finish or abort the operation in progress")
+    } else if matches!(branch.head, Head::Unborn(_)) {
+        Some("No commits yet")
+    } else if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
+        Some(DIRTY)
+    } else {
+        None
+    }
+}
+
+/// Why the bisect cannot be reset now.
+pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if !bisecting(state) {
+        Some(NO_BISECT)
+    } else {
+        None
+    }
+}
+
+// One fn per key and menu item, as `Binding` and `MenuItem` take.
+
+pub(crate) fn selected_bad_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Selected, BisectMark::Bad)
+}
+
+pub(crate) fn selected_good_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Selected, BisectMark::Good)
+}
+
+pub(crate) fn selected_skip_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Selected, BisectMark::Skip)
+}
+
+pub(crate) fn head_good_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Head, BisectMark::Good)
+}
+
+pub(crate) fn head_bad_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Head, BisectMark::Bad)
+}
+
+/// The `disabled` of the Status panel's mark keys and their intents.
+pub(crate) fn head_disabled(mark: BisectMark) -> fn(&AppState) -> Option<&'static str> {
+    match mark {
+        BisectMark::Good => head_good_disabled,
+        BisectMark::Bad => head_bad_disabled,
+        BisectMark::Skip => head_skip_disabled,
+    }
+}
+
+/// The `disabled` of the Commits panel's menu items and their intents.
+pub(crate) fn selected_disabled(mark: BisectMark) -> fn(&AppState) -> Option<&'static str> {
+    match mark {
+        BisectMark::Good => selected_good_disabled,
+        BisectMark::Bad => selected_bad_disabled,
+        BisectMark::Skip => selected_skip_disabled,
+    }
+}
+
+fn head_skip_disabled(state: &AppState) -> Option<&'static str> {
+    mark_disabled(state, Target::Head, BisectMark::Skip)
+}
+
+/// Continue: never for a bisect, which goes on by marking.
+pub(crate) fn continue_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_none() && bisect_only(state) {
+        return Some(MARK_INSTEAD);
+    }
+    crate::keymap::resume_disabled(state)
+}
+
+/// Skip: the commit the operation stopped on, or with only a bisect in
+/// progress, the commit being tested.
+pub(crate) fn skip_disabled(state: &AppState) -> Option<&'static str> {
+    if bisect_only(state) {
+        return head_skip_disabled(state);
+    }
+    crate::keymap::skip_disabled(state)
+}
+
+/// Abort: the operation in progress, or with only a bisect, a reset.
+pub(crate) fn abort_disabled(state: &AppState) -> Option<&'static str> {
+    if bisect_only(state) {
+        return reset_disabled(state);
+    }
+    crate::keymap::resume_disabled(state)
+}
+
+/// The reset question, naming where `HEAD` goes back to.
+pub(crate) fn reset_question(bisect: Option<&BisectState>) -> String {
+    let start = bisect
+        .map(|b| b.start.as_str())
+        .filter(|start| !start.is_empty())
+        .map_or_else(
+            || "where the bisect started".to_string(),
+            |start| elide(start, 40),
+        );
+    format!(
+        "Reset the bisect? Its marks are dropped and HEAD goes back to {start}; \
+         files change to match. Git refuses if a local change would be overwritten. (y/n)"
+    )
+}
+
+/// What the bar says when git names the first bad commit.
+pub(crate) fn found_notice(short: &str, subject: &str) -> String {
+    format!("Bisect found {short}: {subject} (a resets)")
+}
+
+/// What the bar says when only skipped commits are left.
+pub(crate) const ONLY_SKIPPED: &str = "Only skipped commits are left; see the Status panel";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::bisect::Terms;
+    use crate::git::log::CommitRow;
+    use crate::git::status::{BranchStatus, FileEntry};
+    use crate::model::Context;
+
+    const HEX: &str = "abc1234";
+
+    fn row(oid: &str) -> CommitRow {
+        CommitRow {
+            oid: oid.into(),
+            short_oid: oid.chars().take(7).collect(),
+            parents: vec![],
+            author: "a".into(),
+            time: 0,
+            subject: "s".into(),
+        }
+    }
+
+    fn state(head: Head, ops: &[Operation], bisect: Option<BisectState>) -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.commits.rows = vec![row(HEX)];
+        state.branch = Some(BranchStatus {
+            head,
+            upstream: None,
+            ahead_behind: None,
+            in_progress: ops.to_vec(),
+            bisect,
+        });
+        state
+    }
+
+    fn on_main() -> AppState {
+        state(Head::Branch("main".into()), &[], None)
+    }
+
+    fn testing() -> AppState {
+        state(
+            Head::Detached(HEX.into()),
+            &[Operation::Bisect],
+            Some(BisectState::default()),
+        )
+    }
+
+    fn file(kind: EntryKind, index: char, worktree: char) -> FileEntry {
+        FileEntry {
+            path: "a".into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_clean_branch_can_start_with_good_or_bad_but_not_skip() {
+        let state = on_main();
+        assert_eq!(selected_bad_disabled(&state), None);
+        assert_eq!(selected_good_disabled(&state), None);
+        assert_eq!(selected_skip_disabled(&state), Some(NO_BISECT));
+        assert_eq!(reset_disabled(&state), Some(NO_BISECT));
+    }
+
+    #[test]
+    fn a_running_op_comes_first() {
+        let mut state = testing();
+        state.op_seq = Some(1);
+        state.commits.rows.clear();
+        for disabled in [
+            selected_bad_disabled,
+            head_good_disabled,
+            head_bad_disabled,
+            reset_disabled,
+        ] {
+            assert_eq!(disabled(&state), Some(OP_RUNNING));
+        }
+    }
+
+    #[test]
+    fn the_status_panel_marks_only_a_commit_git_checked_out_to_test() {
+        assert_eq!(head_good_disabled(&testing()), None);
+        let started = state(
+            Head::Branch("main".into()),
+            &[Operation::Bisect],
+            Some(BisectState::default()),
+        );
+        assert_eq!(head_bad_disabled(&started), Some(NOT_TESTING));
+        let detached_without_bisect = state(Head::Detached(HEX.into()), &[], None);
+        assert_eq!(
+            head_good_disabled(&detached_without_bisect),
+            Some(NOT_TESTING)
+        );
+        let mut no_rows = on_main();
+        no_rows.commits.rows.clear();
+        assert_eq!(selected_bad_disabled(&no_rows), Some("No commit"));
+    }
+
+    #[test]
+    fn custom_terms_refuse_every_mark_but_not_the_reset() {
+        let custom = BisectState {
+            terms: Terms {
+                bad: "new".into(),
+                good: "old".into(),
+            },
+            ..BisectState::default()
+        };
+        let state = state(
+            Head::Detached(HEX.into()),
+            &[Operation::Bisect],
+            Some(custom),
+        );
+        for disabled in [
+            selected_bad_disabled,
+            selected_good_disabled,
+            selected_skip_disabled,
+            head_good_disabled,
+            head_bad_disabled,
+        ] {
+            assert_eq!(disabled(&state), Some(CUSTOM_TERMS));
+        }
+        assert_eq!(reset_disabled(&state), None);
+    }
+
+    #[test]
+    fn a_start_is_refused_with_tracked_changes_an_operation_or_no_commits() {
+        for (index, worktree, kind) in [
+            ('M', '.', EntryKind::Changed),
+            ('.', 'M', EntryKind::Changed),
+            ('U', 'U', EntryKind::Conflicted),
+        ] {
+            let mut state = on_main();
+            state.files = vec![file(kind, index, worktree)];
+            assert_eq!(selected_bad_disabled(&state), Some(DIRTY), "{kind:?}");
+        }
+        let mut untracked = on_main();
+        untracked.files = vec![file(EntryKind::Untracked, '?', '?')];
+        assert_eq!(selected_good_disabled(&untracked), None);
+
+        let merging = state(Head::Branch("main".into()), &[Operation::Merge], None);
+        assert_eq!(
+            selected_bad_disabled(&merging),
+            Some("Finish or abort the operation in progress")
+        );
+        let unborn = state(Head::Unborn("main".into()), &[], None);
+        assert_eq!(selected_bad_disabled(&unborn), Some("No commits yet"));
+    }
+
+    #[test]
+    fn during_a_bisect_changes_do_not_stop_a_mark() {
+        let mut state = testing();
+        state.files = vec![file(EntryKind::Changed, '.', 'M')];
+        assert_eq!(selected_skip_disabled(&state), None);
+        assert_eq!(head_bad_disabled(&state), None);
+    }
+
+    #[test]
+    fn the_status_keys_follow_the_bisect_only_when_nothing_else_is_in_progress() {
+        let state = testing();
+        assert_eq!(continue_disabled(&state), Some(MARK_INSTEAD));
+        assert_eq!(skip_disabled(&state), None);
+        assert_eq!(abort_disabled(&state), None);
+
+        let both = state_with(&[Operation::Rebase, Operation::Bisect]);
+        assert_eq!(continue_disabled(&both), None);
+        assert_eq!(skip_disabled(&both), None);
+        assert_eq!(abort_disabled(&both), None);
+
+        let none = on_main();
+        assert_eq!(continue_disabled(&none), Some("Nothing in progress"));
+        assert_eq!(abort_disabled(&none), Some("Nothing in progress"));
+    }
+
+    fn state_with(ops: &[Operation]) -> AppState {
+        state(
+            Head::Detached(HEX.into()),
+            ops,
+            Some(BisectState::default()),
+        )
+    }
+
+    #[test]
+    fn the_reset_question_names_the_start_or_says_where_it_started() {
+        let bisect = BisectState {
+            start: "main".into(),
+            ..BisectState::default()
+        };
+        assert!(
+            reset_question(Some(&bisect)).contains("HEAD goes back to main; files change"),
+            "{}",
+            reset_question(Some(&bisect))
+        );
+        assert!(reset_question(None).contains("back to where the bisect started;"));
+        let long = BisectState {
+            start: "b".repeat(60),
+            ..BisectState::default()
+        };
+        assert!(reset_question(Some(&long)).contains(&format!("{}…;", "b".repeat(39))));
+    }
+}

@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use super::bisect::BisectMark;
 use super::branches::BranchName;
 use super::commit_files::CommitId;
 use super::diff::terminal_safe;
@@ -12,7 +13,7 @@ use super::rebase_plan::{RebasePlan, encode};
 use super::remote::redact_userinfo;
 use super::remotes::{RemoteBranch, RemoteName};
 use super::repo_state::Operation;
-use super::runner::{GitCommand, GitRunner};
+use super::runner::{GitCommand, GitOutput, GitRunner};
 use super::status::{EntryKind, FileEntry};
 use super::tags::{TagName, validate_tag_name};
 use crate::sequence_editor::PLAN_ENV;
@@ -172,6 +173,16 @@ pub enum GitOp {
         name: TagName,
         oid: String,
     },
+    /// Mark `commit` good, bad or skipped in the bisect; with `start`, a
+    /// plain `bisect start` runs first. Once there is a good and a bad
+    /// mark, git checks out the next commit to test.
+    BisectMark {
+        mark: BisectMark,
+        commit: CommitId,
+        start: bool,
+    },
+    /// End the bisect and check out where it started.
+    BisectReset,
 }
 
 /// How a merge records the other branch's commits.
@@ -469,6 +480,16 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::Abort(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--abort");
         }
+        // A bisect checks commits out, so hooks run and see the user's env,
+        // as for a merge. Only fixed words and hex digits reach argv;
+        // nothing read from the bisect's own files does. Every subcommand
+        // here predates git 2.15.
+        GitOp::BisectMark { mark, commit, .. } => {
+            return GitCommand::new("bisect")
+                .arg(mark.word())
+                .arg(commit.as_str());
+        }
+        GitOp::BisectReset => return GitCommand::new("bisect").arg("reset"),
         // The user's tool runs on the terminal and keeps their locale, so
         // no `LC_ALL`; the name is still read literally.
         GitOp::MergeTool(path) => {
@@ -511,7 +532,9 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
 /// Run `op`. Failures carry git's message, made safe to draw since it can
 /// quote repo-controlled paths. A commit's, a merge's or a revert's
 /// failure also carries stdout: hooks print to stderr, but git says "nothing to commit"
-/// and names each conflict on stdout.
+/// and names each conflict on stdout. A bisect's does too: git says there
+/// why a mark failed, such as "merge base is bad", or which commits are
+/// left when only skipped ones remain.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
 }
@@ -529,6 +552,9 @@ fn run_op_with(
     {
         run_op(runner, &GitOp::StageAll)?;
     }
+    if let GitOp::BisectMark { start: true, .. } = op {
+        run_bisect_start(runner)?;
+    }
     if let Some(reason) = refusal(op) {
         return Err(reason.into());
     }
@@ -541,14 +567,11 @@ fn run_op_with(
         return Ok(());
     }
     let message = match op {
-        GitOp::Commit { .. } | GitOp::Merge { .. } | GitOp::Revert(_) => {
-            [&output.stderr, &output.stdout]
-                .map(|bytes| terminal_safe(bytes))
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        GitOp::Commit { .. }
+        | GitOp::Merge { .. }
+        | GitOp::Revert(_)
+        | GitOp::BisectMark { .. }
+        | GitOp::BisectReset => stderr_and_stdout(&output),
         // Git quotes a remote's URL in these errors, and it can carry a
         // token.
         GitOp::CheckoutTracking { .. }
@@ -564,6 +587,34 @@ fn run_op_with(
         return Err(format!("git {subcommand} failed"));
     }
     Err(message)
+}
+
+/// Both of git's streams, made safe to draw, for commands that report
+/// their outcome on stdout.
+fn stderr_and_stdout(output: &GitOutput) -> String {
+    [&output.stderr, &output.stdout]
+        .map(|bytes| terminal_safe(bytes))
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `git bisect start` with no arguments: it records where `HEAD` is and
+/// moves nothing, so the first mark that follows starts the bisect.
+fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
+    let output = runner
+        .run(&GitCommand::new("bisect").arg("start"))
+        .map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(());
+    }
+    let message = stderr_and_stdout(&output);
+    Err(if message.is_empty() {
+        "git bisect start failed".into()
+    } else {
+        message
+    })
 }
 
 /// Why `op` must not run at all. The reducer checks a new tag's name
@@ -2440,5 +2491,150 @@ mod tests {
         run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
         assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
         assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
+    }
+
+    fn mark(mark: BisectMark, start: bool) -> GitOp {
+        GitOp::BisectMark {
+            mark,
+            commit: oid("abc123"),
+            start,
+        }
+    }
+
+    #[test]
+    fn bisect_ops_pass_only_fixed_words_and_the_commits_hex() {
+        let cases: [(GitOp, &[&str]); 4] = [
+            (mark(BisectMark::Bad, false), &["bisect", "bad", "abc123"]),
+            (mark(BisectMark::Good, true), &["bisect", "good", "abc123"]),
+            (mark(BisectMark::Skip, false), &["bisect", "skip", "abc123"]),
+            (GitOp::BisectReset, &["bisect", "reset"]),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+            assert_eq!(cmd.input(), None);
+        }
+    }
+
+    #[test]
+    fn a_first_mark_runs_bisect_start_before_it() {
+        let runner = FakeRunner::new()
+            .expect(&["bisect", "start"], ok(b""))
+            .expect(&["bisect", "bad", "abc123"], ok(b""));
+        run_op(&runner, &mark(BisectMark::Bad, true)).unwrap();
+        runner.assert_done();
+
+        let runner = FakeRunner::new().expect(&["bisect", "good", "abc123"], ok(b""));
+        run_op(&runner, &mark(BisectMark::Good, false)).unwrap();
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_start_stops_before_the_mark_with_gits_words() {
+        let runner = FakeRunner::new().expect(&["bisect", "start"], fail("fatal: Bad HEAD\n"));
+        assert_eq!(
+            run_op(&runner, &mark(BisectMark::Bad, true)),
+            Err("fatal: Bad HEAD".into())
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_mark_carries_what_git_said_on_stdout() {
+        let output = GitOutput {
+            stdout: b"There are only 'skip'ped commits left to test.\nThe first bad commit could be any of:\n\x1b[31mabc\n".to_vec(),
+            ..fail("")
+        };
+        let runner = FakeRunner::new().expect(&["bisect", "skip", "abc123"], output);
+        assert_eq!(
+            run_op(&runner, &mark(BisectMark::Skip, false)),
+            Err("There are only 'skip'ped commits left to test.\n\
+                 The first bad commit could be any of:\n\u{FFFD}[31mabc"
+                .into())
+        );
+    }
+
+    /// Eight commits on `main`, `commit 1` to `commit 8`; from commit 5 on
+    /// the tree has a `bug` file. Returns the repo and the commits, oldest
+    /// first.
+    fn buggy_history() -> (crate::git::fake::TempDir, Vec<CommitId>) {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("bisect");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--template=", "-b", "main"]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(dir, &["config", key, value]);
+        }
+        let mut commits = Vec::new();
+        for i in 1..=8 {
+            std::fs::write(dir.join("n.txt"), format!("{i}\n")).unwrap();
+            if i == 5 {
+                std::fs::write(dir.join("bug"), "bug\n").unwrap();
+            }
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "-q", "-m", &format!("commit {i}")]);
+            commits.push(rev_parse(dir, "HEAD"));
+        }
+        (tmp, commits)
+    }
+
+    #[test]
+    fn marks_find_the_first_bad_commit_and_reset_returns_to_the_branch_in_real_git() {
+        use crate::git::bisect::read_bisect;
+        use crate::git::fake::{git, try_git};
+
+        let (tmp, commits) = buggy_history();
+        let dir = tmp.path();
+        let git_dir = dir.join(".git");
+        let runner = crate::git::CliRunner::isolated(dir);
+        let run = |mark: BisectMark, commit: &CommitId, start: bool| {
+            let op = GitOp::BisectMark {
+                mark,
+                commit: commit.clone(),
+                start,
+            };
+            run_op(&runner, &op).unwrap();
+        };
+
+        run(BisectMark::Bad, &commits[7], true);
+        assert_eq!(read_bisect(&git_dir).unwrap().bad, 1);
+        run(BisectMark::Good, &commits[0], false);
+        let mut steps = 0;
+        let found = loop {
+            let state = read_bisect(&git_dir).unwrap();
+            if let Some(found) = state.first_bad {
+                break found;
+            }
+            assert!(
+                !try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+                "HEAD is on a branch"
+            );
+            let head = rev_parse(dir, "HEAD");
+            assert!(
+                commits[1..7].contains(&head),
+                "HEAD {head:?} is outside the range"
+            );
+            let mark = if dir.join("bug").exists() {
+                BisectMark::Bad
+            } else {
+                BisectMark::Good
+            };
+            run(mark, &head, false);
+            steps += 1;
+            assert!(steps < 8, "the bisect never ended");
+        };
+        assert_eq!(found.commit, commits[4]);
+        assert_eq!(found.subject, "commit 5");
+
+        run_op(&runner, &GitOp::BisectReset).unwrap();
+        assert_eq!(git(dir, &["symbolic-ref", "HEAD"]), b"refs/heads/main\n");
+        assert_eq!(rev_parse(dir, "HEAD"), commits[7]);
+        assert_eq!(read_bisect(&git_dir), None);
     }
 }

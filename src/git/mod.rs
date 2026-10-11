@@ -3,6 +3,7 @@
 
 pub mod askpass;
 pub mod attr;
+pub mod bisect;
 pub mod blame;
 pub mod branches;
 pub mod commit_files;

@@ -6,6 +6,7 @@ use crate::commits_view;
 use crate::conflict_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
+use crate::git::bisect::BisectState;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
@@ -333,12 +334,58 @@ fn render_status_panel(
         (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
         (Some(name), None) => fit(name, " (gone)", width),
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::raw(head),
         Line::raw(upstream),
         Line::styled(elide_right(&operations, width), marker),
     ];
+    if let Some(bisect) = &branch.bisect {
+        lines.extend(bisect_lines(state, &branch.head, bisect, width));
+    }
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// The bisect under the "bisecting" marker: its marks, the commit being
+/// tested, where it started, and its outcome. A commit is shown as tested
+/// once `HEAD` is detached, as the Status panel's mark keys need. Every
+/// string here is already terminal-safe.
+fn bisect_lines(
+    state: &AppState,
+    head: &Head,
+    bisect: &BisectState,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let row = |text: String| Line::raw(elide_right(&text, width));
+    let mut lines = vec![row(format!(
+        "Bisect: {} good · {} bad · {} skipped",
+        bisect.good, bisect.bad, bisect.skip
+    ))];
+    lines.push(row(match head {
+        Head::Detached(oid) => match state.commits.rows.iter().find(|r| &r.oid == oid) {
+            Some(commit) => format!("Testing: {} {}", commit.short_oid, commit.subject),
+            None => format!("Testing: {}", short_hash(oid)),
+        },
+        _ => "Mark a good and a bad commit".to_string(),
+    }));
+    if !bisect.start.is_empty() {
+        lines.push(row(format!("Started from: {}", bisect.start)));
+    }
+    if !bisect.terms.is_default() {
+        lines.push(row(format!(
+            "Terms: {}/{}",
+            bisect.terms.bad, bisect.terms.good
+        )));
+    }
+    if let Some(found) = &bisect.first_bad {
+        let short = state.commits.short_oid(&found.commit);
+        lines.push(Line::styled(
+            elide_right(&format!("Found: {short} {}", found.subject), width),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    } else if bisect.only_skipped {
+        lines.push(row("Only skipped commits left".to_string()));
+    }
+    lines
 }
 
 /// The branch row, fitted to `width` columns.
@@ -747,7 +794,8 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
         spans.push(Span::raw(format!(" {cancel}")));
     }
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    if let Some(notice) = state.notice.or(remote_notice) {
+    let announcement = state.announcement.as_deref();
+    if let Some(notice) = state.notice.or(announcement).or(remote_notice) {
         spans.push(Span::styled(
             elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
@@ -1590,6 +1638,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         }
     }
 
@@ -4216,6 +4265,139 @@ mod tests {
                     draw(&state, w, h);
                 }
             }
+        }
+    }
+
+    fn bisect_state() -> crate::git::bisect::BisectState {
+        crate::git::bisect::BisectState {
+            start: "main".into(),
+            good: 2,
+            bad: 1,
+            skip: 3,
+            ..Default::default()
+        }
+    }
+
+    /// Bisecting with `bisect`, `HEAD` at `head`, the Status panel expanded
+    /// on a screen wide enough for its lines.
+    fn bisect_rows(head: Head, bisect: crate::git::bisect::BisectState) -> Vec<String> {
+        let mut status = branch(head);
+        status.in_progress = vec![Operation::Bisect];
+        status.bisect = Some(bisect);
+        let mut state = on(status);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc1234def".into(),
+            short_oid: "abc1234".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "the tested one".into(),
+        }];
+        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        state.commits.graph = vec![graph];
+        thin(draw(&status_focused(&state), 200, 30))
+    }
+
+    #[test]
+    fn the_expanded_panel_shows_the_bisect_under_its_marker() {
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect_state());
+        for line in [
+            "│bisecting",
+            "│Bisect: 2 good · 1 bad · 3 skipped",
+            "│Testing: abc1234 the tested one",
+            "│Started from: main",
+        ] {
+            assert!(contains(&rows, line), "{line}: {rows:#?}");
+        }
+        assert!(!contains(&rows, "Terms:"), "{rows:#?}");
+        assert!(!contains(&rows, "Found:"), "{rows:#?}");
+    }
+
+    #[test]
+    fn before_git_checks_out_a_commit_the_panel_asks_for_marks() {
+        let rows = bisect_rows(Head::Branch("main".into()), bisect_state());
+        assert!(
+            contains(&rows, "│Mark a good and a bad commit"),
+            "{rows:#?}"
+        );
+        let rows = bisect_rows(Head::Detached("fedcba98765".into()), bisect_state());
+        assert!(contains(&rows, "│Testing: fedcba9 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_found_commit_and_custom_terms_are_shown() {
+        let mut bisect = bisect_state();
+        bisect.first_bad = Some(crate::git::bisect::Found {
+            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: "broke it".into(),
+        });
+        bisect.terms = crate::git::bisect::Terms {
+            bad: "new".into(),
+            good: "old".into(),
+        };
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        assert!(contains(&rows, "│Terms: new/old"), "{rows:#?}");
+        assert!(contains(&rows, "│Found: abc1234 broke it"), "{rows:#?}");
+
+        let mut stuck = bisect_state();
+        stuck.only_skipped = true;
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), stuck);
+        assert!(contains(&rows, "│Only skipped commits left"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_hostile_start_and_subject_draw_without_control_characters() {
+        let mut bisect = bisect_state();
+        bisect.start = crate::git::diff::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
+        bisect.first_bad = Some(crate::git::bisect::Found {
+            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: crate::git::diff::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
+        });
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        assert!(
+            contains(&rows, "│Started from: evil\u{FFFD}[2J"),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "│Found: abc1234 bad\u{FFFD}]0;x"),
+            "{rows:#?}"
+        );
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_bisect_line_is_cut_to_the_panel() {
+        let mut bisect = bisect_state();
+        bisect.start = "x".repeat(300);
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        let started = rows.iter().find(|r| r.contains("Started from:")).unwrap();
+        assert!(started.contains('…'), "{started:?}");
+    }
+
+    #[test]
+    fn the_bar_shows_an_announcement_in_place_of_the_hints() {
+        let mut state = loaded(vec![]);
+        state.announcement = Some("Bisect found abc1234: broke it (a resets)".into());
+        let rows = draw(&state, 80, 24);
+        assert!(
+            rows[23].contains("Bisect found abc1234: broke it (a resets)"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_offers_good_bad_skip_and_abort_while_bisecting() {
+        let mut status = branch(Head::Detached("abc1234def".into()));
+        status.in_progress = vec![Operation::Bisect];
+        status.bisect = Some(bisect_state());
+        let rows = draw(&status_focused(&on(status)), 120, 24);
+        for hint in ["s skip", "a abort", "g good", "b bad"] {
+            assert!(rows[23].contains(hint), "{hint}: {:?}", rows[23]);
         }
     }
 }

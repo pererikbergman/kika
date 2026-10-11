@@ -917,6 +917,7 @@ mod tests {
                         upstream: None,
                         ahead_behind: None,
                         in_progress: vec![],
+                        bisect: None,
                     },
                     files: vec![FileEntry {
                         path: "new_file".into(),
