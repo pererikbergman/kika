@@ -1247,4 +1247,36 @@ mod tests {
         assert!(contains(&rows, " Reset bisect "), "{rows:#?}");
         assert!(contains(&rows, "HEAD goes back to feature;"), "{rows:#?}");
     }
+
+    #[test]
+    fn the_copy_menu_draws_its_four_items_and_the_bar_says_what_was_copied() {
+        let mut state = workspace(&[]);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc1234def".into(),
+            short_oid: "abc1234".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        }];
+        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        state.commits.graph = vec![graph];
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Copy,
+            cursor: 0,
+        }];
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " Copy "), "{rows:#?}");
+        for label in ["Full hash", "Short hash", "Subject", "Full message"] {
+            assert!(contains(&rows, label), "{label}: {rows:#?}");
+        }
+
+        state.popups.clear();
+        state.update(crate::intent::AppIntent::CopyCommitText(
+            crate::clipboard::CopyWhat::Hash,
+        ));
+        let (_, rows) = draw(&state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("Copied hash: abc1234def"), "{bar:?}");
+    }
 }

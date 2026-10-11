@@ -818,6 +818,24 @@ fn no_commit(state: &AppState) -> Option<&'static str> {
     state.commits.rows.is_empty().then_some("No commits")
 }
 
+/// Why nothing can be copied from the Commits panel.
+pub(crate) fn no_commit_selected(state: &AppState) -> Option<&'static str> {
+    let row = state.commits.rows.get(state.commits.selected);
+    row.is_none().then_some("No commit selected")
+}
+
+/// Why `i` cannot add the selected file to `.gitignore`. A tracked file
+/// stays tracked whatever `.gitignore` says, and Kika never untracks one.
+pub(crate) fn ignore_disabled(state: &AppState) -> Option<&'static str> {
+    if state.files.is_empty() {
+        return Some("No files");
+    }
+    match state.selected.and_then(|i| state.files.get(i)) {
+        Some(file) if file.kind == EntryKind::Untracked => None,
+        _ => Some("Only untracked files can be ignored"),
+    }
+}
+
 /// With no renderer configured there is nothing to cycle.
 fn renderer_disabled(state: &AppState) -> Option<&'static str> {
     state.renderers.is_empty().then_some(NO_RENDERER)
@@ -1900,6 +1918,17 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commits.copy_menu",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenMenu(MenuId::Copy),
+        description: "Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on)",
+        label: "clipboard",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "reflog.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
@@ -2102,6 +2131,17 @@ static REGISTRY: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: mergetool_disabled,
+    },
+    Binding {
+        id: "files.ignore",
+        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenIgnore,
+        description: "Add to .gitignore",
+        label: "ignore",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: ignore_disabled,
     },
     Binding {
         id: "diff.next",
@@ -6497,6 +6537,66 @@ mod tests {
                 };
                 assert_eq!((item.disabled)(state), expected, "{}", item.label);
             }
+        }
+    }
+
+    #[test]
+    fn the_clipboard_and_ignore_keys_clash_with_nothing_reachable_from_their_scopes() {
+        for id in ["commits.copy_menu", "files.ignore"] {
+            let new = binding(id);
+            for other in registry() {
+                let reachable = new.scope.chain().any(|s| s == other.scope)
+                    || other.scope.chain().any(|s| s == new.scope);
+                if other.id == id || !reachable {
+                    continue;
+                }
+                for key in new.keys {
+                    assert!(
+                        !other.keys.iter().any(|k| k.overlaps(key)),
+                        "{id} clashes with {}",
+                        other.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn y_opens_the_copy_menu_and_i_ignores_only_an_untracked_file() {
+        assert_eq!(
+            from(KeyScope::Commits, plain('y')),
+            Some(AppIntent::OpenMenu(MenuId::Copy))
+        );
+        let mut state = AppState::new(Context::Workspace);
+        let resolve_i = |state: &AppState| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Files,
+            state,
+            plain('i'),
+        ) {
+            Resolution::Run(binding) => Ok(binding.intent.clone()),
+            Resolution::Disabled(reason) => Err(reason),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(resolve_i(&state), Err("No files"));
+        let file = |kind, index, worktree| crate::git::FileEntry {
+            path: "a.log".into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind,
+        };
+        state.files = vec![file(EntryKind::Changed, '.', 'M')];
+        state.selected = Some(0);
+        assert_eq!(
+            resolve_i(&state),
+            Err("Only untracked files can be ignored")
+        );
+        state.files = vec![file(EntryKind::Untracked, '?', '?')];
+        assert_eq!(resolve_i(&state), Ok(AppIntent::OpenIgnore));
+        for id in ["commits.copy_menu", "files.ignore"] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
     }
 }

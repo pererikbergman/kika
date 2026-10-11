@@ -1,16 +1,29 @@
-//! The last commit's message, for amending it.
+//! A commit's full message: the last one's for amending it, any one's
+//! for copying it.
 
+use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::runner::{GitCommand, GitRunner};
 
 /// `HEAD`'s full message, as the commit popup shows it to be edited.
-/// Decoded lossily, without trailing newlines, and with every control
-/// character but `\n` dropped, because the text is drawn as it is.
 pub fn read_head_message(runner: &dyn GitRunner) -> Result<String, String> {
+    read_message(runner, "HEAD")
+}
+
+/// The full message of commit `oid`, which is hex, so git cannot read it
+/// as an option.
+pub fn read_commit_message(runner: &dyn GitRunner, oid: &CommitId) -> Result<String, String> {
+    read_message(runner, oid.as_str())
+}
+
+/// The full message of `rev`, `HEAD` or a commit id. Decoded lossily,
+/// without trailing newlines, and with every control character but `\n`
+/// dropped, because the text is drawn as it is.
+fn read_message(runner: &dyn GitRunner, rev: &str) -> Result<String, String> {
     let cmd = GitCommand::new("log")
         .arg("-1")
         .arg("--format=%B")
-        .arg("HEAD")
+        .arg(rev)
         .arg("--")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C");
@@ -65,6 +78,20 @@ mod tests {
         );
         let runner = FakeRunner::new().expect(ARGV, fail(""));
         assert_eq!(read_head_message(&runner), Err("git log failed".into()));
+    }
+
+    #[test]
+    fn a_commit_message_is_read_by_its_id() {
+        let oid = CommitId::parse("0123abcd").unwrap();
+        let runner = FakeRunner::new().expect(
+            &["log", "-1", "--format=%B", "0123abcd", "--"],
+            ok(b"subj\n\nbody\n"),
+        );
+        assert_eq!(
+            read_commit_message(&runner, &oid),
+            Ok("subj\n\nbody".into())
+        );
+        runner.assert_done();
     }
 
     #[test]

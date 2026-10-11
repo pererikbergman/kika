@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ansi;
 use crate::captured_command::run_captured;
+use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
@@ -19,10 +20,10 @@ use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
-use crate::git::commit_files::{CommitRange, commit_files};
-use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
+use crate::git::commit_files::{CommitId, CommitRange, commit_files};
+use crate::git::diff::{DiffRequest, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
-use crate::git::head::read_head_message;
+use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::log::{log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
@@ -36,6 +37,7 @@ use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
 use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
+use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::recent;
@@ -259,6 +261,21 @@ pub enum Effect {
     /// Hand the answer to the question the running remote operation
     /// asked; `None` cancels it. Does nothing when no question waits.
     AnswerCredential(Option<Secret>),
+    /// Put `text` on the system clipboard. Run by the loop, between draws,
+    /// never by a task; a failure comes back as `CopyFailed`.
+    Clipboard(String),
+    /// Read commit `oid`'s full message to copy it; always answered by
+    /// one `CommitMessageLoaded`.
+    LoadCommitMessage {
+        tag: Tag,
+        oid: CommitId,
+    },
+    /// Add `line` to the worktree's top-level `.gitignore`, creating it if
+    /// need be; always answered by one `IgnoreWritten`.
+    AppendIgnore {
+        tag: Tag,
+        line: Vec<u8>,
+    },
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -289,6 +306,8 @@ pub struct Runtime {
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
     credential: AnswerSlot,
+    /// Where copied text goes: the terminal, unless a test records it.
+    clipboard: Arc<dyn ClipboardSink>,
 }
 
 impl Runtime {
@@ -302,7 +321,24 @@ impl Runtime {
             diff_pager: None,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
+            clipboard: Arc::new(TerminalSink),
         }
+    }
+
+    /// Send copies to `clipboard` instead of the terminal.
+    // Only the headless harness swaps it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_clipboard(self, clipboard: Arc<dyn ClipboardSink>) -> Self {
+        Self { clipboard, ..self }
+    }
+
+    /// Put `text` on the clipboard now, on the caller's thread, so the
+    /// bytes never land inside a frame being drawn.
+    pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        let bytes = clipboard::osc52(text)?;
+        self.clipboard
+            .copy(&bytes)
+            .map_err(|e| format!("Could not write to the terminal: {e}"))
     }
 
     /// The renderer the global config names, offered first by `FindRenderers`.
@@ -787,6 +823,39 @@ impl Runtime {
                     let _ = tx.send(AppIntent::RemoteFinished { tag, op, result });
                 });
             }
+            Effect::LoadCommitMessage { tag, oid } => {
+                tokio::spawn(async move {
+                    let read = oid.clone();
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_commit_message(runner.as_ref(), &read)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
+                    });
+                    let _ = tx.send(AppIntent::CommitMessageLoaded { tag, oid, result });
+                });
+            }
+            Effect::AppendIgnore { tag, line } => {
+                // Where git runs now, inside an entered submodule too.
+                let workdir = self.runner.workdir();
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || append_ignore(&workdir, &line))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("Writing .gitignore crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::IgnoreWritten { tag, result });
+                });
+            }
+            // The loop takes these out and copies itself, between draws.
+            // Without a loop there is no terminal to copy through.
+            Effect::Clipboard(_) => {}
             Effect::AnswerCredential(answer) => {
                 if let Some(answers) = lock(&self.credential).as_ref() {
                     // Gone means the operation ended; nobody is asking.
@@ -821,6 +890,23 @@ impl Runtime {
             let _ = tx.send(AppIntent::RecentLoaded { seq, list });
         });
     }
+}
+
+/// The largest `.gitignore` read to add a line to it.
+const MAX_GITIGNORE: u64 = 1024 * 1024;
+
+/// Add `line` to the `.gitignore` at the top of `workdir`, unless it is a
+/// line there already. Nothing but that one file is touched: no git
+/// command runs and the index stays as it is.
+fn append_ignore(workdir: &std::path::Path, line: &[u8]) -> Result<IgnoreAdded, String> {
+    let file = RepoPath::from(".gitignore");
+    let added = worktree_file::update(workdir, &file, MAX_GITIGNORE, |old| {
+        gitignore::appended(old, line)
+    })?;
+    Ok(IgnoreAdded {
+        pattern: sanitize(line),
+        added,
+    })
 }
 
 /// Where a running remote operation waits for the user's answer.

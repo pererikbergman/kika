@@ -104,6 +104,11 @@ pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) -> V
     for effect in state.update(intent) {
         match effect {
             Effect::HandOff(job) => jobs.push(job),
+            Effect::Clipboard(text) => {
+                if let Err(why) = runtime.copy_to_clipboard(&text) {
+                    jobs.extend(dispatch(state, runtime, AppIntent::CopyFailed(why)));
+                }
+            }
             effect => runtime.spawn(effect),
         }
     }
