@@ -1833,7 +1833,7 @@ async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("Bisect: 1 good · 1 bad · 0 skipped");
     let mut steps = 0;
-    while app.state().announcement.is_none() {
+    while app.state().notice_text.is_none() {
         let mark = if repo.exists("bug") { 'b' } else { 'g' };
         app.press(KeyCode::Char(mark)).await;
         steps += 1;
@@ -1860,6 +1860,57 @@ async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
     let screen = app.screen();
     assert!(
         !screen.iter().any(|row| row.contains("bisecting")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn c_copies_two_commits_on_a_branch_and_v_picks_them_onto_another_in_order() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "topic"]);
+    let repo = repo
+        .write("b.txt", "one\n")
+        .commit("one")
+        .write("c.txt", "two\n")
+        .commit("two");
+    // Wide enough for the title to keep its count beside the tabs.
+    let mut app = Harness::start_sized(&repo, 160, 30).await;
+
+    // Copied newest first; picked oldest first.
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('c')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('c')).await;
+    app.assert_screen_contains("· 2 copied");
+
+    app.press(KeyCode::Char('3')).await;
+    // The current branch is listed first.
+    app.assert_screen_contains("* topic");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(current_branch(&repo), "main");
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('v')).await;
+
+    let subjects = repo.git(["log", "--format=%s", "-3", "--reverse"]);
+    assert_eq!(String::from_utf8(subjects).unwrap(), "init\none\ntwo\n");
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.read("c.txt"), "two\n");
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("Could not")),
+        "{}",
+        screen.join("\n")
+    );
+    app.assert_screen_contains("· 2 copied");
+
+    app.press_with(KeyCode::Char('C'), KeyModifiers::SHIFT)
+        .await;
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("2 copied")),
         "{}",
         screen.join("\n")
     );

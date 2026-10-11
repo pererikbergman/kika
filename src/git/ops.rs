@@ -109,6 +109,10 @@ pub enum GitOp {
     /// Make a new commit that undoes this one. Never built for a merge
     /// commit, which needs a mainline.
     Revert(CommitId),
+    /// Pick these commits onto `HEAD`, one by one in this order. Built
+    /// with parents first (see `super::cherry_pick::ordered`); never with
+    /// a merge commit, which needs a mainline.
+    CherryPick(Vec<CommitId>),
     /// Move the current branch, or a detached `HEAD`, to `to`; `mode` says
     /// what happens to the index and the worktree.
     Reset {
@@ -462,6 +466,14 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
         GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
         GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
+        // Ids are hex digits only, so none is read as an option.
+        GitOp::CherryPick(picks) => {
+            return picks
+                .iter()
+                .fold(GitCommand::new("cherry-pick"), |cmd, pick| {
+                    cmd.arg(pick.as_str())
+                });
+        }
         // The plan goes to the sequence editor, which `handoff` names; the
         // base is hex digits only. The two keys are newer config that an
         // older git ignores; they keep the todo list to picks, which is all
@@ -615,6 +627,7 @@ fn run_op_with(
         GitOp::Commit { .. }
         | GitOp::Merge { .. }
         | GitOp::Revert(_)
+        | GitOp::CherryPick(_)
         | GitOp::BisectMark { .. }
         | GitOp::BisectReset => stderr_and_stdout(&output),
         // Git quotes a remote's URL in these errors, and it can carry a
@@ -668,6 +681,12 @@ fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
 pub fn refusal(op: &GitOp) -> Option<&'static str> {
     match op {
         GitOp::CreateTag { name, .. } => validate_tag_name(name).err(),
+        // Only a full id is surely a commit, never a ref of that name.
+        GitOp::CherryPick(picks)
+            if picks.is_empty() || !picks.iter().all(super::cherry_pick::is_full_id) =>
+        {
+            Some("Only full commit ids can be cherry-picked")
+        }
         _ => None,
     }
 }
@@ -1019,6 +1038,15 @@ mod tests {
         assert_eq!(envs, [("KIKA_REBASE_PLAN", encoded.as_str())]);
         assert_eq!(cmd.input(), None);
         assert_eq!(cmd.subcommand(), "rebase");
+    }
+
+    #[test]
+    fn cherry_pick_names_each_commit_in_order_and_sets_no_env() {
+        let (one, two) = ("1".repeat(40), "2".repeat(40));
+        let cmd = op_command(&GitOp::CherryPick(vec![oid(&one), oid(&two)]));
+        assert_eq!(argv(&cmd), ["cherry-pick", one.as_str(), two.as_str()]);
+        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
+        assert_eq!(cmd.input(), None);
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod attr;
 pub mod bisect;
 pub mod blame;
 pub mod branches;
+pub mod cherry_pick;
 pub mod commit_files;
 pub mod diff;
 #[cfg(test)]

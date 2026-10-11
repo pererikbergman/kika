@@ -11,6 +11,7 @@ use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
 use crate::conflict::{Choice, ConflictView, PendingPick};
+use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
@@ -223,9 +224,6 @@ pub struct AppState {
     pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
     pub notice: Option<&'static str>,
-    /// News a load brought, such as the commit a bisect found. Shown like
-    /// `notice`, which wins, and cleared with it.
-    pub announcement: Option<String>,
     /// Menus, questions, prompts and errors, drawn bottom to top. The top
     /// one takes the keys; closing it shows the one below again.
     pub popups: Vec<Popup>,
@@ -273,6 +271,12 @@ pub struct AppState {
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
+    /// The commits a paste cherry-picks. Kept across checkouts, so they
+    /// can be copied on one branch and pasted on another.
+    pub copied: CopiedCommits,
+    /// A notice whose words are made at run time, such as a count. Shown
+    /// and cleared like `notice`, which wins when both are set.
+    pub notice_text: Option<String>,
 }
 
 impl AppState {
@@ -302,7 +306,6 @@ impl AppState {
             help_scroll: 0,
             commit: CommitFlow::Closed,
             notice: None,
-            announcement: None,
             popups: Vec::new(),
             diff_options: DiffOptions::default(),
             watch: WatchState::default(),
@@ -323,6 +326,8 @@ impl AppState {
             branches: BranchesPanel::default(),
             remote: None,
             commits: CommitsPanel::default(),
+            copied: CopiedCommits::default(),
+            notice_text: None,
         }
     }
 
@@ -341,7 +346,7 @@ impl AppState {
         match intent {
             AppIntent::Key(key) => {
                 self.notice = None;
-                self.announcement = None;
+                self.notice_text = None;
                 if key.code == crossterm::event::KeyCode::Enter && self.enter_refused() {
                     return vec![];
                 }
@@ -893,6 +898,12 @@ impl AppState {
                 return self.start_op(Ok(op));
             }
             AppIntent::RevertCommit => return self.revert_commit(),
+            AppIntent::CopyCommit => self.copy_commit(),
+            AppIntent::ClearCopied => {
+                self.copied.clear();
+                self.notice = Some("Cleared copied commits");
+            }
+            AppIntent::PasteCommits => return self.paste_commits(),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
             AppIntent::RewriteCommit(edit) => return self.rewrite_commit(edit),
@@ -3210,6 +3221,8 @@ impl AppState {
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
         self.commits = CommitsPanel::default();
+        // The ids name commits of the repository being left.
+        self.copied.clear();
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -3811,6 +3824,36 @@ impl AppState {
             Some((id, _)) => self.run_op_where_it_belongs(GitOp::Revert(id)),
             None => vec![],
         }
+    }
+
+    /// Add the selected commit to the copied set, or take it out. Pure, so
+    /// it works while an operation runs.
+    fn copy_commit(&mut self) {
+        let Some((id, _)) = self.commit_for_action(keymap::copy_disabled) else {
+            return;
+        };
+        let row = self.commits.rows.get(self.commits.selected);
+        let subject = row.map(|r| r.subject.clone()).unwrap_or_default();
+        let entry = CopiedCommit::new(id, subject);
+        let short = entry.short.clone();
+        let added = self.copied.toggle(entry);
+        let verb = if added { "Copied" } else { "Removed" };
+        let n = self.copied.len();
+        self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
+    }
+
+    /// Cherry-pick the copied commits on the terminal, so hooks and
+    /// signing work as on the command line. The hand-off puts them parents
+    /// first. The set stays, to paste onto another branch too.
+    fn paste_commits(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::paste_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.run_op_where_it_belongs(GitOp::CherryPick(self.copied.ids()))
     }
 
     /// Reset to the selected commit. Soft and mixed keep the work; hard
@@ -4623,6 +4666,11 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
+        // A pick that the branch already has stops as empty, not on a
+        // conflict; skip drops it.
+        GitOp::CherryPick(_) => {
+            "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
+        }
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
@@ -4718,7 +4766,7 @@ impl AppState {
         if let Some(found) = &now.first_bad {
             if was_found != Some(found) {
                 let short = self.commits.short_oid(&found.commit);
-                self.announcement = Some(bisect::found_notice(&short, &found.subject));
+                self.notice_text = Some(bisect::found_notice(&short, &found.subject));
             }
         } else if now.only_skipped && !was_only_skipped {
             self.notice = Some(bisect::ONLY_SKIPPED);
@@ -4760,6 +4808,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Rebase { .. } | GitOp::InteractiveRebase(_) => "Could not rebase",
         GitOp::CheckoutCommit(_) => "Could not check out the commit",
         GitOp::Revert(_) => "Could not revert",
+        GitOp::CherryPick(_) => "Could not cherry-pick",
         GitOp::Reset { .. } => "Could not reset",
         GitOp::Continue(Operation::Merge) => "Could not continue the merge",
         GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
@@ -12673,6 +12722,164 @@ mod tests {
         assert_eq!(op, GitOp::Abort(Operation::Revert));
     }
 
+    // --- Copy and paste ---
+
+    const COPIED_OID: &str = "1111111111111111111111111111111111111111";
+
+    /// `on_commit`, on `main` with a clean tree, the selected row a commit
+    /// with a full id and a short one.
+    fn copy_ready() -> AppState {
+        let mut state = on_commit();
+        let row = &mut state.commits.rows[1];
+        row.oid = COPIED_OID.into();
+        // Not what the notice names: that is made from the full id.
+        row.short_oid = "111".into();
+        state.branch = Some(on_branch("main"));
+        state
+    }
+
+    /// `copy_ready`, with the selected commit copied.
+    fn one_copied() -> AppState {
+        let mut state = copy_ready();
+        press_char(&mut state, 'c');
+        assert_eq!(state.copied.len(), 1);
+        state
+    }
+
+    #[test]
+    fn c_copies_the_rows_full_id_and_c_again_takes_it_out() {
+        let mut state = copy_ready();
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
+        assert!(!state.copied.contains(&cid("1111111")));
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Copied 1111111 (1 copied)")
+        );
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert!(state.copied.is_empty());
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Removed 1111111 (0 copied)")
+        );
+        // The next key clears the notice.
+        press_char(&mut state, 'j');
+        assert_eq!(state.notice_text, None);
+    }
+
+    #[test]
+    fn copying_works_while_an_op_runs_but_never_copies_a_merge() {
+        let mut state = copy_ready();
+        state.op_seq = Some(4);
+        press_char(&mut state, 'c');
+        assert_eq!(state.copied.len(), 1);
+
+        let mut merge = one_copied();
+        merge.commits.selected = 0;
+        merge.commits.rows[0].parents = vec!["c1".into(), "d0".into()];
+        assert_eq!(press_char(&mut merge, 'c'), vec![]);
+        assert_eq!(merge.notice, Some("Cannot cherry-pick a merge commit"));
+        assert_eq!(merge.update(AppIntent::CopyCommit), vec![]);
+        assert_eq!(merge.copied.ids(), [cid(COPIED_OID)]);
+    }
+
+    #[test]
+    fn shift_c_clears_the_set() {
+        let mut state = one_copied();
+        assert_eq!(press_char(&mut state, 'C'), vec![]);
+        assert!(state.copied.is_empty());
+        assert_eq!(state.notice, Some("Cleared copied commits"));
+    }
+
+    #[test]
+    fn v_cherry_picks_the_copied_ids_on_the_terminal() {
+        let mut state = one_copied();
+        state.commits.selected = 2;
+        state.commits.rows[2].oid = "2".repeat(40);
+        press_char(&mut state, 'c');
+        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
+        assert_eq!(
+            op,
+            GitOp::CherryPick(vec![cid(COPIED_OID), cid(&"2".repeat(40))])
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        // The set stays, to paste on another branch too.
+        assert_eq!(state.copied.len(), 2);
+    }
+
+    #[test]
+    fn v_says_why_it_cannot_paste_and_starts_nothing() {
+        let busy = "Finish or abort the operation in progress";
+        let changes = "Commit or stash your changes first";
+        type Setup = fn(&mut AppState);
+        let cases: [(&str, Setup, &str); 6] = [
+            ("empty set", |s| s.copied.clear(), "Nothing copied"),
+            (
+                "unborn HEAD",
+                |s| s.branch.as_mut().unwrap().head = Head::Unborn("main".into()),
+                "No commit to cherry-pick onto",
+            ),
+            (
+                "merge in progress",
+                |s| s.branch.as_mut().unwrap().in_progress = vec![Operation::Merge],
+                busy,
+            ),
+            (
+                "staged change",
+                |s| s.files = vec![changed("a.rs", 'M', '.')],
+                changes,
+            ),
+            (
+                "unstaged change",
+                |s| s.files = vec![changed("a.rs", '.', 'M')],
+                changes,
+            ),
+            ("op running", |s| s.op_seq = Some(9), keymap::OP_RUNNING),
+        ];
+        for (case, setup, reason) in cases {
+            let mut state = one_copied();
+            setup(&mut state);
+            assert_eq!(press_char(&mut state, 'v'), vec![], "{case}");
+            assert_eq!(state.notice, Some(reason), "{case}");
+            assert_eq!(state.update(AppIntent::PasteCommits), vec![], "{case}");
+        }
+    }
+
+    #[test]
+    fn an_untracked_file_alone_does_not_stop_a_paste() {
+        let mut state = one_copied();
+        state.files = vec![untracked("new.txt")];
+        let (_, op) = attached_of(&press_char(&mut state, 'v'));
+        assert_eq!(op, GitOp::CherryPick(vec![cid(COPIED_OID)]));
+    }
+
+    #[test]
+    fn the_set_survives_a_checkout_and_goes_with_the_repository() {
+        let mut state = one_copied();
+        let (tag, op) = op_of(&state.start_op(Ok(Some(GitOp::Checkout("topic".into())))));
+        state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
+        state.switch_repo();
+        assert!(state.copied.is_empty());
+    }
+
+    #[test]
+    fn a_failed_paste_says_could_not_cherry_pick_and_how_to_go_on() {
+        let mut state = one_copied();
+        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
+        state.update(finished(tag, op, Err("CONFLICT in a.txt".into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not cherry-pick");
+                assert_eq!(
+                    error.next,
+                    "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
+                );
+            }
+            other => panic!("expected one error, got {other:?}"),
+        }
+    }
+
     /// A repository with `three_branches`, on `main`, nothing running.
     fn remote_ready() -> AppState {
         let mut state = with_branches().with_location(Some("/r".into()), "/r".into());
@@ -14059,15 +14266,15 @@ mod tests {
         let tag = refresh_tag(&mut state);
         state.update(status_with(tag, branch.clone()));
         assert_eq!(
-            state.announcement.as_deref(),
+            state.notice_text.as_deref(),
             Some("Bisect found c1 (a resets): commit 1")
         );
 
         press_char(&mut state, 'j');
-        assert_eq!(state.announcement, None);
+        assert_eq!(state.notice_text, None);
         let tag = refresh_tag(&mut state);
         state.update(status_with(tag, branch));
-        assert_eq!(state.announcement, None);
+        assert_eq!(state.notice_text, None);
     }
 
     #[test]
@@ -14087,7 +14294,7 @@ mod tests {
             ),
         ));
         assert_eq!(state.notice, Some(bisect::ONLY_SKIPPED));
-        assert_eq!(state.announcement, None);
+        assert_eq!(state.notice_text, None);
     }
 
     // --- Worktrees ---
