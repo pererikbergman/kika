@@ -9,9 +9,10 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
-use crate::commits::{CommitsPanel, Marker};
+use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::git::commit_files::CommitFile;
 use crate::model::AppState;
+use crate::reflog_view::reflog_lines;
 use crate::view::{PanelLook, elide_right, reversed, width_of};
 
 /// Authors longer than this lose their end, so the subject keeps room.
@@ -29,11 +30,33 @@ pub(crate) fn render_commits_panel(
     area: Rect,
 ) {
     let panel = &state.commits;
-    if let Some(open) = panel.open.as_ref().filter(|_| expanded) {
+    let reflog = expanded && panel.tab == CommitsTab::Reflog;
+    if let Some(open) = panel.open.as_ref().filter(|_| expanded && !reflog) {
         return render_commit_files(open, look, frame, area);
     }
-    let block = look.block(look.title("Commits"));
+    let title = if expanded {
+        // The tab shown is in brackets. Where the whole title does not
+        // fit, the tabs keep their place and the panel's name goes.
+        let tabs = match panel.tab {
+            CommitsTab::Log => "[Log] Reflog",
+            CommitsTab::Reflog => "Log [Reflog]",
+        };
+        let full = format!("Commits · {tabs}");
+        look.title(if look.fits(&full) { &full } else { tabs })
+    } else {
+        look.title("Commits")
+    };
+    let block = look.block(title);
     let inner = block.inner(area);
+    if reflog {
+        let lines = reflog_lines(
+            &panel.reflog,
+            usize::from(inner.height),
+            usize::from(inner.width),
+        );
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+        return;
+    }
     let dim = Style::new().fg(Color::DarkGray);
     let paragraph = if panel.rows.is_empty() {
         match &panel.error {

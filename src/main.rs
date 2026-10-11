@@ -34,6 +34,8 @@ mod popup;
 mod popup_view;
 mod recent;
 mod recent_list;
+mod reflog;
+mod reflog_view;
 mod refresh;
 mod remote_run;
 mod remotes;

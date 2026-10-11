@@ -40,6 +40,8 @@ pub enum Popup {
     Recent(RecentList),
     /// Git or ssh asks something for a running fetch, pull or push.
     Credential(CredentialPrompt),
+    /// "Undo this?" or "Redo this?", with what would happen.
+    Travel(TravelConfirm),
 }
 
 /// A question from git or ssh, and what the user has typed so far. The
@@ -195,6 +197,24 @@ impl ResetHardConfirm {
              unstaged? Commits after it leave the branch. (y/n)",
             self.short_oid
         )
+    }
+}
+
+/// "Undo this?" or "Redo this?" Like [`ResetHardConfirm`], it carries the
+/// op planned when it was asked, so a reload before the answer cannot
+/// change what moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TravelConfirm {
+    /// `Undo` or `Redo`.
+    pub title: &'static str,
+    /// What will happen, line by line, already terminal-safe.
+    pub preview: Vec<String>,
+    pub op: GitOp,
+}
+
+impl TravelConfirm {
+    pub fn question(&self) -> String {
+        format!("{}\n(y/n)", self.preview.join("\n"))
     }
 }
 
@@ -534,6 +554,25 @@ mod tests {
             "Reset to abc1234 and throw away every uncommitted change, staged and \
              unstaged? Commits after it leave the branch. (y/n)"
         );
+    }
+
+    #[test]
+    fn the_travel_question_is_the_preview_then_y_or_n() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::undo::{Direction, Expected, Step};
+        let ask = TravelConfirm {
+            title: "Undo",
+            preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],
+            op: GitOp::Travel {
+                direction: Direction::Undo,
+                step: Step::MoveTo(CommitId::parse("abc").unwrap()),
+                expect: Expected {
+                    head_ref: None,
+                    oid: CommitId::parse("def").unwrap(),
+                },
+            },
+        };
+        assert_eq!(ask.question(), "Undo: commit: x\nBranch main moves.\n(y/n)");
     }
 
     #[test]
