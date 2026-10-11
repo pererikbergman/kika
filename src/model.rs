@@ -6,12 +6,12 @@ use crate::git::diff::{DiffChunk, DiffRequest, DiffSide};
 use crate::git::ops::GitOp;
 use crate::git::patch::{self, Direction, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::status::{BranchStatus, RepoStatus};
-use crate::hunk_view::HunkView;
+use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
+use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Resolution};
 use crate::menu;
-use crate::popup::{ErrorPopup, LineInput, Popup};
+use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 
 /// What Kika is looking at.
@@ -203,6 +203,7 @@ impl AppState {
                 return self.start_op(Ok(op));
             }
             AppIntent::ToggleStageAll => return self.start_op(GitOp::toggle_all(&self.files)),
+            AppIntent::Discard => self.ask_discard(),
             AppIntent::OpenCommit => self.open_commit(),
             AppIntent::ConfirmStageAll => {
                 if self.commit == CommitFlow::ConfirmStageAll {
@@ -299,6 +300,7 @@ impl AppState {
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
+            Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -347,14 +349,85 @@ impl AppState {
         self.update(item.intent.clone())
     }
 
-    /// Close the confirm on top and run its answer, if it has one.
+    /// Close the question on top and run its answer, if it has one.
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
-        let Some(&Popup::Confirm(kind)) = self.popups.last() else {
-            return vec![];
+        match self.popups.pop() {
+            Some(Popup::Confirm(kind)) => {
+                let answer = if yes { Some(kind.yes()) } else { kind.no() };
+                answer.map_or_else(Vec::new, |intent| self.update(intent))
+            }
+            Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
+            Some(Popup::Discard(_)) => vec![],
+            // Not a question: leave it where it was.
+            other => {
+                self.popups.extend(other);
+                vec![]
+            }
+        }
+    }
+
+    /// Ask before throwing away the selected file, hunk or lines. Nothing
+    /// is discarded here; a refusal says why in the bar instead of asking.
+    fn ask_discard(&mut self) {
+        if self.context != Context::Workspace || self.op_seq.is_some() {
+            return;
+        }
+        match self.discard_confirm() {
+            Ok(Some(confirm)) => self.popups.push(Popup::Discard(confirm)),
+            Ok(None) => {}
+            Err(reason) => self.notice = Some(reason),
+        }
+    }
+
+    /// What `d` would discard from the current focus, fixed now.
+    fn discard_confirm(&self) -> Result<Option<DiscardConfirm>, &'static str> {
+        let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
+            return Ok(None);
         };
-        self.popups.pop();
-        let answer = if yes { Some(kind.yes()) } else { kind.no() };
-        answer.map_or_else(Vec::new, |intent| self.update(intent))
+        // Deleting a file is said as such, whatever was selected in it.
+        let confirm = |what, path: &RepoPath, op: GitOp| DiscardConfirm {
+            what: if matches!(op, GitOp::DeleteUntracked(_)) {
+                DiscardWhat::Untracked
+            } else {
+                what
+            },
+            path: path.display().to_string(),
+            op,
+        };
+        let view = match &self.focus {
+            Focus::Files => {
+                let op = GitOp::discard_for(entry)?;
+                return Ok(op.map(|op| confirm(DiscardWhat::File, &entry.path, op)));
+            }
+            Focus::Diff(view) => view,
+        };
+        if view.side == DiffSide::Index {
+            return Err("Unstage first to discard");
+        }
+        if entry.kind == EntryKind::Conflicted {
+            return Err("Resolve the conflict first");
+        }
+        let Some(file_patch) = &view.patch else {
+            return Err(NO_CHANGES);
+        };
+        let (selection, what) = match view.lines {
+            Some(_) => (
+                PatchSelection::Lines(view.selected_lines()),
+                DiscardWhat::Lines,
+            ),
+            None => (PatchSelection::Hunk(view.hunk), DiscardWhat::Hunk),
+        };
+        // The worktree side is the reverse patch's new side, as for unstaging.
+        let built =
+            patch::build(file_patch, &selection, Direction::Unstage).map_err(|e| e.message())?;
+        // The file's whole change: discard the file itself, as staging
+        // falls back to `git add`.
+        let op = if patch::selects_everything(file_patch, &selection) {
+            GitOp::discard_for(entry)?
+        } else {
+            Some(GitOp::ApplyWorktree { patch: built })
+        };
+        Ok(op.map(|op| confirm(what, &view.path, op)))
     }
 
     /// Select the first file whose path contains `text`, ignoring case.
@@ -783,6 +856,9 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Commit { .. } => "Could not commit",
         GitOp::ApplyCached { reverse: false, .. } => "Could not stage the change",
         GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the change",
+        GitOp::DiscardWorktree(_) => "Could not discard the changes",
+        GitOp::DeleteUntracked(_) => "Could not delete the file",
+        GitOp::ApplyWorktree { .. } => "Could not discard the change",
     }
 }
 
@@ -796,7 +872,7 @@ mod tests {
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
-    use crate::popup::{ConfirmKind, PromptKind};
+    use crate::popup::{ConfirmKind, DiscardConfirm, DiscardWhat, PromptKind};
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
@@ -2741,5 +2817,218 @@ mod tests {
             "{:?}",
             state.popups
         );
+    }
+
+    fn discard_popup(state: &AppState) -> &DiscardConfirm {
+        match state.popups.as_slice() {
+            [Popup::Discard(confirm)] => confirm,
+            other => panic!("expected one discard popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn d_on_a_modified_file_asks_and_y_discards_it() {
+        let (mut state, _) = with_files(three_files(), 24);
+        assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
+        assert_eq!(
+            discard_popup(&state),
+            &DiscardConfirm {
+                what: DiscardWhat::File,
+                path: "a.rs".into(),
+                op: GitOp::DiscardWorktree(vec!["a.rs".into()]),
+            }
+        );
+        assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
+        assert_eq!(state.op_seq, None);
+
+        let (tag, op) = op_of(&press(&mut state, KeyCode::Char('y')));
+        assert_eq!(op, GitOp::DiscardWorktree(vec!["a.rs".into()]));
+        assert!(tag.user);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_or_esc_on_the_discard_question_runs_nothing() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc, KeyCode::Enter] {
+            let (mut state, _) = with_files(three_files(), 24);
+            press(&mut state, KeyCode::Char('d'));
+            assert_eq!(press(&mut state, key), vec![], "{key:?}");
+            assert_eq!(state.op_seq, None, "{key:?}");
+            assert!(!state.should_quit, "{key:?}");
+            if key == KeyCode::Enter {
+                // Enter never discards, and never answers at all.
+                assert_eq!(state.popups.len(), 1);
+            } else {
+                assert_eq!(state.popups, [], "{key:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_op_is_fixed_when_asked_so_a_refresh_cannot_change_it() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press(&mut state, KeyCode::Char('d'));
+        let tag = refresh_tag(&mut state);
+        state.update(loaded(tag, &["other.txt"]));
+        let (_, op) = op_of(&press(&mut state, KeyCode::Char('y')));
+        assert_eq!(op, GitOp::DiscardWorktree(vec!["a.rs".into()]));
+    }
+
+    #[test]
+    fn d_on_an_untracked_file_asks_to_delete_it() {
+        let (mut state, _) = with_files(three_files(), 24);
+        select_path(&mut state, "c.txt");
+        press(&mut state, KeyCode::Char('d'));
+        assert_eq!(
+            discard_popup(&state),
+            &DiscardConfirm {
+                what: DiscardWhat::Untracked,
+                path: "c.txt".into(),
+                op: GitOp::DeleteUntracked(vec!["c.txt".into()]),
+            }
+        );
+    }
+
+    #[test]
+    fn d_on_a_conflicted_or_fully_staged_file_says_why_and_asks_nothing() {
+        let conflict = FileEntry {
+            kind: EntryKind::Conflicted,
+            ..changed("both.rs", 'U', 'U')
+        };
+        for (file, reason) in [
+            (conflict, "Resolve the conflict first"),
+            (changed("b.rs", 'M', '.'), "No unstaged changes to discard"),
+        ] {
+            let (mut state, _) = with_files(vec![file], 24);
+            assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
+            assert_eq!(state.notice, Some(reason));
+            assert_eq!(state.popups, []);
+        }
+    }
+
+    #[test]
+    fn discard_does_nothing_in_review_or_while_an_op_runs() {
+        let mut review = AppState::new(Context::Review { number: 1 });
+        review.files = three_files();
+        review.selected = Some(0);
+        let (mut running, _) = with_files(three_files(), 24);
+        running.op_seq = Some(9);
+        for state in [&mut review, &mut running] {
+            assert_eq!(state.update(AppIntent::Discard), vec![]);
+            assert_eq!(state.popups, []);
+        }
+    }
+
+    #[test]
+    fn d_on_one_of_two_hunks_asks_to_reverse_apply_it_to_the_worktree() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Char('d'));
+        let expected = patch::build(
+            &patch_of(TWO_HUNKS),
+            &PatchSelection::Hunk(1),
+            Direction::Unstage,
+        )
+        .unwrap();
+        assert_eq!(
+            discard_popup(&state),
+            &DiscardConfirm {
+                what: DiscardWhat::Hunk,
+                path: "a.rs".into(),
+                op: GitOp::ApplyWorktree { patch: expected },
+            }
+        );
+        let (_, op) = op_of(&press(&mut state, KeyCode::Char('y')));
+        assert!(matches!(op, GitOp::ApplyWorktree { .. }), "{op:?}");
+    }
+
+    #[test]
+    fn d_on_the_only_hunk_discards_the_whole_file() {
+        let mut state = focused(three_files(), ONE_HUNK);
+        press(&mut state, KeyCode::Char('d'));
+        let confirm = discard_popup(&state);
+        assert_eq!(confirm.what, DiscardWhat::Hunk);
+        assert_eq!(confirm.op, GitOp::DiscardWorktree(vec!["a.rs".into()]));
+
+        let new_file = b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n\
+            --- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n";
+        let mut state = focused(vec![untracked("n.txt")], new_file);
+        press(&mut state, KeyCode::Char('d'));
+        let confirm = discard_popup(&state);
+        assert_eq!(confirm.what, DiscardWhat::Untracked);
+        assert_eq!(confirm.op, GitOp::DeleteUntracked(vec!["n.txt".into()]));
+    }
+
+    #[test]
+    fn d_in_line_mode_asks_to_discard_the_selected_lines() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Char('d'));
+        let expected = patch::build(
+            &patch_of(TWO_HUNKS),
+            &PatchSelection::Lines([patch::LineId::added(1)].into()),
+            Direction::Unstage,
+        )
+        .unwrap();
+        assert_eq!(
+            discard_popup(&state),
+            &DiscardConfirm {
+                what: DiscardWhat::Lines,
+                path: "a.rs".into(),
+                op: GitOp::ApplyWorktree { patch: expected },
+            }
+        );
+    }
+
+    #[test]
+    fn d_in_the_staged_view_or_without_a_patch_says_why_and_asks_nothing() {
+        let mut state = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
+        assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
+        assert_eq!(state.notice, Some("Unstage first to discard"));
+        assert_eq!(state.popups, []);
+
+        let mut binary = focused(three_files(), BINARY);
+        assert_eq!(press(&mut binary, KeyCode::Char('d')), vec![]);
+        assert_eq!(binary.notice, Some(patch::PatchError::Binary.message()));
+        assert_eq!(binary.popups, []);
+
+        // Still loading: no patch yet.
+        let (mut loading, _) = with_files(three_files(), 24);
+        press(&mut loading, KeyCode::Enter);
+        assert_eq!(press(&mut loading, KeyCode::Char('d')), vec![]);
+        assert_eq!(loading.notice, Some("Loading…"));
+        assert_eq!(loading.popups, []);
+
+        // The patch failed to load: nothing to discard from.
+        let (tag, _) = patch_load(&press(&mut state, KeyCode::Char('t')));
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Err("fatal: bad".into()),
+        });
+        state.popups.clear();
+        assert_eq!(state.update(AppIntent::Discard), vec![]);
+        assert_eq!(state.notice, Some(NO_CHANGES));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_failed_discard_names_what_failed() {
+        for (op, title) in [
+            (
+                GitOp::DiscardWorktree(vec!["a.rs".into()]),
+                "Could not discard the changes",
+            ),
+            (
+                GitOp::DeleteUntracked(vec!["a.rs".into()]),
+                "Could not delete the file",
+            ),
+            (
+                GitOp::ApplyWorktree { patch: vec![] },
+                "Could not discard the change",
+            ),
+        ] {
+            assert_eq!(failure_title(&op), title);
+        }
     }
 }

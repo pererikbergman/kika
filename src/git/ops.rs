@@ -33,6 +33,18 @@ pub enum GitOp {
         patch: Vec<u8>,
         reverse: bool,
     },
+    /// Throw away the worktree changes to these files: each goes back to its
+    /// index version, which is `HEAD` when nothing is staged. The index is
+    /// not touched.
+    DiscardWorktree(Vec<RepoPath>),
+    /// Delete these untracked files from disk. Ignored files are never
+    /// removed.
+    DeleteUntracked(Vec<RepoPath>),
+    /// Take `patch` back out of the worktree, from stdin. How a hunk or some
+    /// lines are discarded; the index is not touched.
+    ApplyWorktree {
+        patch: Vec<u8>,
+    },
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -76,6 +88,19 @@ impl GitOp {
             GitOp::UnstageAll
         }))
     }
+
+    /// What discarding `entry` from the Files panel does: delete it when
+    /// untracked, else restore its worktree from the index. Only the current
+    /// path is restored, so a staged rename stays staged. Conflicts are never
+    /// touched, and a file with only staged changes has nothing to discard.
+    pub fn discard_for(entry: &FileEntry) -> Result<Option<GitOp>, &'static str> {
+        match entry.kind {
+            EntryKind::Conflicted => Err("Resolve the conflict first"),
+            EntryKind::Untracked => Ok(Some(GitOp::DeleteUntracked(vec![entry.path.clone()]))),
+            _ if entry.worktree == '.' => Err("No unstaged changes to discard"),
+            _ => Ok(Some(GitOp::DiscardWorktree(vec![entry.path.clone()]))),
+        }
+    }
 }
 
 /// The command for `op`. Unlike reads, these need `index.lock`, so
@@ -102,6 +127,18 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             let cmd = if *reverse { cmd.arg("--reverse") } else { cmd };
             cmd.arg("--whitespace=nowarn").arg("-").stdin(patch.clone())
         }
+        GitOp::DiscardWorktree(paths) => with_paths(GitCommand::new("checkout").arg("-q"), paths),
+        // Status lists untracked files one by one, so `-d` is never needed;
+        // without `-x`, ignored files are left alone.
+        GitOp::DeleteUntracked(paths) => {
+            with_paths(GitCommand::new("clean").arg("-f").arg("-q"), paths)
+        }
+        // Without `--cached`, git applies to the worktree only.
+        GitOp::ApplyWorktree { patch } => GitCommand::new("apply")
+            .arg("--reverse")
+            .arg("--whitespace=nowarn")
+            .arg("-")
+            .stdin(patch.clone()),
         GitOp::Commit { message, .. } => {
             return GitCommand::new("commit")
                 .arg("-F")
@@ -300,6 +337,191 @@ mod tests {
                     ("LC_ALL".into(), "C".into())
                 ]]
             );
+        }
+    }
+
+    #[test]
+    fn discard_for_picks_the_op_or_says_why_not() {
+        let modified = entry("a.rs", '.', 'M', EntryKind::Changed);
+        let partly = entry("mm.rs", 'M', 'M', EntryKind::Changed);
+        let deleted = entry("gone.rs", '.', 'D', EntryKind::Changed);
+        let untracked = entry("new.rs", '?', '?', EntryKind::Untracked);
+        let staged = entry("s.rs", 'M', '.', EntryKind::Changed);
+        let conflicted = entry("both.rs", 'U', 'U', EntryKind::Conflicted);
+        let mut renamed = entry("new_name.rs", 'R', 'M', EntryKind::Renamed);
+        renamed.orig_path = Some("old_name.rs".into());
+        let discard = |p: &str| Ok(Some(GitOp::DiscardWorktree(vec![p.into()])));
+        assert_eq!(GitOp::discard_for(&modified), discard("a.rs"));
+        assert_eq!(GitOp::discard_for(&partly), discard("mm.rs"));
+        assert_eq!(GitOp::discard_for(&deleted), discard("gone.rs"));
+        assert_eq!(GitOp::discard_for(&renamed), discard("new_name.rs"));
+        assert_eq!(
+            GitOp::discard_for(&untracked),
+            Ok(Some(GitOp::DeleteUntracked(vec!["new.rs".into()])))
+        );
+        assert_eq!(
+            GitOp::discard_for(&staged),
+            Err("No unstaged changes to discard")
+        );
+        assert_eq!(
+            GitOp::discard_for(&conflicted),
+            Err("Resolve the conflict first")
+        );
+    }
+
+    #[test]
+    fn discard_ops_issue_exact_argv_with_literal_pathspecs() {
+        let cases: [(GitOp, &[&str]); 2] = [
+            (
+                GitOp::DiscardWorktree(paths(&["a", "-b.rs"])),
+                &["checkout", "-q", "--", "a", "-b.rs"],
+            ),
+            (
+                GitOp::DeleteUntracked(paths(&["*.rs"])),
+                &["clean", "-f", "-q", "--", "*.rs"],
+            ),
+        ];
+        for (op, argv) in cases {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+            assert_eq!(runner.inputs(), [None], "{op:?}");
+            assert_eq!(
+                runner.envs(),
+                [vec![
+                    ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                    ("LC_ALL".into(), "C".into())
+                ]],
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_worktree_sends_the_reverse_patch_on_stdin_without_cached() {
+        let runner =
+            FakeRunner::new().expect(&["apply", "--reverse", "--whitespace=nowarn", "-"], ok(b""));
+        let op = GitOp::ApplyWorktree {
+            patch: b"the patch\n".to_vec(),
+        };
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
+        assert_eq!(
+            runner.envs(),
+            [vec![
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                ("LC_ALL".into(), "C".into())
+            ]]
+        );
+    }
+
+    /// `d.txt` committed as `head`, `staged` in the index, `work` in the
+    /// worktree.
+    fn staged_and_changed_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("discard");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("d.txt"), "head\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "head\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("d.txt"), "staged\n").unwrap();
+        git(dir, &["add", "--", "d.txt"]);
+        std::fs::write(dir.join("d.txt"), "work\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "other work\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn discard_worktree_restores_the_index_version_and_keeps_staged_content_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = staged_and_changed_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &GitOp::DiscardWorktree(paths(&["d.txt"]))).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("d.txt")).unwrap(),
+            "staged\n"
+        );
+        assert_eq!(git(dir, &["show", ":d.txt"]), b"staged\n");
+        // Only the named file goes back.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("other.txt")).unwrap(),
+            "other work\n"
+        );
+
+        // A file deleted in the worktree comes back too.
+        std::fs::remove_file(dir.join("other.txt")).unwrap();
+        run_op(&runner, &GitOp::DiscardWorktree(paths(&["other.txt"]))).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("other.txt")).unwrap(),
+            "head\n"
+        );
+    }
+
+    #[test]
+    fn apply_worktree_removes_only_the_selected_lines_and_leaves_the_index_in_real_git() {
+        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
+        use crate::git::fake::{TempDir, git};
+        use crate::git::patch::{Direction, LineId, PatchSelection, build};
+
+        let tmp = TempDir::new("discard-lines");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        let lines: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("l.txt"), &lines).unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        let changed = lines
+            .replace("line 1\n", "line one\n")
+            .replace("line 10\n", "ten a\nten b\n");
+        std::fs::write(dir.join("l.txt"), &changed).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let request = DiffRequest {
+            path: "l.txt".into(),
+            orig_path: None,
+            side: DiffSide::Worktree,
+        };
+        let patch = load_patch(&runner, &request).unwrap();
+        // `ten a` is the 10th line of the new side.
+        let selection = PatchSelection::Lines([LineId::added(10)].into());
+        let reverse = build(&patch, &selection, Direction::Unstage).unwrap();
+        run_op(&runner, &GitOp::ApplyWorktree { patch: reverse }).unwrap();
+
+        let expected = lines
+            .replace("line 1\n", "line one\n")
+            .replace("line 10\n", "ten b\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("l.txt")).unwrap(),
+            expected
+        );
+        assert_eq!(git(dir, &["show", ":l.txt"]), lines.as_bytes());
+    }
+
+    #[test]
+    fn delete_untracked_on_a_glob_name_deletes_only_that_file_in_real_git() {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("clean");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("tracked.rs"), "keep\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        for name in ["*.rs", "a.rs", ":(glob)b.rs", "b.rs"] {
+            std::fs::write(dir.join(name), "new\n").unwrap();
+        }
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &GitOp::DeleteUntracked(paths(&["*.rs"]))).unwrap();
+        run_op(&runner, &GitOp::DeleteUntracked(paths(&[":(glob)b.rs"]))).unwrap();
+        assert!(!dir.join("*.rs").exists());
+        assert!(!dir.join(":(glob)b.rs").exists());
+        for name in ["a.rs", "b.rs", "tracked.rs"] {
+            assert!(dir.join(name).exists(), "{name}");
         }
     }
 
