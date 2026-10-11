@@ -16,7 +16,13 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 
 #### Displaying repository text
 * **Strict by default:** names, paths, refs, authors, headers and git's messages are drawn through `sanitize`. Control characters become `U+FFFD`, and bidi controls and invisible characters become a visible `<U+XXXX>` escape.
-* **File content is a little more lenient:** diff and blame body lines and the external renderer's output go through `sanitize_body`. It keeps a ZWJ/ZWNJ only where it changes what is drawn. One case is next to an Indic or Myanmar virama within a consonant cluster of the same script. The other is a ZWNJ breaking a join between Arabic-script, Syriac, N'Ko or Mongolian letters. Every other joiner is escaped, including those in Latin, Greek, Cyrillic and CJK text.
+* **File content is a little more lenient:** diff and blame body lines and the external renderer's output go through `sanitize_body`. It keeps a ZWJ/ZWNJ only where it changes what is drawn. The rules follow UTS #39 "Unicode Security Mechanisms", section 3.1.1.1 "Limited Contexts for Joining Controls" (A1, A2 and B, the same rules IDNA uses):
+  * a ZWNJ that breaks a cursive join between Arabic-script, Syriac, N'Ko or Mongolian letters;
+  * a joiner after an Indic virama or Myanmar asat.
+
+  Every other joiner is escaped, including those in Latin, Greek, Cyrillic and CJK text. There are two documented deviations from the standard:
+  * **Extension:** a ZWJ between a consonant and a virama is kept, but only in Devanagari, Bengali and Sinhala, where common fonts draw it distinctly (eyelash ra, ya-phala, touching letters).
+  * **Tighter, as the standard allows:** after a virama, only a consonant of the same script may follow. Myanmar asat and Sinhala al-lakuna act only with a ZWJ. Myanmar's invisible stacker (U+1039) does not count as a virama.
 * **Known limit:** a terminal that does not shape these scripts draws a kept joiner as nothing. There, two words that differ only by it look the same. Kika cannot detect shaping support.
 * **Emoji ZWJ sequences stay escaped:** a terminal without grapheme clustering draws each part, wider than the two columns the layout reserves.
 

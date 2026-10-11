@@ -249,8 +249,9 @@ pub fn sanitize(raw: &[u8]) -> String {
 /// `sanitize` for the lines of a file (diff, blame, rendered diff). Persian,
 /// Arabic-script and Indic words need ZWJ/ZWNJ, which only shape their
 /// neighbours and cannot reorder text, so a joiner is kept where it changes
-/// the shaping: next to a virama in a consonant cluster, or a ZWNJ breaking
-/// a join between Arabic-script letters (see `git::joiner`). Anywhere else it
+/// the shaping, following UTS #39 section 3.1.1.1 with the deviations
+/// listed in `git::joiner`: next to a virama in a consonant cluster, or a
+/// ZWNJ breaking a join between Arabic-script letters. Anywhere else it
 /// draws nothing, so `is\u{200D}admin` or `кл\u{200D}юч` would pass for the
 /// plain word: those stay escaped.
 ///
@@ -938,6 +939,7 @@ mod tests {
             // A ZWJ between a consonant and a virama: eyelash ra, ya-phala.
             "र\u{200D}्य",
             "র\u{200D}্য",
+            "ක\u{200D}්ව",
         ] {
             assert_eq!(sanitize_body(text.as_bytes()), text);
         }
@@ -1011,6 +1013,15 @@ mod tests {
             ("र\u{200C}्य", "र<U+200C>्य"),
             ("१\u{200D}्", "१<U+200D>्"),
             ("ক\u{200D}्", "ক<U+200D>्"),
+            // Before a virama outside Devanagari, Bengali and Sinhala, no
+            // font draws a distinct form (UTS #39 3.1.1.1 has no such rule).
+            ("க\u{200D}்", "க<U+200D>்"),
+            ("క\u{200D}్", "క<U+200D>్"),
+            ("က\u{200D}်", "က<U+200D>်"),
+            ("က\u{200D}္", "က<U+200D>္"),
+            // Myanmar's invisible stacker is not a virama for joiners.
+            ("္\u{200C}က", "္<U+200C>က"),
+            ("္\u{200D}က", "္<U+200D>က"),
             // A virama with no letter of its scripts on the other side.
             ("क्\u{200D}a", "क्<U+200D>a"),
             ("م\u{200D}्", "م<U+200D>्"),

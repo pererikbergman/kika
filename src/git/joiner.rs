@@ -5,6 +5,17 @@
 //! the tables cover only the blocks below. No character in them is a joiner
 //! or in the strict escape set, so a run of joiners, or a joiner next to a
 //! bidi or invisible character, stays escaped.
+//!
+//! The basis is UTS #39 "Unicode Security Mechanisms", section 3.1.1.1
+//! "Limited Contexts for Joining Controls" (A1, A2 and B, the rules IDNA
+//! uses), with two documented deviations:
+//! - one extension: a ZWJ between a consonant and a virama is kept in
+//!   Devanagari, Bengali and Sinhala only, where common fonts draw it
+//!   distinctly (eyelash ra, ya-phala, touching letters);
+//! - tighter restrictions, which the standard allows: after a virama only a
+//!   consonant of the same script may follow, Myanmar asat and Sinhala
+//!   al-lakuna act only with a ZWJ, and Myanmar's invisible stacker (U+1039)
+//!   does not count as a virama.
 
 const ZWNJ: char = '\u{200C}';
 const ZWJ: char = '\u{200D}';
@@ -12,19 +23,21 @@ const ZWJ: char = '\u{200D}';
 /// Whether `joiner` (ZWJ or ZWNJ) between `before` and `after` changes how
 /// they are shaped. Three cases do:
 /// - after a virama and before a consonant of its script, it picks the
-///   conjunct, half form or chillu (Myanmar asat and Sinhala al-lakuna act
-///   only with a ZWJ);
-/// - a ZWJ between a consonant and a virama of its script gives the eyelash
-///   ra or ya-phala form;
+///   conjunct, half form or chillu (UTS #39 A2 and B);
+/// - a ZWJ between a consonant and a virama of Devanagari, Bengali or
+///   Sinhala gives the eyelash ra, ya-phala or touching form (the extension);
 /// - a ZWNJ between Arabic-script, Syriac, N'Ko or Mongolian letters that
-///   would connect breaks the join. A ZWJ there draws the plain pair.
+///   would connect breaks the join (A1). A ZWJ there draws the plain pair.
 pub fn shapes(joiner: char, before: char, after: char) -> bool {
     let after_virama = is_virama(before)
         && is_consonant(after)
         && same_script(before, after)
         && (joiner == ZWJ || !matches!(before, '\u{0DCA}' | '\u{103A}'));
-    let before_virama =
-        joiner == ZWJ && is_consonant(before) && is_virama(after) && same_script(before, after);
+    let before_virama = joiner == ZWJ
+        && is_consonant(before)
+        && is_virama(after)
+        && same_script(before, after)
+        && matches!(after, '\u{094D}' | '\u{09CD}' | '\u{0DCA}');
     let breaks_join = joiner == ZWNJ
         && joins_forward(before)
         && joins_backward(after)
@@ -43,7 +56,8 @@ fn same_script(a: char, b: char) -> bool {
     script(a).is_some() && script(a) == script(b)
 }
 
-/// The virama of each Indic block, plus Myanmar's invisible stacker and asat.
+/// The virama of each Indic block, plus Myanmar's asat. Myanmar's invisible
+/// stacker (U+1039) is left out: a joiner after it only breaks the stack.
 fn is_virama(c: char) -> bool {
     matches!(
         c,
@@ -57,7 +71,6 @@ fn is_virama(c: char) -> bool {
             | '\u{0CCD}'
             | '\u{0D4D}'
             | '\u{0DCA}'
-            | '\u{1039}'
             | '\u{103A}'
     )
 }
@@ -66,7 +79,63 @@ fn is_virama(c: char) -> bool {
 fn is_consonant(c: char) -> bool {
     matches!(
         c,
-        '\u{0915}'..='\u{0939}' | '\u{0958}'..='\u{095F}' | '\u{0978}'..='\u{097F}' | '\u{0995}'..='\u{09A8}' | '\u{09AA}'..='\u{09B0}' | '\u{09B2}' | '\u{09B6}'..='\u{09B9}' | '\u{09DC}'..='\u{09DD}' | '\u{09DF}' | '\u{09F0}'..='\u{09F1}' | '\u{0A15}'..='\u{0A28}' | '\u{0A2A}'..='\u{0A30}' | '\u{0A32}'..='\u{0A33}' | '\u{0A35}'..='\u{0A36}' | '\u{0A38}'..='\u{0A39}' | '\u{0A59}'..='\u{0A5C}' | '\u{0A5E}' | '\u{0A95}'..='\u{0AA8}' | '\u{0AAA}'..='\u{0AB0}' | '\u{0AB2}'..='\u{0AB3}' | '\u{0AB5}'..='\u{0AB9}' | '\u{0AF9}' | '\u{0B15}'..='\u{0B28}' | '\u{0B2A}'..='\u{0B30}' | '\u{0B32}'..='\u{0B33}' | '\u{0B35}'..='\u{0B39}' | '\u{0B5C}'..='\u{0B5D}' | '\u{0B5F}' | '\u{0B71}' | '\u{0B95}' | '\u{0B99}'..='\u{0B9A}' | '\u{0B9C}' | '\u{0B9E}'..='\u{0B9F}' | '\u{0BA3}'..='\u{0BA4}' | '\u{0BA8}'..='\u{0BAA}' | '\u{0BAE}'..='\u{0BB9}' | '\u{0C15}'..='\u{0C28}' | '\u{0C2A}'..='\u{0C39}' | '\u{0C58}'..='\u{0C5A}' | '\u{0C95}'..='\u{0CA8}' | '\u{0CAA}'..='\u{0CB3}' | '\u{0CB5}'..='\u{0CB9}' | '\u{0CDE}' | '\u{0D15}'..='\u{0D3A}' | '\u{0D9A}'..='\u{0DB1}' | '\u{0DB3}'..='\u{0DBB}' | '\u{0DBD}' | '\u{0DC0}'..='\u{0DC6}' | '\u{1000}'..='\u{1020}' | '\u{103F}' | '\u{1050}'..='\u{1051}' | '\u{105A}'..='\u{105D}' | '\u{1061}' | '\u{1065}'..='\u{1066}' | '\u{106E}'..='\u{1070}' | '\u{1075}'..='\u{1081}' | '\u{108E}'
+        '\u{0915}'..='\u{0939}'
+            | '\u{0958}'..='\u{095F}'
+            | '\u{0978}'..='\u{097F}'
+            | '\u{0995}'..='\u{09A8}'
+            | '\u{09AA}'..='\u{09B0}'
+            | '\u{09B2}'
+            | '\u{09B6}'..='\u{09B9}'
+            | '\u{09DC}'..='\u{09DD}'
+            | '\u{09DF}'
+            | '\u{09F0}'..='\u{09F1}'
+            | '\u{0A15}'..='\u{0A28}'
+            | '\u{0A2A}'..='\u{0A30}'
+            | '\u{0A32}'..='\u{0A33}'
+            | '\u{0A35}'..='\u{0A36}'
+            | '\u{0A38}'..='\u{0A39}'
+            | '\u{0A59}'..='\u{0A5C}'
+            | '\u{0A5E}'
+            | '\u{0A95}'..='\u{0AA8}'
+            | '\u{0AAA}'..='\u{0AB0}'
+            | '\u{0AB2}'..='\u{0AB3}'
+            | '\u{0AB5}'..='\u{0AB9}'
+            | '\u{0AF9}'
+            | '\u{0B15}'..='\u{0B28}'
+            | '\u{0B2A}'..='\u{0B30}'
+            | '\u{0B32}'..='\u{0B33}'
+            | '\u{0B35}'..='\u{0B39}'
+            | '\u{0B5C}'..='\u{0B5D}'
+            | '\u{0B5F}'
+            | '\u{0B71}'
+            | '\u{0B95}'
+            | '\u{0B99}'..='\u{0B9A}'
+            | '\u{0B9C}'
+            | '\u{0B9E}'..='\u{0B9F}'
+            | '\u{0BA3}'..='\u{0BA4}'
+            | '\u{0BA8}'..='\u{0BAA}'
+            | '\u{0BAE}'..='\u{0BB9}'
+            | '\u{0C15}'..='\u{0C28}'
+            | '\u{0C2A}'..='\u{0C39}'
+            | '\u{0C58}'..='\u{0C5A}'
+            | '\u{0C95}'..='\u{0CA8}'
+            | '\u{0CAA}'..='\u{0CB3}'
+            | '\u{0CB5}'..='\u{0CB9}'
+            | '\u{0CDE}'
+            | '\u{0D15}'..='\u{0D3A}'
+            | '\u{0D9A}'..='\u{0DB1}'
+            | '\u{0DB3}'..='\u{0DBB}'
+            | '\u{0DBD}'
+            | '\u{0DC0}'..='\u{0DC6}'
+            | '\u{1000}'..='\u{1020}'
+            | '\u{103F}'
+            | '\u{1050}'..='\u{1051}'
+            | '\u{105A}'..='\u{105D}'
+            | '\u{1061}'
+            | '\u{1065}'..='\u{1066}'
+            | '\u{106E}'..='\u{1070}'
+            | '\u{1075}'..='\u{1081}'
+            | '\u{108E}'
     )
 }
 
