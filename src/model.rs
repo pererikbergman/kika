@@ -4438,6 +4438,20 @@ mod tests {
         assert!(!state.watch.is_pending());
     }
 
+    /// An idle workspace whose user opted in to auto-fetch.
+    fn idle_with_fetch() -> AppState {
+        let mut state = idle_with_files();
+        state.watch.fetch_enabled = true;
+        state
+    }
+
+    #[test]
+    fn auto_fetch_does_nothing_by_default() {
+        let mut state = idle_with_files();
+        assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
+        assert!(!state.watch.fetch_pending);
+    }
+
     fn fetch_tag(effects: &[Effect]) -> Tag {
         match effects {
             [Effect::Fetch { tag }] => *tag,
@@ -4447,7 +4461,7 @@ mod tests {
 
     #[test]
     fn auto_fetch_is_a_background_effect_that_runs_one_at_a_time() {
-        let mut state = idle_with_files();
+        let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         assert!(!tag.user);
         assert_eq!(state.busy, 0);
@@ -4456,7 +4470,7 @@ mod tests {
 
     #[test]
     fn auto_fetch_does_nothing_when_disabled() {
-        let mut state = idle_with_files();
+        let mut state = idle_with_fetch();
         state.watch.fetch_enabled = false;
         assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
         assert!(!state.watch.fetch_pending);
@@ -4464,7 +4478,7 @@ mod tests {
 
     #[test]
     fn a_successful_fetch_starts_a_background_status() {
-        let mut state = idle_with_files();
+        let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
 
         let effects = state.update(AppIntent::FetchFinished {
@@ -4479,7 +4493,7 @@ mod tests {
 
     #[test]
     fn a_failed_or_stale_fetch_is_dropped_but_frees_the_slot() {
-        let mut state = idle_with_files();
+        let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         let effects = state.update(AppIntent::FetchFinished {
             tag,
@@ -4500,7 +4514,7 @@ mod tests {
 
     #[test]
     fn a_fetch_finishing_while_an_op_runs_starts_no_status() {
-        let mut state = idle_with_files();
+        let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         state.op_seq = Some(9);
         let effects = state.update(AppIntent::FetchFinished {

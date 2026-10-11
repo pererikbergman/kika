@@ -1,6 +1,7 @@
-//! Background `git fetch`, so ahead/behind stays current without the user
-//! asking. It must never stop to ask for a password: nobody is there to type
-//! it, and the prompt would draw over the screen.
+//! Background `git fetch`, so ahead/behind stays current. Opt-in only: it
+//! reaches the network, so it runs only once the user has turned it on. It
+//! must never stop to ask for a password: nobody is there to type it, and
+//! the prompt would draw over the screen.
 
 use super::diff::terminal_safe;
 use super::runner::{GitCommand, GitRunner};

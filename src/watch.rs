@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use crate::git::refs::RefsSnapshot;
 
-/// How often each watch runs. `fetch: None` turns auto-fetch off.
+/// How often each watch runs. `fetch: None` turns auto-fetch off; a
+/// `Some` interval is the user's opt-in to background network access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WatchConfig {
     pub refs: Duration,
@@ -14,11 +15,12 @@ pub struct WatchConfig {
 }
 
 /// Built in until the settings file exists. Refs are cheap to read, so they
-/// are polled more often than `git status`; fetch talks to the network.
+/// are polled more often than `git status`. Auto-fetch is off: it talks to
+/// the network, which Kika does only when the user has turned it on.
 pub const DEFAULT_WATCH: WatchConfig = WatchConfig {
     refs: Duration::from_secs(2),
     files: Duration::from_secs(5),
-    fetch: Some(Duration::from_secs(300)),
+    fetch: None,
 };
 
 /// A reason to look at the repository again without the user asking.
@@ -41,6 +43,7 @@ pub struct WatchState {
     pub refs_pending: bool,
     pub status_pending: bool,
     pub fetch_pending: bool,
+    /// Whether the user opted in to auto-fetch; off unless they did.
     pub fetch_enabled: bool,
 }
 
@@ -87,14 +90,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fetch_is_on_by_default() {
-        assert!(WatchState::default().fetch_enabled);
+    fn fetch_is_off_by_default_because_it_needs_the_network() {
+        assert_eq!(DEFAULT_WATCH.fetch, None);
+        assert!(!WatchState::default().fetch_enabled);
         assert!(!WatchState::default().is_pending());
     }
 
     #[test]
     fn a_slot_is_claimed_once_until_it_is_cleared() {
-        let mut watch = WatchState::default();
+        let mut watch = WatchState {
+            fetch_enabled: true,
+            ..WatchState::default()
+        };
         assert!(watch.start_refs());
         assert!(!watch.start_refs());
         assert!(watch.start_fetch());
