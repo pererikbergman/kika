@@ -129,7 +129,25 @@ pub fn parse_list(bytes: &[u8], sep: u8) -> Vec<Worktree> {
         worktree.unsure |= stray;
         list.push(worktree);
     }
+    if sep == b'\n' && looks_split(&list) {
+        for worktree in &mut list {
+            worktree.unsure = true;
+        }
+    }
     list
+}
+
+/// Whether newline output shows signs of a path that held a newline:
+/// git prints `HEAD` for every worktree that is not bare, and never lists
+/// a path twice. A blank line inside a path can fake a whole record, so
+/// then no record is trusted.
+fn looks_split(list: &[Worktree]) -> bool {
+    let headless = list.iter().any(|w| !w.bare && w.head.is_none());
+    let repeated = list
+        .iter()
+        .enumerate()
+        .any(|(i, w)| list[..i].iter().any(|seen| seen.path == w.path));
+    headless || repeated
 }
 
 /// Fill in one non-`worktree` field; `false` when the key is unknown.
@@ -199,6 +217,14 @@ pub fn remove_error(stderr: &[u8]) -> String {
 
 /// Remove the linked worktree at `path`.
 pub fn remove_worktree(runner: &dyn GitRunner, path: &RepoPath) -> Result<(), String> {
+    // Git removes the worktree it runs in, so the check that keeps Kika's
+    // own one is made here too, on resolved paths.
+    let workdir = runner.workdir();
+    if !workdir.as_os_str().is_empty()
+        && canonical(Path::new(path.as_os_str())) == canonical(&workdir)
+    {
+        return Err("Switch to another worktree first".into());
+    }
     let output = runner
         .run(&remove_command(path))
         .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
@@ -513,6 +539,40 @@ mod tests {
     }
 
     #[test]
+    fn a_blank_line_in_a_path_without_nul_makes_every_record_unsure() {
+        // `/x/a\n\nworktree /etc` split into a headless record and a fake one.
+        let ha = head(A);
+        let out = porcelain(
+            &[
+                &[b"worktree /r", &ha, b"branch refs/heads/main"],
+                &[b"worktree /x/a"],
+                &[b"worktree /etc", &ha, b"branch refs/heads/x"],
+            ],
+            b'\n',
+        );
+        let list = parse_list(&out, b'\n');
+        assert_eq!(list.len(), 3);
+        assert!(list.iter().all(|w| w.unsure), "{list:#?}");
+
+        let out = porcelain(
+            &[
+                &[b"worktree /r", &ha, b"bare"],
+                &[b"worktree /r/b", &ha, b"detached"],
+                &[b"worktree /r/b", &ha, b"detached"],
+            ],
+            b'\n',
+        );
+        assert!(parse_list(&out, b'\n').iter().all(|w| w.unsure));
+
+        // A bare main worktree has no HEAD, and that is not suspect.
+        let out = porcelain(
+            &[&[b"worktree /r", b"bare"], &[b"worktree /r/b", &ha]],
+            b'\n',
+        );
+        assert!(parse_list(&out, b'\n').iter().all(|w| !w.unsure));
+    }
+
+    #[test]
     fn empty_output_is_no_worktrees() {
         assert_eq!(parse_list(b"", 0), vec![]);
         assert_eq!(parse_list(b"", b'\n'), vec![]);
@@ -751,6 +811,21 @@ mod tests {
         fn workdir(&self) -> PathBuf {
             self.workdir.clone()
         }
+    }
+
+    #[test]
+    fn remove_worktree_refuses_the_worktree_git_runs_in() {
+        let (_tmp, workdir, _) = layout();
+        let runner = WorkdirRunner {
+            fake: FakeRunner::new(),
+            workdir: workdir.join("."),
+        };
+        let path = RepoPath::from(workdir.to_str().unwrap());
+        assert_eq!(
+            remove_worktree(&runner, &path),
+            Err("Switch to another worktree first".into())
+        );
+        runner.fake.assert_done();
     }
 
     #[test]

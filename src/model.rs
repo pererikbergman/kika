@@ -2887,6 +2887,7 @@ impl AppState {
             ));
             return vec![];
         }
+        self.notice = Some("Worktree removed");
         let mut effects = self.reload_worktrees();
         effects.extend(self.reload_branches());
         effects
@@ -14076,6 +14077,7 @@ mod tests {
             tag,
             result: Ok(()),
         });
+        assert_eq!(state.notice, Some("Worktree removed"));
         assert!(
             effects
                 .iter()
