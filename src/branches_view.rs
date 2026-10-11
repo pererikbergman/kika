@@ -9,6 +9,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::branches::{BranchesPanel, BranchesTab};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::remotes_view;
+use crate::tags_view;
 use crate::view::{PanelLook, clip, elide_right, fit, pad, reversed};
 
 /// Columns given to a log row's author, so subjects line up.
@@ -42,8 +43,9 @@ pub fn render_panel(
         // fit, the tabs keep their place and the panel's name goes.
         _ if expanded => {
             let tabs = match panel.tab {
-                BranchesTab::Local => "[Local] Remotes",
-                BranchesTab::Remotes => "Local [Remotes]",
+                BranchesTab::Local => "[Local] Remotes Tags",
+                BranchesTab::Remotes => "Local [Remotes] Tags",
+                BranchesTab::Tags => "Local Remotes [Tags]",
             };
             let full = format!("Branches · {tabs}");
             look.title(if look.fits(&full) { &full } else { tabs })
@@ -55,6 +57,8 @@ pub fn render_panel(
     let width = usize::from(inner.width);
     let body = if expanded && panel.tab == BranchesTab::Remotes {
         remotes_view::list_body(&panel.remotes, usize::from(inner.height), width)
+    } else if expanded && panel.tab == BranchesTab::Tags {
+        tags_view::list_body(&panel.tags, usize::from(inner.height), width)
     } else if let Some(error) = &panel.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from("Press r to retry"));

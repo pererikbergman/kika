@@ -9,6 +9,7 @@ use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
@@ -16,6 +17,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
+use crate::remote_run::RemoteRun;
 use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
 use ratatui::Frame;
@@ -719,8 +721,13 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
     let mut room = usize::from(width);
-    // A fetch, pull or push says which; anything else is loading.
+    // A fetch, pull or push says which, and a tag push where to;
+    // anything else is loading.
     let busy = match &state.remote {
+        Some(RemoteRun {
+            op: RemoteOp::PushTag { remote, .. },
+            ..
+        }) => Some(format!(" pushing tag to {}… ", remote.display())),
         Some(run) => Some(format!(" {} ", run.op.doing())),
         None => (state.busy > 0).then(|| " loading… ".to_string()),
     };
@@ -3460,9 +3467,9 @@ mod tests {
         };
         match (panel, &state.focus) {
             // Expanded, the Branches panel names its tabs; at 80 columns
-            // they take the place of its name.
+            // they take the place of its name, and may fill the border.
             (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
-                format!("[Local] Remotes{mode} ")
+                format!("[Local] Remotes Tags{mode}")
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
