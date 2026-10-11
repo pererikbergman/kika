@@ -1,9 +1,11 @@
 //! The patch engine: parse one file's plain unified diff into hunks, and
-//! build a patch from a selection of them for `git apply --cached`. Pure,
+//! build a patch from a hunk or a set of changed lines for
+//! `git apply --cached`, forward or `--reverse`. Pure,
 //! and bytes throughout: patch content is never decoded, so CRLF, invalid
 //! UTF-8 and missing final newlines round-trip exactly. Only the view
 //! sanitizes, when it draws.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// One file's diff, split into the lines before the first hunk and the hunks.
@@ -59,11 +61,54 @@ pub enum PatchLineKind {
     Removed,
 }
 
-/// Which part of a file's diff to put in a patch. One variant for now;
-/// line selection adds another.
+/// Which side of the diff a changed line is numbered on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LineSide {
+    Old,
+    New,
+}
+
+/// A changed line, by identity rather than position in the hunk: a removed
+/// line by its old line number, an added line by its new one. The path and
+/// diff side are those of the `FilePatch` it was taken from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LineId {
+    pub side: LineSide,
+    pub line: u32,
+}
+
+impl LineId {
+    /// A removed line, by its old line number.
+    pub fn removed(line: u32) -> Self {
+        Self {
+            side: LineSide::Old,
+            line,
+        }
+    }
+
+    /// An added line, by its new line number.
+    pub fn added(line: u32) -> Self {
+        Self {
+            side: LineSide::New,
+            line,
+        }
+    }
+}
+
+/// Which part of a file's diff to put in a patch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchSelection {
     Hunk(usize),
+    /// Changed lines, from any hunks.
+    Lines(BTreeSet<LineId>),
+}
+
+/// Which way the patch goes into the index. `Unstage` patches are applied
+/// with `git apply --cached --reverse`, so git searches their new side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Stage,
+    Unstage,
 }
 
 /// Why a diff could not be parsed, or a patch not built.
@@ -79,6 +124,15 @@ pub enum PatchError {
     Unsupported,
     /// The selection names a hunk that does not exist.
     NoSuchHunk,
+    EmptySelection,
+    /// A selected id is not a changed line of this diff.
+    NoSuchLine,
+    /// A partial hunk would be written without a context line to anchor it.
+    NoContext,
+    /// A line without a newline would stop being the last line of a side.
+    NoNewlineSplit,
+    PartialNewFile,
+    PartialDeletedFile,
 }
 
 impl PatchError {
@@ -92,6 +146,16 @@ impl PatchError {
             PatchError::Copied => "Copied file: stage it from the Files panel",
             PatchError::Unsupported => "This change can only be staged from the Files panel",
             PatchError::NoSuchHunk => "No such hunk",
+            PatchError::EmptySelection => "Nothing selected",
+            PatchError::NoSuchLine => "The selected lines are not in this diff",
+            PatchError::NoContext => {
+                "No unchanged lines around the selection: stage the whole hunk"
+            }
+            PatchError::NoNewlineSplit => {
+                "The last line has no newline: select it with the line it replaces"
+            }
+            PatchError::PartialNewFile => "New file: stage it whole",
+            PatchError::PartialDeletedFile => "Deleted file: stage it whole",
         }
     }
 }
@@ -279,19 +343,71 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+impl Hunk {
+    /// The id of each line, `None` for context. Numbers count from the
+    /// `@@` starts; a side of length 0 starts after its "line before".
+    pub fn line_ids(&self) -> Vec<Option<LineId>> {
+        let mut old = first_line(self.old_start, self.old_len);
+        let mut new = first_line(self.new_start, self.new_len);
+        self.lines
+            .iter()
+            .map(|line| match line.kind {
+                PatchLineKind::Context => {
+                    old += 1;
+                    new += 1;
+                    None
+                }
+                PatchLineKind::Removed => {
+                    old += 1;
+                    Some(LineId::removed(old - 1))
+                }
+                PatchLineKind::Added => {
+                    new += 1;
+                    Some(LineId::added(new - 1))
+                }
+            })
+            .collect()
+    }
+}
+
+/// Where a side's first line is. Git writes a side of length 0 with the
+/// line before it as the start.
+fn first_line(start: u32, len: u32) -> u32 {
+    if len == 0 { start + 1 } else { start }
+}
+
+/// Every changed line of the file.
+fn all_changes(patch: &FilePatch) -> BTreeSet<LineId> {
+    patch
+        .hunks
+        .iter()
+        .flat_map(Hunk::line_ids)
+        .flatten()
+        .collect()
+}
+
 /// Whether applying the selection would take the whole file's change, so
 /// staging the file itself does the same with less risk.
 pub fn selects_everything(patch: &FilePatch, selection: &PatchSelection) -> bool {
     match selection {
         PatchSelection::Hunk(index) => patch.hunks.len() == 1 && *index == 0,
+        PatchSelection::Lines(ids) => !ids.is_empty() && *ids == all_changes(patch),
     }
 }
 
 /// The patch for `selection`: the `diff --git`, `---` and `+++` lines
-/// verbatim, then the selected hunks with their counts recomputed. Mode,
-/// index and similarity lines are left out, so a hunk never carries a mode
-/// change with it.
-pub fn build(patch: &FilePatch, selection: &PatchSelection) -> Result<Vec<u8>, PatchError> {
+/// verbatim, then each hunk with a selected line, its counts and starts
+/// recomputed. Mode, index and similarity lines are left out, so a hunk
+/// never carries a mode change with it.
+///
+/// Unselected changes are turned into what the index already holds: for
+/// `Stage`, an unselected removal stays as context and an unselected
+/// addition is dropped; for `Unstage`, the mirror image.
+pub fn build(
+    patch: &FilePatch,
+    selection: &PatchSelection,
+    direction: Direction,
+) -> Result<Vec<u8>, PatchError> {
     match patch.kind {
         FileKind::Binary => return Err(PatchError::Binary),
         FileKind::Renamed => return Err(PatchError::Renamed),
@@ -299,10 +415,7 @@ pub fn build(patch: &FilePatch, selection: &PatchSelection) -> Result<Vec<u8>, P
         FileKind::Unsupported => return Err(PatchError::Unsupported),
         FileKind::Modified | FileKind::Added | FileKind::Deleted => {}
     }
-    let PatchSelection::Hunk(selected) = *selection;
-    if selected >= patch.hunks.len() {
-        return Err(PatchError::NoSuchHunk);
-    }
+    let chosen = chosen_lines(patch, selection)?;
     let mut out = Vec::new();
     for line in &patch.header {
         if line.starts_with(b"diff --git ")
@@ -312,39 +425,170 @@ pub fn build(patch: &FilePatch, selection: &PatchSelection) -> Result<Vec<u8>, P
             out.extend_from_slice(line);
         }
     }
-    // Hunks left out never reach the index, so later hunks land earlier
-    // (or later) by however many lines each one would have added.
+    // What git searches is the index, so only the other side moves: by
+    // however many lines the earlier hunks' left-out changes would add.
     let mut shift: i64 = 0;
-    for (index, hunk) in patch.hunks.iter().enumerate() {
-        if index != selected {
-            shift += i64::from(hunk.new_len) - i64::from(hunk.old_len);
+    for (hunk, chosen) in patch.hunks.iter().zip(&chosen) {
+        let full = i64::from(hunk.new_len) - i64::from(hunk.old_len);
+        if !chosen.contains(&true) {
+            shift += full;
             continue;
         }
-        write_hunk(&mut out, hunk, shift);
+        let whole = hunk
+            .lines
+            .iter()
+            .zip(chosen)
+            .all(|(line, &c)| c || line.kind == PatchLineKind::Context);
+        let lines = transform(hunk, chosen, direction);
+        let (old_len, new_len) = side_lens(&lines);
+        if !whole && old_len > 0 && !lines.iter().any(|(k, _)| *k == PatchLineKind::Context) {
+            return Err(PatchError::NoContext);
+        }
+        check_no_newline(&lines)?;
+        let mut old_pos = i64::from(first_line(hunk.old_start, hunk.old_len));
+        let mut new_pos = i64::from(first_line(hunk.new_start, hunk.new_len));
+        match direction {
+            Direction::Stage => new_pos -= shift,
+            Direction::Unstage => old_pos += shift,
+        }
+        write_hunk(
+            &mut out,
+            &hunk.heading,
+            &lines,
+            (start(old_pos, old_len), old_len),
+            (start(new_pos, new_len), new_len),
+        );
+        shift += full - (i64::from(new_len) - i64::from(old_len));
     }
     Ok(out)
 }
 
-fn write_hunk(out: &mut Vec<u8>, hunk: &Hunk, shift: i64) {
-    let count = |wanted: fn(PatchLineKind) -> bool| {
-        let n = hunk.lines.iter().filter(|l| wanted(l.kind)).count();
+/// For each hunk, which of its lines are selected; context never is.
+fn chosen_lines(
+    patch: &FilePatch,
+    selection: &PatchSelection,
+) -> Result<Vec<Vec<bool>>, PatchError> {
+    match selection {
+        PatchSelection::Hunk(selected) => {
+            if *selected >= patch.hunks.len() {
+                return Err(PatchError::NoSuchHunk);
+            }
+            Ok(patch
+                .hunks
+                .iter()
+                .enumerate()
+                .map(|(index, hunk)| {
+                    hunk.lines
+                        .iter()
+                        .map(|l| index == *selected && l.kind != PatchLineKind::Context)
+                        .collect()
+                })
+                .collect())
+        }
+        PatchSelection::Lines(ids) => {
+            if ids.is_empty() {
+                return Err(PatchError::EmptySelection);
+            }
+            let all = all_changes(patch);
+            if !ids.is_subset(&all) {
+                return Err(PatchError::NoSuchLine);
+            }
+            // A partial patch with `/dev/null` headers does not round-trip.
+            if *ids != all {
+                match patch.kind {
+                    FileKind::Added => return Err(PatchError::PartialNewFile),
+                    FileKind::Deleted => return Err(PatchError::PartialDeletedFile),
+                    _ => {}
+                }
+            }
+            Ok(patch
+                .hunks
+                .iter()
+                .map(|hunk| {
+                    hunk.line_ids()
+                        .into_iter()
+                        .map(|id| id.is_some_and(|id| ids.contains(&id)))
+                        .collect()
+                })
+                .collect())
+        }
+    }
+}
+
+/// The hunk's lines as they go into the patch, each with its written kind.
+/// Text bytes are never touched, so a line turned into context keeps its
+/// line ending exactly.
+fn transform<'a>(
+    hunk: &'a Hunk,
+    chosen: &[bool],
+    direction: Direction,
+) -> Vec<(PatchLineKind, &'a PatchLine)> {
+    use PatchLineKind::{Added, Context, Removed};
+    hunk.lines
+        .iter()
+        .zip(chosen)
+        .filter_map(|(line, &chosen)| {
+            let kind = match (line.kind, chosen, direction) {
+                (Context, _, _) => Context,
+                (kind, true, _) => kind,
+                (Removed, false, Direction::Stage) | (Added, false, Direction::Unstage) => Context,
+                (Added, false, Direction::Stage) | (Removed, false, Direction::Unstage) => {
+                    return None;
+                }
+            };
+            Some((kind, line))
+        })
+        .collect()
+}
+
+/// How many lines each side of the written hunk has.
+fn side_lens(lines: &[(PatchLineKind, &PatchLine)]) -> (u32, u32) {
+    let count = |skip: PatchLineKind| {
+        let n = lines.iter().filter(|(kind, _)| *kind != skip).count();
         u32::try_from(n).unwrap_or(u32::MAX)
     };
-    let old_len = count(|k| k != PatchLineKind::Added);
-    let new_len = count(|k| k != PatchLineKind::Removed);
-    let new_start = (i64::from(hunk.new_start) - shift).max(0);
+    (count(PatchLineKind::Added), count(PatchLineKind::Removed))
+}
+
+/// A line without a newline can only be the last line of its side; one that
+/// would be followed by another line means staging a newline change the
+/// user did not pick.
+fn check_no_newline(lines: &[(PatchLineKind, &PatchLine)]) -> Result<(), PatchError> {
+    for skip in [PatchLineKind::Added, PatchLineKind::Removed] {
+        let side: Vec<&PatchLine> = lines
+            .iter()
+            .filter(|(kind, _)| *kind != skip)
+            .map(|(_, line)| *line)
+            .collect();
+        if let Some((_, before_last)) = side.split_last()
+            && before_last.iter().any(|line| line.no_newline)
+        {
+            return Err(PatchError::NoNewlineSplit);
+        }
+    }
+    Ok(())
+}
+
+/// A side's `@@` start: its first line, or the line before when it is empty.
+fn start(first: i64, len: u32) -> i64 {
+    let start = if len == 0 { first - 1 } else { first };
+    start.max(0)
+}
+
+fn write_hunk(
+    out: &mut Vec<u8>,
+    heading: &[u8],
+    lines: &[(PatchLineKind, &PatchLine)],
+    old: (i64, u32),
+    new: (i64, u32),
+) {
     out.extend_from_slice(
-        format!(
-            "@@ -{} +{} @@",
-            range(i64::from(hunk.old_start), old_len),
-            range(new_start, new_len)
-        )
-        .as_bytes(),
+        format!("@@ -{} +{} @@", range(old.0, old.1), range(new.0, new.1)).as_bytes(),
     );
-    out.extend_from_slice(&hunk.heading);
+    out.extend_from_slice(heading);
     out.push(b'\n');
-    for line in &hunk.lines {
-        out.push(match line.kind {
+    for (kind, line) in lines {
+        out.push(match kind {
             PatchLineKind::Context => b' ',
             PatchLineKind::Added => b'+',
             PatchLineKind::Removed => b'-',
@@ -618,7 +862,8 @@ mod tests {
 
     fn built(diff: &[u8], hunk: usize) -> String {
         let patch = parse(diff).unwrap();
-        String::from_utf8(build(&patch, &PatchSelection::Hunk(hunk)).unwrap()).unwrap()
+        String::from_utf8(build(&patch, &PatchSelection::Hunk(hunk), Direction::Stage).unwrap())
+            .unwrap()
     }
 
     #[test]
@@ -685,8 +930,8 @@ mod tests {
     #[test]
     fn crlf_and_markers_come_back_byte_for_byte() {
         let patch = parse(CRLF).unwrap();
-        let mut whole = build(&patch, &PatchSelection::Hunk(0)).unwrap();
-        let second = build(&patch, &PatchSelection::Hunk(1)).unwrap();
+        let mut whole = build(&patch, &PatchSelection::Hunk(0), Direction::Stage).unwrap();
+        let second = build(&patch, &PatchSelection::Hunk(1), Direction::Stage).unwrap();
         // The second hunk has no shift to apply, so both hunks together are
         // the fixture without its index line.
         whole.extend_from_slice(&second[second.iter().position(|&b| b == b'@').unwrap()..]);
@@ -700,7 +945,7 @@ mod tests {
 
         for fixture in [NO_EOL_OLD, NO_EOL_NEW, NO_EOL_BOTH] {
             let patch = parse(fixture).unwrap();
-            let built = build(&patch, &PatchSelection::Hunk(0)).unwrap();
+            let built = build(&patch, &PatchSelection::Hunk(0), Direction::Stage).unwrap();
             let expected: Vec<u8> = fixture
                 .split_inclusive(|&b| b == b'\n')
                 .filter(|l| !l.starts_with(b"index "))
@@ -746,17 +991,23 @@ mod tests {
             (COMBINED, PatchError::Unsupported),
         ];
         for (diff, error) in cases {
-            assert_eq!(build(&parse(diff).unwrap(), &hunk0), Err(error));
+            assert_eq!(
+                build(&parse(diff).unwrap(), &hunk0, Direction::Stage),
+                Err(error)
+            );
         }
         let copy = parse(b"diff --git a/a b/b\ncopy from a\ncopy to b\n").unwrap();
-        assert_eq!(build(&copy, &hunk0), Err(PatchError::Copied));
+        assert_eq!(
+            build(&copy, &hunk0, Direction::Stage),
+            Err(PatchError::Copied)
+        );
         let patch = parse(TWO_HUNKS).unwrap();
         assert_eq!(
-            build(&patch, &PatchSelection::Hunk(2)),
+            build(&patch, &PatchSelection::Hunk(2), Direction::Stage),
             Err(PatchError::NoSuchHunk)
         );
         assert_eq!(
-            build(&parse(b"").unwrap(), &hunk0),
+            build(&parse(b"").unwrap(), &hunk0, Direction::Stage),
             Err(PatchError::NoSuchHunk)
         );
     }
@@ -782,5 +1033,303 @@ mod tests {
         assert!(!selects_everything(&two, &PatchSelection::Hunk(1)));
         let new_file = parse(NEW_FILE).unwrap();
         assert!(selects_everything(&new_file, &PatchSelection::Hunk(0)));
+    }
+
+    const MIXED: &[u8] = b"diff --git a/m b/m\n--- a/m\n+++ b/m\n\
+        @@ -1,6 +1,6 @@ h\n a\n-b\n-c\n+B\n+C\n d\n-e\n+E\n f\n";
+    /// A pure addition, then a pure deletion further down.
+    const MULTI: &[u8] = b"diff --git a/m b/m\n--- a/m\n+++ b/m\n\
+        @@ -1,4 +1,6 @@\n a\n+n1\n+n2\n b\n c\n d\n\
+        @@ -10,8 +12,6 @@ g\n h\n i\n j\n-k\n-l\n m\n n\n o\n";
+    /// An empty file that got two lines, and one that lost them.
+    const FILLED: &[u8] = b"diff --git a/e b/e\n--- a/e\n+++ b/e\n@@ -0,0 +1,2 @@\n+x\n+y\n";
+    const EMPTIED: &[u8] = b"diff --git a/e b/e\n--- a/e\n+++ b/e\n@@ -1,2 +0,0 @@\n-x\n-y\n";
+    const HEAD_M: &str = "diff --git a/m b/m\n--- a/m\n+++ b/m\n";
+    const HEAD_E: &str = "diff --git a/e b/e\n--- a/e\n+++ b/e\n";
+
+    fn lines(diff: &[u8], ids: &[LineId], direction: Direction) -> Result<String, PatchError> {
+        let selection = PatchSelection::Lines(ids.iter().copied().collect());
+        build(&parse(diff).unwrap(), &selection, direction)
+            .map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    /// The built patch for `ids` in both directions, without the header.
+    fn both(diff: &[u8], ids: &[LineId]) -> (String, String) {
+        let body = |direction| {
+            let built = lines(diff, ids, direction).unwrap();
+            built[built.find("@@").unwrap()..].to_string()
+        };
+        (body(Direction::Stage), body(Direction::Unstage))
+    }
+
+    use Direction::{Stage, Unstage};
+
+    #[test]
+    fn a_single_added_line() {
+        let (stage, unstage) = both(MIXED, &[LineId::added(2)]);
+        // The other removals stay as context; the other additions go.
+        assert_eq!(stage, "@@ -1,6 +1,7 @@ h\n a\n b\n c\n+B\n d\n e\n f\n");
+        // Mirrored: the other additions are already in the index.
+        assert_eq!(unstage, "@@ -1,5 +1,6 @@ h\n a\n+B\n C\n d\n E\n f\n");
+        assert!(
+            lines(MIXED, &[LineId::added(2)], Stage)
+                .unwrap()
+                .starts_with(HEAD_M)
+        );
+    }
+
+    #[test]
+    fn a_single_removed_line() {
+        let (stage, unstage) = both(MIXED, &[LineId::removed(5)]);
+        assert_eq!(stage, "@@ -1,6 +1,5 @@ h\n a\n b\n c\n d\n-e\n f\n");
+        assert_eq!(unstage, "@@ -1,7 +1,6 @@ h\n a\n B\n C\n d\n-e\n E\n f\n");
+    }
+
+    #[test]
+    fn a_whole_mixed_hunk_but_one_line() {
+        let ids = [
+            LineId::removed(2),
+            LineId::removed(3),
+            LineId::added(2),
+            LineId::removed(5),
+            LineId::added(5),
+        ];
+        let (stage, unstage) = both(MIXED, &ids);
+        assert_eq!(stage, "@@ -1,6 +1,5 @@ h\n a\n-b\n-c\n+B\n d\n-e\n+E\n f\n");
+        assert_eq!(
+            unstage,
+            "@@ -1,7 +1,6 @@ h\n a\n-b\n-c\n+B\n C\n d\n-e\n+E\n f\n"
+        );
+    }
+
+    #[test]
+    fn the_first_and_last_change_lines_of_a_hunk() {
+        let (stage, unstage) = both(MIXED, &[LineId::removed(2), LineId::added(5)]);
+        assert_eq!(stage, "@@ -1,6 +1,6 @@ h\n a\n-b\n c\n d\n e\n+E\n f\n");
+        assert_eq!(unstage, "@@ -1,6 +1,6 @@ h\n a\n-b\n B\n C\n d\n+E\n f\n");
+    }
+
+    #[test]
+    fn a_pure_addition_partly_selected() {
+        let (stage, unstage) = both(MULTI, &[LineId::added(2)]);
+        assert_eq!(stage, "@@ -1,4 +1,5 @@\n a\n+n1\n b\n c\n d\n");
+        assert_eq!(unstage, "@@ -1,5 +1,6 @@\n a\n+n1\n n2\n b\n c\n d\n");
+
+        // An empty old side starts at the line before it, and stops doing so
+        // once a line lands on it.
+        let (stage, unstage) = both(FILLED, &[LineId::added(2)]);
+        assert_eq!(stage, "@@ -0,0 +1 @@\n+y\n");
+        assert_eq!(unstage, "@@ -1 +1,2 @@\n x\n+y\n");
+    }
+
+    #[test]
+    fn a_pure_deletion_partly_selected() {
+        // Hunk 0 is left out, so the index-side start moves by its whole delta.
+        let (stage, unstage) = both(MULTI, &[LineId::removed(13)]);
+        assert_eq!(
+            stage,
+            "@@ -10,8 +10,7 @@ g\n h\n i\n j\n-k\n l\n m\n n\n o\n"
+        );
+        assert_eq!(unstage, "@@ -12,7 +12,6 @@ g\n h\n i\n j\n-k\n m\n n\n o\n");
+
+        let stage = lines(EMPTIED, &[LineId::removed(1)], Stage).unwrap();
+        assert_eq!(stage, format!("{HEAD_E}@@ -1,2 +1 @@\n-x\n y\n"));
+        // Mirrored, nothing is left around the line to anchor it.
+        assert_eq!(
+            lines(EMPTIED, &[LineId::removed(1)], Unstage),
+            Err(PatchError::NoContext)
+        );
+    }
+
+    #[test]
+    fn a_later_hunk_shifts_by_what_earlier_hunks_actually_wrote() {
+        let (stage, unstage) = both(MULTI, &[LineId::added(2), LineId::removed(13)]);
+        assert_eq!(
+            stage,
+            "@@ -1,4 +1,5 @@\n a\n+n1\n b\n c\n d\n\
+             @@ -10,8 +11,7 @@ g\n h\n i\n j\n-k\n l\n m\n n\n o\n"
+        );
+        assert_eq!(
+            unstage,
+            "@@ -1,5 +1,6 @@\n a\n+n1\n n2\n b\n c\n d\n\
+             @@ -11,7 +12,6 @@ g\n h\n i\n j\n-k\n m\n n\n o\n"
+        );
+    }
+
+    #[test]
+    fn crlf_lines_keep_their_carriage_returns() {
+        let (stage, unstage) = both(CRLF, &[LineId::added(1)]);
+        assert_eq!(
+            stage,
+            "@@ -1,4 +1,5 @@\n row 1\r\n+row 1 changed\r\n row 2\r\n row 3\r\n row 4\r\n"
+        );
+        assert_eq!(
+            unstage,
+            "@@ -1,3 +1,4 @@\n+row 1 changed\r\n row 2\r\n row 3\r\n row 4\r\n"
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_newline_must_stay_last_on_its_side() {
+        const MARK: &str = "\\ No newline at end of file\n";
+        let split = Err(PatchError::NoNewlineSplit);
+        // Old side lacks the newline.
+        assert_eq!(lines(NO_EOL_OLD, &[LineId::added(2)], Stage), split);
+        assert_eq!(lines(NO_EOL_OLD, &[LineId::removed(2)], Unstage), split);
+        let (stage, unstage) = (
+            lines(NO_EOL_OLD, &[LineId::removed(2)], Stage).unwrap(),
+            lines(NO_EOL_OLD, &[LineId::added(2)], Unstage).unwrap(),
+        );
+        assert!(stage.ends_with(&format!("@@ -1,2 +1 @@\n keep\n-last\n{MARK}")));
+        assert!(unstage.ends_with("@@ -1 +1,2 @@\n keep\n+last\n"));
+
+        // New side lacks it: every single line is fine.
+        let (stage, unstage) = both(NO_EOL_NEW, &[LineId::added(2)]);
+        assert_eq!(
+            stage,
+            format!("@@ -1,2 +1,3 @@\n keep\n last\n+last\n{MARK}")
+        );
+        assert_eq!(unstage, format!("@@ -1 +1,2 @@\n keep\n+last\n{MARK}"));
+        let (stage, unstage) = both(NO_EOL_NEW, &[LineId::removed(2)]);
+        assert_eq!(stage, "@@ -1,2 +1 @@\n keep\n-last\n");
+        assert_eq!(
+            unstage,
+            format!("@@ -1,3 +1,2 @@\n keep\n-last\n last\n{MARK}")
+        );
+
+        // Both sides lack it.
+        assert_eq!(lines(NO_EOL_BOTH, &[LineId::added(2)], Stage), split);
+        assert_eq!(lines(NO_EOL_BOTH, &[LineId::removed(2)], Unstage), split);
+        let stage = lines(NO_EOL_BOTH, &[LineId::removed(2)], Stage).unwrap();
+        assert!(stage.ends_with(&format!("@@ -1,2 +1 @@\n keep\n-old\n{MARK}")));
+        let unstage = lines(NO_EOL_BOTH, &[LineId::added(2)], Unstage).unwrap();
+        assert!(unstage.ends_with(&format!("@@ -1 +1,2 @@\n keep\n+new\n{MARK}")));
+        // Both lines together are the whole hunk, which always builds.
+        let whole = [LineId::removed(2), LineId::added(2)];
+        assert!(lines(NO_EOL_BOTH, &whole, Stage).is_ok());
+        assert!(lines(NO_EOL_BOTH, &whole, Unstage).is_ok());
+    }
+
+    #[test]
+    fn unstaging_a_later_hunk_keeps_its_index_start_and_shifts_the_other() {
+        let patch = parse(TWO_HUNKS).unwrap();
+        let unstage = build(&patch, &PatchSelection::Hunk(1), Unstage).unwrap();
+        let unstage = String::from_utf8(unstage).unwrap();
+        assert!(unstage.contains("@@ -18,4 +18,4 @@ line 16\n"), "{unstage}");
+        // Stage output is what #12 wrote.
+        assert!(built(TWO_HUNKS, 1).contains("@@ -17,4 +17,4 @@ line 16\n"));
+        // Hunk 0 has no hunk before it: the same either way.
+        let first = build(&patch, &PatchSelection::Hunk(0), Unstage).unwrap();
+        assert!(
+            String::from_utf8(first)
+                .unwrap()
+                .contains("@@ -1,4 +1,5 @@\n")
+        );
+    }
+
+    #[test]
+    fn line_selections_on_what_cannot_be_staged_by_line_are_refused() {
+        let any = [LineId::added(1)];
+        for (diff, error) in [
+            (RENAME, PatchError::Renamed),
+            (BINARY, PatchError::Binary),
+            (SUBMODULE, PatchError::Unsupported),
+        ] {
+            for direction in [Stage, Unstage] {
+                assert_eq!(lines(diff, &any, direction), Err(error));
+            }
+        }
+
+        assert_eq!(
+            lines(NEW_FILE, &[LineId::added(1)], Stage),
+            Err(PatchError::PartialNewFile)
+        );
+        let deleted = b"diff --git a/g b/g\ndeleted file mode 100644\n--- a/g\n+++ /dev/null\n\
+            @@ -1,2 +0,0 @@\n-x\n-y\n";
+        assert_eq!(
+            lines(deleted, &[LineId::removed(2)], Unstage),
+            Err(PatchError::PartialDeletedFile)
+        );
+        // Whole files build, and say they are the whole file.
+        for (diff, ids) in [
+            (NEW_FILE, &[LineId::added(1), LineId::added(2)][..]),
+            (DELETED, &[LineId::removed(1)][..]),
+            (deleted, &[LineId::removed(1), LineId::removed(2)][..]),
+        ] {
+            assert!(lines(diff, ids, Stage).is_ok());
+            let selection = PatchSelection::Lines(ids.iter().copied().collect());
+            assert!(selects_everything(&parse(diff).unwrap(), &selection));
+        }
+    }
+
+    #[test]
+    fn empty_unknown_and_unanchored_selections_are_refused() {
+        assert_eq!(lines(MIXED, &[], Stage), Err(PatchError::EmptySelection));
+        // Line 4 is context, and nothing is numbered 99.
+        for id in [LineId::removed(4), LineId::added(4), LineId::added(99)] {
+            assert_eq!(lines(MIXED, &[id], Stage), Err(PatchError::NoSuchLine));
+        }
+        // A whole-file rewrite has no context; part of it has nothing to anchor to.
+        let rewrite = b"diff --git a/r b/r\n--- a/r\n+++ b/r\n@@ -1 +1,2 @@\n-a\n+b\n+c\n";
+        let part = [LineId::removed(1), LineId::added(1)];
+        assert_eq!(lines(rewrite, &part, Stage), Err(PatchError::NoContext));
+        // The whole of it is the hunk as git wrote it.
+        let all = [LineId::removed(1), LineId::added(1), LineId::added(2)];
+        assert!(
+            lines(rewrite, &all, Stage)
+                .unwrap()
+                .ends_with("@@ -1 +1,2 @@\n-a\n+b\n+c\n")
+        );
+        assert_eq!(
+            PatchError::NoContext.to_string(),
+            "No unchanged lines around the selection: stage the whole hunk"
+        );
+    }
+
+    #[test]
+    fn line_ids_number_changes_from_the_hunk_starts() {
+        let patch = parse(MULTI).unwrap();
+        assert_eq!(
+            patch.hunks[0].line_ids(),
+            [
+                None,
+                Some(LineId::added(2)),
+                Some(LineId::added(3)),
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(
+            patch.hunks[1].line_ids()[3..5],
+            [Some(LineId::removed(13)), Some(LineId::removed(14))]
+        );
+        assert_eq!(
+            parse(FILLED).unwrap().hunks[0].line_ids()[0],
+            Some(LineId::added(1))
+        );
+    }
+
+    #[test]
+    fn a_lines_selection_selects_everything_only_when_it_is_every_change() {
+        let patch = parse(TWO_HUNKS).unwrap();
+        let every: BTreeSet<LineId> = patch
+            .hunks
+            .iter()
+            .flat_map(Hunk::line_ids)
+            .flatten()
+            .collect();
+        assert_eq!(every.len(), 5);
+        assert!(selects_everything(
+            &patch,
+            &PatchSelection::Lines(every.clone())
+        ));
+        let mut part = every;
+        part.pop_last();
+        assert!(!selects_everything(&patch, &PatchSelection::Lines(part)));
+        assert!(!selects_everything(
+            &patch,
+            &PatchSelection::Lines(BTreeSet::new())
+        ));
     }
 }

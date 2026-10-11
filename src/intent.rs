@@ -50,6 +50,18 @@ pub enum AppIntent {
     PrevHunk,
     /// Stage the selected hunk, or unstage it in the staged view.
     ToggleHunkStage,
+    /// Start or stop picking changed lines inside the selected hunk.
+    EnterLineMode,
+    ExitLineMode,
+    /// Move the line cursor down or up; with `extend`, grow the range.
+    NextLine {
+        extend: bool,
+    },
+    PrevLine {
+        extend: bool,
+    },
+    /// Stage the selected lines, or unstage them in the staged view.
+    ToggleLinesStage,
     /// Switch the focused Diff pane between unstaged and staged changes.
     ToggleDiffSide,
     /// A whole-file patch load finished; `tag` says which one.
