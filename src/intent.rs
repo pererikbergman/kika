@@ -8,6 +8,7 @@ use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
+use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::CommitFile;
@@ -18,6 +19,7 @@ use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
+use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
@@ -370,6 +372,42 @@ pub enum AppIntent {
     ConfirmDeleteBranch {
         force: bool,
     },
+    /// Fetch every remote, pull into the current branch, or push it. Each
+    /// reaches the network, so only a key the user pressed sends one.
+    Fetch,
+    Pull,
+    Push,
+    /// Push again with `--force-with-lease`, after a plain push was rejected.
+    ForcePush,
+    /// Git or ssh, running for the remote operation `tag`, asks something.
+    /// `confirm` is a yes/no question. The prompt is terminal-safe.
+    // Only the unix bridge asks.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    CredentialAsked {
+        tag: Tag,
+        prompt: String,
+        confirm: bool,
+    },
+    /// Answer with the text typed into the credential popup.
+    SubmitCredential,
+    /// The answer to the open credential question; `None` cancels it.
+    CredentialAnswered(Option<Secret>),
+    /// Ssh, for the remote operation `tag`, says something that needs no
+    /// answer, such as asking to touch a security key. Terminal-safe.
+    // Only the unix bridge passes these on.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    RemoteNotice {
+        tag: Tag,
+        text: String,
+    },
+    /// A fetch, pull or push finished.
+    RemoteFinished {
+        tag: Tag,
+        op: RemoteOp,
+        result: Result<(), RemoteFailure>,
+    },
+    /// Time to draw the next frame of the remote operation's spinner.
+    SpinnerTick,
     /// Merge the selected branch into the current one this way.
     Merge(MergeStrategy),
     /// Rebase the current branch onto the selected one.
