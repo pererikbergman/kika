@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -14,6 +14,8 @@ use crate::view::{PanelLook, elide_right, reversed, width_of};
 
 /// Authors longer than this lose their end, so the subject keeps room.
 const AUTHOR_WIDTH: usize = 16;
+/// Columns the subject keeps before the date and then the author give way.
+const SUBJECT_MIN: usize = 12;
 
 /// The panel: a placeholder until the first page, then one row per commit
 /// in the window around the cursor. Collapsed, the `HEAD` commit's row.
@@ -31,8 +33,14 @@ pub(crate) fn render_commits_panel(
     let paragraph = if panel.rows.is_empty() {
         match &panel.error {
             _ if !panel.loaded => Paragraph::new("Loading…"),
-            Some(error) => Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>())
-                .wrap(Wrap { trim: false }),
+            Some(error) => {
+                let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
+                if let Some(first) = lines.first_mut() {
+                    first.spans.insert(0, Span::raw("! "));
+                }
+                lines.push(Line::from("Press r to retry"));
+                Paragraph::new(lines).wrap(Wrap { trim: false })
+            }
             None => Paragraph::new(Line::styled("No commits yet", dim)),
         }
     } else if !expanded {
@@ -54,10 +62,11 @@ fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
             Style::new().fg(Color::DarkGray),
         ))
     } else {
-        panel
-            .error
-            .as_deref()
-            .map(|error| Line::styled(error.to_string(), Style::new().fg(Color::Red)))
+        panel.error.as_deref().map(|error| {
+            let first = error.lines().next().unwrap_or_default();
+            let text = format!("! {first} (press r to retry)");
+            Line::styled(elide_right(&text, width), Style::new().fg(Color::Red))
+        })
     };
     let room = if note.is_some() && height > 1 {
         height - 1
@@ -73,19 +82,56 @@ fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
     lines
 }
 
-/// Lines for `rows[range]` only; the graph is padded to the widest of them.
+/// Which columns a row has room for, worked out once per draw so every row
+/// lines up. The subject keeps [`SUBJECT_MIN`] columns: the date goes
+/// first, then the author.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Columns {
+    /// Graph lanes shown; wider rows end in `…`.
+    lanes: usize,
+    hash: usize,
+    date: bool,
+    /// 0 drops the author.
+    author: usize,
+}
+
+impl Columns {
+    fn fit(panel: &CommitsPanel, range: std::ops::Range<usize>, width: usize) -> Self {
+        // The widest row loaded so far, not just on screen, so the columns
+        // stay put while scrolling; never more than a third of the width.
+        let lanes = panel.lanes.max(1).min((width / 6).max(1));
+        let hash = panel.rows[range]
+            .iter()
+            .map(|row| width_of(&row.short_oid))
+            .max()
+            .unwrap_or(0);
+        let fixed = lanes * 2 + 2 + hash + 1;
+        let left = width.saturating_sub(fixed);
+        let date = left >= SUBJECT_MIN + 4;
+        let left = if date { left - 4 } else { left };
+        let author = left.saturating_sub(SUBJECT_MIN + 1).min(AUTHOR_WIDTH);
+        Self {
+            lanes,
+            hash,
+            date,
+            author: if author < 4 { 0 } else { author },
+        }
+    }
+}
+
+/// Lines for `rows[range]` only.
 fn commit_lines(
     panel: &CommitsPanel,
     range: std::ops::Range<usize>,
     selected: Option<usize>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let graphs = &panel.graph[range.clone()];
-    let lanes = graphs.iter().map(|g| g.cells.len()).max().unwrap_or(0);
+    let columns = Columns::fit(panel, range.clone(), width);
     range
-        .zip(graphs)
+        .clone()
+        .zip(&panel.graph[range])
         .map(|(i, graph)| {
-            let line = commit_line(panel, i, graph, lanes, width);
+            let line = commit_line(panel, i, graph, columns, width);
             if Some(i) == selected {
                 reversed(line, width)
             } else {
@@ -95,43 +141,68 @@ fn commit_lines(
         .collect()
 }
 
-/// `<graph> <marker> <hash> <date> <author> <subject>`, the subject cut to fit.
+/// `<graph> <marker> <hash> <date> <author> <subject>`, padded so each
+/// column starts at the same place on every row, the subject cut to fit.
 fn commit_line(
     panel: &CommitsPanel,
     index: usize,
     graph: &GraphRow,
-    lanes: usize,
+    columns: Columns,
     width: usize,
 ) -> Line<'static> {
     let row = &panel.rows[index];
     let marker = match panel.marker(&row.oid) {
-        Marker::Unpushed => Span::styled("↑", Style::new().fg(Color::Yellow)),
-        Marker::Merged => Span::styled("✓", Style::new().fg(Color::DarkGray)),
+        Marker::Unpushed => Span::styled(
+            "↑",
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Marker::Merged => Span::styled("✓", Style::new().add_modifier(Modifier::DIM)),
         Marker::Pushed | Marker::Unknown => Span::raw(" "),
     };
-    let author = elide_right(&row.author, AUTHOR_WIDTH);
     let mut spans = vec![
-        Span::styled(graph_text(graph, lanes), Style::new().fg(Color::Magenta)),
+        Span::styled(
+            graph_text(graph, columns.lanes),
+            Style::new().fg(Color::Magenta),
+        ),
         marker,
         Span::raw(" "),
-        Span::styled(row.short_oid.clone(), Style::new().fg(Color::Yellow)),
-        Span::raw(" "),
         Span::styled(
-            format!("{:>3}", relative_date(row.time, panel.loaded_at)),
-            Style::new().fg(Color::DarkGray),
+            pad(&row.short_oid, columns.hash),
+            Style::new().fg(Color::Cyan),
         ),
         Span::raw(" "),
-        Span::styled(author, Style::new().fg(Color::Green)),
-        Span::raw(" "),
     ];
+    if columns.date {
+        spans.push(Span::styled(
+            format!("{:>3} ", relative_date(row.time, panel.loaded_at)),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
+    if columns.author > 0 {
+        let author = elide_right(&row.author, columns.author);
+        spans.push(Span::styled(
+            format!("{} ", pad(&author, columns.author)),
+            Style::new().fg(Color::Green),
+        ));
+    }
     let used: usize = spans.iter().map(|s| width_of(&s.content)).sum();
-    let subject = elide_right(&row.subject, width.saturating_sub(used));
-    spans.push(Span::raw(subject));
+    spans.push(Span::raw(elide_right(
+        &row.subject,
+        width.saturating_sub(used),
+    )));
     Line::from(spans)
 }
 
+/// `text` padded with spaces to `width` display columns.
+fn pad(text: &str, width: usize) -> String {
+    let fill = width.saturating_sub(width_of(text));
+    format!("{text}{}", " ".repeat(fill))
+}
+
 /// Two columns per lane: the lane's glyph, then what joins it to the next.
-/// A merge or branch-off draws a line from the commit to the lanes it touches.
+/// A merge or branch-off draws a line from the commit to the lanes it
+/// touches, crossing lanes on the way with `┼`. A row with more than
+/// `lanes` lanes ends in `…`.
 fn graph_text(graph: &GraphRow, lanes: usize) -> String {
     let cells = &graph.cells;
     let commit = cells.iter().position(|c| *c == GraphCell::Commit);
@@ -150,22 +221,28 @@ fn graph_text(graph: &GraphRow, lanes: usize) -> String {
         None => (0, 0),
     };
     let commit = commit.unwrap_or(0);
-    let mut text = String::new();
-    for i in 0..lanes {
+    let mut text: Vec<char> = Vec::new();
+    for i in 0..lanes.max(cells.len()) {
+        let inside = lo < i && i < hi;
         let glyph = match cells.get(i).copied().unwrap_or(GraphCell::Empty) {
             GraphCell::Commit => '●',
+            GraphCell::Pipe if inside => '┼',
             GraphCell::Pipe => '│',
             GraphCell::MergeIn if i > commit => '╮',
             GraphCell::MergeIn => '╭',
             GraphCell::BranchOut if i > commit => '╯',
             GraphCell::BranchOut => '╰',
-            GraphCell::Empty if lo < i && i < hi => '─',
+            GraphCell::Empty if inside => '─',
             GraphCell::Empty => ' ',
         };
         text.push(glyph);
         text.push(if lo <= i && i < hi { '─' } else { ' ' });
     }
-    text
+    if cells.len() > lanes {
+        text.truncate(lanes * 2 - 1);
+        text.push('…');
+    }
+    text.into_iter().collect()
 }
 
 /// How long ago `time` was at `now`, in the largest whole unit: `now`,
@@ -192,16 +269,13 @@ pub(crate) fn relative_date(time: i64, now: i64) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::time::{Duration, Instant};
 
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Modifier;
 
     use super::*;
-    use crate::commit_graph::GraphBuilder;
-    use crate::git::log::{CommitRow, Markers};
+    use crate::git::log::{CommitRow, LogPage, Markers};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{Context, Focus};
     use crate::view::{buffer_rows, render};
@@ -219,21 +293,18 @@ mod tests {
         }
     }
 
-    /// A workspace with the Commits panel focused, showing `rows`.
+    /// A workspace with the Commits panel focused and zoomed to the whole
+    /// screen, `rows` loaded as page 0.
     fn showing(rows: Vec<CommitRow>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
         state.files_loaded = true;
         state.focus = Focus::Commits;
         state.expanded = SidePanel::Commits;
-        // The panel takes the screen, so whole rows show.
         state.screen_mode = ScreenMode::Full;
-        let mut builder = GraphBuilder::default();
-        state.commits.graph = rows.iter().map(|r| builder.push(r)).collect();
-        state.commits.builder = builder;
-        state.commits.rows = rows;
-        state.commits.loaded = true;
-        state.commits.done = true;
-        state.commits.loaded_at = NOW;
+        state.commits.begin_page(0, 0);
+        state
+            .commits
+            .page_loaded(0, 0, Ok((LogPage { rows, done: true }, NOW)));
         state
     }
 
@@ -247,6 +318,12 @@ mod tests {
         rows.iter()
             .find(|row| row.contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")))
+    }
+
+    /// The display column where `needle` starts on its row.
+    fn column_of(rows: &[String], needle: &str) -> usize {
+        let line = line_with(rows, needle);
+        width_of(&line[..line.find(needle).unwrap()])
     }
 
     fn merge_rows() -> Vec<CommitRow> {
@@ -264,14 +341,31 @@ mod tests {
         ]
     }
 
+    /// The graph cells of a hand-built row, for glyph tests.
+    fn graph(cells: &[GraphCell]) -> GraphRow {
+        GraphRow {
+            cells: cells.to_vec(),
+        }
+    }
+
     #[test]
     fn a_merge_draws_its_graph_hash_author_date_and_subject() {
         let rows = buffer_rows(&draw(&showing(merge_rows()), 100, 30));
+        let author = |name: &str| format!("{name:<16} ");
 
-        assert!(line_with(&rows, "Merge side").contains("●─╮   m000000 now Ann Merge side"));
-        assert!(line_with(&rows, "Side work").contains("│ ●   s000000  3h Bob Side work"));
-        assert!(line_with(&rows, "Main work").contains("● │   b000000  2d Ann Main work"));
-        assert!(line_with(&rows, "Root").contains("●─╯   a000000  3y Ann Root"));
+        let expect = [
+            ("●─╮   m000000 now ", "Ann", "Merge side"),
+            ("│ ●   s000000  3h ", "Bob", "Side work"),
+            ("● │   b000000  2d ", "Ann", "Main work"),
+            ("●─╯   a000000  3y ", "Ann", "Root"),
+        ];
+        for (head, name, subject) in expect {
+            let text = format!("{head}{}{subject}", author(name));
+            assert!(
+                line_with(&rows, subject).contains(&text),
+                "{text:?}\n{rows:#?}"
+            );
+        }
     }
 
     #[test]
@@ -285,12 +379,17 @@ mod tests {
             unmerged: set(&["m000000aaa", "s000000aaa"]),
             unpushed: set(&["m000000aaa"]),
         };
-        let rows = buffer_rows(&draw(&state, 100, 30));
+        let buffer = draw(&state, 100, 30);
+        let rows = buffer_rows(&buffer);
 
         assert!(line_with(&rows, "Merge side").contains("↑ m000000"));
         assert!(line_with(&rows, "Side work").contains("  s000000"));
         assert!(line_with(&rows, "Main work").contains("✓ b000000"));
         assert!(line_with(&rows, "Root").contains("✓ a000000"));
+        // The marker and the hash are told apart by more than the glyph.
+        let y = rows.iter().position(|r| r.contains("Merge side")).unwrap() as u16;
+        let x = column_of(&rows, "↑") as u16;
+        assert_ne!(buffer[(x, y)].style().fg, buffer[(x + 2, y)].style().fg);
     }
 
     #[test]
@@ -300,14 +399,13 @@ mod tests {
         let buffer = draw(&state, 100, 30);
         let rows = buffer_rows(&buffer);
         let y = rows.iter().position(|r| r.contains("Main work")).unwrap();
-        let x = rows[y].find("b000000").unwrap();
-        let x = rows[y][..x].chars().count() as u16;
+        let x = column_of(&rows, "b000000") as u16;
         let style = buffer[(x, y as u16)].style();
         assert!(style.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
-    fn a_hundred_thousand_rows_draw_the_window_around_the_cursor_quickly() {
+    fn a_hundred_thousand_rows_build_lines_only_for_the_window_at_the_cursor() {
         let rows: Vec<CommitRow> = (0..100_000)
             .map(|i| {
                 let parent = format!("{:010}", i + 1);
@@ -324,14 +422,130 @@ mod tests {
         let mut state = showing(rows);
         state.commits.selected = 99_990;
 
-        let started = Instant::now();
-        let buffer = draw(&state, 100, 30);
-        let took = started.elapsed();
+        let lines = window(&state.commits, Rect::new(0, 0, 60, 20));
+        assert_eq!(lines.len(), 20, "one line per visible row, no more");
+        let text = |line: &Line| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        assert!(
+            text(&lines[19]).contains("subject 99990"),
+            "the cursor's row is last"
+        );
+        assert!(text(&lines[0]).contains("subject 99971"));
 
-        let rows = buffer_rows(&buffer);
+        let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "subject 99990");
-        assert!(!rows.iter().any(|r| r.contains("subject 0 ")));
-        assert!(took < Duration::from_millis(500), "took {took:?}");
+    }
+
+    #[test]
+    fn at_80_by_24_the_panel_keeps_the_subject_and_drops_the_date_and_author() {
+        let mut state = showing(merge_rows());
+        state.screen_mode = ScreenMode::Normal;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+
+        let merge = line_with(&rows, "m000000");
+        assert!(merge.contains("m000000 Merge side"), "{rows:#?}");
+        assert!(!merge.contains("Ann") && !merge.contains("now"));
+        // Half the screen has room for the date and a short author column.
+        state.screen_mode = ScreenMode::Half;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        let merge = line_with(&rows, "m000000");
+        assert!(
+            merge.contains("m000000 now Ann     Merge side"),
+            "{rows:#?}"
+        );
+        // Every subject starts in the same column.
+        let at = column_of(&rows, "Merge");
+        for subject in ["Side work", "Main work", "Root"] {
+            assert_eq!(column_of(&rows, subject), at, "{subject}");
+        }
+    }
+
+    #[test]
+    fn a_tiny_panel_draws_without_panicking_and_keeps_the_hash() {
+        let mut state = showing(merge_rows());
+        for (width, height) in [(20, 6), (12, 4), (4, 3), (1, 1)] {
+            let rows = buffer_rows(&draw(&state, width, height));
+            if width >= 20 {
+                line_with(&rows, "m000000");
+            }
+        }
+        state.screen_mode = ScreenMode::Normal;
+        for (width, height) in [(20, 6), (12, 4), (4, 3)] {
+            draw(&state, width, height);
+        }
+    }
+
+    #[test]
+    fn wide_characters_keep_the_columns_aligned_and_end_in_an_ellipsis() {
+        let rows = vec![
+            row(
+                "w000000aaa",
+                &["n000000aaa"],
+                "山田太郎",
+                60,
+                "絵文字 😀 の件名がとても長い場合のテスト",
+            ),
+            row("n000000aaa", &[], "Bob", 60, "plain"),
+        ];
+        let state = showing(rows);
+        let rows = buffer_rows(&draw(&state, 60, 10));
+
+        let wide = line_with(&rows, "w000000");
+        assert!(wide.contains('…'), "{wide:?}");
+        assert!(wide.ends_with('│') || wide.ends_with('┃'), "{wide:?}");
+        assert_eq!(column_of(&rows, "絵文字"), column_of(&rows, "plain"));
+    }
+
+    #[test]
+    fn the_graph_keeps_one_width_while_scrolling_and_caps_it() {
+        // A wide octopus at the top, then a long linear tail.
+        let mut rows = vec![row(
+            "o000000aaa",
+            &["l000000000", "x1", "x2", "x3"],
+            "Ann",
+            60,
+            "octopus",
+        )];
+        rows.extend((0..40).map(|i| {
+            let parent = format!("l{:09}", i + 1);
+            row(
+                &format!("l{i:09}"),
+                &[&parent],
+                "Ann",
+                60,
+                &format!("tail {i}"),
+            )
+        }));
+        let mut state = showing(rows);
+        let at_top = column_of(&buffer_rows(&draw(&state, 100, 12)), "tail 0");
+        state.commits.selected = 40;
+        let scrolled = column_of(&buffer_rows(&draw(&state, 100, 12)), "tail 39");
+        assert_eq!(
+            at_top, scrolled,
+            "columns do not jump when the merge scrolls away"
+        );
+
+        // Narrow, the graph takes at most a third of the width and says so.
+        let lines = commit_lines(&state.commits, 0..1, None, 18);
+        let text: String = lines[0].spans[0].content.to_string();
+        assert_eq!(text, "●─╮─╮…");
+        assert!(text.ends_with('…'), "{text:?}");
+    }
+
+    #[test]
+    fn graph_glyphs_for_an_octopus_a_left_merge_and_a_crossed_lane() {
+        use GraphCell::*;
+        assert_eq!(
+            graph_text(&graph(&[Commit, MergeIn, MergeIn, MergeIn]), 4),
+            "●─╮─╮─╮ "
+        );
+        assert_eq!(graph_text(&graph(&[MergeIn, Commit]), 2), "╭─● ");
+        assert_eq!(graph_text(&graph(&[Commit, Pipe, BranchOut]), 3), "●─┼─╯ ");
+        assert_eq!(graph_text(&graph(&[Pipe, Commit, Empty]), 3), "│ ●   ");
     }
 
     #[test]
@@ -341,19 +555,38 @@ mod tests {
         state.expanded = SidePanel::Files;
         state.screen_mode = ScreenMode::Normal;
         let rows = buffer_rows(&draw(&state, 100, 30));
-        line_with(&rows, "m000000 now Ann Merge");
+        line_with(&rows, "m000000 now");
         assert!(!rows.iter().any(|r| r.contains("Side work")));
     }
 
     #[test]
-    fn placeholders_say_loading_empty_or_the_error() {
+    fn placeholders_say_loading_empty_or_the_error_and_how_to_retry() {
         let mut state = showing(vec![]);
         state.commits.loaded = false;
         line_with(&buffer_rows(&draw(&state, 100, 30)), "Loading…");
         state.commits.loaded = true;
         line_with(&buffer_rows(&draw(&state, 100, 30)), "No commits yet");
-        state.commits.error = Some("fatal: bad thing".into());
-        line_with(&buffer_rows(&draw(&state, 100, 30)), "fatal: bad thing");
+        state.commits.begin_page(1, 0);
+        state
+            .commits
+            .page_loaded(1, 0, Err("fatal: bad thing".into()));
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "! Could not read the history: fatal: bad thing");
+        line_with(&rows, "Press r to retry");
+    }
+
+    #[test]
+    fn a_failed_later_page_says_so_after_the_last_commit_and_names_r() {
+        let mut state = showing(merge_rows());
+        state.commits.begin_page(1, 4);
+        state.commits.page_loaded(1, 4, Err("fatal: gone".into()));
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        let root = rows.iter().position(|r| r.contains("Root")).unwrap();
+        assert!(
+            rows[root + 1]
+                .contains("! Could not load more commits: fatal: gone (press r to retry)"),
+            "{rows:#?}"
+        );
     }
 
     #[test]

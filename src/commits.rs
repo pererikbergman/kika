@@ -31,6 +31,9 @@ pub struct CommitsPanel {
     pub graph: Vec<GraphRow>,
     /// Carries the lanes across pages.
     pub builder: GraphBuilder,
+    /// The most lanes any loaded row has, so the graph column keeps one
+    /// width while scrolling.
+    pub lanes: usize,
     /// The newest commit of page 0; later pages start from it.
     pub tip: Option<String>,
     /// The last page is in.
@@ -89,10 +92,11 @@ impl CommitsPanel {
         let (page, now) = match result {
             Ok(loaded) => loaded,
             Err(message) => {
-                self.error = Some(message);
                 if skip == 0 {
+                    self.error = Some(format!("Could not read the history: {message}"));
                     self.loaded = true;
                 } else {
+                    self.error = Some(format!("Could not load more commits: {message}"));
                     // Retrying on every key press would only repeat it;
                     // the next reload tries again.
                     self.done = true;
@@ -106,6 +110,7 @@ impl CommitsPanel {
             self.rows.clear();
             self.graph.clear();
             self.builder = GraphBuilder::default();
+            self.lanes = 0;
             self.tip = page.rows.first().map(|row| row.oid.clone());
             self.loaded = true;
             self.loaded_at = now;
@@ -122,7 +127,9 @@ impl CommitsPanel {
     fn append(&mut self, page: LogPage) {
         self.done = page.done;
         for row in &page.rows {
-            self.graph.push(self.builder.push(row));
+            let graph = self.builder.push(row);
+            self.lanes = self.lanes.max(graph.cells.len());
+            self.graph.push(graph);
         }
         self.rows.extend(page.rows);
     }

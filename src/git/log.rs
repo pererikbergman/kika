@@ -44,7 +44,9 @@ pub struct Markers {
 /// marker is never wrong, only missing.
 pub const MARKER_CAP: usize = 10_000;
 
-const FORMAT: &str = "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s";
+/// The hex fields and the time first, the free text last: a stray
+/// separator in an author name can only shift text into the subject.
+const FORMAT: &str = "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s";
 
 /// Up to `limit` commits of `tip` (or `HEAD`), after skipping `skip`. Later
 /// pages pass the first page's newest commit as `tip`, so a page never
@@ -66,6 +68,7 @@ pub fn log_page(
             .arg(format!("--skip={skip}"))
             .arg("-n")
             .arg(limit.to_string())
+            .arg("--end-of-options")
             .arg(tip.unwrap_or("HEAD"))
             .arg("--"),
     )?;
@@ -84,32 +87,39 @@ pub fn log_page(
         .map(|record| record.strip_prefix(b"\n").unwrap_or(record))
         .filter(|record| !record.is_empty())
         .map(parse_row)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     Ok(LogPage {
         done: rows.len() < limit,
         rows,
     })
 }
 
-/// One `FORMAT` record. The subject is last, so a stray separator in it
-/// stays part of it.
-fn parse_row(record: &[u8]) -> Result<CommitRow, String> {
-    let fields: Vec<&[u8]> = record.splitn(6, |&b| b == 0x1f).collect();
-    let [oid, short, parents, author, time, subject] = fields.as_slice() else {
-        return Err("git log printed a commit Kika could not read".into());
-    };
+/// One `FORMAT` record. A record that cannot be read still makes a row,
+/// so the page keeps its length and the next page's `skip` stays right.
+fn parse_row(record: &[u8]) -> CommitRow {
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
-    let time = text(time)
-        .parse()
-        .map_err(|_| "git log printed a commit time Kika could not read".to_string())?;
-    Ok(CommitRow {
-        oid: text(oid),
-        short_oid: text(short),
-        parents: text(parents).split_whitespace().map(String::from).collect(),
-        author: terminal_safe(author),
-        time,
-        subject: terminal_safe(subject),
-    })
+    let fields: Vec<&[u8]> = record.splitn(6, |&b| b == 0x1f).collect();
+    if let [oid, short, parents, time, author, subject] = fields.as_slice()
+        && let Ok(time) = text(time).parse()
+    {
+        return CommitRow {
+            oid: text(oid),
+            short_oid: text(short),
+            parents: text(parents).split_whitespace().map(String::from).collect(),
+            author: terminal_safe(author),
+            time,
+            subject: terminal_safe(subject),
+        };
+    }
+    let oid = terminal_safe(fields.first().copied().unwrap_or_default());
+    CommitRow {
+        short_oid: oid.chars().take(7).collect(),
+        oid,
+        parents: Vec::new(),
+        author: String::new(),
+        time: 0,
+        subject: "(a commit Kika could not read)".into(),
+    }
 }
 
 /// Which commits of `HEAD` are unpushed and which are not yet merged into
@@ -411,6 +421,49 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_record_becomes_a_placeholder_row_and_the_page_keeps_its_length() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let argv = [
+            "log",
+            "--no-show-signature",
+            "--no-color",
+            "-z",
+            FORMAT,
+            "--skip=0",
+            "-n",
+            "3",
+            "--end-of-options",
+            "HEAD",
+            "--",
+        ];
+        let fake = FakeRunner::new().expect(
+            &argv,
+            ok(b"a1\x1fa1\x1fb1\x1f5\x1fAn\x1fn\x1fsubj\0\
+                 b1\x1fb1\x1fc1\x1fsoon\x1fBob\x1fbad time\0\
+                 c1\x1fc1\0"),
+        );
+
+        let page = log_page(&fake, None, 0, 3).unwrap();
+
+        assert_eq!(page.rows.len(), 3);
+        assert!(!page.done);
+        // A separator in the author only spills into the subject.
+        let first = &page.rows[0];
+        assert_eq!((first.time, first.author.as_str()), (5, "An"));
+        assert!(first.subject.starts_with('n') && first.subject.ends_with("subj"));
+        assert!(
+            !first.subject.contains(char::is_control),
+            "{:?}",
+            first.subject
+        );
+        for (row, oid) in page.rows[1..].iter().zip(["b1", "c1"]) {
+            assert_eq!(row.oid, oid);
+            assert_eq!(row.subject, "(a commit Kika could not read)");
+        }
+    }
+
+    #[test]
     fn every_query_is_lock_free_and_in_the_c_locale() {
         use crate::git::fake::{FakeRunner, ok};
         use std::ffi::OsString;
@@ -425,10 +478,11 @@ mod tests {
                 "--skip=0",
                 "-n",
                 "2",
+                "--end-of-options",
                 "HEAD",
                 "--",
             ],
-            ok(b"a\x1fa\x1f\x1fAnn\x1f5\x1fsubj\0"),
+            ok(b"a\x1fa\x1f\x1f5\x1fAnn\x1fsubj\0"),
         );
         let page = log_page(&fake, None, 0, 2).unwrap();
         assert!(page.done);

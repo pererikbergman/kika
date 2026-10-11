@@ -1469,14 +1469,15 @@ mod tests {
                 "--no-show-signature",
                 "--no-color",
                 "-z",
-                "--format=%H%x1f%h%x1f%P%x1f%an%x1f%at%x1f%s",
+                "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s",
                 "--skip=200",
                 "-n",
                 "200",
+                "--end-of-options",
                 "abc",
                 "--",
             ],
-            ok(b"abc1\x1fabc\x1f\x1fAnn\x1f7\x1fsubj\0"),
+            ok(b"abc1\x1fabc\x1f\x1f7\x1fAnn\x1fsubj\0"),
         ));
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(runner.clone(), tx);
