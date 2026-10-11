@@ -17,6 +17,14 @@ pub struct CopiedCommit {
     pub subject: String,
 }
 
+impl CopiedCommit {
+    /// `short` is made from `id`, never taken from the log's text.
+    pub fn new(id: CommitId, subject: String) -> Self {
+        let short = crate::git::cherry_pick::short(&id).to_string();
+        Self { id, short, subject }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopiedCommits {
     entries: Vec<CopiedCommit>,
@@ -70,6 +78,12 @@ mod tests {
             short: hex.to_string().repeat(7),
             subject: format!("subject {hex}"),
         }
+    }
+
+    #[test]
+    fn the_short_id_is_made_from_the_full_one() {
+        let id = CommitId::parse(&"ab".repeat(20)).unwrap();
+        assert_eq!(CopiedCommit::new(id, "s".into()).short, "abababa");
     }
 
     #[test]

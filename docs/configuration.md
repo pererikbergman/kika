@@ -601,15 +601,17 @@ continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
 
 `c` copies the selected commit, or takes it out of the copied set; mark each
-commit you want in turn. Copied rows show `+` before their hash and the
-panel's title counts them. Check out another branch and press `v` to
+commit you want in turn. Copied rows show `+` before their hash, and the
+panel's title and the bottom bar count them; in the Commits panel the bar
+puts `v` and `C` first while anything is copied. Check out another branch and press `v` to
 cherry-pick the copied commits onto it with one `git cherry-pick` on the
 terminal, so hooks and signing work as on the command line. They are picked
 parents first, whatever order you copied them in. A merge commit cannot be
 copied, a commit already on the current branch is refused before git runs, and
 `v` waits for a clean worktree (untracked files may stay) and for an operation
-in progress to finish. A pick that stops on conflicts is resolved, continued,
-skipped or aborted from the Status panel. The set stays after a paste, so it
+in progress to finish. A pick that stops on conflicts, or on a commit the
+branch already has (an empty pick), is resolved, continued, skipped or aborted
+from the Status panel. The set stays after a paste, so it
 can be pasted onto another branch too; `C` clears it, and so does switching
 to another repository. The commits a paste makes can be undone with `ctrl-z`.
 

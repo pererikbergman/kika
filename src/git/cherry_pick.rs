@@ -71,7 +71,9 @@ pub fn is_full_id(id: &CommitId) -> bool {
     matches!(id.as_str().len(), 40 | 64)
 }
 
-fn short(id: &CommitId) -> &str {
+/// The first seven hex digits, as named in messages. Made from the id, so
+/// it is hex whatever the log printed.
+pub fn short(id: &CommitId) -> &str {
     let text = id.as_str();
     &text[..text.len().min(7)]
 }

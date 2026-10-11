@@ -768,10 +768,23 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
                 Style::new().fg(Color::DarkGray),
             ));
         }
-        let room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
-        let hints: Vec<(String, bool, bool)> = available(registry(), &state.keymap, focus, state)
+        let mut room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
+        let copied = copied_note(state);
+        if let Some(copied) = &copied {
+            spans.push(Span::styled(
+                format!(" {copied}"),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+            room = room.saturating_sub(width_of(copied) + 1);
+        }
+        // While commits are copied, paste and clear lead the hints, so a
+        // narrow bar keeps them.
+        let leading: &[&str] = if copied.is_some() { COPIED_HINTS } else { &[] };
+        let mut available = available(registry(), &state.keymap, focus, state);
+        available.retain(|(binding, _)| binding.bar || leading.contains(&binding.id));
+        available.sort_by_key(|(binding, _)| !leading.contains(&binding.id));
+        let hints: Vec<(String, bool, bool)> = available
             .into_iter()
-            .filter(|(binding, _)| binding.bar)
             .map(|(binding, disabled)| {
                 let key = state.keymap.keys(binding).first().map(KeyPattern::label);
                 let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
@@ -779,12 +792,22 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
             })
             .collect();
         for (i, (hint, disabled)) in fit_hints(&hints, room).into_iter().enumerate() {
-            let first = i == 0 && note.is_none();
+            let first = i == 0 && note.is_none() && copied.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
             spans.push(Span::styled(hint, dimmed_if(disabled)));
         }
     }
     Line::from(spans)
+}
+
+/// The bindings that lead the hints while commits are copied.
+const COPIED_HINTS: &[&str] = &["commits.paste", "commits.clear_copied"];
+
+/// `N copied` while commits wait to be pasted, so the set shows on every
+/// screen size and from every panel.
+fn copied_note(state: &AppState) -> Option<String> {
+    let n = state.copied.len();
+    (n > 0 && state.context == Context::Workspace).then(|| format!("{n} copied"))
 }
 
 /// The cancel key's hint, if the keymap leaves it a key. Shown only while a

@@ -1890,7 +1890,7 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Commits,
         intent: AppIntent::ClearCopied,
         description: "Clear the copied set",
-        label: "clear copied",
+        label: "clear",
         bar: false,
         disabled: never,
     },

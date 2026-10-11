@@ -36,35 +36,33 @@ pub(crate) fn render_commits_panel(
     if let Some(open) = panel.open.as_ref().filter(|_| expanded && !reflog) {
         return render_commit_files(open, look, frame, area);
     }
-    // The copied count goes first when room runs out.
-    let count = match state.copied.len() {
-        0 => String::new(),
-        n => format!(" · {n} copied"),
+    // The tab shown is in brackets. Where the whole title does not fit,
+    // the copied count shortens to `+N`, then the panel's name goes, and
+    // the count goes before the tabs do.
+    let tabs = match panel.tab {
+        CommitsTab::Log => "[Log] Reflog",
+        CommitsTab::Reflog => "Log [Reflog]",
     };
-    let title = if expanded {
-        // The tab shown is in brackets. Where the whole title does not
-        // fit, the tabs keep their place and the panel's name goes.
-        let tabs = match panel.tab {
-            CommitsTab::Log => "[Log] Reflog",
-            CommitsTab::Reflog => "Log [Reflog]",
-        };
-        let full = format!("Commits · {tabs}");
-        let counted = format!("{full}{count}");
-        look.title(if look.fits(&counted) {
-            &counted
-        } else if look.fits(&full) {
-            &full
-        } else {
-            tabs
-        })
+    let name = if expanded {
+        format!("Commits · {tabs}")
     } else {
-        let counted = format!("Commits{count}");
-        look.title(if look.fits(&counted) {
-            &counted
-        } else {
-            "Commits"
-        })
+        "Commits".to_string()
     };
+    let last = if expanded { tabs } else { "Commits" };
+    let candidates = match state.copied.len() {
+        0 => vec![name, last.to_string()],
+        n => vec![
+            format!("{name} · {n} copied"),
+            format!("{name} +{n}"),
+            format!("{last} +{n}"),
+            last.to_string(),
+        ],
+    };
+    let title = candidates
+        .iter()
+        .find(|text| look.fits(text))
+        .map_or(last, String::as_str);
+    let title = look.title(title);
     let block = look.block(title);
     let inner = block.inner(area);
     if reflog {
@@ -548,14 +546,60 @@ mod tests {
     }
 
     #[test]
-    fn a_narrow_panel_drops_the_count_before_the_tabs() {
+    fn a_narrow_panel_shortens_the_count_then_drops_it_before_the_tabs() {
         let state = two_copied();
-        let rows = buffer_rows(&draw(&state, 42, 20));
-        line_with(&rows, "Commits · [Log] Reflog");
-        assert!(!rows.iter().any(|r| r.contains("copied")), "{rows:#?}");
-        let rows = buffer_rows(&draw(&state, 30, 20));
-        line_with(&rows, "[Log] Reflog");
-        assert!(!rows.iter().any(|r| r.contains("copied")), "{rows:#?}");
+        let title = |width| buffer_rows(&draw(&state, width, 20))[0].clone();
+        assert!(title(60).contains("Commits · [Log] Reflog · 2 copied"));
+        let short = title(42);
+        assert!(short.contains("Commits · [Log] Reflog +2"), "{short}");
+        let shorter = title(32);
+        assert!(shorter.contains("[4] [Log] Reflog +2"), "{shorter}");
+        let tabs = title(26);
+        assert!(tabs.contains("[Log] Reflog"), "{tabs}");
+        assert!(!tabs.contains('+'), "{tabs}");
+    }
+
+    #[test]
+    fn at_80_by_24_the_copied_set_shows_in_the_title_and_the_bar() {
+        let mut state = two_copied();
+        state.screen_mode = ScreenMode::Normal;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "[4] [Log] Reflog +2");
+        line_with(&rows, "+ b000000");
+        assert!(
+            rows[23].starts_with(" 2 copied  v paste  C clear  enter files"),
+            "{}",
+            rows[23]
+        );
+
+        // Collapsed, behind another panel: the count stays, and the bar
+        // does not offer a key that only the Commits panel takes.
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "[4] Commits · 2 copied");
+        assert!(rows[23].starts_with(" 2 copied  "), "{}", rows[23]);
+        assert!(!rows[23].contains("C clear"), "{}", rows[23]);
+        // With nothing copied, clear stays out of the bar.
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.copied.clear();
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        assert!(!rows[23].contains("copied"), "{}", rows[23]);
+        assert!(!rows[23].contains("C clear"), "{}", rows[23]);
+    }
+
+    #[test]
+    fn a_tiny_screen_with_commits_copied_draws_without_panicking() {
+        let mut state = two_copied();
+        for mode in [ScreenMode::Normal, ScreenMode::Full] {
+            state.screen_mode = mode;
+            for (width, height) in [(20, 8), (12, 5), (4, 3), (1, 1)] {
+                draw(&state, width, height);
+            }
+        }
+        let rows = buffer_rows(&draw(&state, 20, 8));
+        assert!(rows.iter().any(|r| r.contains('+')), "{rows:#?}");
     }
 
     #[test]

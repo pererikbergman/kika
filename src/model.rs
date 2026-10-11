@@ -3813,16 +3813,14 @@ impl AppState {
     /// Add the selected commit to the copied set, or take it out. Pure, so
     /// it works while an operation runs.
     fn copy_commit(&mut self) {
-        let Some((id, short)) = self.commit_for_action(keymap::copy_disabled) else {
+        let Some((id, _)) = self.commit_for_action(keymap::copy_disabled) else {
             return;
         };
         let row = self.commits.rows.get(self.commits.selected);
         let subject = row.map(|r| r.subject.clone()).unwrap_or_default();
-        let added = self.copied.toggle(CopiedCommit {
-            id,
-            short: short.clone(),
-            subject,
-        });
+        let entry = CopiedCommit::new(id, subject);
+        let short = entry.short.clone();
+        let added = self.copied.toggle(entry);
         let verb = if added { "Copied" } else { "Removed" };
         let n = self.copied.len();
         self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
@@ -4652,11 +4650,15 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
+        // A pick that the branch already has stops as empty, not on a
+        // conflict; skip drops it.
+        GitOp::CherryPick(_) => {
+            "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
+        }
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
         | GitOp::Revert(_)
-        | GitOp::CherryPick(_)
         | GitOp::Continue(_)
         | GitOp::Skip(_) => {
             "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
@@ -12627,7 +12629,8 @@ mod tests {
         let mut state = on_commit();
         let row = &mut state.commits.rows[1];
         row.oid = COPIED_OID.into();
-        row.short_oid = "1111111".into();
+        // Not what the notice names: that is made from the full id.
+        row.short_oid = "111".into();
         state.branch = Some(on_branch("main"));
         state
     }
@@ -12767,7 +12770,7 @@ mod tests {
                 assert_eq!(error.title, "Could not cherry-pick");
                 assert_eq!(
                     error.next,
-                    "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
+                    "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
                 );
             }
             other => panic!("expected one error, got {other:?}"),
