@@ -14060,7 +14060,7 @@ mod tests {
         state.update(status_with(tag, branch.clone()));
         assert_eq!(
             state.announcement.as_deref(),
-            Some("Bisect found c1: commit 1 (a resets)")
+            Some("Bisect found c1 (a resets): commit 1")
         );
 
         press_char(&mut state, 'j');

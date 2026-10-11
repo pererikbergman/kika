@@ -84,13 +84,17 @@ pub struct BisectState {
 
 /// The bisect in `git_dir`, or `None` when there is no `BISECT_LOG`.
 /// `BISECT_TERMS` is missing before the first mark, and in any git before
-/// 2.7; the terms are then `bad` and `good`.
+/// 2.7; the terms are then `bad` and `good`. Any of the three that is not
+/// a regular file, such as a FIFO or a symlink, means no bisect state is
+/// shown at all.
 pub fn read_bisect(git_dir: &Path) -> Option<BisectState> {
-    let log = read_capped(&git_dir.join("BISECT_LOG"))?;
+    let log = read_capped(&git_dir.join("BISECT_LOG")).ok()??;
     let terms = read_capped(&git_dir.join("BISECT_TERMS"))
+        .ok()?
         .and_then(|bytes| parse_terms(&bytes))
         .unwrap_or_default();
     let start = read_capped(&git_dir.join("BISECT_START"))
+        .ok()?
         .map(|bytes| terminal_safe(first_line(&bytes)))
         .unwrap_or_default();
     Some(BisectState {
@@ -185,16 +189,41 @@ fn first_line(bytes: &[u8]) -> &[u8] {
     bytes.split(|&b| b == b'\n').next().unwrap_or_default()
 }
 
-/// Read at most [`MAX_FILE`] bytes of `path`; `None` when it cannot be
-/// read at all.
-fn read_capped(path: &Path) -> Option<Vec<u8>> {
+/// The path is there but is not a regular file.
+#[derive(Debug, PartialEq, Eq)]
+struct NotRegular;
+
+/// Read at most [`MAX_FILE`] bytes of `path`: `Ok(None)` when it is missing
+/// or cannot be read. Only a regular file is opened, never through a
+/// symlink: a FIFO would block the status load and a link would show
+/// another file's text. On unix the open itself refuses a link and does
+/// not wait on a FIFO swapped in after the check.
+fn read_capped(path: &Path) -> Result<Option<Vec<u8>>, NotRegular> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !meta.is_file() {
+        return Err(NotRegular);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let Ok(file) = options.open(path) else {
+        return Ok(None);
+    };
+    // It may have been swapped since the check; ask the open handle.
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return Err(NotRegular);
+    }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_FILE)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    Some(bytes)
+    match file.take(MAX_FILE).read_to_end(&mut bytes) {
+        Ok(_) => Ok(Some(bytes)),
+        Err(_) => Ok(None),
+    }
 }
 
 /// `text` cut to `max` characters, the last one an `…` when cut.
@@ -392,6 +421,60 @@ mod tests {
         assert_eq!(parse_terms(b""), None);
         assert_eq!(parse_terms(b"bad\n"), None);
         assert_eq!(parse_terms(b"\ngood\n"), None);
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_or_a_symlink_among_the_files_is_no_bisect_and_never_blocks() {
+        use std::os::unix::fs::symlink;
+        for (name, kind) in [
+            ("BISECT_LOG", "fifo"),
+            ("BISECT_START", "fifo"),
+            ("BISECT_TERMS", "fifo"),
+            ("BISECT_LOG", "link"),
+            ("BISECT_START", "link"),
+            ("BISECT_TERMS", "link"),
+        ] {
+            let tmp = TempDir::new("bisect-special");
+            let dir = tmp.path();
+            let elsewhere = dir.join("elsewhere");
+            std::fs::write(&elsewhere, "secret\n").unwrap();
+            for file in ["BISECT_LOG", "BISECT_START", "BISECT_TERMS"] {
+                if file == name {
+                    continue;
+                }
+                let text = match file {
+                    "BISECT_LOG" => format!("git bisect bad {A}\n"),
+                    "BISECT_TERMS" => "bad\ngood\n".into(),
+                    _ => "main\n".into(),
+                };
+                std::fs::write(dir.join(file), text).unwrap();
+            }
+            match kind {
+                "fifo" => mkfifo(&dir.join(name)),
+                _ => symlink(&elsewhere, dir.join(name)).unwrap(),
+            }
+            assert_eq!(read_bisect(dir), None, "{name} as a {kind}");
+        }
+    }
+
+    #[test]
+    fn a_directory_in_place_of_a_file_is_no_bisect() {
+        let tmp = TempDir::new("bisect-dir");
+        let dir = tmp.path();
+        std::fs::write(dir.join("BISECT_LOG"), format!("git bisect bad {A}\n")).unwrap();
+        std::fs::create_dir(dir.join("BISECT_START")).unwrap();
+        assert_eq!(read_bisect(dir), None);
+        assert_eq!(read_capped(&dir.join("BISECT_START")), Err(NotRegular));
+        assert_eq!(read_capped(&dir.join("missing")), Ok(None));
     }
 
     #[test]

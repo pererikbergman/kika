@@ -1844,8 +1844,11 @@ async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
             app.screen().join("\n")
         );
     }
-    app.assert_screen_contains(&format!("Bisect found {}: commit 5", &fifth[..7]));
-    app.assert_screen_contains(&format!("Found: {} commit 5", &fifth[..7]));
+    app.assert_screen_contains(&format!(
+        "Bisect found {} (a resets): commit 5",
+        &fifth[..7]
+    ));
+    app.assert_screen_contains(&format!("◆ Found: {} commit 5", &fifth[..7]));
 
     // Reset, asking first.
     app.press(KeyCode::Char('a')).await;

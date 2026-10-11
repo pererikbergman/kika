@@ -24,6 +24,9 @@ pub(crate) const CUSTOM_TERMS: &str =
 pub(crate) const DIRTY: &str =
     "Commit or stash your changes first: bisect checks out other commits";
 pub(crate) const NO_BISECT: &str = "No bisect in progress";
+/// Why the Status panel's mark keys do nothing before a bisect starts.
+pub(crate) const START_FROM_COMMITS: &str =
+    "No bisect in progress; mark a commit good or bad in the Commits panel to start one";
 /// Why continue does nothing while only a bisect is in progress.
 pub(crate) const MARK_INSTEAD: &str = "Mark the commit good or bad";
 
@@ -79,9 +82,8 @@ pub(crate) fn mark_disabled(
         Target::Selected if selected_commit(state).is_none() => return Some("No commit"),
         // Marking HEAD before git has checked one out would start a
         // bisect from the panel that only follows one.
-        Target::Head if !bisecting(state) || head_commit(state).is_none() => {
-            return Some(NOT_TESTING);
-        }
+        Target::Head if !bisecting(state) => return Some(START_FROM_COMMITS),
+        Target::Head if head_commit(state).is_none() => return Some(NOT_TESTING),
         _ => {}
     }
     if bisect_state(state).is_some_and(|b| !b.terms.is_default()) {
@@ -210,9 +212,10 @@ pub(crate) fn reset_question(bisect: Option<&BisectState>) -> String {
     )
 }
 
-/// What the bar says when git names the first bad commit.
+/// What the bar says when git names the first bad commit. The subject
+/// goes last, so a narrow bar cuts it before the way to end the bisect.
 pub(crate) fn found_notice(short: &str, subject: &str) -> String {
-    format!("Bisect found {short}: {subject} (a resets)")
+    format!("Bisect found {short} (a resets): {subject}")
 }
 
 /// What the bar says when only skipped commits are left.
@@ -310,7 +313,7 @@ mod tests {
         let detached_without_bisect = state(Head::Detached(HEX.into()), &[], None);
         assert_eq!(
             head_good_disabled(&detached_without_bisect),
-            Some(NOT_TESTING)
+            Some(START_FROM_COMMITS)
         );
         let mut no_rows = on_main();
         no_rows.commits.rows.clear();
