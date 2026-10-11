@@ -218,8 +218,11 @@ pub enum AppIntent {
     Start,
     /// Show the recent repositories, to switch to one.
     OpenRecent,
-    /// The recent list as now recorded on disk.
-    RecentLoaded(Vec<PathBuf>),
+    /// The recent list as now recorded on disk, answering request `seq`.
+    RecentLoaded {
+        seq: u64,
+        list: Vec<PathBuf>,
+    },
     /// Move the recent list's cursor down or up.
     RecentNext,
     RecentPrev,

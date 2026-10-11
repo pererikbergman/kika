@@ -870,10 +870,12 @@ async fn the_recent_list_switches_repositories_and_back_restores_the_view() {
     // O, with B on the list, then Enter: B's files.
     app.press_with(KeyCode::Char('O'), KeyModifiers::SHIFT)
         .await;
-    app.intent(AppIntent::RecentLoaded(vec![
-        a_top.clone(),
-        b.path().to_path_buf(),
-    ]))
+    // The harness has no store, so the real load answered with an empty
+    // list; this answers the same request with A and B instead.
+    app.intent(AppIntent::RecentLoaded {
+        seq: app.state().recent_seq,
+        list: vec![a_top.clone(), b.path().to_path_buf()],
+    })
     .await;
     app.assert_screen_contains(" Recent repositories ");
     app.press(KeyCode::Enter).await;

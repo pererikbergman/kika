@@ -154,6 +154,11 @@ pub struct AppState {
     pub launch: PathBuf,
     /// The recent repositories, newest first, as last read from disk.
     pub recent: Vec<PathBuf>,
+    /// The last recent-list request sent. Requests run in parallel and can
+    /// answer out of order, so each carries its number.
+    pub recent_seq: u64,
+    /// The request `recent` answers; an answer older than it is dropped.
+    pub recent_shown: u64,
     /// Repositories switched away from, by top level, to restore on return.
     pub parked: HashMap<PathBuf, ParkedRepo>,
 }
@@ -190,6 +195,8 @@ impl AppState {
             repo: None,
             launch: PathBuf::new(),
             recent: Vec::new(),
+            recent_seq: 0,
+            recent_shown: 0,
             parked: HashMap::new(),
         }
     }
@@ -467,9 +474,12 @@ impl AppState {
             AppIntent::ConfigLoaded { keymap, errors } => self.config_loaded(keymap, errors),
             AppIntent::Start => return self.start(),
             AppIntent::OpenRecent => return self.open_recent(),
-            AppIntent::RecentLoaded(list) => {
-                self.recent = list;
-                self.move_recent_cursor(0);
+            AppIntent::RecentLoaded { seq, list } => {
+                if seq >= self.recent_shown {
+                    self.recent = list;
+                    self.recent_shown = seq;
+                    self.move_recent_cursor(0);
+                }
             }
             AppIntent::RecentNext => self.move_recent_cursor(1),
             AppIntent::RecentPrev => self.move_recent_cursor(-1),
@@ -1497,7 +1507,7 @@ impl AppState {
     fn start(&mut self) -> Vec<Effect> {
         match self.repo.clone() {
             Some(path) => {
-                let mut effects = vec![Effect::RecordRecent { path }];
+                let mut effects = vec![self.record_recent(path)];
                 effects.extend(self.refresh_status());
                 effects
             }
@@ -1515,7 +1525,26 @@ impl AppState {
             let list = RecentList::new(self.repo.is_none());
             self.popups.push(Popup::Recent(list));
         }
-        vec![Effect::LoadRecent]
+        self.recent_seq += 1;
+        vec![Effect::LoadRecent {
+            seq: self.recent_seq,
+        }]
+    }
+
+    /// Put `path` first in the recent list, as a new request.
+    fn record_recent(&mut self, path: PathBuf) -> Effect {
+        self.recent_seq += 1;
+        Effect::RecordRecent {
+            path,
+            seq: self.recent_seq,
+        }
+    }
+
+    /// Whether a recent-list request has yet to answer, so the test
+    /// harness waits for it before calling the app idle.
+    #[cfg(test)]
+    pub fn recent_pending(&self) -> bool {
+        self.recent_shown < self.recent_seq
     }
 
     /// The open recent list and its rows. The list can change under the
@@ -1641,7 +1670,8 @@ impl AppState {
         self.files = parked.files;
         self.files_loaded = parked.files_loaded;
         self.branch = parked.branch;
-        let mut effects = vec![self.set_repo(&path), Effect::RecordRecent { path }];
+        let set_repo = self.set_repo(&path);
+        let mut effects = vec![set_repo, self.record_recent(path)];
         if let Some(index) = parked.selected.filter(|&i| i < self.files.len()) {
             if parked.diff_focused {
                 let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
@@ -5450,6 +5480,12 @@ mod tests {
         state
     }
 
+    /// Answer the latest recent-list request with `list`.
+    fn recent_loaded(state: &mut AppState, list: Vec<PathBuf>) {
+        let seq = state.recent_seq;
+        state.update(AppIntent::RecentLoaded { seq, list });
+    }
+
     fn recent_list(state: &AppState) -> &RecentList {
         match state.popups.last() {
             Some(Popup::Recent(list)) => list,
@@ -5463,7 +5499,7 @@ mod tests {
             AppState::new(Context::Workspace).with_location(Some("/r/a".into()), "/r/a/d".into());
         let effects = state.update(AppIntent::Start);
         match effects.as_slice() {
-            [Effect::RecordRecent { path }, Effect::LoadStatus { .. }] => {
+            [Effect::RecordRecent { path, .. }, Effect::LoadStatus { .. }] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
             other => panic!("expected RecordRecent and LoadStatus, got {other:?}"),
@@ -5475,7 +5511,7 @@ mod tests {
     fn start_outside_a_repository_welcomes_with_the_init_row_and_no_status() {
         let mut state = outside("/w");
         let effects = state.update(AppIntent::Start);
-        assert_eq!(effects, [Effect::LoadRecent]);
+        assert!(matches!(effects[..], [Effect::LoadRecent { .. }]));
         assert_eq!(*recent_list(&state), RecentList::new(true));
         assert_eq!(state.key_focus(), KeyScope::Recent);
         assert_eq!(state.busy, 0);
@@ -5499,7 +5535,10 @@ mod tests {
         let (state, _) = with_files(three_files(), 24);
         let mut state = state.with_location(Some("/r/a".into()), "/r/a".into());
         let o = AppIntent::Key(KeyPress::new(KeyCode::Char('O'), KeyModifiers::SHIFT));
-        assert_eq!(state.update(o.clone()), [Effect::LoadRecent]);
+        assert!(matches!(
+            state.update(o.clone())[..],
+            [Effect::LoadRecent { .. }]
+        ));
         assert_eq!(*recent_list(&state), RecentList::new(false));
         press(&mut state, KeyCode::Esc);
         // Closing it in a repository asks for nothing.
@@ -5507,7 +5546,7 @@ mod tests {
 
         press(&mut state, KeyCode::Enter);
         assert!(matches!(state.focus, Focus::Diff(_)));
-        assert_eq!(state.update(o), [Effect::LoadRecent]);
+        assert!(matches!(state.update(o)[..], [Effect::LoadRecent { .. }]));
         assert_eq!(state.key_focus(), KeyScope::Recent);
     }
 
@@ -5518,7 +5557,10 @@ mod tests {
         for _ in 0..6 {
             state.update(AppIntent::MenuNext);
         }
-        assert_eq!(state.update(AppIntent::MenuSelect), [Effect::LoadRecent]);
+        assert!(matches!(
+            state.update(AppIntent::MenuSelect)[..],
+            [Effect::LoadRecent { .. }]
+        ));
         assert!(matches!(state.popups[..], [Popup::Recent(_)]));
     }
 
@@ -5526,7 +5568,7 @@ mod tests {
     fn the_cursor_moves_over_the_rows_and_enter_opens_the_repository_under_it() {
         let mut state = outside("/w");
         state.update(AppIntent::Start);
-        state.update(AppIntent::RecentLoaded(vec!["/r/a".into(), "/r/b".into()]));
+        recent_loaded(&mut state, vec!["/r/a".into(), "/r/b".into()]);
         press_char(&mut state, 'k');
         for _ in 0..5 {
             press_char(&mut state, 'j');
@@ -5548,13 +5590,40 @@ mod tests {
     }
 
     #[test]
+    fn a_recent_list_answering_an_older_request_does_not_replace_a_newer_one() {
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some("/r/a".into()), "/r/a".into());
+        let [Effect::RecordRecent { seq: recorded, .. }, ..] = state.update(AppIntent::Start)[..]
+        else {
+            panic!("expected RecordRecent first");
+        };
+        let [Effect::LoadRecent { seq: loaded }] = state.update(AppIntent::OpenRecent)[..] else {
+            panic!("expected LoadRecent");
+        };
+        assert!(recorded < loaded);
+
+        let newer: Vec<PathBuf> = vec!["/r/a".into(), "/r/b".into()];
+        state.update(AppIntent::RecentLoaded {
+            seq: loaded,
+            list: newer.clone(),
+        });
+        state.update(AppIntent::RecentLoaded {
+            seq: recorded,
+            list: vec!["/r/a".into()],
+        });
+
+        assert_eq!(state.recent, newer);
+        assert!(!state.recent_pending());
+    }
+
+    #[test]
     fn a_shorter_list_pulls_the_cursor_in() {
         let mut state = outside("/w");
         state.update(AppIntent::Start);
-        state.update(AppIntent::RecentLoaded(vec!["/r/a".into(), "/r/b".into()]));
+        recent_loaded(&mut state, vec!["/r/a".into(), "/r/b".into()]);
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
-        state.update(AppIntent::RecentLoaded(vec![]));
+        recent_loaded(&mut state, vec![]);
         assert_eq!(recent_list(&state).cursor, 0);
     }
 
@@ -5587,7 +5656,7 @@ mod tests {
         match effects.as_slice() {
             [
                 Effect::SetRepo { root, nested },
-                Effect::RecordRecent { path },
+                Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadConfig { repo },
             ] => {
@@ -5658,7 +5727,7 @@ mod tests {
         match effects.as_slice() {
             [
                 Effect::SetRepo { root, nested },
-                Effect::RecordRecent { path },
+                Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { tag },
                 Effect::LoadConfig { repo },
             ] => {
