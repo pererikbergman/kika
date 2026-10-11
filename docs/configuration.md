@@ -89,6 +89,32 @@ Each value must be at least 1.
 **Changes to `[watch]` take effect after a restart.** Kika reads them once,
 when it starts.
 
+## Fetch, pull and push
+
+`f`, `p` and `P` run plain `git fetch --all`, `git pull` and `git push`, so
+your upstream, `push.default`, `pull.rebase`, credential helpers, ssh-agent
+and ssh config apply as they do on the command line. They reach the network
+only when you press them; nothing here changes auto-fetch.
+
+When git or ssh still needs an answer (a username, password, 2FA code, key
+passphrase or a new host key), Kika shows it in a popup and hands back what
+you type. A password or passphrase is drawn as dots. Kika never logs, stores
+or shows it; it goes only to the process that asked. Git asks your credential
+helper and ssh asks ssh-agent first, so the popup only appears when they had
+nothing. This works by making Kika git's and ssh's askpass program:
+
+- If you set `GIT_ASKPASS` or `core.askPass` yourself, git keeps using yours.
+- OpenSSH 8.4 and later always ask through Kika. Older ssh versions use an
+  askpass program only when `DISPLAY` is set; without it, a passphrase or
+  host-key question fails with ssh's message instead. Load the key into
+  ssh-agent, or answer the host-key question once in a terminal.
+- On Windows there is no popup: git and ssh fail instead of asking, so use a
+  credential helper or ssh-agent there.
+
+A push the remote rejects because it has commits your branch lacks offers to
+push again with `--force-with-lease`, which replaces them only if nobody
+pushed since your last fetch. Nothing is forced unless you press `y`.
+
 ## `[diff]` (global file only)
 
 `pager` names a program that draws the Diff pane in its own style, such as a
@@ -373,6 +399,9 @@ means a repository's `.kika.toml` cannot change it.
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `workspace.refresh` | `r` | Reload the changed files and the branches | |
+| `workspace.fetch` | `f` | Fetch every remote | locked |
+| `workspace.pull` | `p` | Pull into the current branch | locked |
+| `workspace.push` | `P` | Push the current branch | locked |
 | `workspace.scroll_down` | `J` | Scroll the diff down a line | |
 | `workspace.scroll_up` | `K` | Scroll the diff up a line | |
 | `workspace.page_down` | `pgdn` | Scroll the diff down a page | |
@@ -545,6 +574,16 @@ commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
 | `prompt.ok` | `enter` | Use the typed text | |
 | `prompt.cancel` | `esc` | Close without using the text | |
 | `prompt.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Git is asking (a credential or other question)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `credential.answer` | `enter` | Send the typed answer to git | locked |
+| `credential.cancel` | `esc` | Cancel the question, which fails the operation | locked |
+| `credential.quit` | `ctrl-c` | Cancel the question and quit Kika | locked |
+
+A yes/no question from ssh uses the yes/no keys above instead.
 
 ### Error messages
 

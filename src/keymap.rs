@@ -230,6 +230,8 @@ pub enum KeyScope {
     Submodules,
     /// The recent repositories on top of the popup stack.
     Recent,
+    /// Git or ssh asking for a username, password or passphrase.
+    Credential,
 }
 
 impl KeyScope {
@@ -259,7 +261,8 @@ impl KeyScope {
             | KeyScope::DiscardConfirm
             | KeyScope::DeleteBranch
             | KeyScope::Submodules
-            | KeyScope::Recent => None,
+            | KeyScope::Recent
+            | KeyScope::Credential => None,
         }
     }
 
@@ -289,6 +292,7 @@ impl KeyScope {
             KeyScope::DeleteBranch => "Delete branch",
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
+            KeyScope::Credential => "Git is asking",
         }
     }
 
@@ -296,7 +300,7 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor => Some("q and ? are typed"),
+            KeyScope::CommitEditor | KeyScope::Credential => Some("q and ? are typed"),
             _ => None,
         }
     }
@@ -347,8 +351,8 @@ pub enum Trust {
 }
 
 /// Bindings a repository file may not change: they quit, start other
-/// programs (an editor, a diff renderer), reach the network, destroy work, answer a question, create a
-/// repository or switch to another one. Moving
+/// programs (an editor, a diff renderer), reach the network, destroy work,
+/// answer a question, create a repository or switch to another one. Moving
 /// one onto an innocent key, taking quit away, or letting the key that
 /// asks also answer, would let a cloned repository trap or trick the user.
 pub const REPO_LOCKED: &[&str] = &[
@@ -384,6 +388,12 @@ pub const REPO_LOCKED: &[&str] = &[
     "delete_branch.force",
     "delete_branch.no",
     "delete_branch.quit",
+    "workspace.fetch",
+    "workspace.pull",
+    "workspace.push",
+    "credential.answer",
+    "credential.cancel",
+    "credential.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -973,6 +983,41 @@ fn force_delete_disabled(state: &AppState) -> Option<&'static str> {
         .then_some("Fully merged: press y to delete")
 }
 
+/// Why no fetch, pull or push may start: one needs a repository, and git
+/// one operation at a time.
+pub(crate) fn remote_disabled(state: &AppState) -> Option<&'static str> {
+    if state.repo.is_none() {
+        Some("Not in a repository")
+    } else if state.op_seq.is_some() || state.remote.is_some() {
+        Some(REMOTE_BUSY)
+    } else {
+        None
+    }
+}
+
+pub(crate) const REMOTE_BUSY: &str = "Another operation is running";
+
+/// A fetch also waits for auto-fetch, which would race it for the same refs.
+pub(crate) fn fetch_disabled(state: &AppState) -> Option<&'static str> {
+    remote_disabled(state).or_else(|| {
+        state
+            .watch
+            .fetch_pending
+            .then_some("A background fetch is running")
+    })
+}
+
+/// Pull and push work on the current branch, so they need one.
+pub(crate) fn pull_push_disabled(state: &AppState) -> Option<&'static str> {
+    remote_disabled(state).or_else(|| {
+        let detached = state
+            .branch
+            .as_ref()
+            .is_some_and(|b| matches!(b.head, Head::Detached(_)));
+        detached.then_some("HEAD is detached")
+    })
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -1009,6 +1054,36 @@ static REGISTRY: &[Binding] = &[
         label: "refresh",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "workspace.fetch",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Fetch,
+        description: "Fetch every remote",
+        label: "fetch",
+        bar: false,
+        disabled: fetch_disabled,
+    },
+    Binding {
+        id: "workspace.pull",
+        keys: &[KeyPattern::exact(KeyCode::Char('p'), NONE)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Pull,
+        description: "Pull into the current branch",
+        label: "pull",
+        bar: false,
+        disabled: pull_push_disabled,
+    },
+    Binding {
+        id: "workspace.push",
+        keys: &[KeyPattern::any(KeyCode::Char('P'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::Push,
+        description: "Push the current branch",
+        label: "push",
+        bar: false,
+        disabled: pull_push_disabled,
     },
     Binding {
         id: "workspace.scroll_down",
@@ -1992,6 +2067,36 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Prompt,
         intent: AppIntent::Quit,
         description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.answer",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::SubmitCredential,
+        description: "Send the typed answer to git",
+        label: "send",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::CredentialAnswered(None),
+        description: "Cancel the question, which fails the operation",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "credential.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Credential,
+        intent: AppIntent::Quit,
+        description: "Cancel the question and quit Kika",
         label: "quit",
         bar: true,
         disabled: never,
@@ -3554,6 +3659,7 @@ mod tests {
             KeyScope::DeleteBranch => "delete_branch",
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
+            KeyScope::Credential => "credential",
         }
     }
 
@@ -3782,6 +3888,12 @@ mod tests {
                     | RecentSelect
                     | DeleteBranch
                     | ConfirmDeleteBranch { .. }
+                    | Fetch
+                    | Pull
+                    | Push
+                    | ForcePush
+                    | SubmitCredential
+                    | CredentialAnswered(_)
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

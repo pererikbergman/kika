@@ -7,7 +7,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::branches::BranchesPanel;
-use crate::git::branches::{Branch, LogRow, Track};
+use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::view::{PanelLook, clip, elide_right, fit, pad, reversed};
 
 /// Columns given to a log row's author, so subjects line up.
@@ -16,14 +16,22 @@ const LOG_AUTHOR: usize = 16;
 /// The branch list: why it failed, a placeholder until the first load,
 /// or one row per branch with the selection reversed. Collapsed, the
 /// current branch stands in for the list; with only a title row, the
-/// title names it.
+/// title names it. `spinner` names the branch a fetch, pull or push runs
+/// for, and the frame to draw in place of its marker.
 pub fn render_panel(
     panel: &BranchesPanel,
     look: &PanelLook,
     expanded: bool,
+    spinner: Option<(&BranchName, &str)>,
     frame: &mut Frame,
     area: Rect,
 ) {
+    let row = |branch: &Branch, width| {
+        let frame = spinner
+            .filter(|(name, _)| **name == branch.name)
+            .map(|(_, frame)| frame);
+        branch_row(branch, frame, width)
+    };
     let current = panel.current();
     let title = match current {
         Some(branch) if look.title_only => {
@@ -43,7 +51,7 @@ pub fn render_panel(
     } else if panel.branches.is_empty() {
         Paragraph::new("No branches")
     } else if !expanded {
-        Paragraph::new(current.map(|b| branch_row(b, width)).unwrap_or_default())
+        Paragraph::new(current.map(|b| row(b, width)).unwrap_or_default())
     } else {
         let rows = usize::from(inner.height);
         let selected = panel.selected.unwrap_or(0);
@@ -56,7 +64,7 @@ pub fn render_panel(
             .skip(first)
             .take(rows)
             .map(|(i, branch)| {
-                let line = Line::from(branch_row(branch, width));
+                let line = Line::from(row(branch, width));
                 if Some(i) == panel.selected {
                     reversed(line, width)
                 } else {
@@ -71,9 +79,14 @@ pub fn render_panel(
 
 /// `* name  upstream ↑1 ↓2`: `*` marks the current branch, counts of zero
 /// are left out, and a deleted upstream says `gone`. The name loses its
-/// start first, so the upstream and counts stay in sight.
-fn branch_row(branch: &Branch, width: usize) -> String {
-    let marker = if branch.head { "* " } else { "  " };
+/// start first, so the upstream and counts stay in sight. A `spinner`
+/// frame takes the marker's place.
+fn branch_row(branch: &Branch, spinner: Option<&str>, width: usize) -> String {
+    let marker = match spinner {
+        Some(frame) => format!("{frame} "),
+        None if branch.head => "* ".to_string(),
+        None => "  ".to_string(),
+    };
     let track = match branch.track {
         Track::None => String::new(),
         Track::Gone => " gone".to_string(),
@@ -237,6 +250,7 @@ mod tests {
                     behind: 0,
                 },
             ),
+            None,
             30,
         );
         assert!(row.ends_with("origin/x ↑3"), "{row:?}");
@@ -267,6 +281,40 @@ mod tests {
         let rows = draw(&state, 80, 40);
         assert!(contains(&rows, "* main"), "{rows:#?}");
         assert!(!contains(&rows, "topic"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_running_push_spins_on_its_branch_row_and_names_itself_in_the_bar() {
+        use crate::git::remote::RemoteOp;
+        use crate::intent::AppIntent;
+        use crate::remote_run::RemoteRun;
+
+        let mut state = focused(vec![
+            branch("main", true, None, Track::None),
+            branch("topic", false, None, Track::None),
+        ]);
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        state.remote = Some(RemoteRun::new(push, 1, Some("main".into())));
+        state.busy = 1;
+
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "| main"), "{rows:#?}");
+        assert!(!contains(&rows, "* main"), "{rows:#?}");
+        assert!(contains(&rows, "  topic"), "{rows:#?}");
+        let bar = rows.last().unwrap();
+        assert!(bar.starts_with(" pushing… "), "{bar:?}");
+        assert!(!contains(&rows, "loading…"), "{rows:#?}");
+
+        state.update(AppIntent::SpinnerTick);
+        assert!(contains(&draw(&state, 80, 24), "/ main"));
+
+        // Collapsed, the panel spins on the same row.
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = draw(&state, 80, 40);
+        assert!(contains(&rows, "/ main"), "{rows:#?}");
     }
 
     #[test]

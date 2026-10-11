@@ -68,9 +68,10 @@ impl WatchState {
         !std::mem::replace(&mut self.refs_pending, true)
     }
 
-    /// Claim the fetch slot; `false` when fetch is off or already running.
-    pub fn start_fetch(&mut self) -> bool {
-        self.fetch_enabled && !std::mem::replace(&mut self.fetch_pending, true)
+    /// Claim the fetch slot; `false` when fetch is off or already running,
+    /// or while a fetch, pull or push the user started is (`remote_running`).
+    pub fn start_fetch(&mut self, remote_running: bool) -> bool {
+        self.fetch_enabled && !remote_running && !std::mem::replace(&mut self.fetch_pending, true)
     }
 
     /// Keep `snapshot` and say whether the refs moved since the last one.
@@ -107,8 +108,8 @@ mod tests {
         };
         assert!(watch.start_refs());
         assert!(!watch.start_refs());
-        assert!(watch.start_fetch());
-        assert!(!watch.start_fetch());
+        assert!(watch.start_fetch(false));
+        assert!(!watch.start_fetch(false));
         assert!(watch.is_pending());
         watch.refs_pending = false;
         assert!(watch.start_refs());
@@ -120,7 +121,18 @@ mod tests {
             fetch_enabled: false,
             ..WatchState::default()
         };
-        assert!(!watch.start_fetch());
+        assert!(!watch.start_fetch(false));
         assert!(!watch.fetch_pending);
+    }
+
+    #[test]
+    fn auto_fetch_waits_for_a_remote_operation_the_user_started() {
+        let mut watch = WatchState {
+            fetch_enabled: true,
+            ..WatchState::default()
+        };
+        assert!(!watch.start_fetch(true));
+        assert!(!watch.fetch_pending);
+        assert!(watch.start_fetch(false));
     }
 }

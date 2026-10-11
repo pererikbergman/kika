@@ -12,6 +12,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
+use crate::git::askpass::Secret;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::{BranchName, branch_log, list_branches};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
@@ -21,6 +22,7 @@ use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
 use crate::git::refs::read_refs;
+use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
@@ -173,6 +175,15 @@ pub enum Effect {
     /// Stop the command `RunCommand` started, which then answers with
     /// `CommandFailure::Cancelled`. Does nothing once it has finished.
     CancelCommand,
+    /// Fetch, pull or push, with git's and ssh's questions sent as
+    /// `CredentialAsked`; always answered by one `RemoteFinished`.
+    Remote {
+        tag: Tag,
+        op: RemoteOp,
+    },
+    /// Hand the answer to the question the running remote operation
+    /// asked; `None` cancels it. Does nothing when no question waits.
+    AnswerCredential(Option<Secret>),
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -194,6 +205,8 @@ pub struct Runtime {
     diff_pager: Option<String>,
     /// Stops the last captured command; aborting a finished one is a no-op.
     command: Mutex<Option<tokio::task::AbortHandle>>,
+    /// Where the running remote operation waits for an answer.
+    credential: AnswerSlot,
 }
 
 impl Runtime {
@@ -206,6 +219,7 @@ impl Runtime {
             recent_store: None,
             diff_pager: None,
             command: Mutex::new(None),
+            credential: AnswerSlot::default(),
         }
     }
 
@@ -473,7 +487,7 @@ impl Runtime {
                 // Taken now: a `SetRepo` after this must not move the command.
                 let workdir = self.runner.workdir();
                 let task = tokio::spawn(run_captured(argv, workdir));
-                *self.command.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+                *lock(&self.command) = Some(task.abort_handle());
                 tokio::spawn(async move {
                     // A panic or a cancel still reports back, or
                     // `command_running` would stay set.
@@ -499,13 +513,32 @@ impl Runtime {
             }
             Effect::CancelCommand => {
                 // Dropping the aborted future kills the program.
-                if let Some(task) = self
-                    .command
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .take()
-                {
+                if let Some(task) = lock(&self.command).take() {
                     task.abort();
+                }
+            }
+            Effect::Remote { tag, op } => {
+                let slot = Arc::clone(&self.credential);
+                tokio::spawn(async move {
+                    let bridge_tx = tx.clone();
+                    // A panic still reports back, or `op_seq` would block every later op.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let bridge = Bridge::open(tag, bridge_tx, slot);
+                        run_remote(runner.as_ref(), op, bridge.env.as_ref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(RemoteFailure::Failed(terminal_safe(
+                            format!("git crashed: {e}").as_bytes(),
+                        )))
+                    });
+                    let _ = tx.send(AppIntent::RemoteFinished { tag, op, result });
+                });
+            }
+            Effect::AnswerCredential(answer) => {
+                if let Some(answers) = lock(&self.credential).as_ref() {
+                    // Gone means the operation ended; nobody is asking.
+                    let _ = answers.send(answer);
                 }
             }
             // The loop takes these out before spawning; without a terminal
@@ -536,6 +569,81 @@ impl Runtime {
             let _ = tx.send(AppIntent::RecentLoaded { seq, list });
         });
     }
+}
+
+/// Where a running remote operation waits for the user's answer.
+type AnswerSlot = Arc<Mutex<Option<std::sync::mpsc::Sender<Option<Secret>>>>>;
+
+/// The askpass bridge for one remote operation, wired to the loop: each
+/// question goes out as an intent, and its answer comes back through the
+/// runtime's slot. Without one (not on unix, or it would not start) `env`
+/// is `None` and git runs closed to questions.
+struct Bridge {
+    #[cfg(unix)]
+    server: Option<crate::git::askpass::AskpassServer>,
+    slot: AnswerSlot,
+    env: Option<AskpassEnv>,
+}
+
+impl Bridge {
+    #[cfg(unix)]
+    fn open(tag: Tag, tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
+        use crate::git::askpass::{AskpassServer, Question};
+
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel();
+        *lock(&slot) = Some(answer_tx);
+        let answers = Mutex::new(answer_rx);
+        let server = std::env::current_exe().ok().and_then(|program| {
+            let server = AskpassServer::start(move |question| match question {
+                Question::Notice(text) => {
+                    let _ = tx.send(AppIntent::RemoteNotice { tag, text });
+                    None
+                }
+                Question::Ask { prompt, confirm } => {
+                    let asked = AppIntent::CredentialAsked {
+                        tag,
+                        prompt,
+                        confirm,
+                    };
+                    tx.send(asked).ok()?;
+                    // An error means the operation ended: cancelled.
+                    lock(&answers).recv().ok().flatten()
+                }
+            })
+            .ok()?;
+            Some((program, server))
+        });
+        let env = server.as_ref().map(|(program, server)| AskpassEnv {
+            program: program.clone(),
+            socket: server.socket().to_path_buf(),
+            git_askpass: true,
+        });
+        Self {
+            server: server.map(|(_, server)| server),
+            slot,
+            env,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn open(_tag: Tag, _tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
+        Self { slot, env: None }
+    }
+}
+
+impl Drop for Bridge {
+    /// Hang up on a question still open, then drop the answer channel, so
+    /// the server's thread stops waiting too.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        drop(self.server.take());
+        *lock(&self.slot) = None;
+    }
+}
+
+/// A poisoned lock only means another thread panicked; the value is fine.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(test)]
@@ -1776,5 +1884,137 @@ mod tests {
             other => panic!("expected renderers, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_remote_op_reports_back_with_the_same_tag_and_op() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(&["config", "--get", "core.askPass"], fail(""))
+                .expect(&["push"], ok(b"")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 3,
+            user: true,
+        };
+        let op = RemoteOp::Push {
+            force_with_lease: false,
+        };
+
+        runtime.spawn(Effect::Remote { tag, op });
+
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::RemoteFinished {
+                tag,
+                op,
+                result: Ok(()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_remote_op_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::Remote {
+            tag,
+            op: RemoteOp::Fetch,
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::RemoteFinished {
+                tag: got,
+                op: RemoteOp::Fetch,
+                result: Err(RemoteFailure::Failed(message)),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed RemoteFinished, got {other:?}"),
+        }
+    }
+
+    /// Stands in for git that needs a password: it runs the askpass
+    /// client the env names, as git would, and succeeds only on `tok`.
+    #[cfg(unix)]
+    struct AskingGit;
+
+    #[cfg(unix)]
+    impl GitRunner for AskingGit {
+        fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
+            if cmd.args()[0] == "config" {
+                return Ok(fail(""));
+            }
+            let socket = cmd
+                .envs()
+                .iter()
+                .find(|(k, _)| k == crate::git::askpass::SOCKET_ENV)
+                .map(|(_, v)| PathBuf::from(v))
+                .expect("the bridge is in the env");
+            let mut out = Vec::new();
+            crate::git::askpass::client(
+                &socket,
+                std::ffi::OsStr::new("Password for 'https://h': "),
+                None,
+                &mut out,
+            );
+            Ok(if out == b"tok\n" {
+                ok(b"")
+            } else {
+                fail("fatal: Authentication failed for 'https://h/'")
+            })
+        }
+
+        fn spawn(&self, _: &GitCommand) -> io::Result<GitChild> {
+            unreachable!("remote ops are run, not spawned")
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_question_from_git_is_asked_and_the_answer_reaches_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(AskingGit), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 5,
+            user: true,
+        };
+
+        for (answer, succeeded) in [(Some(Secret::new("tok")), true), (None, false)] {
+            runtime.spawn(Effect::Remote {
+                tag,
+                op: RemoteOp::Fetch,
+            });
+            assert_eq!(
+                rx.recv().await,
+                Some(AppIntent::CredentialAsked {
+                    tag,
+                    prompt: "Password for 'https://h':".into(),
+                    confirm: false,
+                })
+            );
+            runtime.spawn(Effect::AnswerCredential(answer));
+            match rx.recv().await {
+                Some(AppIntent::RemoteFinished { result, .. }) => {
+                    assert_eq!(result.is_ok(), succeeded, "{result:?}")
+                }
+                other => panic!("expected RemoteFinished, got {other:?}"),
+            }
+        }
+        // With nothing running, an answer goes nowhere.
+        runtime.spawn(Effect::AnswerCredential(None));
     }
 }

@@ -29,6 +29,7 @@ mod popup_view;
 mod recent;
 mod recent_list;
 mod refresh;
+mod remote_run;
 mod rendered_view;
 mod submodule_list;
 mod view;
@@ -49,6 +50,19 @@ use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
 
 fn main() -> color_eyre::Result<ExitCode> {
+    // Run by git or ssh as their askpass program, with the prompt as the
+    // only argument, which `Cli::parse` would reject.
+    #[cfg(unix)]
+    if let Some(socket) = std::env::var_os(git::askpass::SOCKET_ENV) {
+        let prompt = std::env::args_os().nth(1).unwrap_or_default();
+        let kind = std::env::var_os("SSH_ASKPASS_PROMPT");
+        return Ok(git::askpass::client(
+            std::path::Path::new(&socket),
+            &prompt,
+            kind.as_deref(),
+            &mut std::io::stdout().lock(),
+        ));
+    }
     // Install before ratatui::init so the terminal is restored ahead of the report.
     color_eyre::install()?;
     let cli = Cli::parse();
