@@ -41,6 +41,8 @@ mod remotes_view;
 mod rendered_view;
 mod sequence_editor;
 mod submodule_list;
+mod tags;
+mod tags_view;
 mod view;
 mod watch;
 mod worktree_file;

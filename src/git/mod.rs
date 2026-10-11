@@ -27,6 +27,7 @@ pub mod retry;
 pub mod runner;
 pub mod status;
 pub mod submodule;
+pub mod tags;
 pub mod version;
 
 pub use runner::{CliRunner, GitRunner};

@@ -9,6 +9,7 @@ use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
@@ -16,6 +17,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
+use crate::remote_run::RemoteRun;
 use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
 use ratatui::Frame;
@@ -187,6 +189,11 @@ impl PanelLook {
     /// Whether ` [n] <text><mode> ` fits the border whole.
     pub(crate) fn fits(&self, text: &str) -> bool {
         width_of(&format!(" [{}] {text}{} ", self.number, self.mode)) <= self.title_width
+    }
+
+    /// Whether `[n] <text><mode>` fits the border, with no space either side.
+    pub(crate) fn fits_bare(&self, text: &str) -> bool {
+        width_of(&format!("[{}] {text}{}", self.number, self.mode)) <= self.title_width
     }
 
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
@@ -719,8 +726,13 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
     let mut room = usize::from(width);
-    // A fetch, pull or push says which; anything else is loading.
+    // A fetch, pull or push says which, and a tag push where to;
+    // anything else is loading.
     let busy = match &state.remote {
+        Some(RemoteRun {
+            op: RemoteOp::PushTag { remote, .. },
+            ..
+        }) => Some(format!(" pushing tag to {}… ", remote.display())),
         Some(run) => Some(format!(" {} ", run.op.doing())),
         None => (state.busy > 0).then(|| " loading… ".to_string()),
     };
@@ -3460,9 +3472,15 @@ mod tests {
         };
         match (panel, &state.focus) {
             // Expanded, the Branches panel names its tabs; at 80 columns
-            // they take the place of its name.
+            // they take the place of its name, the others shortened.
             (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
-                format!("[Local] Remotes{mode} ")
+                match state.screen_mode {
+                    crate::layout::ScreenMode::Normal => format!(" [3] [Local] Rem Tag{mode} "),
+                    crate::layout::ScreenMode::Half => format!(" [3] [Local] Remotes Tags{mode} "),
+                    crate::layout::ScreenMode::Full => {
+                        format!(" [3] Branches · [Local] Remotes Tags{mode} ")
+                    }
+                }
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
@@ -3734,7 +3752,11 @@ mod tests {
                 let key = format!("[{}]", panel.number());
                 assert!(row.contains(&key), "{w}x{h} {focus:?}: {row:?}");
                 // Whole, or cut on purpose with `…`, the mode note kept.
+                // The expanded Branches panel keeps its shown tab instead.
                 let name = match panel {
+                    Panel::Side(SidePanel::Branches) if state.expanded == SidePanel::Branches => {
+                        "[Local]"
+                    }
                     Panel::Side(side) => side.title(),
                     Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
                     Panel::Diff if state.focus == Focus::Branches => "Commits",
