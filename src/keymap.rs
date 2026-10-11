@@ -195,8 +195,10 @@ pub enum KeyScope {
     Global,
     Workspace,
     Files,
-    /// The Branches panel with focus.
+    /// The Branches panel with focus, showing local branches.
     Branches,
+    /// The Branches panel with focus, showing remotes and their branches.
+    Remotes,
     /// The Commits panel, with a cursor on the log.
     Commits,
     /// The Commits panel showing one commit's files.
@@ -237,6 +239,8 @@ pub enum KeyScope {
     DiscardConfirm,
     /// "Delete this branch?" on top of the popup stack.
     DeleteBranch,
+    /// "Remove this remote?" on top of the popup stack.
+    RemoveRemote,
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
@@ -257,6 +261,7 @@ impl KeyScope {
         match self {
             KeyScope::Files
             | KeyScope::Branches
+            | KeyScope::Remotes
             | KeyScope::Commits
             | KeyScope::CommitFiles
             | KeyScope::Status
@@ -278,6 +283,7 @@ impl KeyScope {
             | KeyScope::Error
             | KeyScope::DiscardConfirm
             | KeyScope::DeleteBranch
+            | KeyScope::RemoveRemote
             | KeyScope::ResetHard
             | KeyScope::Submodules
             | KeyScope::Recent
@@ -292,6 +298,7 @@ impl KeyScope {
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
             KeyScope::Branches => "Branches",
+            KeyScope::Remotes => "Remotes",
             KeyScope::Commits => "Commits",
             KeyScope::CommitFiles => "Commit files",
             KeyScope::Status => "Status",
@@ -313,6 +320,7 @@ impl KeyScope {
             KeyScope::Error => "Error",
             KeyScope::DiscardConfirm => "Discard",
             KeyScope::DeleteBranch => "Delete branch",
+            KeyScope::RemoveRemote => "Remove remote",
             KeyScope::ResetHard => "Reset hard",
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
@@ -433,6 +441,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "reset_hard.yes",
     "reset_hard.no",
     "reset_hard.quit",
+    "remotes.remove",
+    "remove_remote.yes",
+    "remove_remote.no",
+    "remove_remote.quit",
     "commits.squash",
     "commits.fixup",
     "commits.drop",
@@ -1042,6 +1054,51 @@ pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<&'static str> {
             .is_some_and(|b| b.head)
             .then_some("Cannot delete the current branch")
     })
+}
+
+/// Why the selected local branch's upstream cannot be removed: it needs
+/// one.
+pub(crate) fn unset_upstream_disabled(state: &AppState) -> Option<&'static str> {
+    branch_action_disabled(state).or_else(|| {
+        let selected = state.branches.selected_branch();
+        selected
+            .is_some_and(|b| b.upstream.is_none())
+            .then_some("No upstream to unset")
+    })
+}
+
+/// Why no remote can be added now: git one operation at a time.
+pub(crate) fn add_remote_disabled(state: &AppState) -> Option<&'static str> {
+    state.op_seq.is_some().then_some(OP_RUNNING)
+}
+
+/// Why the selected remote branch cannot be checked out: a header row
+/// is a remote, not a branch.
+pub(crate) fn track_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else if state.branches.remotes.selected_branch().is_none() {
+        Some("Select a remote branch")
+    } else {
+        None
+    }
+}
+
+/// Why the selected remote cannot be renamed or removed. `remote rename`
+/// and `remote remove` take no `--` in older git, so a name like an option
+/// is never passed; nor is a group of refs no configured remote owns.
+pub(crate) fn change_remote_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    match state.branches.remotes.selected_remote() {
+        None => Some("No remote selected"),
+        Some(remote) if !remote.configured => Some("Not a configured remote"),
+        Some(remote) if remote.name.0.starts_with(b"-") => {
+            Some("Change a remote named like an option with git directly")
+        }
+        Some(_) => None,
+    }
 }
 
 /// The operation continue, skip and abort act on, if one is in progress.
@@ -2659,6 +2716,119 @@ static REGISTRY: &[Binding] = &[
         disabled: merge_disabled,
     },
     Binding {
+        id: "branches.set_upstream",
+        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::SetUpstream,
+        description: "Set the remote branch the selected branch tracks",
+        label: "upstream",
+        bar: true,
+        disabled: branch_action_disabled,
+    },
+    Binding {
+        id: "branches.unset_upstream",
+        keys: &[KeyPattern::any(KeyCode::Char('U'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::UnsetUpstream,
+        description: "Stop the selected branch tracking its upstream",
+        label: "unset upstream",
+        bar: false,
+        disabled: unset_upstream_disabled,
+    },
+    Binding {
+        id: "branches.switch_tab",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('['), NONE),
+            KeyPattern::exact(KeyCode::Char(']'), NONE),
+        ],
+        scope: KeyScope::Branches,
+        intent: AppIntent::SwitchBranchesTab,
+        description: "Show the remotes and their branches",
+        label: "remotes",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::RemoteNext,
+        description: "Select the next remote or remote branch",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::RemotePrev,
+        description: "Select the previous remote or remote branch",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.checkout",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::TrackRemoteBranch,
+        description: "Check out the selected remote branch as a new branch tracking it",
+        label: "checkout",
+        bar: true,
+        disabled: track_disabled,
+    },
+    Binding {
+        id: "remotes.add",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::AddRemote,
+        description: "Add a remote; fetch to see its branches",
+        label: "add",
+        bar: true,
+        disabled: add_remote_disabled,
+    },
+    // Not `r`, which reloads everywhere in the workspace.
+    Binding {
+        id: "remotes.rename",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::RenameRemote,
+        description: "Rename the selected remote",
+        label: "rename",
+        bar: true,
+        disabled: change_remote_disabled,
+    },
+    Binding {
+        id: "remotes.remove",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::RemoveRemote,
+        description: "Remove the selected remote and its remote-tracking branches, asking first",
+        label: "remove",
+        bar: true,
+        disabled: change_remote_disabled,
+    },
+    Binding {
+        id: "remotes.switch_tab",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('['), NONE),
+            KeyPattern::exact(KeyCode::Char(']'), NONE),
+        ],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::SwitchBranchesTab,
+        description: "Show the local branches",
+        label: "local",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "status.continue",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Status,
@@ -2726,6 +2896,41 @@ static REGISTRY: &[Binding] = &[
         id: "delete_branch.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DeleteBranch,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // As with deleting a branch, Enter is left unbound: the remote's
+    // branches go with it.
+    Binding {
+        id: "remove_remote.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::RemoveRemote,
+        intent: AppIntent::ConfirmRemoveRemote,
+        description: "Yes, remove the remote and its remote-tracking branches",
+        label: "remove",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "remove_remote.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::RemoveRemote,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the remote",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "remove_remote.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::RemoveRemote,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -4001,6 +4206,122 @@ mod tests {
     }
 
     #[test]
+    fn the_remotes_tab_takes_its_own_keys_and_the_workspace_keys_still_reach_it() {
+        use crate::git::remotes::{Remote, RemoteBranch};
+        let mut state =
+            AppState::new(Context::Workspace).with_location(Some("/r".into()), "/r".into());
+        state.branches.remotes.loaded(Ok(vec![Remote {
+            name: "origin".into(),
+            url: Some("/srv".into()),
+            configured: true,
+            branches: vec![RemoteBranch {
+                remote: "origin".into(),
+                short: b"main".to_vec(),
+                refname: b"refs/remotes/origin/main".to_vec(),
+            }],
+        }]));
+        let resolve_in = |state: &AppState, key| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Remotes,
+                state,
+                key,
+            )
+        };
+        let run = |state: &AppState, key| match resolve_in(state, key) {
+            Resolution::Run(binding) => binding.intent.clone(),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
+        assert_eq!(run(&state, plain('j')), AppIntent::RemoteNext);
+        assert_eq!(
+            run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
+            AppIntent::RemotePrev
+        );
+        assert_eq!(run(&state, plain('a')), AppIntent::AddRemote);
+        assert_eq!(run(&state, shift('R')), AppIntent::RenameRemote);
+        assert_eq!(run(&state, plain('d')), AppIntent::RemoveRemote);
+        assert_eq!(run(&state, plain('[')), AppIntent::SwitchBranchesTab);
+        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
+        assert_eq!(run(&state, plain('r')), AppIntent::RefreshStatus);
+        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        // A header row is a remote, not a branch to check out.
+        assert!(matches!(
+            resolve_in(&state, plain(' ')),
+            Resolution::Disabled("Select a remote branch")
+        ));
+        state.branches.remotes.move_by(1);
+        assert_eq!(run(&state, plain(' ')), AppIntent::TrackRemoteBranch);
+        assert_eq!(KeyScope::Remotes.parent(), Some(KeyScope::Workspace));
+
+        let branches = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Branches,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Disabled(_) => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(branches(plain('[')), Some(AppIntent::SwitchBranchesTab));
+        assert_eq!(branches(plain(']')), Some(AppIntent::SwitchBranchesTab));
+        // No branch is selected, so both are refused.
+        assert_eq!(branches(plain('u')), None);
+        assert_eq!(branches(shift('U')), None);
+    }
+
+    #[test]
+    fn the_remove_remote_question_answers_only_to_y_n_and_esc() {
+        let mut state = AppState::new(Context::Workspace);
+        state.popups = vec![Popup::RemoveRemote(crate::popup::RemoveRemoteConfirm {
+            name: "fork".into(),
+            op: crate::git::ops::GitOp::RemoveRemote("fork".into()),
+        })];
+        let resolve_in = |key| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::RemoveRemote,
+                &state,
+                key,
+            )
+        };
+        let ran = |key| match resolve_in(key) {
+            Resolution::Run(binding) => binding.intent.clone(),
+            other => panic!("{key:?}: {other:?}"),
+        };
+        assert_eq!(ran(plain('y')), AppIntent::ConfirmRemoveRemote);
+        assert_eq!(ran(plain('n')), AppIntent::ConfirmNo);
+        assert_eq!(
+            ran(key(KeyCode::Esc, KeyModifiers::NONE)),
+            AppIntent::ConfirmNo
+        );
+        assert_eq!(
+            ran(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppIntent::Quit
+        );
+        for unbound in [key(KeyCode::Enter, KeyModifiers::NONE), plain('q')] {
+            assert!(
+                matches!(resolve_in(unbound), Resolution::Unbound),
+                "{unbound:?}"
+            );
+        }
+        assert_eq!(KeyScope::RemoveRemote.parent(), None);
+        for id in [
+            "remotes.remove",
+            "remove_remote.yes",
+            "remove_remote.no",
+            "remove_remote.quit",
+        ] {
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+        assert!(build(&[("remotes.add", &["F"])], Trust::Repo).is_ok());
+    }
+
+    #[test]
     fn the_commits_panel_checks_out_reverts_and_resets_the_selected_commit() {
         use AppIntent::*;
         let commits = |k| from(KeyScope::Commits, k);
@@ -4424,6 +4745,7 @@ mod tests {
             KeyScope::Workspace => "workspace",
             KeyScope::Files => "files",
             KeyScope::Branches => "branches",
+            KeyScope::Remotes => "remotes",
             KeyScope::Commits => "commits",
             KeyScope::CommitFiles => "commit_files",
             KeyScope::Status => "status",
@@ -4445,6 +4767,7 @@ mod tests {
             KeyScope::Error => "error",
             KeyScope::DiscardConfirm => "discard_confirm",
             KeyScope::DeleteBranch => "delete_branch",
+            KeyScope::RemoveRemote => "remove_remote",
             KeyScope::ResetHard => "reset_hard",
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
@@ -4692,6 +5015,8 @@ mod tests {
                     | RevertCommit
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard
+                    | RemoveRemote
+                    | ConfirmRemoveRemote
                     | RewriteCommit(_)
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);

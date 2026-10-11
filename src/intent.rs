@@ -10,7 +10,7 @@ use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
-use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::branches::{Branch, LogRow};
 use crate::git::commit_files::CommitFile;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
@@ -21,6 +21,7 @@ use crate::git::prompts::PromptFacts;
 use crate::git::rebase_plan::Edit;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
+use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
@@ -347,12 +348,48 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<Vec<Branch>, String>,
     },
-    /// `name`'s log was read; `tag` says which load.
+    /// The log of the full ref `refname` was read; `tag` says which load.
     BranchLogLoaded {
         tag: Tag,
-        name: BranchName,
+        refname: Vec<u8>,
         result: Result<Vec<LogRow>, String>,
     },
+    /// The remotes and their branches were read; `tag` says which load.
+    RemotesLoaded {
+        tag: Tag,
+        result: Result<Vec<Remote>, String>,
+    },
+    /// Show the Branches panel's other tab: local branches or remotes.
+    SwitchBranchesTab,
+    /// Move the Remotes tab's selection down or up, over remote and
+    /// branch rows alike.
+    RemoteNext,
+    RemotePrev,
+    /// Ask for a local name, to check out the selected remote branch as a
+    /// new branch tracking it.
+    TrackRemoteBranch,
+    /// The local name, typed into the `TrackBranch` prompt.
+    TrackRemoteBranchNamed(String),
+    /// Ask for a new remote's name, then its URL.
+    AddRemote,
+    /// The new remote's name, typed into the `RemoteName` prompt.
+    AddRemoteNamed(String),
+    /// The new remote's URL, typed into the `RemoteUrl` prompt.
+    AddRemoteUrl(String),
+    /// Ask for a new name for the selected remote, the old one filled in.
+    RenameRemote,
+    /// The new name, typed into the `RenameRemote` prompt.
+    RenameRemoteTo(String),
+    /// Ask before removing the selected remote.
+    RemoveRemote,
+    /// Remove the remote the open question names.
+    ConfirmRemoveRemote,
+    /// Ask which remote branch the selected local branch should track.
+    SetUpstream,
+    /// The upstream, as `remote/branch`, typed into the `SetUpstream` prompt.
+    SetUpstreamTo(String),
+    /// Stop the selected local branch tracking its upstream.
+    UnsetUpstream,
     /// Move the branch selection down or up.
     BranchNext,
     BranchPrev,

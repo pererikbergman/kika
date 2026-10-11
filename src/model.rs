@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
-use crate::branches::BranchesPanel;
+use crate::branches::{BranchesPanel, BranchesTab};
 use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::CommitsPanel;
@@ -29,6 +29,7 @@ use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::rebase_plan::{self, Edit};
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
+use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
@@ -40,11 +41,12 @@ use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,
-    LineInput, Popup, PromptKind, ResetHardConfirm,
+    LineInput, Popup, PromptKind, RemoveRemoteConfirm, ResetHardConfirm,
 };
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::remote_run::RemoteRun;
+use crate::remotes::RemotePending;
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
 use crate::watch::{WatchEvent, WatchState};
@@ -594,9 +596,17 @@ impl AppState {
                     ..
                 }) => self.pending_command = None,
                 Some(Popup::Prompt {
-                    kind: PromptKind::NewBranch | PromptKind::RenameBranch,
+                    kind: PromptKind::NewBranch | PromptKind::RenameBranch | PromptKind::SetUpstream,
                     ..
                 }) => self.branches.pending = None,
+                Some(Popup::Prompt {
+                    kind:
+                        PromptKind::TrackBranch
+                        | PromptKind::RemoteName
+                        | PromptKind::RemoteUrl
+                        | PromptKind::RenameRemote,
+                    ..
+                }) => self.branches.remotes.pending = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -731,8 +741,31 @@ impl AppState {
                 return self.repo_initialised(tag, result);
             }
             AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
-            AppIntent::BranchLogLoaded { tag, name, result } => {
-                self.branch_log_loaded(tag, name, result)
+            AppIntent::BranchLogLoaded {
+                tag,
+                refname,
+                result,
+            } => self.branch_log_loaded(tag, refname, result),
+            AppIntent::RemotesLoaded { tag, result } => return self.remotes_loaded(tag, result),
+            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(),
+            AppIntent::RemoteNext => return self.move_remote(1),
+            AppIntent::RemotePrev => return self.move_remote(-1),
+            AppIntent::TrackRemoteBranch => self.ask_track_name(),
+            AppIntent::TrackRemoteBranchNamed(text) => return self.track_named(&text),
+            AppIntent::AddRemote => self.ask_remote_name(),
+            AppIntent::AddRemoteNamed(text) => self.remote_named(&text),
+            AppIntent::AddRemoteUrl(text) => return self.remote_url(&text),
+            AppIntent::RenameRemote => self.ask_remote_rename(),
+            AppIntent::RenameRemoteTo(text) => return self.rename_remote_to(&text),
+            AppIntent::RemoveRemote => self.ask_remove_remote(),
+            AppIntent::ConfirmRemoveRemote => return self.confirm_remove_remote(),
+            AppIntent::SetUpstream => self.ask_upstream(),
+            AppIntent::SetUpstreamTo(text) => return self.set_upstream_to(&text),
+            AppIntent::UnsetUpstream => {
+                let op = self
+                    .branch_for_action(keymap::unset_upstream_disabled)
+                    .map(GitOp::UnsetUpstream);
+                return self.start_op(Ok(op));
             }
             AppIntent::BranchNext => return self.move_branch(1),
             AppIntent::BranchPrev => return self.move_branch(-1),
@@ -865,7 +898,10 @@ impl AppState {
     pub fn panel_focus(&self) -> KeyScope {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
-            (Context::Workspace, Focus::Branches) => KeyScope::Branches,
+            (Context::Workspace, Focus::Branches) => match self.branches.tab {
+                BranchesTab::Local => KeyScope::Branches,
+                BranchesTab::Remotes => KeyScope::Remotes,
+            },
             (Context::Workspace, Focus::Commits) if self.commits.open.is_some() => {
                 KeyScope::CommitFiles
             }
@@ -894,6 +930,7 @@ impl AppState {
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
             Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
+            Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
@@ -1145,10 +1182,12 @@ impl AppState {
             }
             Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
             Some(Popup::Discard(_)) => vec![],
-            // Only `ConfirmDeleteBranch` deletes, and only
-            // `ConfirmResetHard` resets; yes here keeps the question, no
-            // closes it.
-            Some(Popup::DeleteBranch(_) | Popup::ResetHard(_)) if !yes => vec![],
+            // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
+            // resets and only `ConfirmRemoveRemote` removes; yes here
+            // keeps the question, no closes it.
+            Some(Popup::DeleteBranch(_) | Popup::ResetHard(_) | Popup::RemoveRemote(_)) if !yes => {
+                vec![]
+            }
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
@@ -1516,8 +1555,21 @@ impl AppState {
             match kind {
                 PromptKind::NewBranch => return format!("New branch from {}", name.display()),
                 PromptKind::RenameBranch => return format!("Rename {}", name.display()),
+                PromptKind::SetUpstream => return format!("Upstream of {}", name.display()),
                 _ => {}
             }
+        }
+        match (kind, &self.branches.remotes.pending) {
+            (PromptKind::TrackBranch, Some(RemotePending::Track(from))) => {
+                return format!("Check out {} as", from.display());
+            }
+            (PromptKind::RenameRemote, Some(RemotePending::Rename(name))) => {
+                return format!("Rename remote {}", name.display());
+            }
+            (PromptKind::RemoteUrl, Some(RemotePending::AddUrl { name })) => {
+                return format!("URL of {}", sanitize(name.as_bytes()));
+            }
+            _ => {}
         }
         let pending = self
             .pending_command
@@ -2951,6 +3003,9 @@ impl AppState {
         self.load_branches(false)
     }
 
+    /// Load the local branches and the remotes together: whatever moves
+    /// one can move the other. A background remotes load is not counted:
+    /// the branch load beside it keeps a second pair from starting.
     fn load_branches(&mut self, user: bool) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
@@ -2958,13 +3013,20 @@ impl AppState {
         let seq = self.take_seq();
         self.branches.list_seq = Some(seq);
         self.start_branch_load(user);
-        vec![Effect::LoadBranches {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user,
-            },
-        }]
+        let remotes = self.take_seq();
+        self.branches.remotes.list_seq = Some(remotes);
+        if user {
+            self.busy += 1;
+        }
+        let tag = |seq| Tag {
+            generation: self.generation,
+            seq,
+            user,
+        };
+        vec![
+            Effect::LoadBranches { tag: tag(seq) },
+            Effect::LoadRemotes { tag: tag(remotes) },
+        ]
     }
 
     /// A user load raises the busy count; a background one the watch's flag.
@@ -2994,39 +3056,88 @@ impl AppState {
         }
         self.branches.list_seq = None;
         self.branches.loaded(result);
-        self.load_branch_log(tag.user)
+        if self.branches.tab == BranchesTab::Local {
+            self.load_branch_log(tag.user)
+        } else {
+            vec![]
+        }
     }
 
-    /// Start loading the selected branch's log; with none selected, there
-    /// is no log to show. `user` as for the list.
+    /// Show the remotes, and on their tab load the selected branch's log
+    /// afresh, as for the local list.
+    fn remotes_loaded(&mut self, tag: Tag, result: Result<Vec<Remote>, String>) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        let remotes = &mut self.branches.remotes;
+        if tag.generation != self.generation || remotes.list_seq != Some(tag.seq) {
+            return vec![];
+        }
+        remotes.list_seq = None;
+        remotes.loaded(result);
+        if self.branches.tab == BranchesTab::Remotes {
+            self.load_branch_log(tag.user)
+        } else {
+            vec![]
+        }
+    }
+
+    /// Start loading the log of the branch selected on the tab shown;
+    /// with none selected, or a remote's header row, there is no log to
+    /// show. `user` as for the list.
     fn load_branch_log(&mut self, user: bool) -> Vec<Effect> {
-        let Some(name) = self.branches.selected_branch().map(|b| b.name.clone()) else {
+        let refname = match self.branches.tab {
+            BranchesTab::Local => self.branches.selected_branch().map(|b| b.name.ref_bytes()),
+            BranchesTab::Remotes => self
+                .branches
+                .remotes
+                .selected_branch()
+                .map(|b| b.refname.clone()),
+        };
+        let Some(refname) = refname else {
             self.branches.log = Default::default();
             return vec![];
         };
         let seq = self.take_seq();
-        self.branches.log.begin(seq, name.clone());
+        self.branches.log.begin(seq, refname.clone());
         self.start_branch_load(user);
         let tag = Tag {
             generation: self.generation,
             seq,
             user,
         };
-        vec![Effect::LoadBranchLog { tag, name }]
+        vec![Effect::LoadBranchLog { tag, refname }]
     }
 
     fn branch_log_loaded(
         &mut self,
         tag: Tag,
-        name: BranchName,
+        refname: Vec<u8>,
         result: Result<Vec<LogRow>, String>,
     ) {
         self.end_branch_load(tag.user);
         let log = &mut self.branches.log;
-        if tag.generation != self.generation || log.for_name.as_ref() != Some(&name) {
+        if tag.generation != self.generation || log.for_ref.as_ref() != Some(&refname) {
             return;
         }
         log.apply(tag.seq, result);
+    }
+
+    /// Show the other tab, and the log of what is selected there.
+    fn switch_branches_tab(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        self.branches.tab = self.branches.tab.other();
+        self.load_branch_log(true)
+    }
+
+    fn move_remote(&mut self, delta: isize) -> Vec<Effect> {
+        if self.branches.remotes.move_by(delta) {
+            self.load_branch_log(true)
+        } else {
+            vec![]
+        }
     }
 
     fn move_branch(&mut self, delta: isize) -> Vec<Effect> {
@@ -3268,6 +3379,221 @@ impl AppState {
             _ => return vec![],
         }
         let Some(Popup::DeleteBranch(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+
+    /// Ask which remote branch the selected branch should track, starting
+    /// from its upstream, or else the same name on `origin` or the first
+    /// remote.
+    fn ask_upstream(&mut self) {
+        let Some(name) = self.branch_for_action(keymap::branch_action_disabled) else {
+            return;
+        };
+        let upstream = self
+            .branches
+            .selected_branch()
+            .and_then(|b| b.upstream.clone());
+        let text = upstream.unwrap_or_else(|| {
+            let configured = || {
+                self.branches
+                    .remotes
+                    .remotes
+                    .iter()
+                    .filter(|r| r.configured)
+            };
+            let remote = configured()
+                .find(|r| r.name.0 == b"origin")
+                .or_else(|| configured().next());
+            match remote {
+                Some(remote) => format!("{}/{}", remote.name.display(), name.display()),
+                None => name.display(),
+            }
+        });
+        self.branches.pending = Some(name);
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::SetUpstream,
+            input: LineInput::with_text(&text),
+        });
+    }
+
+    /// Set the upstream of the branch kept when the prompt opened, to the
+    /// loaded remote branch written exactly as typed.
+    fn set_upstream_to(&mut self, text: &str) -> Vec<Effect> {
+        let Some(branch) = self.branches.pending.take() else {
+            return vec![];
+        };
+        let Some(upstream) = self.branches.remotes.branch_named(text.trim()).cloned() else {
+            self.notice = Some("No such remote branch; fetch, or check the name");
+            return vec![];
+        };
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        self.start_op(Ok(Some(GitOp::SetUpstream { branch, upstream })))
+    }
+}
+
+/// The Remotes tab's actions. Each prompt keeps its target from when it
+/// opened, so a reload while the user types cannot change it.
+impl AppState {
+    /// Whether a Remotes action may run now; if not, the bar says why.
+    fn remotes_action(&mut self, disabled: fn(&AppState) -> Option<&'static str>) -> bool {
+        if self.context != Context::Workspace {
+            return false;
+        }
+        if let Some(reason) = disabled(self) {
+            self.notice = Some(reason);
+            return false;
+        }
+        true
+    }
+
+    /// Ask what to call the local branch, starting from the remote
+    /// branch's own short name.
+    fn ask_track_name(&mut self) {
+        if !self.remotes_action(keymap::track_disabled) {
+            return;
+        }
+        let Some(from) = self.branches.remotes.selected_branch().cloned() else {
+            return;
+        };
+        let input = LineInput::with_text(&from.short_display());
+        self.branches.remotes.pending = Some(RemotePending::Track(from));
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::TrackBranch,
+            input,
+        });
+    }
+
+    fn track_named(&mut self, text: &str) -> Vec<Effect> {
+        let Some(RemotePending::Track(from)) = self.branches.remotes.pending.take() else {
+            return vec![];
+        };
+        let name = text.trim();
+        if name.is_empty() {
+            self.notice = Some("A branch needs a name");
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        let name = name.to_string();
+        self.start_op(Ok(Some(GitOp::CheckoutTracking { name, from })))
+    }
+
+    fn ask_remote_name(&mut self) {
+        if !self.remotes_action(keymap::add_remote_disabled) {
+            return;
+        }
+        self.branches.remotes.pending = None;
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::RemoteName,
+            input: LineInput::default(),
+        });
+    }
+
+    /// Check the new remote's name, then ask for its URL.
+    fn remote_named(&mut self, text: &str) {
+        let name = text.trim();
+        if let Err(reason) = validate_remote_name(name) {
+            self.notice = Some(reason);
+            return;
+        }
+        self.branches.remotes.pending = Some(RemotePending::AddUrl {
+            name: name.to_string(),
+        });
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::RemoteUrl,
+            input: LineInput::default(),
+        });
+    }
+
+    /// Add the remote named before, once its URL passes the checks. No
+    /// fetch: its branches appear after the user's own.
+    fn remote_url(&mut self, text: &str) -> Vec<Effect> {
+        let Some(RemotePending::AddUrl { name }) = self.branches.remotes.pending.take() else {
+            return vec![];
+        };
+        let url = text.trim();
+        if let Err(reason) = validate_remote_url(url) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        let url = url.to_string();
+        self.start_op(Ok(Some(GitOp::AddRemote { name, url })))
+    }
+
+    fn ask_remote_rename(&mut self) {
+        if !self.remotes_action(keymap::change_remote_disabled) {
+            return;
+        }
+        let Some(name) = self
+            .branches
+            .remotes
+            .selected_remote()
+            .map(|r| r.name.clone())
+        else {
+            return;
+        };
+        let input = LineInput::with_text(&name.display());
+        self.branches.remotes.pending = Some(RemotePending::Rename(name));
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::RenameRemote,
+            input,
+        });
+    }
+
+    fn rename_remote_to(&mut self, text: &str) -> Vec<Effect> {
+        let Some(RemotePending::Rename(from)) = self.branches.remotes.pending.take() else {
+            return vec![];
+        };
+        let to = text.trim();
+        if let Err(reason) = validate_remote_name(to) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING);
+            return vec![];
+        }
+        let to = to.to_string();
+        self.start_op(Ok(Some(GitOp::RenameRemote { from, to })))
+    }
+
+    /// Ask before removing the selected remote: its remote-tracking
+    /// branches go with it.
+    fn ask_remove_remote(&mut self) {
+        if !self.remotes_action(keymap::change_remote_disabled) {
+            return;
+        }
+        let Some(name) = self
+            .branches
+            .remotes
+            .selected_remote()
+            .map(|r| r.name.clone())
+        else {
+            return;
+        };
+        self.popups.push(Popup::RemoveRemote(RemoveRemoteConfirm {
+            name: name.display(),
+            op: GitOp::RemoveRemote(name),
+        }));
+    }
+
+    /// Remove the remote the open question names, and only if one is open.
+    fn confirm_remove_remote(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::RemoveRemote(_))) {
+            return vec![];
+        }
+        let Some(Popup::RemoveRemote(confirm)) = self.popups.pop() else {
             return vec![];
         };
         self.start_op(Ok(Some(confirm.op)))
@@ -3608,7 +3934,13 @@ fn failure_next(op: &GitOp) -> &'static str {
         | GitOp::Skip(_) => {
             "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
         }
-        GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
+        GitOp::RenameBranch { .. }
+        | GitOp::DeleteBranch { .. }
+        | GitOp::SetUpstream { .. }
+        | GitOp::UnsetUpstream(_)
+        | GitOp::AddRemote { .. }
+        | GitOp::RenameRemote { .. }
+        | GitOp::RemoveRemote(_) => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
         GitOp::MergeTool(_) => {
@@ -3656,6 +3988,12 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Abort(Operation::Revert) => "Could not abort the revert",
         GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
         GitOp::MergeTool(_) => "The merge tool did not resolve the file",
+        GitOp::CheckoutTracking { .. } => "Could not check out the remote branch",
+        GitOp::SetUpstream { .. } => "Could not set the upstream",
+        GitOp::UnsetUpstream(_) => "Could not unset the upstream",
+        GitOp::AddRemote { .. } => "Could not add the remote",
+        GitOp::RenameRemote { .. } => "Could not rename the remote",
+        GitOp::RemoveRemote(_) => "Could not remove the remote",
     }
 }
 
@@ -3715,17 +4053,24 @@ mod tests {
             [
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                Effect::LoadRemotes { tag: remotes },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
-                let (tag, list) = (*tag, *list);
+                let (tag, list, remotes) = (*tag, *list, *remotes);
                 state.update(AppIntent::BranchesLoaded {
                     tag: list,
                     result: Ok(vec![]),
                 });
+                state.update(AppIntent::RemotesLoaded {
+                    tag: remotes,
+                    result: Ok(vec![]),
+                });
                 tag
             }
-            other => panic!("expected LoadStatus, LoadBranches and the commits, got {other:?}"),
+            other => panic!(
+                "expected LoadStatus, LoadBranches, LoadRemotes and the commits, got {other:?}"
+            ),
         }
     }
 
@@ -3770,12 +4115,13 @@ mod tests {
                 user: true
             }
         );
-        // Seq 1 went to the branch list `r` reloads too, 2 and 3 to the commits.
+        // Seq 1 went to the branch list `r` reloads too, 2 to the remotes,
+        // 3 and 4 to the commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 4,
+                seq: 5,
                 user: true
             }
         );
@@ -4324,9 +4670,10 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        // The status, the branch list, then the commits and their markers.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 4);
-        assert_eq!(state.busy, 2, "the status and the branch list");
+        // The status, the branch list, the remotes, then the commits and
+        // their markers.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 5);
+        assert_eq!(state.busy, 3, "the status, the branch list and the remotes");
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
@@ -4895,6 +5242,7 @@ mod tests {
                 [
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
+                    Effect::LoadRemotes { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                 ]
@@ -4915,6 +5263,7 @@ mod tests {
                 [
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
+                    Effect::LoadRemotes { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                 ]
@@ -7545,6 +7894,7 @@ mod tests {
                 set,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -7613,6 +7963,7 @@ mod tests {
                 Effect::DiffLoadingDelay { .. },
                 Effect::LoadStatus { tag: status },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -7703,6 +8054,7 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
             ] => {
@@ -7856,7 +8208,10 @@ mod tests {
             result: Ok("/w".into()),
         });
 
-        assert_eq!(state.busy, 2, "only the status and branch loads are left");
+        assert_eq!(
+            state.busy, 3,
+            "only the status, branch and remotes loads are left"
+        );
         assert_eq!(state.repo, Some("/w".into()));
         assert_eq!(state.popups, []);
         match effects.as_slice() {
@@ -7865,6 +8220,7 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
@@ -7939,6 +8295,7 @@ mod tests {
                 Effect::RecordRecent { path, .. },
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { repo },
@@ -7988,10 +8345,11 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 5..],
+            effects[effects.len() - 6..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
+                Effect::LoadRemotes { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadConfig { .. }
@@ -8691,9 +9049,10 @@ mod tests {
         match &effects[1..] {
             [
                 Effect::LoadBranches { tag },
+                Effect::LoadRemotes { tag: remotes },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
-            ] => assert!(!tag.user),
+            ] => assert!(!tag.user && !remotes.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
@@ -8892,18 +9251,23 @@ mod tests {
     fn entering_a_submodule_makes_its_first_snapshot_a_baseline() {
         let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
         state.watch.refs = Some(RefsSnapshot::of(b"parent"));
-        let (tag, list) = match press(&mut state, KeyCode::Enter).as_slice() {
+        let (tag, list, remotes) = match press(&mut state, KeyCode::Enter).as_slice() {
             [
                 _,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
+                Effect::LoadRemotes { tag: remotes },
                 ..,
-            ] => (*tag, *list),
+            ] => (*tag, *list, *remotes),
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
         state.update(AppIntent::BranchesLoaded {
             tag: list,
+            result: Ok(vec![]),
+        });
+        state.update(AppIntent::RemotesLoaded {
+            tag: remotes,
             result: Ok(vec![]),
         });
         assert_eq!(state.busy, 0);
@@ -9894,10 +10258,10 @@ mod tests {
         found.unwrap_or_else(|| panic!("expected LoadBranches in {effects:?}"))
     }
 
-    /// The `LoadBranchLog` in `effects`, if any.
-    fn log_load(effects: &[Effect]) -> Option<(Tag, BranchName)> {
+    /// The `LoadBranchLog` in `effects`, if any, with the full ref it reads.
+    fn log_load(effects: &[Effect]) -> Option<(Tag, Vec<u8>)> {
         effects.iter().find_map(|e| match e {
-            Effect::LoadBranchLog { tag, name } => Some((*tag, name.clone())),
+            Effect::LoadBranchLog { tag, refname } => Some((*tag, refname.clone())),
             _ => None,
         })
     }
@@ -9919,10 +10283,10 @@ mod tests {
         });
         let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
         let effects = state.update(branches_loaded(tag, three_branches()));
-        let (tag, name) = log_load(&effects).expect("the selection's log loads");
+        let (tag, refname) = log_load(&effects).expect("the selection's log loads");
         state.update(AppIntent::BranchLogLoaded {
             tag,
-            name,
+            refname,
             result: Ok(vec![]),
         });
         state.update(AppIntent::FocusPanel(layout::Panel::Side(
@@ -9979,11 +10343,11 @@ mod tests {
         state.update(branches_loaded(other_repo, vec![]));
         assert_eq!(state.branches.branches, three_branches());
 
-        let (first, name) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        let (first, refname) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
         let (second, _) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
         state.update(AppIntent::BranchLogLoaded {
             tag: first,
-            name,
+            refname,
             result: Ok(vec![log_row("topic's")]),
         });
         assert!(
@@ -9992,7 +10356,7 @@ mod tests {
         );
         state.update(AppIntent::BranchLogLoaded {
             tag: second,
-            name: "wip".into(),
+            refname: b"refs/heads/wip".to_vec(),
             result: Ok(vec![log_row("wip's")]),
         });
         assert_eq!(state.branches.log.rows, [log_row("wip's")]);
@@ -10001,10 +10365,13 @@ mod tests {
     #[test]
     fn moving_the_selection_loads_the_new_branch_log() {
         let mut state = with_branches();
-        let (tag, name) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
-        assert_eq!(name, "topic".into());
+        let (tag, refname) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        assert_eq!(refname, b"refs/heads/topic");
         assert!(tag.user);
-        assert_eq!(state.branches.log.for_name, Some("topic".into()));
+        assert_eq!(
+            state.branches.log.for_ref.as_deref(),
+            Some(&b"refs/heads/topic"[..])
+        );
         // At the end there is nowhere to go, so nothing loads.
         state.update(AppIntent::BranchNext);
         assert_eq!(state.update(AppIntent::BranchNext), vec![]);
@@ -10015,10 +10382,10 @@ mod tests {
         let mut state = with_branches();
         press_char(&mut state, 'j');
         assert_eq!(selected_name(&state), "topic");
-        let (tag, name) = log_load(&press_char(&mut state, 'j')).unwrap();
+        let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
         state.update(AppIntent::BranchLogLoaded {
             tag,
-            name,
+            refname,
             result: Ok(vec![log_row("1"), log_row("2")]),
         });
         state.update(AppIntent::Key(KeyPress::new(
@@ -10225,10 +10592,410 @@ mod tests {
     #[test]
     fn switching_repository_resets_the_panel() {
         let mut state = with_branches().with_location(Some("/r/a".into()), "/r/a".into());
-        state.update(AppIntent::OpenRepo("/r/b".into()));
+        state.branches.tab = BranchesTab::Remotes;
+        let effects = state.update(AppIntent::OpenRepo("/r/b".into()));
         assert!(!state.branches.loaded);
         assert_eq!(state.branches.branches, []);
         assert_eq!(state.branches.log, Default::default());
+        assert_eq!(state.branches.tab, BranchesTab::Local);
+        assert!(!state.branches.remotes.loaded);
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, Effect::LoadRemotes { tag } if tag.generation == state.generation)
+            ),
+            "{effects:?}"
+        );
+    }
+
+    // --- The Remotes tab, and upstreams ---
+
+    use crate::git::remotes::{RemoteBranch, RemoteName};
+    use crate::remotes::RemoteRow;
+
+    fn git_remote(name: &str, configured: bool, branches: &[&str]) -> Remote {
+        Remote {
+            name: name.into(),
+            url: configured.then(|| format!("/srv/{name}")),
+            configured,
+            branches: branches
+                .iter()
+                .map(|short| RemoteBranch {
+                    remote: RemoteName::from(name),
+                    short: short.as_bytes().to_vec(),
+                    refname: format!("refs/remotes/{name}/{short}").into_bytes(),
+                })
+                .collect(),
+        }
+    }
+
+    /// `fork` (no branches), `origin` with `main` and `topic`, and `stray`,
+    /// refs no configured remote owns.
+    fn three_remotes() -> Vec<Remote> {
+        vec![
+            git_remote("fork", true, &[]),
+            git_remote("origin", true, &["main", "topic"]),
+            git_remote("stray", false, &["old"]),
+        ]
+    }
+
+    /// The tag of the one `LoadRemotes` in `effects`.
+    fn remotes_tag(effects: &[Effect]) -> Tag {
+        let found = effects.iter().find_map(|e| match e {
+            Effect::LoadRemotes { tag } => Some(*tag),
+            _ => None,
+        });
+        found.unwrap_or_else(|| panic!("expected LoadRemotes in {effects:?}"))
+    }
+
+    /// Reload both lists, answering with `remotes`.
+    fn reload_remotes(state: &mut AppState, remotes: Vec<Remote>) -> Vec<Effect> {
+        let tag = remotes_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::RemotesLoaded {
+            tag,
+            result: Ok(remotes),
+        })
+    }
+
+    /// `with_branches`, with `three_remotes` loaded.
+    fn with_remotes() -> AppState {
+        let mut state = with_branches();
+        reload_remotes(&mut state, three_remotes());
+        state
+    }
+
+    /// `with_remotes` on the Remotes tab, with `row` selected.
+    fn on_remote_row(row: usize) -> AppState {
+        let mut state = with_remotes();
+        press_char(&mut state, ']');
+        state.branches.remotes.move_by(row as isize);
+        state
+    }
+
+    #[test]
+    fn brackets_switch_the_tab_and_j_and_k_move_over_remotes_and_branches() {
+        let mut state = with_remotes();
+        assert_eq!(
+            press_char(&mut state, '['),
+            vec![],
+            "a header row has no log"
+        );
+        assert_eq!(state.branches.tab, BranchesTab::Remotes);
+        assert_eq!(state.key_focus(), KeyScope::Remotes);
+        assert_eq!(state.branches.log, Default::default());
+        assert_eq!(
+            state.branches.remotes.selected_row(),
+            Some(RemoteRow::Remote(0))
+        );
+
+        assert_eq!(press_char(&mut state, 'j'), vec![], "origin's header");
+        assert_eq!(
+            state.branches.remotes.selected_row(),
+            Some(RemoteRow::Remote(1))
+        );
+        let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
+        assert_eq!(refname, b"refs/remotes/origin/main");
+        assert!(tag.user);
+        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(
+            state.branches.remotes.selected_row(),
+            Some(RemoteRow::Remote(2))
+        );
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Up);
+        assert_eq!(
+            state.branches.remotes.selected_branch().unwrap().display(),
+            "origin/main"
+        );
+
+        let (_, refname) = log_load(&press_char(&mut state, ']')).unwrap();
+        assert_eq!(refname, b"refs/heads/main", "the local selection's log");
+        assert_eq!(state.branches.tab, BranchesTab::Local);
+        assert_eq!(state.key_focus(), KeyScope::Branches);
+    }
+
+    #[test]
+    fn a_reload_on_one_tab_reloads_only_its_own_log() {
+        let mut state = on_remote_row(2);
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        let effects = state.update(branches_loaded(tag, three_branches()));
+        assert_eq!(log_load(&effects), None, "the local list is not shown");
+        let effects = reload_remotes(&mut state, three_remotes());
+        let (_, refname) = log_load(&effects).expect("the shown branch's log");
+        assert_eq!(refname, b"refs/remotes/origin/main");
+    }
+
+    #[test]
+    fn checking_out_a_remote_branch_asks_for_the_name_and_tracks_it() {
+        let mut state = on_remote_row(0);
+        assert_eq!(press_char(&mut state, ' '), vec![]);
+        assert_eq!(state.notice, Some("Select a remote branch"));
+        assert_eq!(state.popups, []);
+
+        state.branches.remotes.move_by(3);
+        press_char(&mut state, ' ');
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::TrackBranch);
+                assert_eq!(input.text, "topic");
+            }
+            other => panic!("expected the name prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.prompt_title(PromptKind::TrackBranch),
+            "Check out origin/topic as"
+        );
+        // A reload while the user types moves the list under the prompt.
+        reload_remotes(&mut state, vec![git_remote("origin", true, &["main"])]);
+        type_text(&mut state, "-2");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::CheckoutTracking {
+                name: "topic-2".into(),
+                from: three_remotes()[1].branches[1].clone(),
+            }
+        );
+        assert_eq!(state.branches.remotes.pending, None);
+    }
+
+    #[test]
+    fn an_invalid_remote_name_or_url_leaves_a_notice_and_no_effect() {
+        let mut state = on_remote_row(0);
+        for bad in ["", "-x", "a b", "a..b", "x.lock"] {
+            press_char(&mut state, 'a');
+            type_text(&mut state, bad);
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{bad:?}");
+            assert!(state.notice.is_some(), "{bad:?}");
+            assert_eq!(state.popups, [], "{bad:?}");
+        }
+        for bad in [
+            "ext::sh -c x",
+            "EXT::x",
+            "fd::3",
+            "ext://sh -c x",
+            "EXT://x",
+            "fd://3",
+            "-oProxyCommand=x",
+            "  ",
+        ] {
+            press_char(&mut state, 'a');
+            type_text(&mut state, "fork2\n");
+            assert_eq!(
+                state.prompt_title(PromptKind::RemoteUrl),
+                "URL of fork2",
+                "{bad:?}"
+            );
+            type_text(&mut state, bad);
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{bad:?}");
+            assert!(state.notice.is_some(), "{bad:?}");
+            assert_eq!((state.op_seq, &state.popups), (None, &vec![]), "{bad:?}");
+            assert_eq!(state.branches.remotes.pending, None);
+        }
+    }
+
+    #[test]
+    fn adding_a_remote_runs_only_the_op_and_never_fetches() {
+        let mut state = on_remote_row(0);
+        press_char(&mut state, 'a');
+        type_text(&mut state, " fork2 \n");
+        type_text(&mut state, "https://u:t@h/fork.git");
+        let effects = press(&mut state, KeyCode::Enter);
+        let (tag, op) = op_of(&effects);
+        assert_eq!(
+            op,
+            GitOp::AddRemote {
+                name: "fork2".into(),
+                url: "https://u:t@h/fork.git".into(),
+            }
+        );
+        assert_eq!(state.remote, None);
+
+        let effects = state.update(finished(tag, op, Ok(())));
+        remotes_tag(&effects);
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Remote { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(state.remote, None);
+    }
+
+    #[test]
+    fn a_cancelled_remote_prompt_forgets_its_target() {
+        let mut state = on_remote_row(0);
+        press_char(&mut state, 'a');
+        type_text(&mut state, "fork2\n");
+        assert!(state.branches.remotes.pending.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.branches.remotes.pending, None);
+        assert_eq!(state.update(AppIntent::AddRemoteUrl("/x".into())), vec![]);
+    }
+
+    #[test]
+    fn renaming_keeps_the_remote_selected_when_the_prompt_opened() {
+        let mut state = on_remote_row(1);
+        shift(&mut state, 'R');
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::RenameRemote);
+                assert_eq!(input.text, "origin");
+            }
+            other => panic!("expected the rename prompt, got {other:?}"),
+        }
+        reload_remotes(&mut state, vec![git_remote("fork", true, &[])]);
+        type_text(&mut state, "-old");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::RenameRemote {
+                from: "origin".into(),
+                to: "origin-old".into(),
+            }
+        );
+
+        let mut state = on_remote_row(1);
+        shift(&mut state, 'R');
+        for _ in 0..6 {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "-bad");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert!(state.notice.is_some());
+    }
+
+    #[test]
+    fn rename_and_remove_are_refused_for_an_option_like_name_or_an_unconfigured_group() {
+        let mut state = on_remote_row(4);
+        assert!(!state.branches.remotes.selected_remote().unwrap().configured);
+        for key in ['d', 'R'] {
+            let effects = if key == 'R' {
+                shift(&mut state, key)
+            } else {
+                press_char(&mut state, key)
+            };
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.notice, Some("Not a configured remote"));
+            assert_eq!(state.popups, []);
+        }
+
+        let mut state = with_branches();
+        reload_remotes(&mut state, vec![git_remote("-f", true, &["x"])]);
+        press_char(&mut state, ']');
+        state.branches.remotes.move_by(1);
+        for intent in [AppIntent::RemoveRemote, AppIntent::RenameRemote] {
+            state.notice = None;
+            assert_eq!(state.update(intent), vec![]);
+            assert!(state.notice.unwrap().contains("like an option"));
+            assert_eq!(state.popups, []);
+        }
+    }
+
+    #[test]
+    fn removing_a_remote_asks_and_only_y_removes_the_one_asked_about() {
+        let mut state = on_remote_row(2);
+        press_char(&mut state, 'd');
+        assert_eq!(state.key_focus(), KeyScope::RemoveRemote);
+        match state.popups.as_slice() {
+            [Popup::RemoveRemote(confirm)] => {
+                assert_eq!(confirm.name, "origin");
+                assert_eq!(confirm.op, GitOp::RemoveRemote("origin".into()));
+            }
+            other => panic!("expected the question, got {other:?}"),
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1, "enter does not answer");
+        assert_eq!(press_char(&mut state, 'q'), vec![]);
+        assert!(!state.should_quit);
+
+        // A reload under the question cannot change what it removes.
+        reload_remotes(&mut state, vec![git_remote("fork", true, &[])]);
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::RemoveRemote("origin".into()));
+        assert_eq!(state.popups, []);
+
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_remote_row(2);
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.popups, [], "{key:?}");
+            assert_eq!(state.update(AppIntent::ConfirmRemoveRemote), vec![]);
+        }
+    }
+
+    #[test]
+    fn set_upstream_starts_from_the_upstream_or_origin_and_needs_a_listed_branch() {
+        let mut state = with_remotes();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'u');
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::SetUpstream);
+                assert_eq!(input.text, "origin/topic");
+            }
+            other => panic!("expected the upstream prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.prompt_title(PromptKind::SetUpstream),
+            "Upstream of topic"
+        );
+        // A name no fetch has listed only says so.
+        type_text(&mut state, "x");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("No such remote branch; fetch, or check the name")
+        );
+        assert_eq!(state.branches.pending, None);
+
+        press_char(&mut state, 'u');
+        for _ in 0.."origin/topic".len() {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "origin/main");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::SetUpstream {
+                branch: "topic".into(),
+                upstream: three_remotes()[1].branches[0].clone(),
+            }
+        );
+
+        // An upstream already set is where the prompt starts.
+        let mut state = with_remotes();
+        state.branches.branches[0].upstream = Some("fork/x".into());
+        press_char(&mut state, 'u');
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt { input, .. }] if input.text == "fork/x"
+        ));
+    }
+
+    #[test]
+    fn unset_upstream_needs_an_upstream() {
+        let mut state = with_remotes();
+        assert_eq!(shift(&mut state, 'U'), vec![]);
+        assert_eq!(state.notice, Some("No upstream to unset"));
+        state.branches.branches[0].upstream = Some("origin/main".into());
+        let (_, op) = op_of(&shift(&mut state, 'U'));
+        assert_eq!(op, GitOp::UnsetUpstream("main".into()));
+    }
+
+    #[test]
+    fn remote_actions_wait_for_a_running_op() {
+        let mut state = on_remote_row(2);
+        state.op_seq = Some(99);
+        for intent in [
+            AppIntent::TrackRemoteBranch,
+            AppIntent::AddRemote,
+            AppIntent::RenameRemote,
+            AppIntent::RemoveRemote,
+        ] {
+            state.notice = None;
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{intent:?}");
+            assert_eq!(state.popups, [], "{intent:?}");
+        }
     }
 
     #[test]
@@ -11241,7 +12008,7 @@ mod tests {
             );
             assert_eq!(state.popups, []);
             // Only the reloads count as busy now.
-            assert_eq!(state.busy, 2);
+            assert_eq!(state.busy, 3);
         }
     }
 

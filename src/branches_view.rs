@@ -6,8 +6,9 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::branches::BranchesPanel;
+use crate::branches::{BranchesPanel, BranchesTab};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
+use crate::remotes_view;
 use crate::view::{PanelLook, clip, elide_right, fit, pad, reversed};
 
 /// Columns given to a log row's author, so subjects line up.
@@ -37,12 +38,24 @@ pub fn render_panel(
         Some(branch) if look.title_only => {
             look.title(&format!("Branches · {}", branch.name.display()))
         }
+        // The tab shown is in brackets. Where the whole title does not
+        // fit, the tabs keep their place and the panel's name goes.
+        _ if expanded => {
+            let tabs = match panel.tab {
+                BranchesTab::Local => "[Local] Remotes",
+                BranchesTab::Remotes => "Local [Remotes]",
+            };
+            let full = format!("Branches · {tabs}");
+            look.title(if look.fits(&full) { &full } else { tabs })
+        }
         _ => look.title("Branches"),
     };
     let block = look.block(title);
     let inner = block.inner(area);
     let width = usize::from(inner.width);
-    let body = if let Some(error) = &panel.error {
+    let body = if expanded && panel.tab == BranchesTab::Remotes {
+        remotes_view::list_body(&panel.remotes, usize::from(inner.height), width)
+    } else if let Some(error) = &panel.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from("Press r to retry"));
         Paragraph::new(lines).wrap(Wrap { trim: false })
@@ -119,8 +132,8 @@ pub fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, ar
     } else {
         format!(" · {}/{}", log.scroll + 1, log.rows.len())
     };
-    let title = match &log.for_name {
-        Some(name) => look.title(&format!("Commits · {}{position}", name.display())),
+    let title = match log.name() {
+        Some(name) => look.title(&format!("Commits · {name}{position}")),
         None => look.title("Commits"),
     };
     let block = look.block(title);
@@ -128,7 +141,7 @@ pub fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, ar
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let body = if let Some(error) = &log.error {
         Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if log.for_name.is_none() {
+    } else if log.for_ref.is_none() {
         Paragraph::new(if panel.loaded {
             "No branch selected"
         } else {
@@ -170,7 +183,6 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::git::branches::BranchName;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};
@@ -350,7 +362,7 @@ mod tests {
     #[test]
     fn with_branches_focused_the_diff_slot_shows_the_selected_branch_commits() {
         let mut state = focused(vec![branch("main", true, None, Track::None)]);
-        state.branches.log.begin(1, BranchName::from("main"));
+        state.branches.log.begin(1, b"refs/heads/main".to_vec());
         state
             .branches
             .log
@@ -379,7 +391,7 @@ mod tests {
     #[test]
     fn a_wide_author_and_subject_are_clipped_to_the_pane() {
         let mut state = focused(vec![branch("main", true, None, Track::None)]);
-        state.branches.log.begin(1, BranchName::from("main"));
+        state.branches.log.begin(1, b"refs/heads/main".to_vec());
         let wide = LogRow {
             author: "山田太郎山田太郎山田太郎".into(),
             subject: "日本語".repeat(30),
@@ -400,11 +412,11 @@ mod tests {
     #[test]
     fn the_log_says_loading_empty_or_why_it_failed() {
         let mut state = focused(vec![branch("main", true, None, Track::None)]);
-        state.branches.log.begin(1, BranchName::from("main"));
+        state.branches.log.begin(1, b"refs/heads/main".to_vec());
         assert!(contains(&draw(&state, 100, 24), "Loading…"));
         state.branches.log.apply(1, Ok(vec![]));
         assert!(contains(&draw(&state, 100, 24), "No commits"));
-        state.branches.log.begin(2, BranchName::from("main"));
+        state.branches.log.begin(2, b"refs/heads/main".to_vec());
         state.branches.log.apply(2, Err("fatal: bad ref".into()));
         assert!(contains(&draw(&state, 100, 24), "fatal: bad ref"));
     }
@@ -420,7 +432,7 @@ mod tests {
                 behind: 2,
             },
         )]);
-        state.branches.log.begin(1, BranchName::from("main"));
+        state.branches.log.begin(1, b"refs/heads/main".to_vec());
         state.branches.log.apply(1, Ok(vec![log_row_of("x")]));
         for (w, h) in [(1, 1), (2, 3), (10, 4), (20, 6), (0, 0)] {
             draw(&state, w, h);
