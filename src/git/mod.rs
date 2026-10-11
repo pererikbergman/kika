@@ -5,6 +5,7 @@ pub mod askpass;
 pub mod attr;
 pub mod blame;
 pub mod branches;
+pub mod command_line;
 pub mod commit_files;
 pub mod diff;
 #[cfg(test)]
@@ -18,6 +19,7 @@ pub mod patch;
 pub mod path;
 pub mod prompts;
 pub mod rebase_plan;
+pub mod recording;
 pub mod reflog;
 pub mod refs;
 pub mod remote;
