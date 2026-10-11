@@ -318,7 +318,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
             ConfirmKind::Abort(Operation::Revert) => "Abort revert",
-            ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
+            ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
         }
@@ -348,8 +348,13 @@ impl ConfirmKind {
                 "Abort the revert and return to where it started? \
                  Resolved conflicts are lost. (y/n)"
             }
-            // Never asked: a bisect is not resumable.
-            ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
+            // `AppState::confirm_question` names where the bisect started;
+            // this is the fallback when it cannot.
+            ConfirmKind::Abort(Operation::Bisect) => {
+                "Reset the bisect? Its marks are dropped and HEAD goes back to where \
+                 the bisect started; files change to match. Git refuses if a local \
+                 change would be overwritten. (y/n)"
+            }
             ConfirmKind::StageResolved => {
                 "Every conflict in this file is resolved. Stage it? (y/n)"
             }
@@ -367,6 +372,7 @@ impl ConfirmKind {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::ForcePush => AppIntent::ForcePush,
+            ConfirmKind::Abort(Operation::Bisect) => AppIntent::ConfirmBisectReset,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
