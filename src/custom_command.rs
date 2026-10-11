@@ -120,7 +120,7 @@ impl CustomCommand {
         let keys = table
             .keys
             .iter()
-            .map(|text| parse_key(text).map_err(&fail))
+            .map(|text| parse_key(text).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         if keys.is_empty() {
             return Err(fail("needs at least one key".into()));
@@ -131,7 +131,7 @@ impl CustomCommand {
         let argv = table
             .command
             .iter()
-            .map(|element| parse_element(element).map_err(&fail))
+            .map(|element| parse_element(element).map_err(fail))
             .collect::<Result<Vec<_>, _>>()?;
         let program = match argv.first() {
             None => return Err(fail("`command` is empty".into())),
