@@ -1,6 +1,8 @@
+use crate::blame_view::{BlameView, CommitView};
 use crate::commit_editor::{CommitEditor, Field};
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
+use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
@@ -29,6 +31,10 @@ pub fn render(state: &AppState, frame: &mut Frame) {
                     render_diff_pane(&state.diff, state.diff_options, frame, areas.diff)
                 }
                 Focus::Diff(view) => render_hunk_view(view, state.diff_options, frame, areas.diff),
+                Focus::Blame(view) => match &view.commit {
+                    Some(commit) => render_commit_view(commit, frame, areas.diff),
+                    None => render_blame(view, frame, areas.diff),
+                },
             }
         }
         Context::Review { number } => {
@@ -699,11 +705,7 @@ fn render_hunk_view(view: &HunkView, options: DiffOptions, frame: &mut Frame, ar
         Some(_) => " · lines",
         None => "",
     };
-    let title = format!(" {side}{mode}{} ", options_note(options));
-    let block = Block::bordered()
-        .title(title)
-        .title_style(Style::new().add_modifier(Modifier::BOLD))
-        .border_style(Style::new().fg(FOCUSED));
+    let block = focused_block(format!(" {side}{mode}{} ", options_note(options)));
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     let pane = match &view.patch {
@@ -757,6 +759,106 @@ fn render_hunk_view(view: &HunkView, options: DiffOptions, frame: &mut Frame, ar
                 .collect::<Vec<_>>();
             Paragraph::new(lines)
         }
+    };
+    frame.render_widget(pane.block(block), area);
+}
+
+/// Columns the author takes in a blame row; longer names are elided.
+const BLAME_AUTHOR: usize = 16;
+
+/// The focused pane's frame: a bold title and a coloured border.
+fn focused_block(title: String) -> Block<'static> {
+    Block::bordered()
+        .title(title)
+        .title_style(Style::new().add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(FOCUSED))
+}
+
+/// The blame in the Diff pane's place: per line its commit, author, day
+/// and number, then the text. The cursor row is reversed, so it reads
+/// without colour.
+fn render_blame(view: &BlameView, frame: &mut Frame, area: Rect) {
+    let block = focused_block(format!(" Blame {} ", view.path.display()));
+    let inner = block.inner(area);
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    let pane = if let Some(error) = &view.error {
+        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
+    } else if !view.loaded {
+        Paragraph::new("Loading…")
+    } else if view.lines.is_empty() {
+        Paragraph::new("Empty file")
+    } else {
+        let number_width = view
+            .lines
+            .iter()
+            .map(|l| l.line_no)
+            .max()
+            .unwrap_or(0)
+            .to_string()
+            .len();
+        let lines = view
+            .lines
+            .iter()
+            .enumerate()
+            .skip(view.scroll)
+            .take(rows)
+            .map(|(i, line)| {
+                let line = Line::from(blame_row(line, number_width));
+                if i == view.cursor {
+                    reversed(line, width)
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>();
+        Paragraph::new(lines)
+    };
+    frame.render_widget(pane.block(block), area);
+}
+
+/// `<oid> <author> <date> <line no> <text>`, columns aligned. A line not
+/// committed yet has no author or day, so it says so across both.
+fn blame_row(line: &BlameLine, number_width: usize) -> String {
+    let who = if line.is_uncommitted() {
+        pad("Not committed yet", BLAME_AUTHOR + 1 + "YYYY-MM-DD".len())
+    } else {
+        format!(
+            "{} {}",
+            pad(&elide_right(&line.author, BLAME_AUTHOR), BLAME_AUTHOR),
+            line.date
+        )
+    };
+    format!(
+        "{} {who} {:>number_width$} {}",
+        short_hash(&line.oid),
+        line.line_no,
+        line.text
+    )
+}
+
+/// `text` followed by spaces up to `width` columns.
+fn pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(width_of(text))))
+}
+
+/// A commit opened from the blame, in the same place: its message and
+/// diff, coloured as the Diff pane colours them.
+fn render_commit_view(view: &CommitView, frame: &mut Frame, area: Rect) {
+    let block = focused_block(format!(" Commit {} ", short_hash(&view.oid)));
+    let rows = usize::from(block.inner(area).height);
+    let pane = if let Some(error) = &view.error {
+        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
+    } else if !view.loaded {
+        Paragraph::new("Loading…")
+    } else {
+        let start = view.scroll.min(view.lines.len());
+        let end = start.saturating_add(rows).min(view.lines.len());
+        Paragraph::new(
+            view.lines[start..end]
+                .iter()
+                .map(styled_diff_line)
+                .collect::<Vec<_>>(),
+        )
     };
     frame.render_widget(pane.block(block), area);
 }
@@ -2246,6 +2348,170 @@ mod tests {
                 row("Hide or show whitespace-only").contains(" w "),
                 "{rows:#?}"
             );
+        }
+    }
+
+    const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
+    fn blame_line(oid: &str, author: &str, line_no: usize, text: &str) -> BlameLine {
+        BlameLine {
+            oid: oid.into(),
+            author: author.into(),
+            date: "2024-01-02".into(),
+            line_no,
+            text: text.into(),
+        }
+    }
+
+    /// A workspace showing a loaded blame of `a.rs` with `lines`.
+    fn blamed(lines: Vec<BlameLine>, cursor: usize) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut view = BlameView::new("a.rs".into(), 0);
+        view.loaded(Ok(lines));
+        view.cursor = cursor;
+        state.focus = Focus::Blame(view);
+        state
+    }
+
+    fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+        let (x, y) = find(buffer, needle);
+        buffer[(x, y)]
+            .style()
+            .add_modifier
+            .contains(Modifier::REVERSED)
+    }
+
+    #[test]
+    fn a_loaded_blame_shows_each_lines_commit_author_date_and_text() {
+        let zero = "0".repeat(40);
+        let mut lines: Vec<BlameLine> = (1..=9)
+            .map(|i| blame_line(OID, "Ann", i, &format!("text {i}")))
+            .collect();
+        lines.push(blame_line(&zero, "Not Committed Yet", 10, "edited"));
+        lines[1].author = "Bartholomew Longname-Smith".into();
+        let state = blamed(lines, 1);
+        let buffer = draw_buffer(&state, 120, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, " Blame a.rs "), "{rows:#?}");
+        assert!(
+            contains(&rows, "abcdef1 Ann              2024-01-02  1 text 1"),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "abcdef1 Bartholomew Lon… 2024-01-02  2 text 2"),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "0000000 Not committed yet           10 edited"),
+            "{rows:#?}"
+        );
+        assert!(reversed_at(&buffer, "abcdef1 Bartholomew"));
+        assert!(!reversed_at(
+            &buffer,
+            "abcdef1 Ann              2024-01-02  1"
+        ));
+        // The whole cursor row is highlighted, past its text.
+        let (x, y) = find(&buffer, "abcdef1 Bartholomew");
+        assert!(
+            buffer[(x + 60, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn only_the_scrolled_window_of_a_blame_is_drawn() {
+        let lines = (1..=30)
+            .map(|i| blame_line(OID, "Ann", i, &format!("text {i}")))
+            .collect();
+        let mut state = blamed(lines, 25);
+        if let Focus::Blame(view) = &mut state.focus {
+            view.scroll = 20;
+        }
+        let rows = draw(&state, 100, 10);
+        assert!(contains(&rows, "21 text 21"), "{rows:#?}");
+        assert!(!contains(&rows, "20 text 20"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_loading_or_failed_blame_says_so() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.focus = Focus::Blame(BlameView::new("a.rs".into(), 0));
+        let rows = draw(&state, 100, 10);
+        assert!(contains(&rows, " Blame a.rs "), "{rows:#?}");
+        assert!(contains(&rows, "Loading…"), "{rows:#?}");
+
+        let mut view = BlameView::new("a.rs".into(), 0);
+        view.loaded(Err("fatal: no such path 'a.rs' in HEAD".into()));
+        state.focus = Focus::Blame(view);
+        let rows = draw(&state, 100, 10);
+        assert!(contains(&rows, "fatal: no such path"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_commit_view_shows_its_header_and_coloured_diff() {
+        use LineKind::*;
+        let mut state = blamed(vec![blame_line(OID, "Ann", 1, "x")], 0);
+        let mut commit = CommitView::new(OID.into(), 1);
+        commit.loaded(Ok(vec![
+            diff_line(Header, &format!("commit {OID}")),
+            diff_line(Header, "Author: Ann <ann@a>"),
+            diff_line(Header, "    Why it changed"),
+            diff_line(Header, "diff --git a/a.rs b/a.rs"),
+            diff_line(Hunk, "@@ -1 +1 @@"),
+            diff_line(Removed, "-old"),
+            diff_line(Added, "+new"),
+        ]));
+        if let Focus::Blame(view) = &mut state.focus {
+            view.commit = Some(commit);
+        }
+        let buffer = draw_buffer(&state, 100, 14);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, " Commit abcdef1 "), "{rows:#?}");
+        assert!(!contains(&rows, " Blame "), "{rows:#?}");
+        assert!(contains(&rows, "Author: Ann <ann@a>"), "{rows:#?}");
+        assert!(contains(&rows, "    Why it changed"), "{rows:#?}");
+        let style = |needle| {
+            let (x, y) = find(&buffer, needle);
+            buffer[(x, y)].style()
+        };
+        assert_eq!(style("-old").fg, Some(Color::Red));
+        assert_eq!(style("+new").fg, Some(Color::Green));
+        assert!(style("Author:").add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn a_loading_or_failed_commit_says_so() {
+        let mut state = blamed(vec![blame_line(OID, "Ann", 1, "x")], 0);
+        if let Focus::Blame(view) = &mut state.focus {
+            view.commit = Some(CommitView::new(OID.into(), 1));
+        }
+        let rows = draw(&state, 100, 10);
+        assert!(contains(&rows, "Loading…"), "{rows:#?}");
+
+        let mut commit = CommitView::new(OID.into(), 1);
+        commit.loaded(Err("fatal: bad object".into()));
+        if let Focus::Blame(view) = &mut state.focus {
+            view.commit = Some(commit);
+        }
+        let rows = draw(&state, 100, 10);
+        assert!(contains(&rows, "fatal: bad object"), "{rows:#?}");
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_a_blame_or_commit() {
+        let lines = vec![blame_line(OID, "Ann", 1, "x")];
+        let mut state = blamed(lines, 0);
+        for (w, h) in [(0, 0), (1, 1), (5, 3), (20, 4)] {
+            draw(&state, w, h);
+        }
+        if let Focus::Blame(view) = &mut state.focus {
+            view.commit = Some(CommitView::new(OID.into(), 1));
+        }
+        for (w, h) in [(0, 0), (1, 1), (5, 3), (20, 4)] {
+            draw(&state, w, h);
         }
     }
 }
