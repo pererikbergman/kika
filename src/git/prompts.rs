@@ -54,12 +54,13 @@ pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>) -> bool {
 
 /// Whether `op` always runs with the terminal handed over: it may make
 /// commits, so hooks, signing and git's editor for the message must work
-/// as on the command line; the merge tool is interactive. A fast-forward, a squash (which stops before
-/// committing) and an abort make none, so they run detached.
+/// as on the command line; the merge tool is interactive. A fast-forward,
+/// a squash (which stops before committing), an abort, a checkout and a
+/// reset make none, so they run detached.
 pub fn runs_attached(op: &GitOp) -> bool {
     match op {
         GitOp::Merge { strategy, .. } => *strategy == MergeStrategy::NoFastForward,
-        GitOp::Rebase { .. } | GitOp::Continue(_) | GitOp::Skip(_) => true,
+        GitOp::Rebase { .. } | GitOp::Revert(_) | GitOp::Continue(_) | GitOp::Skip(_) => true,
         // The merge tool is the user's own program on the terminal.
         GitOp::MergeTool(_) => true,
         _ => false,
@@ -152,6 +153,9 @@ mod tests {
 
     #[test]
     fn only_ops_that_can_commit_run_attached() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        let oid = || CommitId::parse("abc").unwrap();
         let merge = |strategy| GitOp::Merge {
             branch: "b".into(),
             strategy,
@@ -163,6 +167,8 @@ mod tests {
             GitOp::Continue(Operation::Rebase),
             GitOp::Skip(Operation::CherryPick),
             GitOp::MergeTool("a.txt".into()),
+            GitOp::Revert(oid()),
+            GitOp::Continue(Operation::Revert),
         ];
         for op in attached {
             assert!(runs_attached(&op), "{op:?}");
@@ -173,6 +179,12 @@ mod tests {
             GitOp::Abort(Operation::Merge),
             GitOp::Abort(Operation::Rebase),
             GitOp::Checkout("b".into()),
+            GitOp::CheckoutCommit(oid()),
+            GitOp::Reset {
+                to: oid(),
+                mode: ResetMode::Hard,
+            },
+            GitOp::Abort(Operation::Revert),
             GitOp::StageAll,
         ];
         for op in detached {

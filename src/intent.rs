@@ -13,7 +13,7 @@ use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::CommitFile;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
-use crate::git::ops::{GitOp, MergeStrategy};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
@@ -374,14 +374,25 @@ pub enum AppIntent {
     Merge(MergeStrategy),
     /// Rebase the current branch onto the selected one.
     RebaseOnto,
-    /// Go on with the merge, rebase or cherry-pick in progress.
+    /// Go on with the merge, rebase, cherry-pick or revert in progress.
     ContinueOperation,
-    /// Drop the commit the rebase or cherry-pick stopped on and go on.
+    /// Drop the commit the rebase, cherry-pick or revert stopped on and go on.
     SkipOperation,
     /// Ask before aborting the operation in progress.
     AbortOperation,
     /// Abort this operation, as the question asked.
     ConfirmAbort(Operation),
+    /// Ask before checking out the selected commit as a detached `HEAD`.
+    CheckoutCommit,
+    /// Check out the commit the question was about.
+    ConfirmCheckoutCommit,
+    /// Make a commit that undoes the selected one.
+    RevertCommit,
+    /// Reset the current branch to the selected commit. A hard reset asks
+    /// first.
+    ResetTo(ResetMode),
+    /// Reset hard, as the question asked.
+    ConfirmResetHard,
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

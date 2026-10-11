@@ -236,6 +236,9 @@ pub enum KeyScope {
     DiscardConfirm,
     /// "Delete this branch?" on top of the popup stack.
     DeleteBranch,
+    /// "Reset hard and lose every uncommitted change?" on top of the popup
+    /// stack.
+    ResetHard,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The recent repositories on top of the popup stack.
@@ -272,6 +275,7 @@ impl KeyScope {
             | KeyScope::Error
             | KeyScope::DiscardConfirm
             | KeyScope::DeleteBranch
+            | KeyScope::ResetHard
             | KeyScope::Submodules
             | KeyScope::Recent => None,
         }
@@ -305,6 +309,7 @@ impl KeyScope {
             KeyScope::Error => "Error",
             KeyScope::DiscardConfirm => "Discard",
             KeyScope::DeleteBranch => "Delete branch",
+            KeyScope::ResetHard => "Reset hard",
             KeyScope::Submodules => "Submodules",
             KeyScope::Recent => "Recent repositories",
         }
@@ -412,6 +417,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "conflict.ours",
     "conflict.theirs",
     "conflict.both",
+    "commits.revert",
+    "commits.reset",
+    "reset_hard.yes",
+    "reset_hard.no",
+    "reset_hard.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -1042,7 +1052,7 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<&'static str> {
 }
 
 /// Why continue or abort cannot run: one at a time, and only with a
-/// merge, rebase or cherry-pick to act on.
+/// merge, rebase, cherry-pick or revert to act on.
 pub(crate) fn resume_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING)
@@ -1059,6 +1069,43 @@ pub(crate) fn skip_disabled(state: &AppState) -> Option<&'static str> {
             .is_some_and(|op| !op.can_skip())
             .then_some("A merge cannot be skipped")
     })
+}
+
+/// Why no action can run on the selected commit now: git runs one
+/// operation at a time, and the log needs a commit.
+pub(crate) fn commit_action_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else {
+        no_commit(state)
+    }
+}
+
+pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<&'static str> {
+    commit_action_disabled(state)
+}
+
+/// Another operation in progress would mix with this one's commits.
+fn in_progress_disabled(state: &AppState) -> Option<&'static str> {
+    resumable_operation(state)
+        .is_some()
+        .then_some("Finish or abort the operation in progress")
+}
+
+/// Why the selected commit cannot be reverted now. A merge commit needs a
+/// mainline chosen, which Kika does not ask for.
+pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
+    commit_action_disabled(state)
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| {
+            let row = state.commits.rows.get(state.commits.selected);
+            row.is_some_and(|r| r.parents.len() > 1)
+                .then_some("Cannot revert a merge commit")
+        })
+}
+
+pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
+    commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
 
 /// The delete question on top, if one is.
@@ -1374,6 +1421,36 @@ static REGISTRY: &[Binding] = &[
         label: "files",
         bar: true,
         disabled: no_commit,
+    },
+    Binding {
+        id: "commits.checkout",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::CheckoutCommit,
+        description: "Check out the selected commit as a detached HEAD, asking first",
+        label: "checkout",
+        bar: true,
+        disabled: checkout_commit_disabled,
+    },
+    Binding {
+        id: "commits.revert",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::RevertCommit,
+        description: "Make a commit that undoes the selected one",
+        label: "revert",
+        bar: true,
+        disabled: revert_disabled,
+    },
+    Binding {
+        id: "commits.reset",
+        keys: &[KeyPattern::any(KeyCode::Char('X'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenMenu(MenuId::Reset),
+        description: "Reset the current branch to the selected commit: soft, mixed or hard",
+        label: "reset",
+        bar: true,
+        disabled: reset_disabled,
     },
     Binding {
         id: "commit_files.next",
@@ -2409,7 +2486,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Status,
         intent: AppIntent::ContinueOperation,
-        description: "Continue the merge, rebase or cherry-pick once conflicts are resolved",
+        description: "Continue the merge, rebase, cherry-pick or revert once conflicts are resolved",
         label: "continue",
         bar: true,
         disabled: resume_disabled,
@@ -2419,7 +2496,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
         scope: KeyScope::Status,
         intent: AppIntent::SkipOperation,
-        description: "Skip the commit the rebase or cherry-pick stopped on",
+        description: "Skip the commit the rebase, cherry-pick or revert stopped on",
         label: "skip",
         bar: true,
         disabled: skip_disabled,
@@ -2472,6 +2549,41 @@ static REGISTRY: &[Binding] = &[
         id: "delete_branch.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DeleteBranch,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // As with deleting a branch, Enter is left unbound: a hard reset
+    // cannot be undone.
+    Binding {
+        id: "reset_hard.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::ResetHard,
+        intent: AppIntent::ConfirmResetHard,
+        description: "Yes, reset and throw away every uncommitted change",
+        label: "reset",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "reset_hard.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::ResetHard,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the changes",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "reset_hard.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::ResetHard,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -3712,6 +3824,113 @@ mod tests {
     }
 
     #[test]
+    fn the_commits_panel_checks_out_reverts_and_resets_the_selected_commit() {
+        use AppIntent::*;
+        let commits = |k| from(KeyScope::Commits, k);
+        assert_eq!(commits(plain(' ')), Some(CheckoutCommit));
+        assert_eq!(
+            commits(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(RevertCommit)
+        );
+        assert_eq!(
+            commits(key(KeyCode::Char('X'), KeyModifiers::SHIFT)),
+            Some(OpenMenu(MenuId::Reset))
+        );
+    }
+
+    #[test]
+    fn commit_actions_say_why_they_cannot_run() {
+        let row = |parents: &[&str]| crate::git::log::CommitRow {
+            oid: "abc".into(),
+            short_oid: "abc".into(),
+            parents: parents.iter().map(|p| p.to_string()).collect(),
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        };
+        let mut state = AppState::new(Context::Workspace);
+        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
+            assert_eq!(disabled(&state), Some("No commits"));
+        }
+        state.commits.rows = vec![row(&["p"])];
+        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
+            assert_eq!(disabled(&state), None);
+        }
+        state.commits.rows = vec![row(&["p", "q"])];
+        assert_eq!(
+            revert_disabled(&state),
+            Some("Cannot revert a merge commit")
+        );
+        assert_eq!(reset_disabled(&state), None);
+        assert_eq!(checkout_commit_disabled(&state), None);
+
+        state.commits.rows = vec![row(&["p"])];
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Revert],
+        });
+        let busy = Some("Finish or abort the operation in progress");
+        assert_eq!(revert_disabled(&state), busy);
+        assert_eq!(reset_disabled(&state), busy);
+        // Git refuses a checkout that would lose work; it may go ahead.
+        assert_eq!(checkout_commit_disabled(&state), None);
+
+        state.op_seq = Some(1);
+        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
+            assert_eq!(disabled(&state), Some(OP_RUNNING));
+        }
+    }
+
+    #[test]
+    fn the_hard_reset_question_has_no_enter_and_n_or_esc_keeps_the_work() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::ResetHard,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmResetHard));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::ResetHard.parent(), None);
+        assert_eq!(KeyScope::ResetHard.title(), "Reset hard");
+    }
+
+    #[test]
+    fn revert_reset_and_the_hard_reset_answers_are_locked_but_checkout_is_not() {
+        for id in [
+            "commits.revert",
+            "commits.reset",
+            "reset_hard.yes",
+            "reset_hard.no",
+            "reset_hard.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+        assert!(!REPO_LOCKED.contains(&"commits.checkout"));
+        assert!(build(&[("commits.checkout", &["F"])], Trust::Repo).is_ok());
+    }
+
+    #[test]
     fn no_scope_binds_the_same_key_twice() {
         let patterns: Vec<(KeyScope, &KeyPattern)> = registry()
             .iter()
@@ -3950,6 +4169,7 @@ mod tests {
             KeyScope::Error => "error",
             KeyScope::DiscardConfirm => "discard_confirm",
             KeyScope::DeleteBranch => "delete_branch",
+            KeyScope::ResetHard => "reset_hard",
             KeyScope::Submodules => "submodules",
             KeyScope::Recent => "recent",
         }
@@ -4186,6 +4406,9 @@ mod tests {
                     | AbortOperation
                     | PickConflict(_)
                     | OpenMergeTool
+                    | RevertCommit
+                    | OpenMenu(MenuId::Reset)
+                    | ConfirmResetHard
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

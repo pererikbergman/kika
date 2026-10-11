@@ -1,10 +1,11 @@
 //! Every menu Kika shows, declared once like the keymap. An item's result
 //! is an intent, and it can be disabled with a reason, as a key can.
 
-use crate::git::ops::MergeStrategy;
+use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::intent::AppIntent;
 use crate::keymap::{
-    amend_disabled, commit_disabled, merge_disabled, never, stage_all_disabled, stage_disabled,
+    amend_disabled, commit_disabled, merge_disabled, never, reset_disabled, stage_all_disabled,
+    stage_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -15,6 +16,8 @@ pub enum MenuId {
     Stage,
     /// Merge the selected branch into the current one, or rebase onto it.
     Merge,
+    /// Reset the current branch to the selected commit.
+    Reset,
 }
 
 impl MenuId {
@@ -23,6 +26,7 @@ impl MenuId {
             MenuId::Actions => "Actions",
             MenuId::Stage => "Stage",
             MenuId::Merge => "Merge / rebase",
+            MenuId::Reset => "Reset to commit",
         }
     }
 }
@@ -119,10 +123,29 @@ static MERGE: &[MenuItem] = &[
     },
 ];
 
+static RESET: &[MenuItem] = &[
+    MenuItem {
+        label: "Soft: keep index and worktree",
+        intent: AppIntent::ResetTo(ResetMode::Soft),
+        disabled: reset_disabled,
+    },
+    MenuItem {
+        label: "Mixed: keep worktree, reset index",
+        intent: AppIntent::ResetTo(ResetMode::Mixed),
+        disabled: reset_disabled,
+    },
+    MenuItem {
+        label: "Hard: discard all changes…",
+        intent: AppIntent::ResetTo(ResetMode::Hard),
+        disabled: reset_disabled,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
         MenuId::Stage => STAGE,
         MenuId::Merge => MERGE,
+        MenuId::Reset => RESET,
     }
 }

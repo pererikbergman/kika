@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use super::branches::BranchName;
+use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::repo_state::Operation;
@@ -89,6 +90,18 @@ pub enum GitOp {
     /// Stop the operation and put `HEAD`, the index and the worktree back
     /// where it started.
     Abort(Operation),
+    /// Check out this commit with no branch: a detached `HEAD`. Git
+    /// refuses when it would overwrite changes in the worktree.
+    CheckoutCommit(CommitId),
+    /// Make a new commit that undoes this one. Never built for a merge
+    /// commit, which needs a mainline.
+    Revert(CommitId),
+    /// Move the current branch, or a detached `HEAD`, to `to`; `mode` says
+    /// what happens to the index and the worktree.
+    Reset {
+        to: CommitId,
+        mode: ResetMode,
+    },
     /// Make branch `name` at `from` and switch to it, the usual next step.
     CreateBranch {
         name: String,
@@ -119,6 +132,29 @@ pub enum MergeStrategy {
     /// Stage the combined changes for one ordinary commit; no merge is
     /// recorded.
     Squash,
+}
+
+/// What a reset keeps besides moving the branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetMode {
+    /// Keep the index and the worktree: the undone commits' changes stay
+    /// staged.
+    Soft,
+    /// Keep the worktree but reset the index: the changes stay, unstaged.
+    Mixed,
+    /// Keep nothing: the index and the worktree match the target, and
+    /// every uncommitted change is lost.
+    Hard,
+}
+
+impl ResetMode {
+    fn flag(self) -> &'static str {
+        match self {
+            ResetMode::Soft => "--soft",
+            ResetMode::Mixed => "--mixed",
+            ResetMode::Hard => "--hard",
+        }
+    }
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -182,8 +218,8 @@ impl GitOp {
 /// are read literally, never as globs or pathspec magic. A commit adds no
 /// env at all: its hooks inherit it, and must see what they would see
 /// outside Kika. Git runs hooks with stdin closed, so the message on stdin
-/// never reaches them. Merges, rebases and their continue, skip and abort
-/// add none for the same reason.
+/// never reaches them. Merges, rebases, reverts and their continue, skip
+/// and abort add none for the same reason.
 pub fn op_command(op: &GitOp) -> GitCommand {
     let with_paths = |cmd: GitCommand, paths: &[RepoPath]| {
         paths
@@ -254,6 +290,18 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(name)
             .arg(from.full_ref())
             .arg("--"),
+        // The id is hex digits only, so it cannot be read as an option;
+        // `--` keeps it from being read as a path.
+        GitOp::CheckoutCommit(oid) => GitCommand::new("checkout")
+            .arg("-q")
+            .arg("--detach")
+            .arg(oid.as_str())
+            .arg("--"),
+        GitOp::Reset { to, mode } => GitCommand::new("reset")
+            .arg("-q")
+            .arg(mode.flag())
+            .arg(to.as_str())
+            .arg("--"),
         GitOp::RenameBranch { from, to } => GitCommand::new("branch")
             .arg("-m")
             .arg("--")
@@ -276,12 +324,13 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             return GitCommand::new("merge").arg(flag).arg(branch.full_ref());
         }
         GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
+        GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
         GitOp::Continue(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--continue");
         }
         // Git rejects `merge --skip` without touching anything; no key
-        // builds it. `cherry-pick --skip` needs git 2.23, and an older one
-        // rejects it the same way.
+        // builds it. `cherry-pick --skip` and `revert --skip` need git 2.23,
+        // and an older one rejects them the same way.
         GitOp::Skip(operation) => {
             debug_assert!(operation.can_skip(), "{operation:?} cannot be skipped");
             return GitCommand::new(operation.subcommand()).arg("--skip");
@@ -329,8 +378,8 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
 }
 
 /// Run `op`. Failures carry git's message, made safe to draw since it can
-/// quote repo-controlled paths. A commit's or a merge's failure also
-/// carries stdout: hooks print to stderr, but git says "nothing to commit"
+/// quote repo-controlled paths. A commit's, a merge's or a revert's
+/// failure also carries stdout: hooks print to stderr, but git says "nothing to commit"
 /// and names each conflict on stdout.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
@@ -358,12 +407,14 @@ fn run_op_with(
         return Ok(());
     }
     let message = match op {
-        GitOp::Commit { .. } | GitOp::Merge { .. } => [&output.stderr, &output.stdout]
-            .map(|bytes| terminal_safe(bytes))
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        GitOp::Commit { .. } | GitOp::Merge { .. } | GitOp::Revert(_) => {
+            [&output.stderr, &output.stdout]
+                .map(|bytes| terminal_safe(bytes))
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
@@ -641,6 +692,166 @@ mod tests {
                 .into())
         );
         runner.assert_done();
+    }
+
+    fn oid(text: &str) -> CommitId {
+        CommitId::parse(text).unwrap()
+    }
+
+    #[test]
+    fn checkout_and_reset_name_the_commit_before_the_path_separator() {
+        let cases: [(GitOp, &[&str]); 4] = [
+            (
+                GitOp::CheckoutCommit(oid("abc123")),
+                &["checkout", "-q", "--detach", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Soft,
+                },
+                &["reset", "-q", "--soft", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Mixed,
+                },
+                &["reset", "-q", "--mixed", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Hard,
+                },
+                &["reset", "-q", "--hard", "abc123", "--"],
+            ),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            let envs: Vec<_> = cmd
+                .envs()
+                .iter()
+                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                envs,
+                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")],
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn revert_is_plain_git_revert_and_sets_no_env() {
+        let cmd = op_command(&GitOp::Revert(oid("abc123")));
+        assert_eq!(argv(&cmd), ["revert", "abc123"]);
+        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
+        assert_eq!(cmd.input(), None);
+    }
+
+    /// `a.txt` committed as `one`, then as `two`, with an identity and no
+    /// signing. Returns the repo and the first commit's id.
+    fn two_commit_repo() -> (crate::git::fake::TempDir, CommitId) {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("history");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--template="]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(dir, &["config", key, value]);
+        }
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        let first = rev_parse(dir, "HEAD");
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "second"]);
+        (tmp, first)
+    }
+
+    fn rev_parse(dir: &Path, rev: &str) -> CommitId {
+        let out = crate::git::fake::git(dir, &["rev-parse", rev]);
+        oid(String::from_utf8(out).unwrap().trim())
+    }
+
+    #[test]
+    fn checkout_commit_leaves_head_detached_at_it_in_real_git() {
+        use crate::git::fake::{git, try_git};
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &GitOp::CheckoutCommit(first.clone())).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD"), first);
+        assert!(
+            !try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+            "HEAD is on a branch"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
+    }
+
+    #[test]
+    fn revert_makes_a_commit_on_head_that_undoes_the_change_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        let second = rev_parse(dir, "HEAD");
+        let runner = crate::git::CliRunner::isolated(dir).with_env("GIT_EDITOR", "true");
+        run_op(&runner, &GitOp::Revert(second.clone())).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD^"), second);
+        assert_eq!(git(dir, &["show", "HEAD:a.txt"]), b"one\n");
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"3\n");
+        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
+    }
+
+    #[test]
+    fn each_reset_mode_keeps_what_it_says_in_real_git() {
+        use crate::git::fake::git;
+
+        let cases = [
+            (ResetMode::Soft, "M  a.txt\n"),
+            (ResetMode::Mixed, " M a.txt\n"),
+            (ResetMode::Hard, ""),
+        ];
+        for (mode, status) in cases {
+            let (tmp, first) = two_commit_repo();
+            let dir = tmp.path();
+            let runner = crate::git::CliRunner::isolated(dir);
+            run_op(
+                &runner,
+                &GitOp::Reset {
+                    to: first.clone(),
+                    mode,
+                },
+            )
+            .unwrap();
+            assert_eq!(rev_parse(dir, "HEAD"), first, "{mode:?}");
+            // The branch moved with it; HEAD is still on it.
+            assert!(
+                crate::git::fake::try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+                "{mode:?}"
+            );
+            assert_eq!(
+                String::from_utf8(git(dir, &["status", "--porcelain"])).unwrap(),
+                status,
+                "{mode:?}"
+            );
+            let worktree = std::fs::read_to_string(dir.join("a.txt")).unwrap();
+            let expected = if mode == ResetMode::Hard {
+                "one\n"
+            } else {
+                "two\n"
+            };
+            assert_eq!(worktree, expected, "{mode:?}");
+        }
     }
 
     #[cfg(unix)]

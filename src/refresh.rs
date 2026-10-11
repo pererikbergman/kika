@@ -65,9 +65,13 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
             Selection::KeepPath,
         ),
         // These move HEAD, rewrite the worktree and index, and start or
-        // end an operation the Status panel shows.
+        // end an operation the Status panel shows. A detached checkout
+        // also changes what the Status panel says HEAD is.
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
+        | GitOp::CheckoutCommit(_)
+        | GitOp::Revert(_)
+        | GitOp::Reset { .. }
         | GitOp::Continue(_)
         | GitOp::Skip(_)
         | GitOp::Abort(_) => (
@@ -188,6 +192,37 @@ mod tests {
                     Scope::Branches,
                     Scope::Commits
                 ]),
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_revert_and_reset_of_a_commit_reload_everything_head_touches() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        let oid = || CommitId::parse("abc").unwrap();
+        let ops = [
+            GitOp::CheckoutCommit(oid()),
+            GitOp::Revert(oid()),
+            GitOp::Reset {
+                to: oid(),
+                mode: ResetMode::Hard,
+            },
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
                 "{op:?}"
             );
         }

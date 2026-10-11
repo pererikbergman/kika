@@ -1,4 +1,5 @@
 use crate::ansi::StyledRow;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -16,11 +17,11 @@ use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::{CommitFile, CommitRange};
+use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
-use crate::git::ops::{GitOp, MergeStrategy};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
@@ -36,7 +37,7 @@ use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
     ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup,
-    PromptKind,
+    PromptKind, ResetHardConfirm,
 };
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -743,6 +744,14 @@ impl AppState {
             AppIntent::ConfirmAbort(operation) => {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
             }
+            AppIntent::CheckoutCommit => self.ask_checkout_commit(),
+            AppIntent::ConfirmCheckoutCommit => {
+                let op = self.commits.pending.take().map(GitOp::CheckoutCommit);
+                return self.start_op(Ok(op));
+            }
+            AppIntent::RevertCommit => return self.revert_commit(),
+            AppIntent::ResetTo(mode) => return self.reset_to(mode),
+            AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
         }
         vec![]
     }
@@ -831,6 +840,7 @@ impl AppState {
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
             Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
+            Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
         }
@@ -1066,13 +1076,18 @@ impl AppState {
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
         match self.popups.pop() {
             Some(Popup::Confirm(kind)) => {
+                if kind == ConfirmKind::DetachedCheckout && !yes {
+                    self.commits.pending = None;
+                }
                 let answer = if yes { Some(kind.yes()) } else { kind.no() };
                 answer.map_or_else(Vec::new, |intent| self.update(intent))
             }
             Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
             Some(Popup::Discard(_)) => vec![],
-            // Only `ConfirmDeleteBranch` deletes; yes or no here keeps it.
-            Some(Popup::DeleteBranch(_)) if !yes => vec![],
+            // Only `ConfirmDeleteBranch` deletes, and only
+            // `ConfirmResetHard` resets; yes here keeps the question, no
+            // closes it.
+            Some(Popup::DeleteBranch(_) | Popup::ResetHard(_)) if !yes => vec![],
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
@@ -1450,6 +1465,21 @@ impl AppState {
         pending
             .and_then(|p| p.command.prompts.get(p.answers.len()))
             .map_or_else(|| kind.title().to_string(), |t| sanitize(t.as_bytes()))
+    }
+
+    /// A yes/no question's text. The detached checkout names the commit
+    /// it was asked about.
+    pub fn confirm_question(&self, kind: ConfirmKind) -> Cow<'static, str> {
+        match (kind, &self.commits.pending) {
+            (ConfirmKind::DetachedCheckout, Some(id)) => {
+                let short = self.commits.short_oid(id);
+                Cow::Owned(format!(
+                    "Check out {short} as a detached HEAD? You will be on no branch; \
+                     new commits there belong to no branch until you create one. (y/n)"
+                ))
+            }
+            _ => Cow::Borrowed(kind.question()),
+        }
     }
 
     /// Show an error, unless the same one is already on top: a repeated
@@ -3027,6 +3057,74 @@ impl AppState {
         }
     }
 
+    /// The selected commit's id and short id, or why no action may run on
+    /// it now, said in the bar. Only an id of hex digits reaches argv.
+    fn commit_for_action(
+        &mut self,
+        disabled: fn(&AppState) -> Option<&'static str>,
+    ) -> Option<(CommitId, String)> {
+        if self.context != Context::Workspace {
+            return None;
+        }
+        if let Some(reason) = disabled(self) {
+            self.notice = Some(reason);
+            return None;
+        }
+        let row = self.commits.rows.get(self.commits.selected)?;
+        match CommitId::parse(&row.oid) {
+            Some(id) => Some((id, row.short_oid.clone())),
+            None => {
+                self.notice = Some("Not a commit id git can use");
+                None
+            }
+        }
+    }
+
+    /// Ask before leaving the branch: commits made on a detached `HEAD`
+    /// belong to no branch.
+    fn ask_checkout_commit(&mut self) {
+        if let Some((id, _)) = self.commit_for_action(keymap::checkout_commit_disabled) {
+            self.commits.pending = Some(id);
+            self.popups
+                .push(Popup::Confirm(ConfirmKind::DetachedCheckout));
+        }
+    }
+
+    /// Revert the selected commit on the terminal, so git's editor and the
+    /// commit hooks work as on the command line.
+    fn revert_commit(&mut self) -> Vec<Effect> {
+        match self.commit_for_action(keymap::revert_disabled) {
+            Some((id, _)) => self.run_op_where_it_belongs(GitOp::Revert(id)),
+            None => vec![],
+        }
+    }
+
+    /// Reset to the selected commit. Soft and mixed keep the work; hard
+    /// throws it away, so it asks first.
+    fn reset_to(&mut self, mode: ResetMode) -> Vec<Effect> {
+        let Some((to, short_oid)) = self.commit_for_action(keymap::reset_disabled) else {
+            return vec![];
+        };
+        let op = GitOp::Reset { to, mode };
+        if mode == ResetMode::Hard {
+            self.popups
+                .push(Popup::ResetHard(ResetHardConfirm { short_oid, op }));
+            return vec![];
+        }
+        self.start_op(Ok(Some(op)))
+    }
+
+    /// Reset hard as the open question asked, and only if one is open.
+    fn confirm_reset_hard(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
+            return vec![];
+        }
+        let Some(Popup::ResetHard(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+
     /// Ask for a branch name, keeping the selected branch for the answer.
     /// Renaming starts from the old name.
     fn ask_branch_name(&mut self, kind: PromptKind) {
@@ -3308,7 +3406,11 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
-        GitOp::Merge { .. } | GitOp::Rebase { .. } | GitOp::Continue(_) | GitOp::Skip(_) => {
+        GitOp::Merge { .. }
+        | GitOp::Rebase { .. }
+        | GitOp::Revert(_)
+        | GitOp::Continue(_)
+        | GitOp::Skip(_) => {
             "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
         }
         GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
@@ -3344,14 +3446,19 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
         GitOp::Merge { .. } => "Could not merge",
         GitOp::Rebase { .. } => "Could not rebase",
+        GitOp::CheckoutCommit(_) => "Could not check out the commit",
+        GitOp::Revert(_) => "Could not revert",
+        GitOp::Reset { .. } => "Could not reset",
         GitOp::Continue(Operation::Merge) => "Could not continue the merge",
         GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
         GitOp::Continue(Operation::CherryPick) => "Could not continue the cherry-pick",
+        GitOp::Continue(Operation::Revert) => "Could not continue the revert",
         GitOp::Continue(Operation::Bisect) => "Could not continue the bisect",
         GitOp::Skip(_) => "Could not skip",
         GitOp::Abort(Operation::Merge) => "Could not abort the merge",
         GitOp::Abort(Operation::Rebase) => "Could not abort the rebase",
         GitOp::Abort(Operation::CherryPick) => "Could not abort the cherry-pick",
+        GitOp::Abort(Operation::Revert) => "Could not abort the revert",
         GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
         GitOp::MergeTool(_) => "The merge tool did not resolve the file",
     }
@@ -10504,5 +10611,285 @@ mod tests {
         let (_, op) = attached_of(&press_char(&mut state, 'M'));
         assert_eq!(op, GitOp::MergeTool("c.txt".into()));
         assert_eq!(state.focus, Focus::Files);
+    }
+
+    // --- Checkout, revert and reset of a commit ---
+
+    fn cid(text: &str) -> CommitId {
+        CommitId::parse(text).unwrap()
+    }
+
+    /// `with_commits`, on the second commit, `c1`.
+    fn on_commit() -> AppState {
+        let mut state = with_commits(3, true);
+        press_char(&mut state, 'j');
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        state
+    }
+
+    #[test]
+    fn space_asks_before_a_detached_checkout_and_y_checks_out_the_commit() {
+        let mut state = on_commit();
+        assert_eq!(press_char(&mut state, ' '), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
+        );
+        assert_eq!(state.commits.pending, Some(cid("c1")));
+        assert!(
+            state
+                .confirm_question(ConfirmKind::DetachedCheckout)
+                .starts_with("Check out c1 as a detached HEAD? You will be on no branch;"),
+        );
+        assert_eq!(state.op_seq, None);
+
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.commits.pending, None);
+    }
+
+    #[test]
+    fn enter_also_answers_the_detached_checkout() {
+        let mut state = on_commit();
+        press_char(&mut state, ' ');
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
+    }
+
+    #[test]
+    fn n_or_esc_keeps_the_branch_and_forgets_the_commit() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_commit();
+            press_char(&mut state, ' ');
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.commits.pending, None, "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn capital_r_reverts_the_selected_commit_on_the_terminal() {
+        let mut state = on_commit();
+        let (tag, op) = attached_of(&press_char(&mut state, 'R'));
+        assert_eq!(op, GitOp::Revert(cid("c1")));
+        assert_eq!(state.op_seq, Some(tag.seq));
+    }
+
+    #[test]
+    fn a_revert_is_refused_on_a_merge_while_an_op_runs_or_during_an_operation() {
+        let mut merge = on_commit();
+        merge.commits.rows[1].parents = vec!["c2".into(), "d0".into()];
+        assert_eq!(press_char(&mut merge, 'R'), vec![]);
+        assert_eq!(merge.notice, Some("Cannot revert a merge commit"));
+        assert_eq!(merge.update(AppIntent::RevertCommit), vec![]);
+        assert_eq!(merge.op_seq, None);
+
+        let mut running = on_commit();
+        running.op_seq = Some(9);
+        assert_eq!(press_char(&mut running, 'R'), vec![]);
+        assert_eq!(running.notice, Some(keymap::OP_RUNNING));
+        assert_eq!(running.update(AppIntent::RevertCommit), vec![]);
+
+        let mut reverting = on_commit();
+        let mut branch = on_branch("main");
+        branch.in_progress = vec![Operation::Revert];
+        reverting.branch = Some(branch);
+        assert_eq!(press_char(&mut reverting, 'R'), vec![]);
+        assert_eq!(
+            reverting.notice,
+            Some("Finish or abort the operation in progress")
+        );
+        assert_eq!(reverting.update(AppIntent::RevertCommit), vec![]);
+        assert_eq!(reverting.op_seq, None);
+    }
+
+    #[test]
+    fn capital_x_opens_the_reset_menu_and_soft_and_mixed_reset_at_once() {
+        for (moves, mode) in [(0, ResetMode::Soft), (1, ResetMode::Mixed)] {
+            let mut state = on_commit();
+            assert_eq!(press_char(&mut state, 'X'), vec![]);
+            assert_eq!(
+                state.popups,
+                [Popup::Menu {
+                    id: MenuId::Reset,
+                    cursor: 0
+                }]
+            );
+            for _ in 0..moves {
+                press_char(&mut state, 'j');
+            }
+            let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+            assert_eq!(
+                op,
+                GitOp::Reset {
+                    to: cid("c1"),
+                    mode
+                }
+            );
+            assert_eq!(state.popups, []);
+        }
+    }
+
+    #[test]
+    fn a_hard_reset_asks_first_and_only_y_resets() {
+        let mut state = on_commit();
+        press_char(&mut state, 'X');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        let hard = GitOp::Reset {
+            to: cid("c1"),
+            mode: ResetMode::Hard,
+        };
+        assert_eq!(
+            state.popups,
+            [Popup::ResetHard(ResetHardConfirm {
+                short_oid: "c1".into(),
+                op: hard.clone(),
+            })]
+        );
+        assert_eq!(state.key_focus(), KeyScope::ResetHard);
+        assert_eq!(state.op_seq, None);
+
+        // Enter is not an answer: the question stays and nothing runs.
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1);
+        assert_eq!(state.op_seq, None);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, hard);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_or_esc_closes_the_hard_reset_question() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_commit();
+            state.update(AppIntent::ResetTo(ResetMode::Hard));
+            assert_eq!(state.popups.len(), 1, "{code:?}");
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn confirm_reset_hard_does_nothing_without_the_question() {
+        let mut state = on_commit();
+        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_reset_waits_for_the_operation_in_progress() {
+        let mut state = on_commit();
+        let mut branch = on_branch("main");
+        branch.in_progress = vec![Operation::Merge];
+        state.branch = Some(branch);
+        assert_eq!(press_char(&mut state, 'X'), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(
+            state.notice,
+            Some("Finish or abort the operation in progress")
+        );
+        for mode in [ResetMode::Soft, ResetMode::Hard] {
+            assert_eq!(state.update(AppIntent::ResetTo(mode)), vec![]);
+        }
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_row_whose_id_is_not_hex_starts_nothing() {
+        let mut state = on_commit();
+        state.commits.rows[1].oid = "--upload-pack=x".into();
+        for intent in [
+            AppIntent::CheckoutCommit,
+            AppIntent::RevertCommit,
+            AppIntent::ResetTo(ResetMode::Soft),
+            AppIntent::ResetTo(ResetMode::Hard),
+        ] {
+            state.notice = None;
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(
+                state.notice,
+                Some("Not a commit id git can use"),
+                "{intent:?}"
+            );
+        }
+        assert_eq!(state.popups, []);
+        assert_eq!(state.commits.pending, None);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn with_no_commits_the_actions_say_so() {
+        let mut state = with_commits(0, true);
+        for c in [' ', 'R', 'X'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some("No commits"), "{c}");
+        }
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn commit_action_failures_have_their_own_titles() {
+        let conflicts = "If git stopped on conflicts, resolve them, then continue or abort from the Status panel.";
+        let files = "The file list was reloaded. Fix the cause above, then try again.";
+        let cases = [
+            (
+                GitOp::CheckoutCommit(cid("c1")),
+                "Could not check out the commit",
+                files,
+            ),
+            (GitOp::Revert(cid("c1")), "Could not revert", conflicts),
+            (
+                GitOp::Reset {
+                    to: cid("c1"),
+                    mode: ResetMode::Mixed,
+                },
+                "Could not reset",
+                files,
+            ),
+            (
+                GitOp::Continue(Operation::Revert),
+                "Could not continue the revert",
+                conflicts,
+            ),
+            (
+                GitOp::Abort(Operation::Revert),
+                "Could not abort the revert",
+                files,
+            ),
+        ];
+        for (op, title, next) in cases {
+            assert_eq!(failure_title(&op), title, "{op:?}");
+            assert_eq!(failure_next(&op), next, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn a_revert_in_progress_can_be_continued_skipped_and_aborted() {
+        let mut state = status_focused(&[Operation::Revert]);
+        let (tag, op) = attached_of(&press_char(&mut state, 'c'));
+        assert_eq!(op, GitOp::Continue(Operation::Revert));
+        state.update(finished(tag, op, Ok(())));
+        let (tag, op) = attached_of(&press_char(&mut state, 's'));
+        assert_eq!(op, GitOp::Skip(Operation::Revert));
+        state.update(finished(tag, op, Ok(())));
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Revert))]
+        );
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::Abort(Operation::Revert));
     }
 }

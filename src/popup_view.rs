@@ -35,9 +35,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 let cursor = top.then_some(*cursor);
                 render_menu(state, *id, cursor, frame, area)
             }
-            Popup::Confirm(kind) => {
-                render_question(&format!(" {} ", kind.title()), kind.question(), frame, area)
-            }
+            Popup::Confirm(kind) => render_question(
+                &format!(" {} ", kind.title()),
+                &state.confirm_question(*kind),
+                frame,
+                area,
+            ),
             Popup::Prompt { kind, input } => {
                 render_prompt(&state.prompt_title(*kind), input, top, frame, area)
             }
@@ -48,6 +51,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 render_question(&format!(" {} ", what.title()), &text, frame, area)
             }
             Popup::DeleteBranch(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
+            Popup::ResetHard(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
                 frame,
@@ -585,6 +594,44 @@ mod tests {
         assert!(contains(&rows, " Delete branch "), "{rows:#?}");
         assert!(contains(&rows, "Delete branch topic? (y/n)"), "{rows:#?}");
         assert!(!contains(&rows, "not fully merged"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_detached_checkout_question_names_the_commit() {
+        let mut state = workspace(&["a.rs"]);
+        state.commits.pending = crate::git::commit_files::CommitId::parse("abcdef0123");
+        state.popups = vec![Popup::Confirm(ConfirmKind::DetachedCheckout)];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Detached checkout "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Check out abcdef0 as a detached HEAD?"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_hard_reset_question_names_the_target_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        use crate::popup::ResetHardConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::ResetHard(ResetHardConfirm {
+            short_oid: "abc1234".into(),
+            op: GitOp::Reset {
+                to: CommitId::parse("abc1234").unwrap(),
+                mode: ResetMode::Hard,
+            },
+        })];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Reset hard "), "{rows:#?}");
+        assert!(
+            contains(&rows, "Reset to abc1234 and throw away"),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
     }
 
     #[test]
