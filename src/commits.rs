@@ -64,6 +64,9 @@ pub struct CommitsPanel {
     /// rewrite would replace. Loaded with page 0; `None` until it is, or
     /// when it failed.
     pub tips: Option<Vec<Tip>>,
+    /// Why the last read of the tips failed, kept apart from one that is
+    /// still on its way.
+    pub tips_error: Option<String>,
     pub tips_seq: Option<u64>,
     /// The todo list of a stopped rebase, shown above the log.
     pub todo: Option<RebaseTodo>,
@@ -184,7 +187,10 @@ impl CommitsPanel {
     pub fn tips_loaded(&mut self, seq: u64, result: Result<Vec<Tip>, String>) {
         if self.tips_seq == Some(seq) {
             self.tips_seq = None;
-            self.tips = result.ok();
+            (self.tips, self.tips_error) = match result {
+                Ok(tips) => (Some(tips), None),
+                Err(error) => (None, Some(error)),
+            };
         }
     }
 
@@ -267,6 +273,23 @@ mod tests {
     fn an_unmerged_commit_outside_a_known_unpushed_set_is_pushed() {
         assert_eq!(panel(set(&["a"]), set(&[])).marker("a"), Marker::Pushed);
         assert_eq!(panel(None, set(&["b"])).marker("a"), Marker::Pushed);
+    }
+
+    #[test]
+    fn a_failed_tips_read_is_kept_apart_from_a_pending_one() {
+        let mut panel = CommitsPanel {
+            tips_seq: Some(3),
+            ..CommitsPanel::default()
+        };
+        panel.tips_loaded(2, Ok(vec![]));
+        assert_eq!((panel.tips.is_some(), panel.tips_seq), (false, Some(3)));
+        panel.tips_loaded(3, Err("boom".into()));
+        assert_eq!(panel.tips, None);
+        assert_eq!(panel.tips_error.as_deref(), Some("boom"));
+        panel.tips_seq = Some(4);
+        panel.tips_loaded(4, Ok(vec![]));
+        assert_eq!(panel.tips, Some(vec![]));
+        assert_eq!(panel.tips_error, None);
     }
 
     #[test]

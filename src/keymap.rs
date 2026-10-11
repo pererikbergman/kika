@@ -21,8 +21,11 @@ use crate::layout::{Panel, SidePanel};
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
-use crate::reason;
 use crate::rebase_todo::Rewrite;
+
+/// Why a key or menu item cannot run, shown to the user. Most reasons are
+/// fixed text; some name a branch or a commit.
+pub type Reason = std::borrow::Cow<'static, str>;
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,7 +372,7 @@ pub struct Binding {
     /// Whether the bottom bar shows it; the help menu always does.
     pub bar: bool,
     /// Why the binding cannot run right now, if it cannot. Pure.
-    pub disabled: fn(&AppState) -> Option<&'static str>,
+    pub disabled: fn(&AppState) -> Option<Reason>,
 }
 
 impl Binding {
@@ -638,7 +641,7 @@ pub enum Resolution<'a> {
     /// The user's command at this index in [`Keymap::commands`].
     Command(usize),
     /// The key is bound but cannot run; the reason is shown to the user.
-    Disabled(&'static str),
+    Disabled(Reason),
     Unbound,
 }
 
@@ -684,7 +687,7 @@ pub fn available<'a>(
     keymap: &Keymap,
     focus: KeyScope,
     state: &AppState,
-) -> Vec<(&'a Binding, Option<&'static str>)> {
+) -> Vec<(&'a Binding, Option<Reason>)> {
     let mut claimed: Vec<KeyPattern> = Vec::new();
     let mut out = Vec::new();
     for scope in focus.chain() {
@@ -732,7 +735,7 @@ fn commands_in(keymap: &Keymap, scope: KeyScope) -> impl Iterator<Item = &Custom
 }
 
 /// For bindings and menu items that always run.
-pub(crate) fn never(_: &AppState) -> Option<&'static str> {
+pub(crate) fn never(_: &AppState) -> Option<Reason> {
     None
 }
 
@@ -743,62 +746,64 @@ pub(crate) const OP_RUNNING: &str = "An operation is running";
 pub(crate) const WHITESPACE_HIDDEN: &str = "Whitespace is hidden; press w to stage";
 
 /// The Diff pane shows a `-w` diff, which hunk and line keys cannot apply.
-fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
+fn whitespace_hidden(state: &AppState) -> Option<Reason> {
     let in_diff = matches!(state.focus, Focus::Diff(_));
-    (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
+    (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN.into())
 }
 
 /// The diff keys of the Workspace scope reach the blame through its
 /// parent, but the diff they would change is hidden behind it.
 const BLAME_OPEN: &str = "Close the blame first";
 
-fn blame_open(state: &AppState) -> Option<&'static str> {
-    matches!(state.focus, Focus::Blame(_)).then_some(BLAME_OPEN)
+fn blame_open(state: &AppState) -> Option<Reason> {
+    matches!(state.focus, Focus::Blame(_)).then_some(BLAME_OPEN.into())
 }
 
 /// The diff settings reach the conflict view the same way, and the diff
 /// is just as hidden.
-fn diff_hidden(state: &AppState) -> Option<&'static str> {
+fn diff_hidden(state: &AppState) -> Option<Reason> {
     blame_open(state).or_else(|| {
-        matches!(state.focus, Focus::Conflict(_)).then_some("Close the conflict view first")
+        matches!(state.focus, Focus::Conflict(_)).then_some("Close the conflict view first".into())
     })
 }
 
-fn most_context(state: &AppState) -> Option<&'static str> {
+fn most_context(state: &AppState) -> Option<Reason> {
     diff_hidden(state).or_else(|| {
-        (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context")
+        (state.diff_options.context >= MAX_CONTEXT).then_some("Already at the most context".into())
     })
 }
 
-fn least_context(state: &AppState) -> Option<&'static str> {
+fn least_context(state: &AppState) -> Option<Reason> {
     diff_hidden(state).or_else(|| {
-        (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context")
+        (state.diff_options.context <= MIN_CONTEXT).then_some("Already at the least context".into())
     })
 }
 
 /// Enter has no commit to open before the log has rows.
 /// Why a key that acts on a log commit does nothing: there is none, or
 /// the cursor is on the rebase's todo list above the log.
-fn no_commit(state: &AppState) -> Option<&'static str> {
+fn no_commit(state: &AppState) -> Option<Reason> {
     if state.commits.todo_selected.is_some() {
-        return Some("Select a commit in the log first");
+        return Some("Select a commit in the log first".into());
     }
-    state.commits.rows.is_empty().then_some("No commits")
+    state.commits.rows.is_empty().then_some("No commits".into())
 }
 
 /// With no renderer configured there is nothing to cycle.
-fn renderer_disabled(state: &AppState) -> Option<&'static str> {
-    state.renderers.is_empty().then_some(NO_RENDERER)
+fn renderer_disabled(state: &AppState) -> Option<Reason> {
+    state.renderers.is_empty().then_some(NO_RENDERER.into())
 }
 
 /// Why `b` cannot blame the selected file. An untracked or deleted file
 /// has no lines git can blame.
-pub(crate) fn blame_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn blame_disabled(state: &AppState) -> Option<Reason> {
     match state.selected.and_then(|i| state.files.get(i)) {
-        None => Some("No file selected"),
-        Some(file) if file.kind == EntryKind::Untracked => Some("Untracked file: nothing to blame"),
+        None => Some("No file selected".into()),
+        Some(file) if file.kind == EntryKind::Untracked => {
+            Some("Untracked file: nothing to blame".into())
+        }
         Some(file) if file.worktree == 'D' || file.index == 'D' => {
-            Some("The file is deleted: nothing to blame")
+            Some("The file is deleted: nothing to blame".into())
         }
         Some(_) => None,
     }
@@ -806,111 +811,111 @@ pub(crate) fn blame_disabled(state: &AppState) -> Option<&'static str> {
 
 /// Why the conflict view cannot pick a side now: one write at a time, and
 /// only in a file whose blocks were read.
-pub(crate) fn pick_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn pick_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     match &state.focus {
         Focus::Conflict(view) if view.loaded.is_some() => None,
-        _ => Some("Nothing to pick"),
+        _ => Some("Nothing to pick".into()),
     }
 }
 
 /// Why the merge tool cannot start now: in the conflict view it is for
 /// that file; from Files, only for a conflicted one.
-pub(crate) fn mergetool_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn mergetool_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     if matches!(state.focus, Focus::Conflict(_)) {
         return None;
     }
     match state.selected.and_then(|i| state.files.get(i)) {
         Some(file) if file.kind == EntryKind::Conflicted => None,
-        _ => Some("Not a conflicted file"),
+        _ => Some("Not a conflicted file".into()),
     }
 }
 
-pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     match state.selected.and_then(|i| state.files.get(i)) {
-        None => Some("No file selected"),
+        None => Some("No file selected".into()),
         Some(file) if file.kind == EntryKind::Conflicted => {
-            Some("Resolve the conflict before staging this file")
+            Some("Resolve the conflict before staging this file".into())
         }
         Some(_) => None,
     }
 }
 
-fn no_command_running(state: &AppState) -> Option<&'static str> {
-    (!state.command_running).then_some("No command is running")
+fn no_command_running(state: &AppState) -> Option<Reason> {
+    (!state.command_running).then_some("No command is running".into())
 }
 
-fn no_file_selected(state: &AppState) -> Option<&'static str> {
+fn no_file_selected(state: &AppState) -> Option<Reason> {
     let selected = state.selected.and_then(|i| state.files.get(i));
-    selected.is_none().then_some("No file selected")
+    selected.is_none().then_some("No file selected".into())
 }
 
 /// Why the selected hunk cannot be staged or unstaged right now.
-pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn hunk_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     let Focus::Diff(view) = &state.focus else {
-        return Some(NO_CHANGES);
+        return Some(NO_CHANGES.into());
     };
     if let Some(reason) = whitespace_hidden(state) {
         return Some(reason);
     }
     if view.loading() {
-        return Some("Loading…");
+        return Some("Loading…".into());
     }
     let entry = state.selected.and_then(|i| state.files.get(i));
     match entry.map(|e| e.kind) {
-        Some(EntryKind::Conflicted) => return Some("Resolve the conflict first"),
+        Some(EntryKind::Conflicted) => return Some("Resolve the conflict first".into()),
         Some(EntryKind::Renamed | EntryKind::Copied) => {
-            return Some(PatchError::Renamed.message());
+            return Some(PatchError::Renamed.message().into());
         }
         _ => {}
     }
     match &view.patch {
-        Some(patch) if patch.kind == FileKind::Binary => Some(PatchError::Binary.message()),
+        Some(patch) if patch.kind == FileKind::Binary => Some(PatchError::Binary.message().into()),
         Some(patch) if !patch.hunks.is_empty() => None,
-        _ => Some(NO_CHANGES),
+        _ => Some(NO_CHANGES.into()),
     }
 }
 
 /// An untracked file has only one side to show.
-fn side_disabled(state: &AppState) -> Option<&'static str> {
+fn side_disabled(state: &AppState) -> Option<Reason> {
     match &state.focus {
         Focus::Diff(view) if view.side == DiffSide::Untracked => {
-            Some("Untracked file: nothing is staged")
+            Some("Untracked file: nothing is staged".into())
         }
         _ => None,
     }
 }
 
-pub(crate) fn stage_all_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if state.files.is_empty() {
-        Some("No changes to stage")
+        Some("No changes to stage".into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some(crate::git::ops::CONFLICTS_REFUSAL)
+        Some(crate::git::ops::CONFLICTS_REFUSAL.into())
     } else {
         None
     }
 }
 
-pub(crate) fn commit_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn commit_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if state.files.is_empty() {
-        Some("Nothing to commit")
+        Some("Nothing to commit".into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some("Resolve conflicts before committing")
+        Some("Resolve conflicts before committing".into())
     } else {
         None
     }
@@ -918,17 +923,17 @@ pub(crate) fn commit_disabled(state: &AppState) -> Option<&'static str> {
 
 /// Why the last commit cannot be amended right now. A clean tree is
 /// fine: amending then only changes the message.
-pub(crate) fn amend_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
     let no_commit = match &state.branch {
         None => true,
         Some(branch) => matches!(branch.head, Head::Unborn(_)),
     };
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if no_commit {
-        Some("No commit to amend")
+        Some("No commit to amend".into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some("Resolve conflicts before amending")
+        Some("Resolve conflicts before amending".into())
     } else {
         None
     }
@@ -936,98 +941,98 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<&'static str> {
 
 /// Why `d` cannot ask right now. What it would discard, and why that is
 /// refused, is the model's call once it runs.
-pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     if let Some(reason) = whitespace_hidden(state) {
         return Some(reason);
     }
     match &state.focus {
-        Focus::Diff(view) if view.loading() => Some("Loading…"),
+        Focus::Diff(view) if view.loading() => Some("Loading…".into()),
         _ => no_file_selected(state),
     }
 }
 
 /// Why `o` cannot open the editor right now.
-fn open_disabled(state: &AppState) -> Option<&'static str> {
+fn open_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     no_file_selected(state)
 }
 
 /// Why `e` cannot edit the selected hunk right now. What kind of change
 /// can be edited is the model's call once it runs.
-fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
+fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     let Focus::Diff(view) = &state.focus else {
-        return Some(NO_CHANGES);
+        return Some(NO_CHANGES.into());
     };
     if let Some(reason) = whitespace_hidden(state) {
         return Some(reason);
     }
     if view.lines.is_some() {
-        return Some("Press Esc to edit the whole hunk");
+        return Some("Press Esc to edit the whole hunk".into());
     }
     if view.loading() {
-        return Some("Loading…");
+        return Some("Loading…".into());
     }
     match &view.patch {
         Some(patch) if !patch.hunks.is_empty() => None,
-        _ => Some(NO_CHANGES),
+        _ => Some(NO_CHANGES.into()),
     }
 }
 
 /// The editor's keys wait while the commit runs, so the message cannot change.
-fn commit_editor_disabled(state: &AppState) -> Option<&'static str> {
+fn commit_editor_disabled(state: &AppState) -> Option<Reason> {
     let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_seq.is_some();
-    running.then_some(OP_RUNNING)
+    running.then_some(OP_RUNNING.into())
 }
 
-fn no_submodule(state: &AppState) -> Option<&'static str> {
+fn no_submodule(state: &AppState) -> Option<Reason> {
     state
         .selected_submodule()
         .is_none()
-        .then_some("No submodule selected")
+        .then_some("No submodule selected".into())
 }
 
 /// Why `i` or `u` cannot run on the selected submodule right now.
-fn submodule_op_disabled(state: &AppState) -> Option<&'static str> {
+fn submodule_op_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     no_submodule(state)
 }
 
 /// Why the selected submodule cannot be entered: it must be surely checked
 /// out, and an operation must not be running in the repository being left.
-pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some("Wait for the operation to finish");
+        return Some("Wait for the operation to finish".into());
     }
     match state.selected_submodule() {
-        None => Some("No submodule selected"),
+        None => Some("No submodule selected".into()),
         Some(sub) if sub.state == SubmoduleState::Uninitialized => {
-            Some("Update the submodule first")
+            Some("Update the submodule first".into())
         }
         // Git marks a conflict before it looks for a checkout, so the
         // directory may hold none, and git there would find the parent.
         Some(sub) if sub.state == SubmoduleState::Conflicted => {
-            Some("Resolve the submodule conflict first")
+            Some("Resolve the submodule conflict first".into())
         }
         Some(_) => None,
     }
 }
 
 /// Why there is no parent to go back to right now.
-pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<Reason> {
     if state.repo_stack.is_empty() {
-        Some("Not in a submodule")
+        Some("Not in a submodule".into())
     } else if state.op_seq.is_some() {
-        Some("Wait for the operation to finish")
+        Some("Wait for the operation to finish".into())
     } else {
         None
     }
@@ -1035,12 +1040,12 @@ pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<&'static str>
 
 /// Why `i` cannot make the launch directory a repository: it is offered
 /// only by the recent list shown outside one.
-pub(crate) fn init_repo_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn init_repo_disabled(state: &AppState) -> Option<Reason> {
     let offered = matches!(state.popups.last(), Some(Popup::Recent(list)) if list.offer_init);
     if state.repo.is_some() || !offered {
-        Some("Already in a repository")
+        Some("Already in a repository".into())
     } else if state.busy > 0 {
-        Some("Loading…")
+        Some("Loading…".into())
     } else {
         None
     }
@@ -1048,57 +1053,57 @@ pub(crate) fn init_repo_disabled(state: &AppState) -> Option<&'static str> {
 
 /// Why no branch action can run right now: one needs a selected branch,
 /// and git one operation at a time.
-pub(crate) fn branch_action_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if state.branches.selected_branch().is_none() {
-        Some("No branch selected")
+        Some("No branch selected".into())
     } else {
         None
     }
 }
 
-pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
     branch_action_disabled(state).or_else(|| {
         let selected = state.branches.selected_branch();
         selected
             .is_some_and(|b| b.head)
-            .then_some("Already on this branch")
+            .then_some("Already on this branch".into())
     })
 }
 
-pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<Reason> {
     branch_action_disabled(state).or_else(|| {
         let selected = state.branches.selected_branch();
         selected
             .is_some_and(|b| b.head)
-            .then_some("Cannot delete the current branch")
+            .then_some("Cannot delete the current branch".into())
     })
 }
 
 /// Why the selected local branch's upstream cannot be removed: it needs
 /// one.
-pub(crate) fn unset_upstream_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn unset_upstream_disabled(state: &AppState) -> Option<Reason> {
     branch_action_disabled(state).or_else(|| {
         let selected = state.branches.selected_branch();
         selected
             .is_some_and(|b| b.upstream.is_none())
-            .then_some("No upstream to unset")
+            .then_some("No upstream to unset".into())
     })
 }
 
 /// Why no remote can be added now: git one operation at a time.
-pub(crate) fn add_remote_disabled(state: &AppState) -> Option<&'static str> {
-    state.op_seq.is_some().then_some(OP_RUNNING)
+pub(crate) fn add_remote_disabled(state: &AppState) -> Option<Reason> {
+    state.op_seq.is_some().then_some(OP_RUNNING.into())
 }
 
 /// Why the selected remote branch cannot be checked out: a header row
 /// is a remote, not a branch.
-pub(crate) fn track_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if state.branches.remotes.selected_branch().is_none() {
-        Some("Select a remote branch")
+        Some("Select a remote branch".into())
     } else {
         None
     }
@@ -1107,15 +1112,15 @@ pub(crate) fn track_disabled(state: &AppState) -> Option<&'static str> {
 /// Why the selected remote cannot be renamed or removed. `remote rename`
 /// and `remote remove` take no `--` in older git, so a name like an option
 /// is never passed; nor is a group of refs no configured remote owns.
-pub(crate) fn change_remote_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn change_remote_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     match state.branches.remotes.selected_remote() {
-        None => Some("No remote selected"),
-        Some(remote) if !remote.configured => Some("Not a configured remote"),
+        None => Some("No remote selected".into()),
+        Some(remote) if !remote.configured => Some("Not a configured remote".into()),
         Some(remote) if remote.name.0.starts_with(b"-") => {
-            Some("Change a remote named like an option with git directly")
+            Some("Change a remote named like an option with git directly".into())
         }
         Some(_) => None,
     }
@@ -1131,12 +1136,12 @@ pub(crate) fn resumable_operation(state: &AppState) -> Option<Operation> {
 
 /// Why the selected branch cannot be merged or rebased onto now: not into
 /// itself, and not while another operation waits to be finished.
-pub(crate) fn merge_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
     branch_action_disabled(state).or_else(|| {
         if state.branches.selected_branch().is_some_and(|b| b.head) {
-            Some("Already on this branch")
+            Some("Already on this branch".into())
         } else if resumable_operation(state).is_some() {
-            Some("Finish or abort the operation in progress")
+            Some("Finish or abort the operation in progress".into())
         } else {
             None
         }
@@ -1145,54 +1150,54 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<&'static str> {
 
 /// Why continue or abort cannot run: one at a time, and only with a
 /// merge, rebase, cherry-pick or revert to act on.
-pub(crate) fn resume_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn resume_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else if resumable_operation(state).is_none() {
-        Some("Nothing in progress")
+        Some("Nothing in progress".into())
     } else {
         None
     }
 }
 
-pub(crate) fn skip_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn skip_disabled(state: &AppState) -> Option<Reason> {
     resume_disabled(state).or_else(|| {
         resumable_operation(state)
             .is_some_and(|op| !op.can_skip())
-            .then_some("A merge cannot be skipped")
+            .then_some("A merge cannot be skipped".into())
     })
 }
 
 /// Why no action can run on the selected commit now: git runs one
 /// operation at a time, and the log needs a commit.
-pub(crate) fn commit_action_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn commit_action_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else {
         no_commit(state)
     }
 }
 
-pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state)
 }
 
 /// Another operation in progress would mix with this one's commits.
-fn in_progress_disabled(state: &AppState) -> Option<&'static str> {
+fn in_progress_disabled(state: &AppState) -> Option<Reason> {
     resumable_operation(state)
         .is_some()
-        .then_some("Finish or abort the operation in progress")
+        .then_some("Finish or abort the operation in progress".into())
 }
 
 /// Why the selected commit cannot be reverted now. A merge commit needs a
 /// mainline chosen, which Kika does not ask for.
-pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn revert_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state)
         .or_else(|| in_progress_disabled(state))
         .or_else(|| {
             let row = state.commits.rows.get(state.commits.selected);
             row.is_some_and(|r| r.parents.len() > 1)
-                .then_some("Cannot revert a merge commit")
+                .then_some("Cannot revert a merge commit".into())
         })
 }
 
@@ -1200,7 +1205,7 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<&'static str> {
 /// row: one operation at a time, none in progress, and a history the
 /// planner can rewrite. On a todo row: one write at a time, and an edit
 /// the list allows.
-pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<&'static str> {
+pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<Reason> {
     if state.commits.todo_selected.is_some() {
         return todo_disabled(state, rewrite);
     }
@@ -1213,9 +1218,16 @@ pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<&'s
 /// minimum git.
 pub(crate) const NEEDS_BREAK: &str = "Needs Git 2.20 or newer";
 
-/// Why a rewrite waits: whether a branch sits on its commits is not known
-/// yet.
+/// Why a rewrite waits: the branches are still being read, so whether
+/// one sits on its commits is not known yet.
 pub(crate) const TIPS_UNKNOWN: &str = "Reading the branches; try again in a moment";
+
+/// Why a rewrite on an older git cannot go ahead: reading the branches
+/// failed, so whether one would be left behind is not known.
+fn tips_failed(error: &str) -> String {
+    let first = error.lines().next().unwrap_or_default();
+    format!("Could not read the branches ({first}); press r to retry")
+}
 
 /// Why a todo edit waits for the last one to be written.
 pub(crate) const TODO_SAVING: &str = "Saving the todo list";
@@ -1225,9 +1237,9 @@ pub(crate) const TODO_SAVING: &str = "Saving the todo list";
 /// (`--update-refs`), so only a move that would change what one holds is
 /// refused; with an older git any stacked branch would be left behind, so
 /// the rewrite is refused.
-pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan, &'static str> {
+pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan, Reason> {
     if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
-        return Err(NEEDS_BREAK);
+        return Err(NEEDS_BREAK.into());
     }
     let commits = &state.commits;
     let (rows, selected) = (commits.rows.as_slice(), commits.selected);
@@ -1244,9 +1256,13 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
     let stacked =
         |tips, from: usize, len| branch_tips::stacked(&rows[from..], len, tips, head.as_deref());
     if !plan.update_refs {
-        let tips = commits.tips.as_deref().ok_or(TIPS_UNKNOWN)?;
+        let tips = match (&commits.tips, &commits.tips_error) {
+            (Some(tips), _) => tips,
+            (None, Some(error)) => return Err(tips_failed(error).into()),
+            (None, None) => return Err(TIPS_UNKNOWN.into()),
+        };
         if let Some(name) = stacked(tips, 0, plan.steps.len()).first() {
-            return Err(reason::intern(branch_tips::left_behind(name)));
+            return Err(branch_tips::left_behind(name).into());
         }
     } else if let (Rewrite::Move(direction), Some(tips)) = (rewrite, &commits.tips) {
         // A branch on the older of the two would end up holding the other.
@@ -1257,7 +1273,7 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
         };
         if let Some(name) = stacked(tips, older, 1).first() {
             let oid = &rows[selected].oid;
-            return Err(reason::intern(rebase_plan::crossing(oid, name)));
+            return Err(rebase_plan::crossing(oid, name).into());
         }
     }
     Ok(plan)
@@ -1268,65 +1284,65 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
 pub(crate) fn todo_edit(
     state: &AppState,
     rewrite: Rewrite,
-) -> Result<(Vec<TodoEntry>, usize), &'static str> {
+) -> Result<(Vec<TodoEntry>, usize), Reason> {
     let commits = &state.commits;
     let (Some(todo), Some(i)) = (&commits.todo, commits.todo_selected) else {
-        return Err("No todo row selected");
+        return Err("No todo row selected".into());
     };
-    todo.edit(i, rewrite).map_err(reason::intern)
+    todo.edit(i, rewrite).map_err(Reason::from)
 }
 
-fn todo_disabled(state: &AppState, rewrite: Rewrite) -> Option<&'static str> {
+fn todo_disabled(state: &AppState, rewrite: Rewrite) -> Option<Reason> {
     if state.op_seq.is_some() {
-        return Some(OP_RUNNING);
+        return Some(OP_RUNNING.into());
     }
     // The list shown is what was written only once it is read back.
     if state.commits.todo_write_seq.is_some() || state.commits.todo_seq.is_some() {
-        return Some(TODO_SAVING);
+        return Some(TODO_SAVING.into());
     }
     if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
-        return Some(NEEDS_BREAK);
+        return Some(NEEDS_BREAK.into());
     }
     todo_edit(state, rewrite).err()
 }
 
-fn squash_disabled(state: &AppState) -> Option<&'static str> {
+fn squash_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Squash))
 }
 
-fn fixup_disabled(state: &AppState) -> Option<&'static str> {
+fn fixup_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Fixup))
 }
 
-fn drop_disabled(state: &AppState) -> Option<&'static str> {
+fn drop_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Drop))
 }
 
-fn reword_disabled(state: &AppState) -> Option<&'static str> {
+fn reword_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Reword))
 }
 
-fn stop_disabled(state: &AppState) -> Option<&'static str> {
+fn stop_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Stop))
 }
 
-fn todo_pick_disabled(state: &AppState) -> Option<&'static str> {
+fn todo_pick_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Pick))
 }
 
-fn break_disabled(state: &AppState) -> Option<&'static str> {
+fn break_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Break)
 }
 
-fn move_up_disabled(state: &AppState) -> Option<&'static str> {
+fn move_up_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Move(Direction::Up))
 }
 
-fn move_down_disabled(state: &AppState) -> Option<&'static str> {
+fn move_down_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Move(Direction::Down))
 }
 
-pub(crate) fn reset_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
 
@@ -1339,26 +1355,26 @@ fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
 }
 
 /// `y` deletes only a merged branch; an unmerged one needs `D`.
-fn plain_delete_disabled(state: &AppState) -> Option<&'static str> {
+fn plain_delete_disabled(state: &AppState) -> Option<Reason> {
     delete_question(state)
         .is_some_and(DeleteBranchConfirm::force)
-        .then_some("Not fully merged: press D to force delete")
+        .then_some("Not fully merged: press D to force delete".into())
 }
 
 /// `D` answers only the stronger question, about an unmerged branch.
-fn force_delete_disabled(state: &AppState) -> Option<&'static str> {
+fn force_delete_disabled(state: &AppState) -> Option<Reason> {
     delete_question(state)
         .is_some_and(|c| !c.force())
-        .then_some("Fully merged: press y to delete")
+        .then_some("Fully merged: press y to delete".into())
 }
 
 /// Why no fetch, pull or push may start: one needs a repository, and git
 /// one operation at a time.
-pub(crate) fn remote_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn remote_disabled(state: &AppState) -> Option<Reason> {
     if state.repo.is_none() {
-        Some("Not in a repository")
+        Some("Not in a repository".into())
     } else if state.op_seq.is_some() || state.remote.is_some() {
-        Some(REMOTE_BUSY)
+        Some(REMOTE_BUSY.into())
     } else {
         None
     }
@@ -1367,23 +1383,23 @@ pub(crate) fn remote_disabled(state: &AppState) -> Option<&'static str> {
 pub(crate) const REMOTE_BUSY: &str = "Another operation is running";
 
 /// A fetch also waits for auto-fetch, which would race it for the same refs.
-pub(crate) fn fetch_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn fetch_disabled(state: &AppState) -> Option<Reason> {
     remote_disabled(state).or_else(|| {
         state
             .watch
             .fetch_pending
-            .then_some("A background fetch is running")
+            .then_some("A background fetch is running".into())
     })
 }
 
 /// Pull and push work on the current branch, so they need one.
-pub(crate) fn pull_push_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn pull_push_disabled(state: &AppState) -> Option<Reason> {
     remote_disabled(state).or_else(|| {
         let detached = state
             .branch
             .as_ref()
             .is_some_and(|b| matches!(b.head, Head::Detached(_)));
-        detached.then_some("HEAD is detached")
+        detached.then_some("HEAD is detached".into())
     })
 }
 
@@ -3325,8 +3341,8 @@ mod tests {
         key(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
-    fn off(_: &AppState) -> Option<&'static str> {
-        Some("off")
+    fn off(_: &AppState) -> Option<Reason> {
+        Some("off".into())
     }
 
     const X: &[KeyPattern] = &[KeyPattern::any(KeyCode::Char('x'))];
@@ -3423,7 +3439,7 @@ mod tests {
                 &state,
                 plain('v')
             ),
-            Resolution::Disabled("off")
+            Resolution::Disabled(ref reason) if reason == "off"
         ));
         assert_eq!(
             run(&table, KeyScope::Workspace, &state, plain('v')),
@@ -3435,21 +3451,21 @@ mod tests {
     fn available_lists_nearest_first_and_omits_fully_shadowed_bindings() {
         let table = table();
         let state = AppState::new(Context::Workspace);
-        let listed: Vec<(KeyScope, char, Option<&str>)> =
+        let listed: Vec<(KeyScope, char, Option<String>)> =
             available(&table, &Keymap::default(), KeyScope::Files, &state)
                 .into_iter()
                 .map(|(b, reason)| {
                     let KeyCode::Char(c) = b.keys[0].code else {
                         unreachable!()
                     };
-                    (b.scope, c, reason)
+                    (b.scope, c, reason.map(String::from))
                 })
                 .collect();
         assert_eq!(
             listed,
             [
                 (KeyScope::Files, 'x', None),
-                (KeyScope::Files, 'v', Some("off")),
+                (KeyScope::Files, 'v', Some("off".to_string())),
                 (KeyScope::Workspace, 'y', None),
                 (KeyScope::Global, 'z', None),
             ]
@@ -3692,7 +3708,7 @@ mod tests {
         for (scope, k) in [(KeyScope::Lines, plain(' ')), (KeyScope::Diff, plain('v'))] {
             assert!(matches!(
                 resolve(registry(), &Keymap::default(), scope, &state, k),
-                Resolution::Disabled(NO_CHANGES)
+                Resolution::Disabled(ref reason) if reason == NO_CHANGES
             ));
         }
         let bound = |scope, k| {
@@ -3798,9 +3814,9 @@ mod tests {
         };
         let mut state = AppState::new(Context::Workspace);
         state.op_seq = Some(1);
-        assert_eq!(c(&state), Err("An operation is running"));
+        assert_eq!(c(&state), Err("An operation is running".into()));
         state.op_seq = None;
-        assert_eq!(c(&state), Err("Nothing to commit"));
+        assert_eq!(c(&state), Err("Nothing to commit".into()));
         let file = |kind| crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
@@ -3809,9 +3825,9 @@ mod tests {
             kind,
         };
         state.files = vec![file(EntryKind::Changed), file(EntryKind::Conflicted)];
-        assert_eq!(c(&state), Err("Resolve conflicts before committing"));
+        assert_eq!(c(&state), Err("Resolve conflicts before committing".into()));
         state.op_seq = Some(1);
-        assert_eq!(c(&state), Err("An operation is running"));
+        assert_eq!(c(&state), Err("An operation is running".into()));
         state.op_seq = None;
         state.files.pop();
         assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
@@ -3838,11 +3854,11 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(
             a(&state),
-            Err("No commit to amend"),
+            Err("No commit to amend".into()),
             "before the first load"
         );
         state.branch = Some(branch(Head::Unborn("main".into())));
-        assert_eq!(a(&state), Err("No commit to amend"));
+        assert_eq!(a(&state), Err("No commit to amend".into()));
 
         // A clean tree with commits: nothing staged is a message-only amend.
         state.branch = Some(branch(Head::Branch("main".into())));
@@ -3852,7 +3868,7 @@ mod tests {
         assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
 
         state.op_seq = Some(1);
-        assert_eq!(a(&state), Err(OP_RUNNING));
+        assert_eq!(a(&state), Err(OP_RUNNING.into()));
         state.op_seq = None;
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
@@ -3861,7 +3877,7 @@ mod tests {
             worktree: 'U',
             kind: EntryKind::Conflicted,
         }];
-        assert_eq!(a(&state), Err("Resolve conflicts before amending"));
+        assert_eq!(a(&state), Err("Resolve conflicts before amending".into()));
     }
 
     #[test]
@@ -3886,7 +3902,7 @@ mod tests {
                     &state,
                     ctrl(c)
                 ),
-                Resolution::Disabled(OP_RUNNING)
+                Resolution::Disabled(ref reason) if reason == OP_RUNNING
             ));
         }
     }
@@ -4020,7 +4036,7 @@ mod tests {
             assert!(
                 matches!(
                     resolve(registry(), &Keymap::default(), scope, &state, backspace),
-                    Resolution::Disabled("Not in a submodule")
+                    Resolution::Disabled(ref reason) if reason == "Not in a submodule"
                 ),
                 "{scope:?}"
             );
@@ -4053,7 +4069,7 @@ mod tests {
                 &state,
                 backspace
             ),
-            Resolution::Disabled("Wait for the operation to finish")
+            Resolution::Disabled(ref reason) if reason == "Wait for the operation to finish"
         ));
         assert_eq!(
             KeyPattern::any(KeyCode::Backspace).label(),
@@ -4197,20 +4213,23 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(
             reason(&state, KeyScope::Files, 'o'),
-            Some("No file selected")
+            Some("No file selected".into())
         );
         state.op_seq = Some(1);
-        assert_eq!(reason(&state, KeyScope::Files, 'o'), Some(OP_RUNNING));
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(OP_RUNNING));
+        assert_eq!(
+            reason(&state, KeyScope::Files, 'o'),
+            Some(OP_RUNNING.into())
+        );
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(OP_RUNNING.into()));
         state.op_seq = None;
 
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.seq = Some(3);
         state.focus = Focus::Diff(view.clone());
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some("Loading…"));
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some("Loading…".into()));
         view.seq = None;
         state.focus = Focus::Diff(view.clone());
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(NO_CHANGES));
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(NO_CHANGES.into()));
         view.patch =
             Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
         state.focus = Focus::Diff(view.clone());
@@ -4222,7 +4241,7 @@ mod tests {
         state.focus = Focus::Diff(view);
         assert_eq!(
             reason(&state, KeyScope::Lines, 'e'),
-            Some("Press Esc to edit the whole hunk")
+            Some("Press Esc to edit the whole hunk".into())
         );
     }
 
@@ -4240,9 +4259,9 @@ mod tests {
             Resolution::Unbound | Resolution::Command(_) => panic!("d is unbound"),
         };
         let mut state = AppState::new(Context::Workspace);
-        assert_eq!(d(&state), Some("No file selected"));
+        assert_eq!(d(&state), Some("No file selected".into()));
         state.op_seq = Some(1);
-        assert_eq!(d(&state), Some("An operation is running"));
+        assert_eq!(d(&state), Some("An operation is running".into()));
     }
 
     #[test]
@@ -4263,7 +4282,7 @@ mod tests {
                     &state,
                     k
                 ),
-                Resolution::Disabled("An operation is running")
+                Resolution::Disabled(ref reason) if reason == "An operation is running"
             ));
         }
         // Ctrl+C is the way out while git runs.
@@ -4433,7 +4452,7 @@ mod tests {
         // A header row is a remote, not a branch to check out.
         assert!(matches!(
             resolve_in(&state, plain(' ')),
-            Resolution::Disabled("Select a remote branch")
+            Resolution::Disabled(ref reason) if reason == "Select a remote branch"
         ));
         state.branches.remotes.move_by(1);
         assert_eq!(run(&state, plain(' ')), AppIntent::TrackRemoteBranch);
@@ -4532,7 +4551,7 @@ mod tests {
         };
         let mut state = AppState::new(Context::Workspace);
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
-            assert_eq!(disabled(&state), Some("No commits"));
+            assert_eq!(disabled(&state), Some("No commits".into()));
         }
         state.commits.rows = vec![row(&["p"])];
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
@@ -4541,7 +4560,7 @@ mod tests {
         state.commits.rows = vec![row(&["p", "q"])];
         assert_eq!(
             revert_disabled(&state),
-            Some("Cannot revert a merge commit")
+            Some("Cannot revert a merge commit".into())
         );
         assert_eq!(reset_disabled(&state), None);
         assert_eq!(checkout_commit_disabled(&state), None);
@@ -4554,14 +4573,14 @@ mod tests {
             in_progress: vec![Operation::Revert],
         });
         let busy = Some("Finish or abort the operation in progress");
-        assert_eq!(revert_disabled(&state), busy);
-        assert_eq!(reset_disabled(&state), busy);
+        assert_eq!(revert_disabled(&state).as_deref(), busy);
+        assert_eq!(reset_disabled(&state).as_deref(), busy);
         // Git refuses a checkout that would lose work; it may go ahead.
         assert_eq!(checkout_commit_disabled(&state), None);
 
         state.op_seq = Some(1);
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
-            assert_eq!(disabled(&state), Some(OP_RUNNING));
+            assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
         }
     }
 
@@ -4624,6 +4643,20 @@ mod tests {
             on(&state, key(KeyCode::Up, KeyModifiers::NONE)),
             Some(AppIntent::CommitPrev)
         );
+        // Only plain arrows move the cursor now: Alt+arrow moves the
+        // commit, and Shift+arrow is left unbound.
+        for code in [KeyCode::Down, KeyCode::Up] {
+            assert!(matches!(
+                resolve(
+                    registry(),
+                    &Keymap::default(),
+                    KeyScope::Commits,
+                    &state,
+                    key(code, KeyModifiers::SHIFT)
+                ),
+                Resolution::Unbound
+            ));
+        }
         // A log row is a pick already; `p` stays pull.
         assert!(matches!(
             resolve(
@@ -4633,7 +4666,7 @@ mod tests {
                 &state,
                 plain('u')
             ),
-            Resolution::Disabled("Already a pick")
+            Resolution::Disabled(ref reason) if reason == "Already a pick"
         ));
         assert!(matches!(
             resolve(
@@ -4685,18 +4718,21 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.commits.tips = Some(vec![]);
         for disabled in all {
-            assert_eq!(disabled(&state), Some("No commits"));
+            assert_eq!(disabled(&state), Some("No commits".into()));
         }
         // `a` on `b`, the root.
         state.commits.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
         assert_eq!(drop_disabled(&state), None);
         assert_eq!(reword_disabled(&state), None);
         let below_is_root = Some("The commit below is the first commit");
-        assert_eq!(squash_disabled(&state), below_is_root);
-        assert_eq!(fixup_disabled(&state), below_is_root);
+        assert_eq!(squash_disabled(&state).as_deref(), below_is_root);
+        assert_eq!(fixup_disabled(&state).as_deref(), below_is_root);
         state.commits.selected = 1;
         for disabled in all {
-            assert_eq!(disabled(&state), Some("Cannot rewrite the first commit"));
+            assert_eq!(
+                disabled(&state),
+                Some("Cannot rewrite the first commit".into())
+            );
         }
 
         state.commits.selected = 0;
@@ -4713,12 +4749,12 @@ mod tests {
         for disabled in all {
             assert_eq!(
                 disabled(&state),
-                Some("Finish or abort the operation in progress")
+                Some("Finish or abort the operation in progress".into())
             );
         }
         state.op_seq = Some(1);
         for disabled in all {
-            assert_eq!(disabled(&state), Some(OP_RUNNING));
+            assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
         }
     }
 
@@ -4872,7 +4908,7 @@ mod tests {
         ] {
             assert!(matches!(
                 resolve(registry(), &Keymap::default(), KeyScope::Files, &state, k),
-                Resolution::Disabled("No file selected")
+                Resolution::Disabled(ref reason) if reason == "No file selected"
             ));
         }
     }
@@ -4915,11 +4951,20 @@ mod tests {
         assert_eq!(reason(&state, '+'), None);
         assert_eq!(reason(&state, '-'), None);
         state.diff_options.context = MAX_CONTEXT;
-        assert_eq!(reason(&state, '+'), Some("Already at the most context"));
-        assert_eq!(reason(&state, '='), Some("Already at the most context"));
+        assert_eq!(
+            reason(&state, '+'),
+            Some("Already at the most context".into())
+        );
+        assert_eq!(
+            reason(&state, '='),
+            Some("Already at the most context".into())
+        );
         assert_eq!(reason(&state, '-'), None);
         state.diff_options.context = MIN_CONTEXT;
-        assert_eq!(reason(&state, '-'), Some("Already at the least context"));
+        assert_eq!(
+            reason(&state, '-'),
+            Some("Already at the least context".into())
+        );
         assert_eq!(reason(&state, '+'), None);
     }
 
@@ -4960,7 +5005,7 @@ mod tests {
         for c in [' ', 'v', 'd', 'e'] {
             assert_eq!(
                 reason(&state, KeyScope::Diff, c),
-                Some(WHITESPACE_HIDDEN),
+                Some(WHITESPACE_HIDDEN.into()),
                 "{c:?}"
             );
         }
@@ -4972,7 +5017,7 @@ mod tests {
         for c in [' ', 'd'] {
             assert_eq!(
                 reason(&state, KeyScope::Lines, c),
-                Some(WHITESPACE_HIDDEN),
+                Some(WHITESPACE_HIDDEN.into()),
                 "{c:?}"
             );
         }
@@ -5353,7 +5398,7 @@ mod tests {
                 &state,
                 plain('i')
             ),
-            Resolution::Disabled("Already in a repository")
+            Resolution::Disabled(ref reason) if reason == "Already in a repository"
         ));
     }
 
@@ -5366,7 +5411,7 @@ mod tests {
                 |state: &AppState| resolve(registry(), &Keymap::default(), scope, state, ctrl_x);
             state.command_running = false;
             assert!(
-                matches!(at(&state), Resolution::Disabled("No command is running")),
+                matches!(at(&state), Resolution::Disabled(ref reason) if reason == "No command is running"),
                 "{scope:?}"
             );
             state.command_running = true;

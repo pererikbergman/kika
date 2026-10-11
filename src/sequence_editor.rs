@@ -218,6 +218,11 @@ mod tests {
         todo.extend_from_slice(b"exec rm -rf /\n");
         fs::write(&path, todo).unwrap();
         refused(&[path.clone().into()], &plan(), &path);
+        // Git runs an indented command too, so it is no comment.
+        let mut indented = self::todo();
+        indented.extend_from_slice(b"\t  exec rm -rf /\n");
+        fs::write(&path, indented).unwrap();
+        refused(&[path.clone().into()], &plan(), &path);
     }
 
     #[cfg(unix)]

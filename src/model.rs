@@ -37,7 +37,7 @@ use crate::git::version::GitVersion;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
-use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
+use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
@@ -216,7 +216,7 @@ pub struct AppState {
     pub help_scroll: usize,
     pub commit: CommitFlow,
     /// Why the last key did nothing, shown in the bottom bar until the next key.
-    pub notice: Option<&'static str>,
+    pub notice: Option<Reason>,
     /// Menus, questions, prompts and errors, drawn bottom to top. The top
     /// one takes the keys; closing it shows the one below again.
     pub popups: Vec<Popup>,
@@ -1072,7 +1072,7 @@ impl AppState {
     /// Step through built-in, each renderer, and back to built-in.
     fn cycle_renderer(&mut self) -> Vec<Effect> {
         if self.renderers.is_empty() {
-            self.notice = Some(external_diff::NO_RENDERER);
+            self.notice = Some(external_diff::NO_RENDERER.into());
             return vec![];
         }
         self.renderer = match self.renderer {
@@ -1236,7 +1236,7 @@ impl AppState {
         match self.discard_confirm() {
             Ok(Some(confirm)) => self.popups.push(Popup::Discard(confirm)),
             Ok(None) => {}
-            Err(reason) => self.notice = Some(reason),
+            Err(reason) => self.notice = Some(reason.into()),
         }
     }
 
@@ -1306,7 +1306,7 @@ impl AppState {
             return vec![];
         };
         if entry.worktree == 'D' || entry.index == 'D' {
-            self.notice = Some("The file is deleted");
+            self.notice = Some("The file is deleted".into());
             return vec![];
         }
         let (path, line) = match &self.focus {
@@ -1332,22 +1332,22 @@ impl AppState {
             return vec![];
         }
         if self.diff_options.ignore_whitespace {
-            self.notice = Some(keymap::WHITESPACE_HIDDEN);
+            self.notice = Some(keymap::WHITESPACE_HIDDEN.into());
             return vec![];
         }
         if view.side == DiffSide::Index {
-            self.notice = Some("Edit hunks from the unstaged view");
+            self.notice = Some("Edit hunks from the unstaged view".into());
             return vec![];
         }
         let Some(file_patch) = &view.patch else {
             return vec![];
         };
         if file_patch.kind != FileKind::Modified {
-            self.notice = Some("Only hunks of changed files can be edited");
+            self.notice = Some("Only hunks of changed files can be edited".into());
             return vec![];
         }
         if file_patch.hunks.is_empty() {
-            self.notice = Some(NO_CHANGES);
+            self.notice = Some(NO_CHANGES.into());
             return vec![];
         }
         match patch::build(
@@ -1357,7 +1357,7 @@ impl AppState {
         ) {
             Ok(built) => vec![Effect::HandOff(HandOff::edit_hunk(&built))],
             Err(error) => {
-                self.notice = Some(error.message());
+                self.notice = Some(error.message().into());
                 vec![]
             }
         }
@@ -1392,7 +1392,7 @@ impl AppState {
         match result {
             Ok(Some(patch)) => self.start_op(Ok(Some(GitOp::ApplyEdited { patch }))),
             Ok(None) => {
-                self.notice = Some("Edit cancelled");
+                self.notice = Some("Edit cancelled".into());
                 vec![]
             }
             Err(message) => {
@@ -1419,7 +1419,7 @@ impl AppState {
         match found {
             Some(index) => self.select(index),
             None => {
-                self.notice = Some("No file matches");
+                self.notice = Some("No file matches".into());
                 vec![]
             }
         }
@@ -1432,17 +1432,17 @@ impl AppState {
             return vec![];
         };
         let Some(target) = self.command_target() else {
-            self.notice = Some("No file selected");
+            self.notice = Some("No file selected".into());
             return vec![];
         };
         if self.command_running {
-            self.notice = Some("A command is running");
+            self.notice = Some("A command is running".into());
             return vec![];
         }
         // Say now what the selection lacks, not after the prompts.
         let blanks = vec![String::new(); command.prompts.len()];
         if let Err(reason) = command.expand(&target, &blanks) {
-            self.notice = Some(reason);
+            self.notice = Some(reason.into());
             return vec![];
         }
         self.ask_or_run(PendingCommand {
@@ -1520,7 +1520,7 @@ impl AppState {
         let argv = match command.expand(&target, &answers) {
             Ok(argv) => argv,
             Err(reason) => {
-                self.notice = Some(reason);
+                self.notice = Some(reason.into());
                 return vec![];
             }
         };
@@ -1564,7 +1564,7 @@ impl AppState {
                 &message,
                 "Press Esc to close",
             )),
-            Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled"),
+            Err(CommandFailure::Cancelled) => self.notice = Some("Command cancelled".into()),
             Ok(text) if output == OutputMode::Popup => {
                 let text = if text.is_empty() {
                     "(no output)"
@@ -1863,7 +1863,7 @@ impl AppState {
             return vec![];
         };
         if self.diff_options.ignore_whitespace {
-            self.notice = Some(keymap::WHITESPACE_HIDDEN);
+            self.notice = Some(keymap::WHITESPACE_HIDDEN.into());
             return vec![];
         }
         let Some(file_patch) = &view.patch else {
@@ -1877,7 +1877,7 @@ impl AppState {
         let built = match patch::build(file_patch, &selection, direction) {
             Ok(built) => built,
             Err(error) => {
-                self.notice = Some(error.message());
+                self.notice = Some(error.message().into());
                 return vec![];
             }
         };
@@ -2000,7 +2000,7 @@ impl AppState {
             return vec![];
         };
         if line.is_uncommitted() {
-            self.notice = Some("Not committed yet");
+            self.notice = Some("Not committed yet".into());
             return vec![];
         }
         let oid = line.oid.clone();
@@ -2134,7 +2134,7 @@ impl AppState {
             return vec![];
         };
         if editor.subject.trim().is_empty() {
-            self.notice = Some("Write a subject first");
+            self.notice = Some("Write a subject first".into());
             return vec![];
         }
         // Git keeps `HEAD`'s own message, byte for byte, when it is untouched.
@@ -2203,7 +2203,7 @@ impl AppState {
                 self.start_commit(Some(message))
             }
             Ok(None) => {
-                self.notice = Some("Empty message; commit aborted");
+                self.notice = Some("Empty message; commit aborted".into());
                 vec![]
             }
             Err(message) => {
@@ -2257,7 +2257,7 @@ impl AppState {
                         }
                     ) =>
                 {
-                    self.notice = Some("Squashed changes are staged; commit them");
+                    self.notice = Some("Squashed changes are staged; commit them".into());
                 }
                 Ok(()) => {}
                 Err(message) => {
@@ -2649,7 +2649,7 @@ impl AppState {
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some("Wait for the operation to finish");
+            self.notice = Some("Wait for the operation to finish".into());
             return vec![];
         }
         if self.repo.as_ref() == Some(&path) && self.repo_stack.is_empty() {
@@ -3195,7 +3195,7 @@ impl AppState {
     /// said in the bar.
     fn branch_for_action(
         &mut self,
-        disabled: fn(&AppState) -> Option<&'static str>,
+        disabled: fn(&AppState) -> Option<Reason>,
     ) -> Option<BranchName> {
         if self.context != Context::Workspace {
             return None;
@@ -3239,7 +3239,7 @@ impl AppState {
     /// acted on now, said in the bar.
     fn operation_for_action(
         &mut self,
-        disabled: fn(&AppState) -> Option<&'static str>,
+        disabled: fn(&AppState) -> Option<Reason>,
     ) -> Option<Operation> {
         if self.context != Context::Workspace {
             return None;
@@ -3254,7 +3254,7 @@ impl AppState {
     /// Continue or skip the operation in progress.
     fn resume(
         &mut self,
-        disabled: fn(&AppState) -> Option<&'static str>,
+        disabled: fn(&AppState) -> Option<Reason>,
         make: fn(Operation) -> GitOp,
     ) -> Vec<Effect> {
         match self.operation_for_action(disabled) {
@@ -3276,7 +3276,7 @@ impl AppState {
     /// it now, said in the bar. Only an id of hex digits reaches argv.
     fn commit_for_action(
         &mut self,
-        disabled: fn(&AppState) -> Option<&'static str>,
+        disabled: fn(&AppState) -> Option<Reason>,
     ) -> Option<(CommitId, String)> {
         if self.context != Context::Workspace {
             return None;
@@ -3289,7 +3289,7 @@ impl AppState {
         match CommitId::parse(&row.oid) {
             Some(id) => Some((id, row.short_oid.clone())),
             None => {
-                self.notice = Some("Not a commit id git can use");
+                self.notice = Some("Not a commit id git can use".into());
                 None
             }
         }
@@ -3405,7 +3405,7 @@ impl AppState {
         self.commits.todo_write_seq = None;
         match result {
             Ok(()) => {}
-            Err(message) if message == CHANGED_ON_DISK => self.notice = Some(TODO_CHANGED),
+            Err(message) if message == CHANGED_ON_DISK => self.notice = Some(TODO_CHANGED.into()),
             Err(message) => self.op_error = Some(message),
         }
         self.reload_rebase_todo()
@@ -3462,11 +3462,11 @@ impl AppState {
         };
         let name = text.trim();
         if name.is_empty() {
-            self.notice = Some("A branch needs a name");
+            self.notice = Some("A branch needs a name".into());
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         self.start_op(Ok(Some(op(branch, name.to_string()))))
@@ -3548,11 +3548,11 @@ impl AppState {
             return vec![];
         };
         let Some(upstream) = self.branches.remotes.branch_named(text.trim()).cloned() else {
-            self.notice = Some("No such remote branch; fetch, or check the name");
+            self.notice = Some("No such remote branch; fetch, or check the name".into());
             return vec![];
         };
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         self.start_op(Ok(Some(GitOp::SetUpstream { branch, upstream })))
@@ -3563,7 +3563,7 @@ impl AppState {
 /// opened, so a reload while the user types cannot change it.
 impl AppState {
     /// Whether a Remotes action may run now; if not, the bar says why.
-    fn remotes_action(&mut self, disabled: fn(&AppState) -> Option<&'static str>) -> bool {
+    fn remotes_action(&mut self, disabled: fn(&AppState) -> Option<Reason>) -> bool {
         if self.context != Context::Workspace {
             return false;
         }
@@ -3597,11 +3597,11 @@ impl AppState {
         };
         let name = text.trim();
         if name.is_empty() {
-            self.notice = Some("A branch needs a name");
+            self.notice = Some("A branch needs a name".into());
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         let name = name.to_string();
@@ -3623,7 +3623,7 @@ impl AppState {
     fn remote_named(&mut self, text: &str) {
         let name = text.trim();
         if let Err(reason) = validate_remote_name(name) {
-            self.notice = Some(reason);
+            self.notice = Some(reason.into());
             return;
         }
         self.branches.remotes.pending = Some(RemotePending::AddUrl {
@@ -3643,11 +3643,11 @@ impl AppState {
         };
         let url = text.trim();
         if let Err(reason) = validate_remote_url(url) {
-            self.notice = Some(reason);
+            self.notice = Some(reason.into());
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         let url = url.to_string();
@@ -3680,11 +3680,11 @@ impl AppState {
         };
         let to = text.trim();
         if let Err(reason) = validate_remote_name(to) {
-            self.notice = Some(reason);
+            self.notice = Some(reason.into());
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         let to = to.to_string();
@@ -4839,7 +4839,7 @@ mod tests {
         state.op_seq = Some(99);
         let busy = state.busy;
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         assert_eq!(state.busy, busy);
     }
 
@@ -4847,7 +4847,7 @@ mod tests {
     fn space_without_a_selection_says_so() {
         let (mut state, _) = with_files(vec![], 24);
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
     }
 
     #[test]
@@ -4860,7 +4860,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char('a')), vec![]);
         assert_eq!(
             state.notice,
-            Some("Resolve conflicts before staging everything")
+            Some("Resolve conflicts before staging everything".into())
         );
         assert_eq!(state.op_error, None);
         assert_eq!(state.op_seq, None);
@@ -5166,7 +5166,7 @@ mod tests {
         let mut state = editing();
         type_text(&mut state, "  ");
         assert_eq!(ctrl(&mut state, 's'), vec![]);
-        assert_eq!(state.notice, Some("Write a subject first"));
+        assert_eq!(state.notice, Some("Write a subject first".into()));
         assert_eq!(state.op_seq, None);
         assert_eq!(editor(&state).subject, "  ");
     }
@@ -5228,17 +5228,20 @@ mod tests {
         };
         let (mut state, _) = with_files(vec![changed("a.rs", 'M', '.'), conflict], 24);
         press(&mut state, KeyCode::Char('c'));
-        assert_eq!(state.notice, Some("Resolve conflicts before committing"));
+        assert_eq!(
+            state.notice,
+            Some("Resolve conflicts before committing".into())
+        );
         assert_eq!(state.commit, CommitFlow::Closed);
 
         let (mut state, _) = with_files(vec![], 24);
         press(&mut state, KeyCode::Char('c'));
-        assert_eq!(state.notice, Some("Nothing to commit"));
+        assert_eq!(state.notice, Some("Nothing to commit".into()));
 
         let (mut state, _) = with_files(three_files(), 24);
         state.op_seq = Some(5);
         press(&mut state, KeyCode::Char('c'));
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         assert_eq!(state.commit, CommitFlow::Closed);
     }
 
@@ -5350,7 +5353,7 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(ctrl(&mut state, 's'), vec![]);
         assert_eq!(state.commit, before);
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         assert!(!state.should_quit);
     }
 
@@ -5700,13 +5703,13 @@ mod tests {
             ..on_branch("main")
         });
         assert_eq!(press(&mut state, KeyCode::Char('A')), vec![]);
-        assert_eq!(state.notice, Some("No commit to amend"));
+        assert_eq!(state.notice, Some("No commit to amend".into()));
         assert_eq!(state.commit, CommitFlow::Closed);
 
         let (mut state, _) = with_files(three_files(), 24);
         state.op_seq = Some(7);
         assert_eq!(press(&mut state, KeyCode::Char('A')), vec![]);
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         assert_eq!(state.commit, CommitFlow::Closed);
     }
 
@@ -5804,7 +5807,7 @@ mod tests {
         let effects = state.update(AppIntent::CommitMessageEdited { result: Ok(None) });
         assert_eq!(effects, vec![]);
         assert_eq!(state.commit, before);
-        assert_eq!(state.notice, Some("Empty message; commit aborted"));
+        assert_eq!(state.notice, Some("Empty message; commit aborted".into()));
         assert_eq!(state.op_seq, None);
     }
 
@@ -5883,7 +5886,7 @@ mod tests {
 
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
 
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
         assert_eq!(state.popups, before);
     }
 
@@ -5924,7 +5927,7 @@ mod tests {
         state.update(AppIntent::MenuNext);
         state.update(AppIntent::MenuNext);
         assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
-        assert_eq!(state.notice, Some("No commit to amend"));
+        assert_eq!(state.notice, Some("No commit to amend".into()));
     }
 
     #[test]
@@ -6005,7 +6008,7 @@ mod tests {
     fn going_to_a_missing_file_says_so_and_empty_text_does_nothing() {
         let mut state = two_txt_files();
         assert_eq!(state.update(AppIntent::GoToFile("zzz".into())), vec![]);
-        assert_eq!(state.notice, Some("No file matches"));
+        assert_eq!(state.notice, Some("No file matches".into()));
         assert_eq!(state.selected, Some(0));
 
         state.notice = None;
@@ -6192,7 +6195,7 @@ mod tests {
     fn enter_without_a_file_says_so() {
         let (mut state, _) = with_files(vec![], 24);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
         assert_eq!(state.focus, Focus::Files);
     }
 
@@ -6262,7 +6265,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
         assert_eq!(
             state.notice,
-            Some("Binary file: stage it from the Files panel")
+            Some("Binary file: stage it from the Files panel".into())
         );
         assert_eq!(state.op_seq, None);
     }
@@ -6272,13 +6275,13 @@ mod tests {
         let mut state = focused(three_files(), TWO_HUNKS);
         state.op_seq = Some(1);
         press(&mut state, KeyCode::Char(' '));
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         state.op_seq = None;
 
         let mut loading = state.clone();
         press(&mut loading, KeyCode::Char('t'));
         press(&mut loading, KeyCode::Char(' '));
-        assert_eq!(loading.notice, Some("Loading…"));
+        assert_eq!(loading.notice, Some("Loading…".into()));
 
         for (kind, reason) in [
             (EntryKind::Conflicted, "Resolve the conflict first"),
@@ -6294,12 +6297,12 @@ mod tests {
             let mut odd = state.clone();
             odd.files[0].kind = kind;
             assert_eq!(press(&mut odd, KeyCode::Char(' ')), vec![]);
-            assert_eq!(odd.notice, Some(reason), "{kind:?}");
+            assert_eq!(odd.notice, Some(reason.into()), "{kind:?}");
         }
 
         let mut empty = focused(three_files(), b"");
         press(&mut empty, KeyCode::Char(' '));
-        assert_eq!(empty.notice, Some("No changes in this view"));
+        assert_eq!(empty.notice, Some("No changes in this view".into()));
     }
 
     #[test]
@@ -6310,7 +6313,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
         assert_eq!(
             state.notice,
-            Some("This change can only be staged from the Files panel")
+            Some("This change can only be staged from the Files panel".into())
         );
     }
 
@@ -6332,7 +6335,10 @@ mod tests {
         let mut state = focused(vec![untracked("n.txt")], ONE_HUNK);
         assert_eq!(view(&state).side, DiffSide::Untracked);
         assert_eq!(press(&mut state, KeyCode::Char('t')), vec![]);
-        assert_eq!(state.notice, Some("Untracked file: nothing is staged"));
+        assert_eq!(
+            state.notice,
+            Some("Untracked file: nothing is staged".into())
+        );
     }
 
     #[test]
@@ -6556,7 +6562,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
         assert_eq!(
             state.notice,
-            Some("New file: press Esc, then Space for the whole file")
+            Some("New file: press Esc, then Space for the whole file".into())
         );
         assert_eq!(state.op_seq, None);
         assert_eq!(state.busy, 0);
@@ -6572,7 +6578,7 @@ mod tests {
 
         let mut empty = focused(three_files(), b"");
         assert_eq!(press(&mut empty, KeyCode::Char('v')), vec![]);
-        assert_eq!(empty.notice, Some("No changes in this view"));
+        assert_eq!(empty.notice, Some("No changes in this view".into()));
         assert_eq!(view(&empty).lines, None);
     }
 
@@ -6671,7 +6677,7 @@ mod tests {
         ] {
             let (mut state, _) = with_files(vec![file], 24);
             assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
-            assert_eq!(state.notice, Some(reason));
+            assert_eq!(state.notice, Some(reason.into()));
             assert_eq!(state.popups, []);
         }
     }
@@ -6755,19 +6761,22 @@ mod tests {
     fn d_in_the_staged_view_or_without_a_patch_says_why_and_asks_nothing() {
         let mut state = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
         assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
-        assert_eq!(state.notice, Some("Unstage first to discard"));
+        assert_eq!(state.notice, Some("Unstage first to discard".into()));
         assert_eq!(state.popups, []);
 
         let mut binary = focused(three_files(), BINARY);
         assert_eq!(press(&mut binary, KeyCode::Char('d')), vec![]);
-        assert_eq!(binary.notice, Some(patch::PatchError::Binary.message()));
+        assert_eq!(
+            binary.notice,
+            Some(patch::PatchError::Binary.message().into())
+        );
         assert_eq!(binary.popups, []);
 
         // Still loading: no patch yet.
         let (mut loading, _) = with_files(three_files(), 24);
         press(&mut loading, KeyCode::Enter);
         assert_eq!(press(&mut loading, KeyCode::Char('d')), vec![]);
-        assert_eq!(loading.notice, Some("Loading…"));
+        assert_eq!(loading.notice, Some("Loading…".into()));
         assert_eq!(loading.popups, []);
 
         // The patch failed to load: nothing to discard from.
@@ -6778,7 +6787,7 @@ mod tests {
         });
         state.popups.clear();
         assert_eq!(state.update(AppIntent::Discard), vec![]);
-        assert_eq!(state.notice, Some(NO_CHANGES));
+        assert_eq!(state.notice, Some(NO_CHANGES.into()));
         assert_eq!(state.popups, []);
     }
 
@@ -6864,11 +6873,11 @@ mod tests {
         for (index, worktree) in [('.', 'D'), ('D', '.')] {
             let (mut state, _) = with_files(vec![changed("gone.rs", index, worktree)], 24);
             assert_eq!(press(&mut state, KeyCode::Char('o')), vec![]);
-            assert_eq!(state.notice, Some("The file is deleted"));
+            assert_eq!(state.notice, Some("The file is deleted".into()));
         }
         let mut state = focused(vec![changed("gone.rs", '.', 'D')], ONE_HUNK);
         assert_eq!(press(&mut state, KeyCode::Char('o')), vec![]);
-        assert_eq!(state.notice, Some("The file is deleted"));
+        assert_eq!(state.notice, Some("The file is deleted".into()));
     }
 
     #[test]
@@ -6897,7 +6906,10 @@ mod tests {
     fn e_refuses_the_staged_side_other_kinds_and_a_running_op() {
         let mut staged = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
         assert_eq!(press(&mut staged, KeyCode::Char('e')), vec![]);
-        assert_eq!(staged.notice, Some("Edit hunks from the unstaged view"));
+        assert_eq!(
+            staged.notice,
+            Some("Edit hunks from the unstaged view".into())
+        );
 
         let new_file = b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n\
             --- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n";
@@ -6905,7 +6917,7 @@ mod tests {
         assert_eq!(press(&mut added, KeyCode::Char('e')), vec![]);
         assert_eq!(
             added.notice,
-            Some("Only hunks of changed files can be edited")
+            Some("Only hunks of changed files can be edited".into())
         );
 
         let mut running = focused(three_files(), TWO_HUNKS);
@@ -7010,7 +7022,7 @@ mod tests {
             state.update(AppIntent::HunkEdited { result: Ok(None) }),
             vec![]
         );
-        assert_eq!(state.notice, Some("Edit cancelled"));
+        assert_eq!(state.notice, Some("Edit cancelled".into()));
         assert_eq!(state.op_seq, None);
         assert_eq!(state.popups, []);
     }
@@ -7124,14 +7136,14 @@ mod tests {
         state.diff_options.context = MAX_CONTEXT;
         for c in ['+', '='] {
             assert_eq!(press_char(&mut state, c), vec![], "{c}");
-            assert_eq!(state.notice, Some("Already at the most context"));
+            assert_eq!(state.notice, Some("Already at the most context".into()));
         }
         assert_eq!(state.update(AppIntent::MoreContext), vec![]);
         assert_eq!(state.diff_options.context, MAX_CONTEXT);
 
         state.diff_options.context = MIN_CONTEXT;
         assert_eq!(press_char(&mut state, '-'), vec![]);
-        assert_eq!(state.notice, Some("Already at the least context"));
+        assert_eq!(state.notice, Some("Already at the least context".into()));
         assert_eq!(state.update(AppIntent::LessContext), vec![]);
         assert_eq!(state.diff_options.context, MIN_CONTEXT);
     }
@@ -7204,7 +7216,7 @@ mod tests {
         });
         for c in [' ', 'v', 'd', 'e'] {
             assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
-            assert_eq!(state.notice, Some(REASON), "{c:?}");
+            assert_eq!(state.notice, Some(REASON.into()), "{c:?}");
             assert_eq!(state.popups, [], "{c:?}");
             assert_eq!(state.panel_focus(), KeyScope::Diff, "{c:?}");
         }
@@ -7225,7 +7237,7 @@ mod tests {
         });
         for c in [' ', 'd'] {
             assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
-            assert_eq!(state.notice, Some(REASON), "{c:?}");
+            assert_eq!(state.notice, Some(REASON.into()), "{c:?}");
             assert_eq!(state.popups, [], "{c:?}");
         }
 
@@ -7426,7 +7438,7 @@ mod tests {
         let (mut state, _) = with_files(vec![], 24);
         assert_eq!(press(&mut state, KeyCode::Char('l')), vec![]);
         assert_eq!(state.focus, Focus::Files);
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
     }
 
     #[test]
@@ -7579,7 +7591,7 @@ mod tests {
         }
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(press(&mut state, KeyCode::Char('b')), vec![]);
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
     }
 
     #[test]
@@ -7718,7 +7730,7 @@ mod tests {
         press(&mut state, KeyCode::Char('j'));
         press(&mut state, KeyCode::Char('j'));
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Not committed yet"));
+        assert_eq!(state.notice, Some("Not committed yet".into()));
         assert_eq!(blame(&state).commit, None);
         assert_eq!(state.panel_focus(), KeyScope::Blame);
     }
@@ -7927,7 +7939,7 @@ mod tests {
 
         // One at a time.
         assert_eq!(press_char(&mut state, 'u'), vec![]);
-        assert_eq!(state.notice, Some("An operation is running"));
+        assert_eq!(state.notice, Some("An operation is running".into()));
         state.update(AppIntent::OpFinished {
             tag,
             op,
@@ -8037,7 +8049,7 @@ mod tests {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::Uninitialized)]);
         let before = state.clone();
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Update the submodule first"));
+        assert_eq!(state.notice, Some("Update the submodule first".into()));
         assert_eq!(
             AppState {
                 notice: None,
@@ -8051,7 +8063,10 @@ mod tests {
     fn enter_on_a_conflicted_submodule_says_why_and_stays_in_the_parent() {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::Conflicted)]);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Resolve the submodule conflict first"));
+        assert_eq!(
+            state.notice,
+            Some("Resolve the submodule conflict first".into())
+        );
         assert_eq!(state.repo_stack, []);
         assert!(matches!(state.popups[..], [Popup::Submodules(_)]));
     }
@@ -8061,7 +8076,10 @@ mod tests {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::UpToDate)]);
         state.op_seq = Some(99);
         assert_eq!(state.update(AppIntent::EnterSubmodule), vec![]);
-        assert_eq!(state.notice, Some("Wait for the operation to finish"));
+        assert_eq!(
+            state.notice,
+            Some("Wait for the operation to finish".into())
+        );
         assert_eq!(state.repo_stack, []);
     }
 
@@ -8128,7 +8146,7 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         let before = state.clone();
         assert_eq!(press(&mut state, KeyCode::Backspace), vec![]);
-        assert_eq!(state.notice, Some("Not in a submodule"));
+        assert_eq!(state.notice, Some("Not in a submodule".into()));
         assert_eq!(
             AppState {
                 notice: None,
@@ -8330,7 +8348,7 @@ mod tests {
         assert_eq!(state.busy, 1);
         // Enter on the init row asks the same, once git is done.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Loading…"));
+        assert_eq!(state.notice, Some("Loading…".into()));
 
         let effects = state.update(AppIntent::RepoInitialised {
             tag,
@@ -8396,7 +8414,7 @@ mod tests {
         let mut state = state.with_location(Some("/r/a".into()), "/r/a".into());
         state.update(AppIntent::OpenRecent);
         assert_eq!(press_char(&mut state, 'i'), vec![]);
-        assert_eq!(state.notice, Some("Already in a repository"));
+        assert_eq!(state.notice, Some("Already in a repository".into()));
     }
 
     /// Repository `/r/a` with three files loaded, `b.rs` selected.
@@ -8574,7 +8592,10 @@ mod tests {
         let mut state = in_repo_a();
         state.op_seq = Some(9);
         assert_eq!(state.update(AppIntent::OpenRepo("/r/b".into())), vec![]);
-        assert_eq!(state.notice, Some("Wait for the operation to finish"));
+        assert_eq!(
+            state.notice,
+            Some("Wait for the operation to finish".into())
+        );
         assert_eq!(state.repo, Some("/r/a".into()));
     }
 
@@ -8948,7 +8969,7 @@ mod tests {
         let mut state = on_commit_five();
         state.commits.rows.clear();
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("No commits"));
+        assert_eq!(state.notice, Some("No commits".into()));
     }
 
     #[test]
@@ -9821,12 +9842,12 @@ mod tests {
     fn without_renderers_r_says_so_and_does_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
         assert_eq!(state.update(AppIntent::CycleRenderer), vec![]);
-        assert_eq!(state.notice, Some(external_diff::NO_RENDERER));
+        assert_eq!(state.notice, Some(external_diff::NO_RENDERER.into()));
         assert_eq!(state.renderer, None);
         state.notice = None;
         press(&mut state, KeyCode::Enter);
         assert_eq!(press(&mut state, KeyCode::Char('R')), vec![]);
-        assert_eq!(state.notice, Some(external_diff::NO_RENDERER));
+        assert_eq!(state.notice, Some(external_diff::NO_RENDERER.into()));
     }
 
     #[test]
@@ -10160,7 +10181,7 @@ mod tests {
             &[files_command(&["echo", "{path}"], &["Q"], OutputMode::None)],
         );
         assert_eq!(ctrl_t(&mut state), []);
-        assert_eq!(state.notice, Some("No file selected"));
+        assert_eq!(state.notice, Some("No file selected".into()));
         assert!(state.popups.is_empty());
     }
 
@@ -10193,7 +10214,7 @@ mod tests {
         // The last line is not committed: refused before any prompt.
         state.update(AppIntent::BlameNext);
         assert_eq!(ctrl_t(&mut state), []);
-        assert_eq!(state.notice, Some("Not committed yet"));
+        assert_eq!(state.notice, Some("Not committed yet".into()));
         assert!(state.popups.is_empty());
     }
 
@@ -10209,7 +10230,7 @@ mod tests {
 
         assert_eq!(ctrl_t(&mut state), []);
 
-        assert_eq!(state.notice, Some("A command is running"));
+        assert_eq!(state.notice, Some("A command is running".into()));
         assert_eq!(state.busy, busy);
         assert!(state.popups.is_empty());
     }
@@ -10346,7 +10367,7 @@ mod tests {
         // One down for the command, one up for the reload.
         assert_eq!(state.busy, busy);
         assert!(state.popups.is_empty(), "{:?}", state.popups);
-        assert_eq!(state.notice, Some("Command cancelled"));
+        assert_eq!(state.notice, Some("Command cancelled".into()));
     }
 
     #[test]
@@ -10553,9 +10574,12 @@ mod tests {
     fn checking_out_or_deleting_the_current_branch_is_refused() {
         let mut state = with_branches();
         assert_eq!(state.update(AppIntent::CheckoutBranch), vec![]);
-        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.notice, Some("Already on this branch".into()));
         assert_eq!(state.update(AppIntent::DeleteBranch), vec![]);
-        assert_eq!(state.notice, Some("Cannot delete the current branch"));
+        assert_eq!(
+            state.notice,
+            Some("Cannot delete the current branch".into())
+        );
         assert_eq!(state.popups, []);
         assert_eq!(state.op_seq, None);
     }
@@ -10573,13 +10597,17 @@ mod tests {
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
-            assert_eq!(state.notice, Some("An operation is running"), "{intent:?}");
+            assert_eq!(
+                state.notice,
+                Some("An operation is running".into()),
+                "{intent:?}"
+            );
         }
         assert_eq!(state.popups, []);
 
         let mut empty = AppState::new(Context::Workspace);
         empty.update(AppIntent::CheckoutBranch);
-        assert_eq!(empty.notice, Some("No branch selected"));
+        assert_eq!(empty.notice, Some("No branch selected".into()));
     }
 
     #[test]
@@ -10709,7 +10737,7 @@ mod tests {
         press_char(&mut state, 'n');
         type_text(&mut state, "  ");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("A branch needs a name"));
+        assert_eq!(state.notice, Some("A branch needs a name".into()));
         assert_eq!(state.op_seq, None);
 
         press_char(&mut state, 'n');
@@ -10862,7 +10890,7 @@ mod tests {
     fn checking_out_a_remote_branch_asks_for_the_name_and_tracks_it() {
         let mut state = on_remote_row(0);
         assert_eq!(press_char(&mut state, ' '), vec![]);
-        assert_eq!(state.notice, Some("Select a remote branch"));
+        assert_eq!(state.notice, Some("Select a remote branch".into()));
         assert_eq!(state.popups, []);
 
         state.branches.remotes.move_by(3);
@@ -11007,7 +11035,7 @@ mod tests {
                 press_char(&mut state, key)
             };
             assert_eq!(effects, vec![]);
-            assert_eq!(state.notice, Some("Not a configured remote"));
+            assert_eq!(state.notice, Some("Not a configured remote".into()));
             assert_eq!(state.popups, []);
         }
 
@@ -11076,7 +11104,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(
             state.notice,
-            Some("No such remote branch; fetch, or check the name")
+            Some("No such remote branch; fetch, or check the name".into())
         );
         assert_eq!(state.branches.pending, None);
 
@@ -11108,7 +11136,7 @@ mod tests {
     fn unset_upstream_needs_an_upstream() {
         let mut state = with_remotes();
         assert_eq!(shift(&mut state, 'U'), vec![]);
-        assert_eq!(state.notice, Some("No upstream to unset"));
+        assert_eq!(state.notice, Some("No upstream to unset".into()));
         state.branches.branches[0].upstream = Some("origin/main".into());
         let (_, op) = op_of(&shift(&mut state, 'U'));
         assert_eq!(op, GitOp::UnsetUpstream("main".into()));
@@ -11126,7 +11154,7 @@ mod tests {
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
-            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{intent:?}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
         }
     }
@@ -11267,21 +11295,21 @@ mod tests {
     fn merging_the_current_branch_or_during_an_operation_is_refused() {
         let mut state = in_progress(&[]);
         assert_eq!(press_char(&mut state, 'm'), vec![]);
-        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.notice, Some("Already on this branch".into()));
         assert_eq!(state.popups, []);
         assert_eq!(
             state.update(AppIntent::Merge(MergeStrategy::Squash)),
             vec![]
         );
         assert_eq!(state.update(AppIntent::RebaseOnto), vec![]);
-        assert_eq!(state.notice, Some("Already on this branch"));
+        assert_eq!(state.notice, Some("Already on this branch".into()));
 
         let mut merging = in_progress(&[Operation::Merge]);
         merging.update(AppIntent::BranchNext);
         assert_eq!(press_char(&mut merging, 'm'), vec![]);
         assert_eq!(
             merging.notice,
-            Some("Finish or abort the operation in progress")
+            Some("Finish or abort the operation in progress".into())
         );
         assert_eq!(merging.popups, []);
         assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
@@ -11303,7 +11331,7 @@ mod tests {
         state.update(finished(tag, op, Ok(())));
 
         assert_eq!(press_char(&mut state, 's'), vec![]);
-        assert_eq!(state.notice, Some("A merge cannot be skipped"));
+        assert_eq!(state.notice, Some("A merge cannot be skipped".into()));
         assert_eq!(state.update(AppIntent::SkipOperation), vec![]);
         assert_eq!(state.op_seq, None);
     }
@@ -11346,7 +11374,7 @@ mod tests {
             for c in ['c', 's', 'a'] {
                 state.notice = None;
                 assert_eq!(press_char(&mut state, c), vec![], "{c}");
-                assert_eq!(state.notice, Some("Nothing in progress"), "{c}");
+                assert_eq!(state.notice, Some("Nothing in progress".into()), "{c}");
             }
             for intent in [
                 AppIntent::ContinueOperation,
@@ -11367,7 +11395,7 @@ mod tests {
         for c in ['c', 's', 'a'] {
             state.notice = None;
             assert_eq!(press_char(&mut state, c), vec![], "{c}");
-            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{c}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{c}");
         }
         assert_eq!(state.popups, []);
     }
@@ -11380,7 +11408,7 @@ mod tests {
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(
             state.notice,
-            Some("Squashed changes are staged; commit them")
+            Some("Squashed changes are staged; commit them".into())
         );
         assert!(
             effects
@@ -11560,7 +11588,7 @@ mod tests {
         let mut state = conflict_shown();
         press_char(&mut state, 'o');
         assert_eq!(press_char(&mut state, 't'), vec![]);
-        assert_eq!(state.notice, Some(keymap::OP_RUNNING));
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
         assert_eq!(
             state.update(AppIntent::PickConflict(Choice::Theirs)),
             vec![]
@@ -11663,7 +11691,7 @@ mod tests {
         );
         for c in ['o', 't', 'b'] {
             assert_eq!(press_char(&mut state, c), vec![], "{c}");
-            assert_eq!(state.notice, Some("Nothing to pick"), "{c}");
+            assert_eq!(state.notice, Some("Nothing to pick".into()), "{c}");
         }
     }
 
@@ -11671,7 +11699,7 @@ mod tests {
     fn the_diff_settings_wait_while_the_conflict_view_is_open_and_esc_leaves_it() {
         let mut state = conflict_shown();
         assert_eq!(press_char(&mut state, '+'), vec![]);
-        assert_eq!(state.notice, Some("Close the conflict view first"));
+        assert_eq!(state.notice, Some("Close the conflict view first".into()));
         press_char(&mut state, 'j');
         assert_eq!(conflict(&state).block, 1);
         press_char(&mut state, 'k');
@@ -11697,7 +11725,7 @@ mod tests {
 
         press_char(&mut state, 'j');
         assert_eq!(press_char(&mut state, 'M'), vec![]);
-        assert_eq!(state.notice, Some("Not a conflicted file"));
+        assert_eq!(state.notice, Some("Not a conflicted file".into()));
     }
 
     #[test]
@@ -11778,14 +11806,14 @@ mod tests {
         let mut merge = on_commit();
         merge.commits.rows[1].parents = vec!["c2".into(), "d0".into()];
         assert_eq!(press_char(&mut merge, 'R'), vec![]);
-        assert_eq!(merge.notice, Some("Cannot revert a merge commit"));
+        assert_eq!(merge.notice, Some("Cannot revert a merge commit".into()));
         assert_eq!(merge.update(AppIntent::RevertCommit), vec![]);
         assert_eq!(merge.op_seq, None);
 
         let mut running = on_commit();
         running.op_seq = Some(9);
         assert_eq!(press_char(&mut running, 'R'), vec![]);
-        assert_eq!(running.notice, Some(keymap::OP_RUNNING));
+        assert_eq!(running.notice, Some(keymap::OP_RUNNING.into()));
         assert_eq!(running.update(AppIntent::RevertCommit), vec![]);
 
         let mut reverting = on_commit();
@@ -11795,7 +11823,7 @@ mod tests {
         assert_eq!(press_char(&mut reverting, 'R'), vec![]);
         assert_eq!(
             reverting.notice,
-            Some("Finish or abort the operation in progress")
+            Some("Finish or abort the operation in progress".into())
         );
         assert_eq!(reverting.update(AppIntent::RevertCommit), vec![]);
         assert_eq!(reverting.op_seq, None);
@@ -11891,7 +11919,7 @@ mod tests {
         assert_eq!(state.popups, []);
         assert_eq!(
             state.notice,
-            Some("Finish or abort the operation in progress")
+            Some("Finish or abort the operation in progress".into())
         );
         for mode in [ResetMode::Soft, ResetMode::Hard] {
             assert_eq!(state.update(AppIntent::ResetTo(mode)), vec![]);
@@ -11914,7 +11942,7 @@ mod tests {
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
             assert_eq!(
                 state.notice,
-                Some("Not a commit id git can use"),
+                Some("Not a commit id git can use".into()),
                 "{intent:?}"
             );
         }
@@ -11929,7 +11957,7 @@ mod tests {
         for c in [' ', 'R', 'X'] {
             state.notice = None;
             assert_eq!(press_char(&mut state, c), vec![], "{c}");
-            assert_eq!(state.notice, Some("No commits"), "{c}");
+            assert_eq!(state.notice, Some("No commits".into()), "{c}");
         }
         assert_eq!(state.popups, []);
     }
@@ -12054,14 +12082,14 @@ mod tests {
         remote_of(&press_char(&mut state, 'f'));
         for key in ['f', 'p'] {
             assert_eq!(press_char(&mut state, key), []);
-            assert_eq!(state.notice, Some("Another operation is running"));
+            assert_eq!(state.notice, Some("Another operation is running".into()));
         }
         assert_eq!(shift(&mut state, 'P'), []);
 
         let mut state = remote_ready();
         state.op_seq = Some(99);
         assert_eq!(press_char(&mut state, 'p'), []);
-        assert_eq!(state.notice, Some("Another operation is running"));
+        assert_eq!(state.notice, Some("Another operation is running".into()));
         assert_eq!(state.remote, None);
 
         // An intent that skips the keymap is refused the same way.
@@ -12076,7 +12104,7 @@ mod tests {
         let mut state = remote_ready();
         state.watch.fetch_pending = true;
         assert_eq!(press_char(&mut state, 'f'), []);
-        assert_eq!(state.notice, Some("A background fetch is running"));
+        assert_eq!(state.notice, Some("A background fetch is running".into()));
         // Pull and push are not held up by it.
         remote_of(&press_char(&mut state, 'p'));
 
@@ -12098,15 +12126,15 @@ mod tests {
             ..on_branch("main")
         });
         assert_eq!(press_char(&mut state, 'p'), []);
-        assert_eq!(state.notice, Some("HEAD is detached"));
+        assert_eq!(state.notice, Some("HEAD is detached".into()));
         assert_eq!(shift(&mut state, 'P'), []);
-        assert_eq!(state.notice, Some("HEAD is detached"));
+        assert_eq!(state.notice, Some("HEAD is detached".into()));
         remote_of(&press_char(&mut state, 'f'));
 
         let mut state = remote_ready();
         state.repo = None;
         assert_eq!(press_char(&mut state, 'f'), []);
-        assert_eq!(state.notice, Some("Not in a repository"));
+        assert_eq!(state.notice, Some("Not in a repository".into()));
     }
 
     fn remote_finished(tag: Tag, op: RemoteOp, result: Result<(), RemoteFailure>) -> AppIntent {
@@ -12475,7 +12503,7 @@ mod tests {
         for key in ['s', 'F', 'd', 'e'] {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
-            assert_eq!(state.notice, Some(notice), "{key}");
+            assert_eq!(state.notice, Some(notice.into()), "{key}");
             assert_eq!(state.op_seq, None, "{key}");
             assert_eq!(state.popups, [], "{key}");
         }
@@ -12502,7 +12530,7 @@ mod tests {
         for key in ['s', 'F', 'd', 'e'] {
             let mut state = running.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
-            assert_eq!(state.notice, Some(keymap::OP_RUNNING), "{key}");
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{key}");
             assert_eq!(state.op_seq, Some(9), "{key}");
         }
 
@@ -12594,7 +12622,7 @@ mod tests {
 
         let mut state = on_linear_log();
         assert_eq!(press_char(&mut state, 'b'), vec![]);
-        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK));
+        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK.into()));
         state.git_version = version(20);
         let (_, op) = attached_of(&press_char(&mut state, 'b'));
         let GitOp::InteractiveRebase(plan) = op else {
@@ -12625,13 +12653,13 @@ mod tests {
         for key in ['s', 'F', 'd', 'e', 'E', 'b'] {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
-            assert_eq!(state.notice, Some(reason), "{key}");
+            assert_eq!(state.notice, Some(reason.into()), "{key}");
             assert_eq!(state.op_seq, None, "{key}");
         }
         for code in [KeyCode::Char('k'), KeyCode::Char('j')] {
             let mut state = state.clone();
             assert_eq!(alt(&mut state, code), vec![], "{code:?}");
-            assert_eq!(state.notice, Some(reason), "{code:?}");
+            assert_eq!(state.notice, Some(reason.into()), "{code:?}");
         }
         // Rewriting only the head commit leaves `stack` where it is.
         state.commits.selected = 0;
@@ -12643,7 +12671,14 @@ mod tests {
         let mut unknown = on_linear_log();
         unknown.commits.tips = None;
         assert_eq!(press_char(&mut unknown, 'd'), vec![]);
-        assert_eq!(unknown.notice, Some(keymap::TIPS_UNKNOWN));
+        assert_eq!(unknown.notice, Some(keymap::TIPS_UNKNOWN.into()));
+        // A failed read says so, and how to try again.
+        unknown.commits.tips_error = Some("fatal: bad ref\nmore".into());
+        assert_eq!(press_char(&mut unknown, 'd'), vec![]);
+        assert_eq!(
+            unknown.notice.as_deref(),
+            Some("Could not read the branches (fatal: bad ref); press r to retry")
+        );
     }
 
     #[test]
@@ -12662,14 +12697,14 @@ mod tests {
         assert_eq!(alt(&mut up, KeyCode::Char('k')), vec![]);
         assert_eq!(
             up.notice,
-            Some("Moving bbbbbbb past branch stack would change what it holds")
+            Some("Moving bbbbbbb past branch stack would change what it holds".into())
         );
         let mut from_head = state.clone();
         from_head.commits.selected = 0;
         assert_eq!(alt(&mut from_head, KeyCode::Char('j')), vec![]);
         assert_eq!(
             from_head.notice,
-            Some("Moving aaaaaaa past branch stack would change what it holds")
+            Some("Moving aaaaaaa past branch stack would change what it holds".into())
         );
         // Moving `bbb…` below `ccc…` is fine: `stack` holds both either way.
         let mut down = state.clone();
@@ -12773,7 +12808,7 @@ mod tests {
             let effects = state.update(AppIntent::Key(press));
             if written.is_empty() {
                 assert_eq!(effects, vec![], "{name}");
-                assert_eq!(state.notice, Some("Already a pick"), "{name}");
+                assert_eq!(state.notice, Some("Already a pick".into()), "{name}");
                 continue;
             }
             let (expected, content) = todo_write(&effects);
@@ -12797,14 +12832,14 @@ mod tests {
         };
         assert_eq!(state.commits.todo_selected, Some(3));
         assert_eq!(alt(&mut state, KeyCode::Char('j')), vec![]);
-        assert_eq!(state.notice, Some(keymap::TODO_SAVING));
+        assert_eq!(state.notice, Some(keymap::TODO_SAVING.into()));
         // Until the written list is read back, too.
         state.update(AppIntent::RebaseTodoWritten {
             tag,
             result: Ok(()),
         });
         assert_eq!(press_char(&mut state, 'd'), vec![]);
-        assert_eq!(state.notice, Some(keymap::TODO_SAVING));
+        assert_eq!(state.notice, Some(keymap::TODO_SAVING.into()));
     }
 
     #[test]
@@ -12813,7 +12848,7 @@ mod tests {
         assert_eq!(alt(&mut state, KeyCode::Char('j')), vec![]);
         assert_eq!(
             state.notice,
-            Some("Moving 2222 past branch x would change what it holds")
+            Some("Moving 2222 past branch x would change what it holds".into())
         );
         assert_eq!(state.commits.todo_write_seq, None);
     }
@@ -12824,7 +12859,11 @@ mod tests {
         for key in ['s', 'F', 'd', 'e', 'E', 'b', 'u'] {
             let mut state = stopped(todo, 0);
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
-            assert_eq!(state.notice, Some(rebase_todo::NOT_EDITABLE), "{key}");
+            assert_eq!(
+                state.notice,
+                Some(rebase_todo::NOT_EDITABLE.into()),
+                "{key}"
+            );
         }
         let mut state = stopped(todo, 0);
         assert_eq!(alt(&mut state, KeyCode::Char('k')), vec![]);
@@ -12835,7 +12874,7 @@ mod tests {
         let mut state = stopped(TODO, 2);
         state.git_version = version(19);
         assert_eq!(press_char(&mut state, 'b'), vec![]);
-        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK));
+        assert_eq!(state.notice, Some(keymap::NEEDS_BREAK.into()));
     }
 
     #[test]
@@ -12859,7 +12898,10 @@ mod tests {
         // Log keys do not act on a todo row.
         state.commits.todo_selected = Some(0);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Select a commit in the log first"));
+        assert_eq!(
+            state.notice,
+            Some("Select a commit in the log first".into())
+        );
     }
 
     #[test]
@@ -12931,7 +12973,7 @@ mod tests {
             );
             assert_eq!(state.busy, busy);
             assert_eq!(state.commits.todo_write_seq, None);
-            assert_eq!(state.notice, notice);
+            assert_eq!(state.notice.as_deref(), notice);
             assert_eq!(state.op_error, error);
         }
     }
@@ -12945,7 +12987,7 @@ mod tests {
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
             assert_eq!(
                 state.notice,
-                Some("Finish or abort the operation in progress"),
+                Some("Finish or abort the operation in progress".into()),
                 "{key}"
             );
         }

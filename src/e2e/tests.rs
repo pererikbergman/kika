@@ -753,7 +753,7 @@ async fn emptying_the_hunk_file_cancels_the_edit() {
     app.press(KeyCode::Char('e')).await;
 
     assert!(repo.staged().is_empty());
-    assert_eq!(app.state().notice, Some("Edit cancelled"));
+    assert_eq!(app.state().notice, Some("Edit cancelled".into()));
     assert_eq!(app.state().popups, []);
     assert_hunk_file_removed(&repo);
 }
@@ -1057,7 +1057,10 @@ async fn emptying_the_message_in_the_editor_aborts_and_keeps_the_popup() {
 
     assert_eq!(repo.head(), head);
     assert_eq!(repo.staged(), ["a.txt"]);
-    assert_eq!(app.state().notice, Some("Empty message; commit aborted"));
+    assert_eq!(
+        app.state().notice,
+        Some("Empty message; commit aborted".into())
+    );
     app.assert_screen_contains("typed");
 }
 

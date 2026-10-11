@@ -32,7 +32,6 @@ mod menu;
 mod model;
 mod popup;
 mod popup_view;
-mod reason;
 mod rebase_todo;
 mod recent;
 mod recent_list;

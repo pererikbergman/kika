@@ -4,8 +4,8 @@
 use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::intent::AppIntent;
 use crate::keymap::{
-    amend_disabled, commit_disabled, merge_disabled, never, reset_disabled, stage_all_disabled,
-    stage_disabled,
+    Reason, amend_disabled, commit_disabled, merge_disabled, never, reset_disabled,
+    stage_all_disabled, stage_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -37,11 +37,11 @@ pub struct MenuItem {
     pub label: &'static str,
     pub intent: AppIntent,
     /// Why the item cannot run right now, if it cannot. Pure.
-    pub disabled: fn(&AppState) -> Option<&'static str>,
+    pub disabled: fn(&AppState) -> Option<Reason>,
 }
 
-fn no_files(state: &AppState) -> Option<&'static str> {
-    state.files.is_empty().then_some("No files")
+fn no_files(state: &AppState) -> Option<Reason> {
+    state.files.is_empty().then_some("No files".into())
 }
 
 static ACTIONS: &[MenuItem] = &[

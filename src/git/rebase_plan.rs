@@ -305,13 +305,24 @@ pub enum TodoEntry {
 /// `exec`, `label`, `reset`, `merge` and any unknown word are errors,
 /// since Kika neither writes nor edits them.
 pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
+    command_lines(todo).map(parse_line).collect()
+}
+
+/// The lines of a todo list that git reads as commands, with the spaces
+/// and tabs git skips before a command taken off. Git skips them too, so
+/// an indented line is a command, never a comment. The comment char is
+/// configurable and unknown here; a command always starts with a letter.
+pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
     todo.split(|&b| b == b'\n')
         .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-        // The comment char is configurable and unknown here; a command
-        // always starts with a letter.
+        .map(|line| {
+            let indent = line
+                .iter()
+                .take_while(|&&b| b == b' ' || b == b'\t')
+                .count();
+            &line[indent..]
+        })
         .filter(|line| line.first().is_some_and(u8::is_ascii_alphanumeric))
-        .map(parse_line)
-        .collect()
 }
 
 fn parse_line(line: &[u8]) -> Result<TodoEntry, String> {
@@ -382,8 +393,31 @@ pub fn crossing(oid: &str, branch: &[u8]) -> String {
 /// their order, so no branch ends up holding other commits. Each segment
 /// is written as its steps in plan order, then its `update-ref` lines.
 pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
-    // Each todo commit with its segment, and each segment's refs.
-    let mut commits: Vec<(&str, &[u8], usize)> = Vec::new();
+    let segments = collect_todo(todo)?;
+    let matched = match_steps(steps, &segments)?;
+    Ok(emit(steps, &matched, &segments))
+}
+
+/// A todo commit as [`apply`] keeps it: its id as git wrote it, what
+/// follows the id, and the segment it sits in.
+#[derive(Debug, PartialEq, Eq)]
+struct TodoCommit<'a> {
+    oid: &'a str,
+    rest: &'a [u8],
+    segment: usize,
+}
+
+/// A fresh todo list split at its `update-ref` lines: every commit with
+/// its segment, and the refs that close each segment. Git writes only
+/// picks there, so anything else is an error.
+#[derive(Debug, PartialEq, Eq)]
+struct Segments<'a> {
+    commits: Vec<TodoCommit<'a>>,
+    refs: Vec<Vec<&'a [u8]>>,
+}
+
+fn collect_todo(todo: &[TodoEntry]) -> Result<Segments<'_>, String> {
+    let mut commits = Vec::new();
     let mut refs: Vec<Vec<&[u8]>> = vec![Vec::new()];
     for entry in todo {
         match entry {
@@ -395,7 +429,11 @@ pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
                 if !refs[refs.len() - 1].is_empty() {
                     refs.push(Vec::new());
                 }
-                commits.push((oid, rest, refs.len() - 1));
+                commits.push(TodoCommit {
+                    oid,
+                    rest,
+                    segment: refs.len() - 1,
+                });
             }
             TodoEntry::UpdateRef(name) => {
                 let last = refs.len() - 1;
@@ -407,6 +445,14 @@ pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
             TodoEntry::Break => return Err("Unexpected todo line: break".into()),
         }
     }
+    Ok(Segments { commits, refs })
+}
+
+/// For each step, the index of the one todo commit its id names: a
+/// bijection, with every step kept in its commit's segment and the
+/// segments in todo order.
+fn match_steps(steps: &[Step], segments: &Segments) -> Result<Vec<usize>, String> {
+    let commits = &segments.commits;
     if steps.len() != commits.len() {
         return Err(format!(
             "The todo list has {} commits, the plan {}",
@@ -416,41 +462,44 @@ pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
     }
     let mut used = vec![false; commits.len()];
     let mut matched = Vec::with_capacity(steps.len());
+    let mut segment = 0;
     for step in steps {
         let full = step.commit.as_str();
         let mut found = commits
             .iter()
             .enumerate()
-            .filter(|(_, (oid, _, _))| oid.len() >= 4 && full.starts_with(oid));
-        let (Some((at, _)), None) = (found.next(), found.next()) else {
+            .filter(|(_, commit)| commit.oid.len() >= 4 && full.starts_with(commit.oid));
+        let (Some((at, commit)), None) = (found.next(), found.next()) else {
             return Err(format!("The todo list does not name {full} exactly once"));
         };
         if std::mem::replace(&mut used[at], true) {
             return Err(format!("The plan names {full} twice"));
         }
+        if commit.segment < segment {
+            return Err(crossing(full, segments.refs[commit.segment][0]));
+        }
+        segment = commit.segment;
         matched.push(at);
     }
-    let mut segment = 0;
-    for (step, &at) in steps.iter().zip(&matched) {
-        let (_, _, seg) = commits[at];
-        if seg < segment {
-            return Err(crossing(step.commit.as_str(), refs[seg][0]));
-        }
-        segment = seg;
-    }
+    Ok(matched)
+}
+
+/// The todo list to write: each segment's steps in plan order, a `break`
+/// after each that stops, then that segment's `update-ref` lines.
+fn emit(steps: &[Step], matched: &[usize], segments: &Segments) -> Vec<u8> {
     let mut out = Vec::new();
-    for (seg, names) in refs.iter().enumerate() {
-        for (step, &at) in steps.iter().zip(&matched) {
-            let (_, rest, step_seg) = commits[at];
-            if step_seg != seg {
+    for (segment, names) in segments.refs.iter().enumerate() {
+        for (step, &at) in steps.iter().zip(matched) {
+            let commit = &segments.commits[at];
+            if commit.segment != segment {
                 continue;
             }
-            out.extend_from_slice(
-                format!("{} {}", step.action.word(), step.commit.as_str()).as_bytes(),
-            );
-            if !rest.is_empty() {
+            out.extend_from_slice(step.action.word().as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(step.commit.as_str().as_bytes());
+            if !commit.rest.is_empty() {
                 out.push(b' ');
-                out.extend_from_slice(rest);
+                out.extend_from_slice(commit.rest);
             }
             out.push(b'\n');
             if step.break_after {
@@ -463,7 +512,7 @@ pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
             out.push(b'\n');
         }
     }
-    Ok(out)
+    out
 }
 
 /// Whether `after` is a safe edit of the todo list `before` of a rebase
@@ -872,6 +921,25 @@ mod tests {
     }
 
     #[test]
+    fn indented_lines_are_commands_as_git_reads_them() {
+        assert_eq!(
+            parse_todo(b"  pick 1234 one\n\t pick 5678 two\n  # comment\n\t\n"),
+            Ok(vec![line("1234", "one"), line("5678", "two")])
+        );
+        for hidden in [
+            &b"pick 1234 a\n\texec touch x\n"[..],
+            b"   x make\n",
+            b"\tlabel l\n",
+        ] {
+            assert!(
+                parse_todo(hidden).is_err(),
+                "{}",
+                String::from_utf8_lossy(hidden)
+            );
+        }
+    }
+
+    #[test]
     fn parse_todo_accepts_long_and_short_words_breaks_and_update_refs() {
         let todo = b"r 1111 a\nreword 1112 b\ne 2222\nedit 2223\ns 3333\nsquash 3334\n\
                      f 4444\nfixup 4445\nd 5555\ndrop 5556\nb\nbreak\n\
@@ -989,6 +1057,53 @@ mod tests {
                 id('a'),
                 id('b')
             )
+        );
+    }
+
+    #[test]
+    fn collect_todo_splits_commits_into_segments_at_update_refs() {
+        let todo = [
+            line("cccc", "c"),
+            update_ref("x"),
+            update_ref("y"),
+            line("bbbb", "b"),
+        ];
+        let segments = collect_todo(&todo).unwrap();
+        let at: Vec<(&str, usize)> = segments
+            .commits
+            .iter()
+            .map(|c| (c.oid, c.segment))
+            .collect();
+        assert_eq!(at, [("cccc", 0), ("bbbb", 1)]);
+        assert_eq!(
+            segments.refs,
+            [vec![&b"refs/heads/x"[..], b"refs/heads/y"], vec![]]
+        );
+        assert!(collect_todo(&[TodoEntry::Break]).is_err());
+        assert!(collect_todo(&[commit(TodoAction::Drop, "cccc", "")]).is_err());
+    }
+
+    #[test]
+    fn match_steps_pairs_each_step_with_its_todo_commit() {
+        let todo = [line(&id('c')[..5], ""), line(&id('a')[..7], "")];
+        let segments = collect_todo(&todo).unwrap();
+        assert_eq!(
+            match_steps(&[pick('a'), pick('c')], &segments),
+            Ok(vec![1, 0])
+        );
+        assert!(match_steps(&[pick('a')], &segments).is_err());
+        assert!(match_steps(&[pick('a'), pick('b')], &segments).is_err());
+    }
+
+    #[test]
+    fn emit_writes_full_ids_subjects_breaks_and_refs() {
+        let todo = [line("cccc", "c"), update_ref("x")];
+        let segments = collect_todo(&todo).unwrap();
+        let mut stop = pick('c');
+        stop.break_after = true;
+        assert_eq!(
+            String::from_utf8(emit(&[stop], &[0], &segments)).unwrap(),
+            format!("pick {} c\nbreak\nupdate-ref refs/heads/x\n", id('c'))
         );
     }
 

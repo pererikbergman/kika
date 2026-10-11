@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use crate::git::rebase_plan::{
-    Direction, Edit, NOTHING_TO_FOLD, TodoAction, TodoEntry, crossing, parse_todo,
+    Direction, Edit, NOTHING_TO_FOLD, TodoAction, TodoEntry, command_lines, crossing, parse_todo,
 };
 
 /// Why a todo list is shown but not edited.
@@ -92,13 +92,6 @@ impl RebaseTodo {
 /// Whether git's `done` list holds no step yet.
 pub fn nothing_done(done: &[u8]) -> bool {
     command_lines(done).next().is_none()
-}
-
-/// Lines that are commands: not blank, not a comment.
-fn command_lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
-    text.split(|&b| b == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-        .filter(|line| line.first().is_some_and(u8::is_ascii_alphanumeric))
 }
 
 /// Swap row `i` with the next to run (`Up`, as the list reads like future
@@ -260,6 +253,19 @@ mod tests {
             todo.edit(0, Rewrite::Edit(Edit::Drop)),
             Err(NOT_EDITABLE.into())
         );
+    }
+
+    #[test]
+    fn an_indented_pick_is_kept_and_an_indented_exec_makes_the_list_read_only() {
+        let todo = RebaseTodo::load(file(b"pick 1111 one\n  pick 2222 two\n", Some(b"")));
+        assert_eq!(todo.editable, Ok(()));
+        assert_eq!(todo.len(), 2);
+        assert_eq!(serialize(&todo.entries), b"pick 1111 one\npick 2222 two\n");
+
+        let todo = RebaseTodo::load(file(b"pick 1111 one\n\texec touch x\n", Some(b"")));
+        assert_eq!(todo.editable, Err(NOT_EDITABLE));
+        assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"exec touch x"]);
+        assert!(!nothing_done(b"  pick 1111 one\n"));
     }
 
     #[test]

@@ -549,7 +549,8 @@ continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
 
 `alt-k` and `alt-j` move the selected commit above the newer one or below the
-older one, the same way. `E` stops the rebase at the selected commit so you
+older one, the same way (as do `alt-up` and `alt-down`; in this panel only
+plain arrows move the cursor, so Shift+arrow does nothing). `E` stops the rebase at the selected commit so you
 can amend it, and `b` stops it right after the selected commit (`b` needs Git
 2.20 or newer); continue from the Status panel to finish. With Git 2.38 or
 newer every rewrite passes `--update-refs`, so other branches that point at
