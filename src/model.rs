@@ -9,6 +9,7 @@ use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::CommitsPanel;
 use crate::config::ConfigError;
+use crate::conflict::{Choice, ConflictView, PendingPick};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
@@ -128,6 +129,8 @@ pub enum Focus {
     Diff(HunkView),
     /// A blame of the selected file, in the Diff pane's place.
     Blame(BlameView),
+    /// The selected conflicted file's blocks, in the Diff pane's place.
+    Conflict(ConflictView),
 }
 
 impl Focus {
@@ -142,7 +145,8 @@ impl Focus {
         }
     }
 
-    /// Where it is drawn. The blame takes the diff's place.
+    /// Where it is drawn. The blame and the conflict view take the
+    /// diff's place.
     pub fn panel(&self) -> Panel {
         match self {
             Focus::Status => Panel::Side(SidePanel::Status),
@@ -150,7 +154,7 @@ impl Focus {
             Focus::Branches => Panel::Side(SidePanel::Branches),
             Focus::Commits => Panel::Side(SidePanel::Commits),
             Focus::Stash => Panel::Side(SidePanel::Stash),
-            Focus::Diff(_) | Focus::Blame(_) => Panel::Diff,
+            Focus::Diff(_) | Focus::Blame(_) | Focus::Conflict(_) => Panel::Diff,
         }
     }
 
@@ -390,6 +394,8 @@ impl AppState {
                 {
                     rendered.scroll(by, rows);
                 } else if let Focus::Diff(view) = &mut self.focus {
+                    view.scroll(by, rows);
+                } else if let Focus::Conflict(view) = &mut self.focus {
                     view.scroll(by, rows);
                 } else {
                     return self.diff.scroll(by, rows);
@@ -681,6 +687,17 @@ impl AppState {
                     return self.render_if_stale();
                 }
             }
+            AppIntent::ConflictLoaded { tag, path, result } => {
+                self.conflict_loaded(tag, path, result)
+            }
+            AppIntent::ConflictNext => self.with_conflict(|view, rows| view.move_by(1, rows)),
+            AppIntent::ConflictPrev => self.with_conflict(|view, rows| view.move_by(-1, rows)),
+            AppIntent::PickConflict(choice) => return self.pick_conflict(choice),
+            AppIntent::ResolvedWritten { tag, path, result } => {
+                return self.resolved_written(tag, path, result);
+            }
+            AppIntent::StageResolved => return self.stage_resolved(),
+            AppIntent::OpenMergeTool => return self.open_merge_tool(),
             AppIntent::CycleRenderer => return self.cycle_renderer(),
             AppIntent::RenderersFound(renderers) => {
                 self.renderers = renderers;
@@ -859,6 +876,7 @@ impl AppState {
                 KeyScope::BlameCommit
             }
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
+            (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
             (Context::Review { .. }, _) => KeyScope::Review,
         }
     }
@@ -935,8 +953,8 @@ impl AppState {
 
     /// The diff the Diff pane shows: the selected file's from the Files
     /// panel, the focused view's side with the Diff pane focused (renames
-    /// off, as its patch has them), nothing behind a blame. A commit's file
-    /// is never rendered, so it is not one of these.
+    /// off, as its patch has them), nothing behind a blame or a conflict.
+    /// A commit's file is never rendered, so it is not one of these.
     fn shown_request(&self) -> Option<DiffRequest> {
         match &self.focus {
             Focus::Commits if self.commits.open.is_some() => None,
@@ -951,7 +969,7 @@ impl AppState {
                 options: self.diff_options,
                 commit: None,
             }),
-            Focus::Blame(_) => None,
+            Focus::Blame(_) | Focus::Conflict(_) => None,
         }
     }
 
@@ -1367,7 +1385,11 @@ impl AppState {
     fn command_target(&self) -> Option<Target> {
         match &self.focus {
             // Commands bind only in Files, the diff and the blame.
-            Focus::Status | Focus::Branches | Focus::Commits | Focus::Stash => None,
+            Focus::Status
+            | Focus::Branches
+            | Focus::Commits
+            | Focus::Stash
+            | Focus::Conflict(_) => None,
             Focus::Files => {
                 let entry = self.selected.and_then(|i| self.files.get(i))?;
                 Some(Target {
@@ -1650,8 +1672,9 @@ impl AppState {
         self.focus_panel(next)
     }
 
-    /// Focus the Diff pane on the selected file, on the side its diff shows.
-    /// Not while a commit's file is shown: it has no hunks to stage.
+    /// Focus the Diff pane on the selected file, on the side its diff
+    /// shows; a conflicted file opens the conflict view instead. Not while
+    /// a commit's file is shown: it has no hunks to stage.
     fn focus_diff(&mut self) -> Vec<Effect> {
         if self.commits.open.is_some() {
             return vec![];
@@ -1659,6 +1682,9 @@ impl AppState {
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
             return vec![];
         };
+        if entry.kind == EntryKind::Conflicted {
+            return self.open_conflict();
+        }
         let request = DiffRequest::for_entry(entry, self.diff_options);
         self.focus = Focus::Diff(HunkView::new(request.path, request.side));
         let mut effects = self.load_patch();
@@ -2121,6 +2147,13 @@ impl AppState {
                 self.end_commit(None);
             }
             return vec![];
+        }
+        // The resolved file is staged: nothing is left for the view.
+        if let (Focus::Conflict(view), GitOp::Stage(paths), Ok(())) = (&self.focus, &op, &result)
+            && paths == std::slice::from_ref(&view.path)
+        {
+            self.focus = Focus::Files;
+            self.expanded = SidePanel::Files;
         }
         if commit {
             // A commit's failure shows in its own popup, not the status bar.
@@ -3332,6 +3365,211 @@ impl AppState {
     }
 }
 
+/// The conflict view: loading a conflicted file, picking a side of each
+/// block, writing the file after each pick, and staging it at the end.
+impl AppState {
+    /// Show the selected conflicted file's blocks in the Diff pane's
+    /// place, and load it. A user effect, so the busy indicator shows.
+    fn open_conflict(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        let Some(path) = self
+            .selected
+            .and_then(|i| self.files.get(i))
+            .map(|f| f.path.clone())
+        else {
+            return vec![];
+        };
+        let seq = self.take_seq();
+        self.busy += 1;
+        self.focus = Focus::Conflict(ConflictView::new(path.clone(), seq));
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::LoadConflict { tag, path }]
+    }
+
+    fn conflict_loaded(
+        &mut self,
+        tag: Tag,
+        path: RepoPath,
+        result: Result<(Vec<u8>, usize), String>,
+    ) {
+        // Every user effect reports back once, stale or not.
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        let rows = self.pane_rows();
+        let Focus::Conflict(view) = &mut self.focus else {
+            return;
+        };
+        if tag.generation != self.generation || view.seq != Some(tag.seq) || view.path != path {
+            return;
+        }
+        view.loaded(result, rows);
+    }
+
+    /// Change the conflict view's cursor, given the pane's rows.
+    fn with_conflict(&mut self, change: impl FnOnce(&mut ConflictView, usize)) {
+        let rows = self.pane_rows();
+        if let Focus::Conflict(view) = &mut self.focus {
+            change(view, rows);
+        }
+    }
+
+    /// Keep `choice` for the selected block and write the file at once,
+    /// unpicked blocks keeping their markers; then on to the next
+    /// unpicked block. The write takes the operation slot, so a second
+    /// pick waits for it.
+    fn pick_conflict(&mut self, choice: Choice) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::pick_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let rows = self.pane_rows();
+        let Focus::Conflict(view) = &mut self.focus else {
+            return vec![];
+        };
+        let Some(expected) = view.loaded.as_ref().map(|l| l.on_disk.clone()) else {
+            return vec![];
+        };
+        let block = view.block;
+        let Some(previous) = view.choices.get(block).copied() else {
+            return vec![];
+        };
+        view.choices[block] = Some(choice);
+        let content = view
+            .loaded
+            .as_ref()
+            .map(|l| l.file.render(&view.choices))
+            .unwrap_or_default();
+        let path = view.path.clone();
+        view.pending = Some(PendingPick { block, previous });
+        view.next_unpicked(rows);
+        let seq = self.take_seq();
+        self.op_seq = Some(seq);
+        self.op_error = None;
+        self.busy += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        };
+        vec![Effect::WriteResolved {
+            tag,
+            path,
+            expected,
+            content,
+        }]
+    }
+
+    /// A pick was written, or not. Written, the status reloads, and once
+    /// every block is picked the user is asked to stage the file. Not
+    /// written, the pick is undone, as the file still is.
+    fn resolved_written(
+        &mut self,
+        tag: Tag,
+        path: RepoPath,
+        result: Result<Vec<u8>, String>,
+    ) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if self.op_seq == Some(tag.seq) {
+            self.op_seq = None;
+        }
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        let rows = self.pane_rows();
+        // Only the view that made the pick: one reopened since has read
+        // the file afresh, and its own bytes and blocks stand.
+        let view = match &mut self.focus {
+            Focus::Conflict(view) if view.path == path && view.pending.is_some() => Some(view),
+            _ => None,
+        };
+        match result {
+            Ok(content) => {
+                // Asked again after any later pick: answering no leaves
+                // the row conflicted, which Files will not stage, so a
+                // pick is the way back to the question.
+                let resolved = view.is_some_and(|view| {
+                    view.pending = None;
+                    if let Some(loaded) = &mut view.loaded {
+                        loaded.on_disk = content;
+                    }
+                    view.resolved()
+                });
+                self.status_selection = Selection::KeepPath;
+                let effects = self.refresh_status();
+                if resolved {
+                    self.popups.push(Popup::Confirm(ConfirmKind::StageResolved));
+                }
+                effects
+            }
+            Err(message) => {
+                if let Some(view) = view
+                    && let Some(PendingPick { block, previous }) = view.pending.take()
+                {
+                    if let Some(choice) = view.choices.get_mut(block) {
+                        *choice = previous;
+                    }
+                    view.block = block;
+                    view.scroll_to_block(rows);
+                }
+                self.push_error(ErrorPopup::new(
+                    "Could not write the resolved file",
+                    &message,
+                    "The pick was undone. Close this, then try again.",
+                ));
+                vec![]
+            }
+        }
+    }
+
+    /// Stage the file the conflict view resolved, which marks it resolved
+    /// for git. `stage_disabled` refuses conflicted rows, so this does not
+    /// go through it.
+    fn stage_resolved(&mut self) -> Vec<Effect> {
+        let Focus::Conflict(view) = &self.focus else {
+            return vec![];
+        };
+        let op = GitOp::Stage(vec![view.path.clone()]);
+        self.start_op(Ok(Some(op)))
+    }
+
+    /// Hand the terminal to `git mergetool` for the conflicted file, from
+    /// the Files panel or the conflict view, which closes: the tool
+    /// rewrites the file under it.
+    fn open_merge_tool(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::mergetool_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let path = match &self.focus {
+            Focus::Conflict(view) => view.path.clone(),
+            _ => match self.selected.and_then(|i| self.files.get(i)) {
+                Some(entry) => entry.path.clone(),
+                None => return vec![],
+            },
+        };
+        let effects = self.run_op_where_it_belongs(GitOp::MergeTool(path));
+        if !effects.is_empty() && matches!(self.focus, Focus::Conflict(_)) {
+            self.focus = Focus::side(self.expanded);
+        }
+        effects
+    }
+}
+
 /// The first line of a rejected edited hunk's error, above git's message.
 pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
 Keep the @@ line as it was and start each line with a space, + or -.";
@@ -3349,6 +3587,9 @@ fn failure_next(op: &GitOp) -> &'static str {
         }
         GitOp::RenameBranch { .. } | GitOp::DeleteBranch { .. } => {
             "The branch list was reloaded. Fix the cause above, then try again."
+        }
+        GitOp::MergeTool(_) => {
+            "The file list was reloaded. Check merge.tool, or resolve the file in your editor."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
     }
@@ -3391,6 +3632,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Abort(Operation::CherryPick) => "Could not abort the cherry-pick",
         GitOp::Abort(Operation::Revert) => "Could not abort the revert",
         GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
+        GitOp::MergeTool(_) => "The merge tool did not resolve the file",
     }
 }
 
@@ -10265,6 +10507,282 @@ mod tests {
             assert_eq!(failure_title(&op), title, "{op:?}");
             assert_eq!(failure_next(&op), next, "{op:?}");
         }
+    }
+
+    // --- The conflict view ---
+
+    fn conflicted(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            orig_path: None,
+            index: 'U',
+            worktree: 'U',
+            kind: EntryKind::Conflicted,
+        }
+    }
+
+    const CONFLICT: &[u8] = b"a\n<<<<<<< HEAD\nours 1\n=======\ntheirs 1\n>>>>>>> other\nb\n\
+<<<<<<< HEAD\nours 2\n=======\ntheirs 2\n>>>>>>> other\n";
+
+    /// `CONFLICT` with only its second block, as it stays after the
+    /// first is picked.
+    const SECOND_BLOCK: &[u8] = b"<<<<<<< HEAD\nours 2\n=======\ntheirs 2\n>>>>>>> other\n";
+
+    /// Files listing conflicted `c.txt` first, after Enter on it: the
+    /// conflict view and its load's tag.
+    fn conflict_opened() -> (AppState, Tag) {
+        let (mut state, _) = with_files(vec![conflicted("c.txt"), changed("a.rs", '.', 'M')], 24);
+        let busy = state.busy;
+        match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadConflict { tag, path }] => {
+                assert_eq!(path, &RepoPath::from("c.txt"));
+                assert_eq!(state.busy, busy + 1, "a user load");
+                (state, *tag)
+            }
+            other => panic!("expected one LoadConflict, got {other:?}"),
+        }
+    }
+
+    /// `conflict_opened`, with `CONFLICT` read.
+    fn conflict_shown() -> AppState {
+        let (mut state, tag) = conflict_opened();
+        state.update(AppIntent::ConflictLoaded {
+            tag,
+            path: "c.txt".into(),
+            result: Ok((CONFLICT.to_vec(), 7)),
+        });
+        state
+    }
+
+    fn conflict(state: &AppState) -> &ConflictView {
+        match &state.focus {
+            Focus::Conflict(view) => view,
+            other => panic!("expected the conflict view, got {other:?}"),
+        }
+    }
+
+    /// The one write in `effects`: its tag, what it expects on disk and
+    /// what it writes.
+    fn write_of(effects: &[Effect]) -> (Tag, Vec<u8>, Vec<u8>) {
+        match effects {
+            [
+                Effect::WriteResolved {
+                    tag,
+                    path,
+                    expected,
+                    content,
+                },
+            ] => {
+                assert_eq!(path, &RepoPath::from("c.txt"));
+                (*tag, expected.clone(), content.clone())
+            }
+            other => panic!("expected one WriteResolved, got {other:?}"),
+        }
+    }
+
+    fn written(tag: Tag, result: Result<Vec<u8>, String>) -> AppIntent {
+        AppIntent::ResolvedWritten {
+            tag,
+            path: "c.txt".into(),
+            result,
+        }
+    }
+
+    #[test]
+    fn enter_on_a_conflicted_row_opens_the_conflict_view_in_the_diffs_place() {
+        let (state, _) = conflict_opened();
+        assert_eq!(state.panel_focus(), KeyScope::Conflict);
+        assert_eq!(state.focus.panel(), layout::Panel::Diff);
+        assert_eq!(conflict(&state).loaded, None);
+
+        let state = conflict_shown();
+        let view = conflict(&state);
+        assert_eq!(view.block_count(), 2);
+        assert_eq!(view.choices, [None, None]);
+        assert_eq!(view.seq, None);
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn a_stale_load_is_dropped() {
+        let (mut state, tag) = conflict_opened();
+        let stale = Tag {
+            seq: tag.seq + 100,
+            ..tag
+        };
+        state.update(AppIntent::ConflictLoaded {
+            tag: stale,
+            path: "c.txt".into(),
+            result: Ok((CONFLICT.to_vec(), 7)),
+        });
+        assert_eq!(conflict(&state).loaded, None);
+        assert_eq!(conflict(&state).seq, Some(tag.seq));
+    }
+
+    #[test]
+    fn o_writes_our_side_at_once_and_moves_to_the_next_block() {
+        let mut state = conflict_shown();
+        let (tag, expected, content) = write_of(&press_char(&mut state, 'o'));
+        assert_eq!(expected, CONFLICT);
+        assert_eq!(content, [&b"a\nours 1\nb\n"[..], SECOND_BLOCK].concat());
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert!(tag.user);
+        let view = conflict(&state);
+        assert_eq!(view.choices, [Some(Choice::Ours), None]);
+        assert_eq!(view.block, 1);
+    }
+
+    #[test]
+    fn a_second_pick_while_the_write_runs_is_refused() {
+        let mut state = conflict_shown();
+        press_char(&mut state, 'o');
+        assert_eq!(press_char(&mut state, 't'), vec![]);
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING));
+        assert_eq!(
+            state.update(AppIntent::PickConflict(Choice::Theirs)),
+            vec![]
+        );
+        assert_eq!(conflict(&state).choices, [Some(Choice::Ours), None]);
+    }
+
+    #[test]
+    fn once_every_block_is_written_y_stages_the_file_and_returns_to_files() {
+        let mut state = conflict_shown();
+        let (tag, _, first) = write_of(&press_char(&mut state, 'o'));
+        let effects = state.update(written(tag, Ok(first.clone())));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(state.popups, [], "one block is left");
+        assert_eq!(state.op_seq, None);
+
+        let (tag, expected, content) = write_of(&press_char(&mut state, 't'));
+        assert_eq!(expected, first, "the bytes the first write left");
+        assert_eq!(content, b"a\nours 1\nb\ntheirs 2\n");
+        state.update(written(tag, Ok(content.clone())));
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
+        assert_eq!(conflict(&state).loaded.as_ref().unwrap().on_disk, content);
+
+        // After no, a later pick asks again: Files will not stage the row.
+        press_char(&mut state, 'n');
+        assert_eq!(state.popups, []);
+        let (again, _, both) = write_of(&press_char(&mut state, 'b'));
+        state.update(written(again, Ok(both)));
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
+
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::Stage(vec!["c.txt".into()]));
+        state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.focus, Focus::Files);
+    }
+
+    #[test]
+    fn a_write_landing_after_the_file_was_reopened_leaves_the_new_view_alone() {
+        let mut state = conflict_shown();
+        let (tag, ..) = write_of(&press_char(&mut state, 'o'));
+        press(&mut state, KeyCode::Esc);
+        let load = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadConflict { tag, .. }] => *tag,
+            other => panic!("expected one LoadConflict, got {other:?}"),
+        };
+        state.update(AppIntent::ConflictLoaded {
+            tag: load,
+            path: "c.txt".into(),
+            result: Ok((CONFLICT.to_vec(), 7)),
+        });
+        state.update(written(tag, Ok(b"a\nours 1\nb\n".to_vec())));
+        let view = conflict(&state);
+        assert_eq!(view.loaded.as_ref().unwrap().on_disk, CONFLICT);
+        assert_eq!(view.choices, [None, None]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_failed_write_undoes_the_pick_and_says_so() {
+        let mut state = conflict_shown();
+        let (tag, ..) = write_of(&press_char(&mut state, 'o'));
+        let effects = state.update(written(
+            tag,
+            Err(crate::worktree_file::CHANGED_ON_DISK.to_string()),
+        ));
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.op_seq, None);
+        let view = conflict(&state);
+        assert_eq!(view.choices, [None, None]);
+        assert_eq!(view.block, 0);
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not write the resolved file");
+                assert!(error.message.contains("changed on disk"), "{error:?}");
+            }
+            other => panic!("expected an error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unparsable_file_shows_why_and_nothing_can_be_picked() {
+        let (mut state, tag) = conflict_opened();
+        state.update(AppIntent::ConflictLoaded {
+            tag,
+            path: "c.txt".into(),
+            result: Ok((b"a\n=======\n".to_vec(), 7)),
+        });
+        assert!(
+            conflict(&state)
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("Line 2")),
+            "{:?}",
+            conflict(&state).error
+        );
+        for c in ['o', 't', 'b'] {
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some("Nothing to pick"), "{c}");
+        }
+    }
+
+    #[test]
+    fn the_diff_settings_wait_while_the_conflict_view_is_open_and_esc_leaves_it() {
+        let mut state = conflict_shown();
+        assert_eq!(press_char(&mut state, '+'), vec![]);
+        assert_eq!(state.notice, Some("Close the conflict view first"));
+        press_char(&mut state, 'j');
+        assert_eq!(conflict(&state).block, 1);
+        press_char(&mut state, 'k');
+        assert_eq!(conflict(&state).block, 0);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn m_hands_a_conflicted_file_to_the_merge_tool_and_is_disabled_on_others() {
+        let (mut state, _) = with_files(vec![conflicted("c.txt"), changed("a.rs", '.', 'M')], 24);
+        let (tag, op) = attached_of(&press_char(&mut state, 'M'));
+        assert_eq!(op, GitOp::MergeTool("c.txt".into()));
+        assert_eq!(state.op_seq, Some(tag.seq));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+
+        press_char(&mut state, 'j');
+        assert_eq!(press_char(&mut state, 'M'), vec![]);
+        assert_eq!(state.notice, Some("Not a conflicted file"));
+    }
+
+    #[test]
+    fn m_in_the_conflict_view_closes_it_and_runs_the_merge_tool() {
+        let mut state = conflict_shown();
+        let (_, op) = attached_of(&press_char(&mut state, 'M'));
+        assert_eq!(op, GitOp::MergeTool("c.txt".into()));
+        assert_eq!(state.focus, Focus::Files);
     }
 
     // --- Checkout, revert and reset of a commit ---

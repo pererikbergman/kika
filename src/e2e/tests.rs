@@ -289,6 +289,77 @@ async fn a_conflicting_rebase_shows_rebasing() {
     app.assert_screen_contains("┃rebasing ");
 }
 
+/// `a.txt`, executable and with CRLF endings, changed at both ends on
+/// `main` and on `other`, merged so it stops with two conflicts.
+#[cfg(unix)]
+fn two_conflicts() -> TestRepo {
+    use std::os::unix::fs::PermissionsExt;
+
+    let lines =
+        |top: &str, bottom: &str| format!("{top}\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n{bottom}\r\n");
+    let repo = TestRepo::new();
+    repo.git(["checkout", "-q", "-b", "main"]);
+    let repo = repo.write("a.txt", &lines("top", "bottom"));
+    let file = repo.path().join("a.txt");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo = repo.commit("init");
+    repo.git(["checkout", "-q", "-b", "other"]);
+    let repo = repo
+        .write("a.txt", &lines("theirs top", "theirs bottom"))
+        .commit("theirs");
+    repo.git(["checkout", "-q", "main"]);
+    let repo = repo
+        .write("a.txt", &lines("ours top", "ours bottom"))
+        .commit("ours");
+    assert!(
+        !repo.try_git(["merge", "other"]),
+        "the merge should conflict"
+    );
+    repo
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn picking_a_side_of_each_conflict_writes_the_file_and_y_stages_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = two_conflicts();
+    let mut app = Harness::start(&repo).await;
+    app.assert_screen_contains("! UU a.txt");
+
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Conflict 1/2 · a.txt");
+    app.press(KeyCode::Char('o')).await;
+    app.press(KeyCode::Char('t')).await;
+
+    let bytes = std::fs::read(repo.path().join("a.txt")).unwrap();
+    assert_eq!(
+        String::from_utf8(bytes).unwrap(),
+        "ours top\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6\r\ntheirs bottom\r\n"
+    );
+    let mode = std::fs::metadata(repo.path().join("a.txt"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+
+    app.assert_screen_contains("Stage it? (y/n)");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.staged(), ["a.txt"]);
+    let unmerged = repo.git(["diff", "--name-only", "--diff-filter=U"]);
+    assert!(
+        unmerged.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&unmerged)
+    );
+    assert_eq!(
+        repo.entry("a.txt").map(|e| e.kind),
+        Some(EntryKind::Changed)
+    );
+    app.assert_screen_contains("M  a.txt");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn committing_in_the_app_updates_the_ahead_count() {
     let repo = on_main();

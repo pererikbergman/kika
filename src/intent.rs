@@ -4,6 +4,7 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
 use crate::config::ConfigError;
+use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
@@ -15,6 +16,7 @@ use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
+use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
@@ -271,6 +273,28 @@ pub enum AppIntent {
     ScrollCommit(Scroll),
     /// Back from the blame to the Files panel.
     CloseBlame,
+    /// The conflicted file the view opened on was read: its bytes and its
+    /// marker size, or why not. `tag` says which load.
+    ConflictLoaded {
+        tag: Tag,
+        path: RepoPath,
+        result: Result<(Vec<u8>, usize), String>,
+    },
+    /// Move the conflict view's cursor to the next or previous block.
+    ConflictNext,
+    ConflictPrev,
+    /// Keep this side of the selected block, and write the file.
+    PickConflict(Choice),
+    /// A resolved file was written: what is now on disk, or why not.
+    ResolvedWritten {
+        tag: Tag,
+        path: RepoPath,
+        result: Result<Vec<u8>, String>,
+    },
+    /// Stage the file the conflict view resolved, as the question asked.
+    StageResolved,
+    /// Resolve the selected conflicted file in the user's merge tool.
+    OpenMergeTool,
     /// Show the diff through the next configured renderer, or the
     /// built-in view after the last.
     CycleRenderer,

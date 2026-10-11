@@ -205,6 +205,8 @@ pub enum ConfirmKind {
     /// Abort this operation in progress. It names the operation found when
     /// asked, so the answer aborts what the question said.
     Abort(Operation),
+    /// Every block of the conflict view's file is picked: stage it?
+    StageResolved,
     /// Check out the commit kept in the Commits panel's `pending` as a
     /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
     /// is lost and Enter may answer.
@@ -221,6 +223,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
             ConfirmKind::Abort(Operation::Revert) => "Abort revert",
             ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
+            ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
         }
     }
@@ -251,6 +254,9 @@ impl ConfirmKind {
             }
             // Never asked: a bisect is not resumable.
             ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
+            ConfirmKind::StageResolved => {
+                "Every conflict in this file is resolved. Stage it? (y/n)"
+            }
             // `AppState::confirm_question` names the commit; this is the
             // fallback when it cannot.
             ConfirmKind::DetachedCheckout => {
@@ -266,6 +272,7 @@ impl ConfirmKind {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::ForcePush => AppIntent::ForcePush,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
+            ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
         }
     }
@@ -275,6 +282,7 @@ impl ConfirmKind {
             ConfirmKind::Quit
             | ConfirmKind::ForcePush
             | ConfirmKind::Abort(_)
+            | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout => None,
         }
     }
