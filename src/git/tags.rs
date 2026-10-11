@@ -67,13 +67,15 @@ const SHORT: usize = 7;
 
 /// The listing command: newest first, one record of NUL-separated fields
 /// per tag. `%(*objecttype)` says whether an annotated tag points at a
-/// commit; a tag of a tree or a blob is not listed.
+/// commit; a tag of a tree or a blob is not listed. `%(symref)` names
+/// what a symbolic ref under `refs/tags` points at; such a ref is not a
+/// tag Kika can act on, so it is not listed either.
 pub fn list_command() -> GitCommand {
     GitCommand::new("for-each-ref")
         .arg("--sort=-creatordate")
         .arg(
             "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objectname)%00\
-             %(*objecttype)%00%(creatordate:short)%00%(contents:subject)",
+             %(*objecttype)%00%(symref)%00%(creatordate:short)%00%(contents:subject)",
         )
         .arg("refs/tags")
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -105,8 +107,15 @@ pub fn parse_tags(out: &[u8]) -> Vec<TagRef> {
     let mut tags = Vec::new();
     while let Some(name) = refname {
         let mut take = || fields.next();
-        let (Some(kind), Some(oid), Some(peeled), Some(peeled_kind), Some(date), Some(last)) =
-            (take(), take(), take(), take(), take(), take())
+        let (
+            Some(kind),
+            Some(oid),
+            Some(peeled),
+            Some(peeled_kind),
+            Some(symref),
+            Some(date),
+            Some(last),
+        ) = (take(), take(), take(), take(), take(), take(), take())
         else {
             break;
         };
@@ -121,6 +130,7 @@ pub fn parse_tags(out: &[u8]) -> Vec<TagRef> {
             oid,
             peeled,
             peeled_kind,
+            symref,
             date,
             subject,
         };
@@ -136,12 +146,16 @@ struct Record<'a> {
     oid: &'a [u8],
     peeled: &'a [u8],
     peeled_kind: &'a [u8],
+    symref: &'a [u8],
     date: &'a [u8],
     subject: &'a [u8],
 }
 
 impl Record<'_> {
     fn parse(&self) -> Option<TagRef> {
+        if !self.symref.is_empty() {
+            return None;
+        }
         let name = self.name.strip_prefix(TAGS_PREFIX)?;
         let (annotated, target) = match (self.kind, self.peeled_kind) {
             (b"commit", _) => (false, self.oid),
@@ -209,10 +223,35 @@ mod tests {
     const C2: &str = "2222222222222222222222222222222222222222";
     const T1: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    /// A record with no symref: name, type, oid, peeled oid, peeled
+    /// type, date and subject.
     fn record(fields: [&str; 7]) -> Vec<u8> {
+        let [name, kind, oid, peeled, peeled_kind, date, subject] = fields;
+        symbolic([name, kind, oid, peeled, peeled_kind, "", date, subject])
+    }
+
+    /// A record with every field, the symref sixth.
+    fn symbolic(fields: [&str; 8]) -> Vec<u8> {
         let mut out = fields.join("\0").into_bytes();
         out.push(b'\n');
         out
+    }
+
+    #[test]
+    fn a_symbolic_ref_under_refs_tags_is_not_listed() {
+        let mut out = symbolic([
+            "refs/tags/evil",
+            "commit",
+            C1,
+            "",
+            "",
+            "refs/heads/keep",
+            "d",
+            "s",
+        ]);
+        out.extend(record(["refs/tags/ok", "commit", C1, "", "", "d", "s"]));
+        let names: Vec<_> = parse_tags(&out).iter().map(|t| t.name.display()).collect();
+        assert_eq!(names, ["ok"]);
     }
 
     #[test]
@@ -281,7 +320,7 @@ mod tests {
     fn control_bytes_in_a_name_or_subject_come_out_replaced() {
         let mut out = b"refs/tags/v\x1b[31m\0commit\0".to_vec();
         out.extend(C1.as_bytes());
-        out.extend(b"\0\0\0d\x07\0sub\x1b[2Jject\nwith a line\n");
+        out.extend(b"\0\0\0\0d\x07\0sub\x1b[2Jject\nwith a line\n");
         out.extend(record(["refs/tags/next", "commit", C1, "", "", "d", "s"]));
         let tags = parse_tags(&out);
         assert_eq!(tags.len(), 2);
@@ -299,7 +338,7 @@ mod tests {
                 "for-each-ref",
                 "--sort=-creatordate",
                 "--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objectname)%00\
-                 %(*objecttype)%00%(creatordate:short)%00%(contents:subject)",
+                 %(*objecttype)%00%(symref)%00%(creatordate:short)%00%(contents:subject)",
                 "refs/tags",
             ],
             ok(&record(["refs/tags/v1", "commit", C1, "", "", "d", "s"])),
@@ -325,6 +364,8 @@ mod tests {
         git(dir, &["tag", "light"]);
         git(dir, &["tag", "-a", "-m", "Annotated\n\nbody", "heavy"]);
         git(dir, &["tag", "-a", "-m", "tree", "of-tree", "HEAD^{tree}"]);
+        git(dir, &["branch", "keep"]);
+        git(dir, &["symbolic-ref", "refs/tags/sym", "refs/heads/keep"]);
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
 
         let tags = list_tags(&CliRunner::isolated(dir)).unwrap();

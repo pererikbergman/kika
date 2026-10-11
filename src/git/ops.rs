@@ -418,7 +418,10 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
         // The full ref, so a hand-made name like an option stays a name,
         // and the old value, so a tag moved since it was listed is kept.
+        // `--no-deref`, so a symbolic ref under `refs/tags` that points at
+        // a branch loses itself, never the branch.
         GitOp::DeleteTag { name, oid } => GitCommand::new("update-ref")
+            .arg("--no-deref")
             .arg("-d")
             .arg(name.full_ref())
             .arg(oid),
@@ -1200,14 +1203,14 @@ mod tests {
                     name: "v1".into(),
                     oid: OID.into(),
                 },
-                &["update-ref", "-d", "refs/tags/v1", OID],
+                &["update-ref", "--no-deref", "-d", "refs/tags/v1", OID],
             ),
             (
                 GitOp::DeleteTag {
                     name: "-x".into(),
                     oid: OID.into(),
                 },
-                &["update-ref", "-d", "refs/tags/-x", OID],
+                &["update-ref", "--no-deref", "-d", "refs/tags/-x", OID],
             ),
         ];
         for (op, expected) in cases {
@@ -1235,6 +1238,10 @@ mod tests {
         let tmp = TempDir::new("tag-ops");
         let dir = tmp.path();
         git(dir, &["init", "-q", "-b", "main"]);
+        // An annotated tag records a tagger, and the runner below sees
+        // only the repository's config.
+        git(dir, &["config", "user.name", "Tagger"]);
+        git(dir, &["config", "user.email", "tagger@example.com"]);
         git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
         let head = CommitId::parse(head.trim()).unwrap();
@@ -1274,6 +1281,32 @@ mod tests {
             dir,
             &["rev-parse", "--verify", "-q", "refs/tags/light"]
         ));
+    }
+
+    #[test]
+    fn deleting_a_symbolic_tag_removes_only_the_tag_never_its_branch() {
+        use crate::git::fake::{TempDir, git, try_git};
+        let tmp = TempDir::new("tag-symref");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(dir, &["branch", "keep"]);
+        git(dir, &["symbolic-ref", "refs/tags/evil", "refs/heads/keep"]);
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+
+        let delete = GitOp::DeleteTag {
+            name: "evil".into(),
+            oid: head.trim().into(),
+        };
+        run_op(&runner, &delete).unwrap();
+
+        assert!(try_git(
+            dir,
+            &["rev-parse", "--verify", "-q", "refs/heads/keep"]
+        ));
+        let left = git(dir, &["for-each-ref", "--format=%(refname)", "refs/tags"]);
+        assert!(left.is_empty(), "{}", String::from_utf8_lossy(&left));
     }
 
     fn origin_main() -> RemoteBranch {

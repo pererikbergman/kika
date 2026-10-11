@@ -1611,7 +1611,7 @@ async fn show_tags(app: &mut Harness) {
     app.press(KeyCode::Char('3')).await;
     app.press(KeyCode::Char(']')).await;
     app.press(KeyCode::Char(']')).await;
-    app.assert_screen_contains("Local Remotes [Tags]");
+    app.assert_screen_contains("Loc Rem [Tags]");
 }
 
 #[tokio::test(flavor = "multi_thread")]

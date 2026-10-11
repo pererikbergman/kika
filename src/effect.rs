@@ -1539,7 +1539,7 @@ mod tests {
     #[tokio::test]
     async fn a_tags_load_reports_back_with_the_same_tag() {
         let oid = "1".repeat(40);
-        let record = format!("refs/tags/v1\0commit\0{oid}\0\0\0d\0s\n");
+        let record = format!("refs/tags/v1\0commit\0{oid}\0\0\0\0d\0s\n");
         let list = crate::git::tags::list_command();
         let argv: Vec<String> = list
             .args()

@@ -39,17 +39,7 @@ pub fn render_panel(
         Some(branch) if look.title_only => {
             look.title(&format!("Branches · {}", branch.name.display()))
         }
-        // The tab shown is in brackets. Where the whole title does not
-        // fit, the tabs keep their place and the panel's name goes.
-        _ if expanded => {
-            let tabs = match panel.tab {
-                BranchesTab::Local => "[Local] Remotes Tags",
-                BranchesTab::Remotes => "Local [Remotes] Tags",
-                BranchesTab::Tags => "Local Remotes [Tags]",
-            };
-            let full = format!("Branches · {tabs}");
-            look.title(if look.fits(&full) { &full } else { tabs })
-        }
+        _ if expanded => look.title(&tabs_title(panel.tab, look)),
         _ => look.title("Branches"),
     };
     let block = look.block(title);
@@ -92,6 +82,42 @@ pub fn render_panel(
         Paragraph::new(lines)
     };
     frame.render_widget(body.block(block), area);
+}
+
+/// The tabs, the one shown in brackets. Where the whole title does not
+/// fit, the panel's name goes first, then the other tabs shrink to three
+/// letters, then to one, and last they go. The shown tab stays, in
+/// brackets, shortened itself only when nothing else is left.
+fn tabs_title(shown: BranchesTab, look: &PanelLook) -> String {
+    const TABS: [(BranchesTab, &str); 3] = [
+        (BranchesTab::Local, "Local"),
+        (BranchesTab::Remotes, "Remotes"),
+        (BranchesTab::Tags, "Tags"),
+    ];
+    let tabs = |others: usize| {
+        TABS.iter()
+            .map(|&(tab, name)| match tab == shown {
+                true => format!("[{name}]"),
+                false => name.chars().take(others).collect(),
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let whole = tabs(usize::MAX);
+    let ladder = [format!("Branches · {whole}"), whole, tabs(3), tabs(1)];
+    if let Some(title) = ladder.into_iter().find(|title| look.fits(title)) {
+        return title;
+    }
+    // Only the shown tab is left; it shrinks too, rather than be cut.
+    let name = TABS
+        .iter()
+        .find(|(tab, _)| *tab == shown)
+        .map_or("", |t| t.1);
+    let short = |n: usize| format!("[{}]", name.chars().take(n).collect::<String>());
+    [short(usize::MAX), short(3), short(1)]
+        .into_iter()
+        .find(|title| look.fits_bare(title))
+        .unwrap_or_else(|| short(1))
 }
 
 /// `* name  upstream ↑1 ↓2`: `*` marks the current branch, counts of zero

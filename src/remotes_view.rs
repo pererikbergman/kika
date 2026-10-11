@@ -197,9 +197,9 @@ mod tests {
     fn the_title_marks_the_tab_shown() {
         let mut state = focused(vec![remote("origin", Some("/r"), &[])]);
         let rows = draw(&state, 80, 24);
-        assert!(contains(&rows, "[3] Local [Remotes] Tags"), "{rows:#?}");
+        assert!(contains(&rows, " [3] Loc [Remotes] Tag "), "{rows:#?}");
         state.branches.tab = BranchesTab::Local;
-        assert!(contains(&draw(&state, 80, 24), "[3] [Local] Remotes Tags"));
+        assert!(contains(&draw(&state, 80, 24), " [3] [Local] Rem Tag "));
         // With room, the panel's name stays too.
         state.screen_mode = crate::layout::ScreenMode::Full;
         let rows = draw(&state, 80, 24);

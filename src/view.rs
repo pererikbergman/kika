@@ -191,6 +191,11 @@ impl PanelLook {
         width_of(&format!(" [{}] {text}{} ", self.number, self.mode)) <= self.title_width
     }
 
+    /// Whether `[n] <text><mode>` fits the border, with no space either side.
+    pub(crate) fn fits_bare(&self, text: &str) -> bool {
+        width_of(&format!("[{}] {text}{}", self.number, self.mode)) <= self.title_width
+    }
+
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
     /// the rest of the title fits.
     pub(crate) fn path_title(&self, head: &str, path: &str, tail: &str) -> String {
@@ -3467,9 +3472,15 @@ mod tests {
         };
         match (panel, &state.focus) {
             // Expanded, the Branches panel names its tabs; at 80 columns
-            // they take the place of its name, and may fill the border.
+            // they take the place of its name, the others shortened.
             (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
-                format!("[Local] Remotes Tags{mode}")
+                match state.screen_mode {
+                    crate::layout::ScreenMode::Normal => format!(" [3] [Local] Rem Tag{mode} "),
+                    crate::layout::ScreenMode::Half => format!(" [3] [Local] Remotes Tags{mode} "),
+                    crate::layout::ScreenMode::Full => {
+                        format!(" [3] Branches · [Local] Remotes Tags{mode} ")
+                    }
+                }
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
@@ -3741,7 +3752,11 @@ mod tests {
                 let key = format!("[{}]", panel.number());
                 assert!(row.contains(&key), "{w}x{h} {focus:?}: {row:?}");
                 // Whole, or cut on purpose with `…`, the mode note kept.
+                // The expanded Branches panel keeps its shown tab instead.
                 let name = match panel {
+                    Panel::Side(SidePanel::Branches) if state.expanded == SidePanel::Branches => {
+                        "[Local]"
+                    }
                     Panel::Side(side) => side.title(),
                     Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
                     Panel::Diff if state.focus == Focus::Branches => "Commits",

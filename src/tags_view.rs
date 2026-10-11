@@ -187,6 +187,41 @@ mod tests {
     }
 
     #[test]
+    fn the_shown_tab_stays_in_the_title_at_every_size() {
+        use crate::layout::ScreenMode;
+        for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
+            let marker = match tab {
+                BranchesTab::Local => "[Local]",
+                BranchesTab::Remotes => "[Remotes]",
+                BranchesTab::Tags => "[Tags]",
+            };
+            for (w, h, mode) in [
+                (80, 24, ScreenMode::Normal),
+                (80, 24, ScreenMode::Half),
+                (60, 20, ScreenMode::Normal),
+                (40, 12, ScreenMode::Normal),
+                (40, 12, ScreenMode::Half),
+            ] {
+                let mut state = focused(Ok(vec![tag(b"v1", true, 'e', "s")]));
+                state.branches.tab = tab;
+                state.screen_mode = mode;
+                let rows = buffer_rows(&draw(&state, w, h));
+                let title = rows.iter().find(|r| r.contains("[3]"));
+                // At 40 columns a long tab name may shrink, never go.
+                let needle = if w >= 60 { marker } else { &marker[..4] };
+                assert!(
+                    title.is_some_and(|t| t.contains(needle)),
+                    "{tab:?} {w}x{h} {mode:?}: {rows:#?}"
+                );
+            }
+        }
+        // At 80 columns the other tabs shrink, and the padding stays.
+        let state = focused(Ok(vec![]));
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        assert!(contains(&rows, "┏ [3] Loc Rem [Tags] ━"), "{rows:#?}");
+    }
+
+    #[test]
     fn a_long_row_is_cut_to_the_width() {
         let row = tag_row(&tag(&b"v".repeat(50), true, 'd', "subject"), 20);
         assert_eq!(crate::view::width_of(&row), 20);
