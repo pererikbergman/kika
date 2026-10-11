@@ -174,10 +174,11 @@ const STASH_STAGED_GIT: GitVersion = GitVersion {
 /// Why a stash action is refused when its entry moved since it was chosen.
 pub const STASH_LIST_CHANGED: &str = "The stash list changed; refresh and try again";
 
-/// Why a rename is refused when `stash@{0}` holds the same commit: git
-/// cannot store it on top again, so there is nothing to rename it to.
-pub const STASH_COPY_ON_TOP: &str =
-    "stash@{0} is a copy of this stash; rename or drop stash@{0} instead";
+/// Why a rename is refused when another entry, next to it on top of the
+/// list, holds the same commit: git adds no entry for the commit
+/// `refs/stash` already names, so the rename could only lose one copy.
+pub const STASH_COPY: &str =
+    "Another stash holds the same commit as this one; drop the copy first, then rename";
 
 /// How a merge records the other branch's commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -646,12 +647,16 @@ fn staged_stash_supported(runner: &dyn GitRunner) -> Result<(), String> {
 /// the store moved down by one. Storing first means a failure leaves a
 /// copy, never a loss.
 ///
-/// Git does not log a ref update that leaves the ref where it was, so
-/// storing the commit `refs/stash` already points at adds nothing. For
-/// `stash@{0}` itself, the entry is dropped first instead; if the store
-/// then fails, the error names its id so it can be stored by hand. A
-/// deeper entry whose commit is also at `stash@{0}` (a copy) is refused:
-/// the store would add nothing, and the drop would only lose the entry.
+/// Git adds no entry when the commit stored is the one `refs/stash`
+/// already names, so every path makes sure the store will add one:
+/// - `stash@{0}` is dropped first, then stored. If `stash@{1}` is the same
+///   commit, the drop would leave it on top and the store add nothing, so
+///   that is refused.
+/// - A deeper entry whose commit is also at `stash@{0}` is refused for the
+///   same reason.
+///
+/// After a store, `stash@{0}` must be the commit, or nothing more is
+/// dropped and the error says so.
 fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Result<(), String> {
     let store = store_command(stash, message);
     let at = |index| StashRef {
@@ -659,21 +664,25 @@ fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Resu
         oid: stash.oid.clone(),
     };
     let drop = |index| op_command(&GitOp::StashDrop(at(index)));
+    let copy_beside = if stash.index == 0 { 1 } else { 0 };
+    if stash_is(runner, &at(copy_beside))? {
+        return Err(STASH_COPY.into());
+    }
     // `run_op` has checked that `stash@{index}` is still this commit.
     if stash.index == 0 {
         run_checked(runner, &drop(0))?;
-        return run_checked(runner, &store).map(|_| ()).map_err(|message| {
+        let lost = |why: String| {
             format!(
-                "{message}\nThe stash was dropped but not stored again; \
+                "{why}\nThe stash was dropped but not stored again; \
                  git stash store {} brings it back.",
                 stash.oid.as_str()
             )
-        });
-    }
-    if stash_is(runner, &at(0))? {
-        return Err(STASH_COPY_ON_TOP.into());
+        };
+        run_checked(runner, &store).map_err(lost)?;
+        return verify_stash(runner, &at(0)).map_err(lost);
     }
     run_checked(runner, &store)?;
+    verify_stash(runner, &at(0))?;
     verify_stash(runner, &at(stash.index + 1))?;
     run_checked(runner, &drop(stash.index + 1)).map(|_| ())
 }
@@ -2378,11 +2387,11 @@ mod tests {
             ["stash", "store", "-m", "better words", STASH_OID]
         );
         let runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
-        let runner = expect_verify(runner, 0, "0ther");
-        let runner = runner.expect(
+        let runner = expect_verify(runner, 0, "0ther").expect(
             &["stash", "store", "-m", "better words", STASH_OID],
             ok(b""),
         );
+        let runner = expect_verify(runner, 0, STASH_OID);
         let runner =
             expect_verify(runner, 3, STASH_OID).expect(&["stash", "drop", "stash@{3}"], ok(b""));
         assert_eq!(run_op(&runner, &op), Ok(()));
@@ -2396,15 +2405,23 @@ mod tests {
             message: "m".into(),
         };
         let store = ["stash", "store", "-m", "m", STASH_OID];
-        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
-            .expect(&["stash", "drop", "stash@{0}"], ok(b""))
-            .expect(&store, ok(b""));
-        assert_eq!(run_op(&runner, &op), Ok(()));
-        runner.assert_done();
+        let drop = ["stash", "drop", "stash@{0}"];
+        // With another commit below it, and with nothing below it.
+        for below in ["0ther", ""] {
+            let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+            let runner = expect_verify(runner, 1, below)
+                .expect(&drop, ok(b""))
+                .expect(&store, ok(b""));
+            let runner = expect_verify(runner, 0, STASH_OID);
+            assert_eq!(run_op(&runner, &op), Ok(()), "{below:?}");
+            runner.assert_done();
+        }
 
-        // A failed store says how to bring the entry back.
-        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
-            .expect(&["stash", "drop", "stash@{0}"], ok(b""))
+        // A failed store, or one that added nothing, says how to bring the
+        // entry back.
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+        let runner = expect_verify(runner, 1, "0ther")
+            .expect(&drop, ok(b""))
             .expect(&store, fail("fatal: no space"));
         let error = run_op(&runner, &op).unwrap_err();
         assert!(error.starts_with("fatal: no space\n"), "{error}");
@@ -2412,30 +2429,63 @@ mod tests {
             error.contains(&format!("git stash store {STASH_OID}")),
             "{error}"
         );
-    }
-
-    #[test]
-    fn renaming_a_deeper_copy_of_the_top_entry_is_refused_without_dropping() {
-        let op = GitOp::StashRename {
-            stash: at(2),
-            message: "m".into(),
-        };
-        let runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
-        let runner = expect_verify(runner, 0, STASH_OID);
-        assert_eq!(run_op(&runner, &op), Err(STASH_COPY_ON_TOP.into()));
+        runner.assert_done();
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+        let runner = expect_verify(runner, 1, "0ther")
+            .expect(&drop, ok(b""))
+            .expect(&store, ok(b""));
+        let runner = expect_verify(runner, 0, "0ther");
+        let error = run_op(&runner, &op).unwrap_err();
+        assert!(
+            error.contains(&format!("git stash store {STASH_OID}")),
+            "{error}"
+        );
         runner.assert_done();
     }
 
     #[test]
-    fn a_rename_whose_old_place_moved_after_the_store_drops_nothing() {
+    fn renaming_an_entry_with_a_copy_beside_it_on_top_is_refused_without_dropping() {
+        // The top entry with the same commit just below it: [X, X, ...].
+        let op = GitOp::StashRename {
+            stash: at(0),
+            message: "m".into(),
+        };
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+        let runner = expect_verify(runner, 1, STASH_OID);
+        assert_eq!(run_op(&runner, &op), Err(STASH_COPY.into()));
+        runner.assert_done();
+
+        // A deeper entry with the same commit on top: [X, ..., X].
+        for index in [1, 2] {
+            let op = GitOp::StashRename {
+                stash: at(index),
+                message: "m".into(),
+            };
+            let runner = expect_verify(FakeRunner::new(), index, STASH_OID);
+            let runner = expect_verify(runner, 0, STASH_OID);
+            assert_eq!(run_op(&runner, &op), Err(STASH_COPY.into()), "{index}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_rename_whose_store_or_old_place_moved_drops_nothing() {
         let op = GitOp::StashRename {
             stash: at(1),
             message: "m".into(),
         };
+        let store = ["stash", "store", "-m", "m", STASH_OID];
+        // The old place moved under the store.
         let runner = expect_verify(FakeRunner::new(), 1, STASH_OID);
-        let runner = expect_verify(runner, 0, "0ther")
-            .expect(&["stash", "store", "-m", "m", STASH_OID], ok(b""));
+        let runner = expect_verify(runner, 0, "0ther").expect(&store, ok(b""));
+        let runner = expect_verify(runner, 0, STASH_OID);
         let runner = expect_verify(runner, 2, "f00");
+        assert_eq!(run_op(&runner, &op), Err(STASH_LIST_CHANGED.into()));
+        runner.assert_done();
+        // The store added nothing on top.
+        let runner = expect_verify(FakeRunner::new(), 1, STASH_OID);
+        let runner = expect_verify(runner, 0, "0ther").expect(&store, ok(b""));
+        let runner = expect_verify(runner, 0, "0ther");
         assert_eq!(run_op(&runner, &op), Err(STASH_LIST_CHANGED.into()));
         runner.assert_done();
     }
@@ -2709,39 +2759,102 @@ mod tests {
         }
     }
 
-    #[test]
-    fn renaming_a_copy_of_the_top_stash_keeps_every_entry_in_real_git() {
+    /// A repository whose stash list holds `layout` from the top: each
+    /// letter a commit, a repeated letter a copy of the same commit, each
+    /// entry's subject `<letter><place>`.
+    fn stash_layout(layout: &str) -> crate::git::fake::TempDir {
         use crate::git::fake::git;
 
         let tmp = stash_repo();
         let dir = tmp.path();
         let runner = crate::git::CliRunner::isolated(dir);
-        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
-        run_op(&runner, &push(StashMode::All, Some("one"), &[])).unwrap();
-        std::fs::write(dir.join("a.txt"), "y\n").unwrap();
-        run_op(&runner, &push(StashMode::All, Some("two"), &[])).unwrap();
-        // The copy a failed rename can leave: X again on top.
-        let x = real_entries(dir)[1].oid.clone();
-        git(dir, &["stash", "store", "-m", "dup", x.as_str()]);
-        let before = real_entries(dir);
-        let subjects = |entries: &[crate::git::stash::StashEntry]| {
-            entries
-                .iter()
-                .map(|e| (e.oid.clone(), e.subject.clone()))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(before.len(), 3);
-        assert_eq!((&before[0].oid, &before[2].oid), (&x, &x));
+        let mut made = std::collections::HashMap::new();
+        for letter in layout.chars() {
+            if made.contains_key(&letter) {
+                continue;
+            }
+            std::fs::write(dir.join("a.txt"), format!("{letter}\n")).unwrap();
+            run_op(&runner, &push(StashMode::All, None, &[])).unwrap();
+            let oid = real_entries(dir)[0].oid.clone();
+            run_op(&runner, &GitOp::StashDrop(real_ref(dir, 0))).unwrap();
+            made.insert(letter, oid);
+        }
+        // Stored bottom first, so `layout` reads from the top. Git adds no
+        // entry for the commit already on top, so a filler goes between
+        // twins and is dropped after: a drop keeps the twins side by side.
+        std::fs::write(dir.join("a.txt"), "filler\n").unwrap();
+        run_op(&runner, &push(StashMode::All, None, &[])).unwrap();
+        let filler = real_entries(dir)[0].oid.clone();
+        run_op(&runner, &GitOp::StashDrop(real_ref(dir, 0))).unwrap();
+        let mut last = None;
+        for (place, letter) in layout.chars().rev().enumerate() {
+            if last == Some(letter) {
+                git(dir, &["stash", "store", "-m", "_", filler.as_str()]);
+            }
+            let subject = format!("{letter}{}", layout.len() - 1 - place);
+            git(
+                dir,
+                &["stash", "store", "-m", &subject, made[&letter].as_str()],
+            );
+            last = Some(letter);
+        }
+        while let Some(at) = real_entries(dir).iter().position(|e| e.subject == "_") {
+            git(dir, &["stash", "drop", "-q", &format!("stash@{{{at}}}")]);
+        }
+        let listed: String = real_entries(dir)
+            .iter()
+            .map(|e| e.subject.chars().next().unwrap())
+            .collect();
+        assert_eq!(listed, layout, "the layout was not built as asked");
+        tmp
+    }
 
-        let result = run_op(
-            &runner,
-            &GitOp::StashRename {
-                stash: before[2].stash_ref(),
-                message: "renamed".into(),
-            },
-        );
+    fn subjects(dir: &Path) -> Vec<String> {
+        real_entries(dir).into_iter().map(|e| e.subject).collect()
+    }
 
-        assert_eq!(result, Err(STASH_COPY_ON_TOP.into()));
-        assert_eq!(subjects(&real_entries(dir)), subjects(&before));
+    #[test]
+    fn renaming_any_entry_with_a_copy_on_top_keeps_every_entry_in_real_git() {
+        // Each layout, each place: refused with nothing changed, or renamed
+        // with every other entry kept in order.
+        let cases: [(&str, usize, bool); 9] = [
+            ("XX", 0, false),
+            ("XX", 1, false),
+            ("XYX", 0, true),
+            ("XYX", 1, true),
+            ("XYX", 2, false),
+            ("XXX", 0, false),
+            ("XXX", 1, false),
+            ("XXX", 2, false),
+            ("XXY", 2, true),
+        ];
+        for (layout, index, renames) in cases {
+            let tmp = stash_layout(layout);
+            let dir = tmp.path();
+            let runner = crate::git::CliRunner::isolated(dir);
+            let before = real_entries(dir);
+            let result = run_op(
+                &runner,
+                &GitOp::StashRename {
+                    stash: before[index].stash_ref(),
+                    message: "renamed".into(),
+                },
+            );
+            let after = real_entries(dir);
+            let case = format!("{layout} @{index}: {result:?}");
+            if renames {
+                assert_eq!(result, Ok(()), "{case}");
+                assert_eq!(after[0].subject, "renamed", "{case}");
+                assert_eq!(after[0].oid, before[index].oid, "{case}");
+                let mut expected: Vec<String> = before.iter().map(|e| e.subject.clone()).collect();
+                expected.remove(index);
+                expected.insert(0, "renamed".into());
+                assert_eq!(subjects(dir), expected, "{case}");
+            } else {
+                assert_eq!(result, Err(STASH_COPY.into()), "{case}");
+                let unchanged: Vec<_> = before.iter().map(|e| e.subject.clone()).collect();
+                assert_eq!(subjects(dir), unchanged, "{case}");
+            }
+        }
     }
 }
