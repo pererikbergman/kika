@@ -4,9 +4,10 @@ use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
 use crate::git::diff::{DiffChunk, DiffRequest, DiffSide};
 use crate::git::ops::GitOp;
-use crate::git::patch::{self, Direction, FilePatch, PatchSelection};
+use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
+use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope, Resolution};
@@ -276,6 +277,10 @@ impl AppState {
             AppIntent::PopPopup => {
                 self.popups.pop();
             }
+            AppIntent::OpenInEditor => return self.open_in_editor(),
+            AppIntent::EditHunk => return self.edit_hunk(),
+            AppIntent::EditorClosed { result } => return self.editor_closed(result),
+            AppIntent::HunkEdited { result } => return self.hunk_edited(result),
         }
         vec![]
     }
@@ -428,6 +433,110 @@ impl AppState {
             Some(GitOp::ApplyWorktree { patch: built })
         };
         Ok(op.map(|op| confirm(what, &view.path, op)))
+    }
+
+    /// Hand the terminal to the editor on the selected file: at the
+    /// selected change from the Diff pane, at the top from the Files panel.
+    fn open_in_editor(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace || self.op_seq.is_some() {
+            return vec![];
+        }
+        let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
+            return vec![];
+        };
+        if entry.worktree == 'D' || entry.index == 'D' {
+            self.notice = Some("The file is deleted");
+            return vec![];
+        }
+        let (path, line) = match &self.focus {
+            Focus::Files => (entry.path.clone(), None),
+            Focus::Diff(view) => (view.path.clone(), view.editor_line()),
+        };
+        vec![Effect::HandOff(HandOff::OpenFile { path, line })]
+    }
+
+    /// Hand the selected unstaged hunk to the editor; what comes back is
+    /// staged. Only plain changes to a file: other headers need more than
+    /// a recount to apply.
+    fn edit_hunk(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace || self.op_seq.is_some() {
+            return vec![];
+        }
+        let Focus::Diff(view) = &self.focus else {
+            return vec![];
+        };
+        if view.lines.is_some() {
+            return vec![];
+        }
+        if view.side == DiffSide::Index {
+            self.notice = Some("Edit hunks from the unstaged view");
+            return vec![];
+        }
+        let Some(file_patch) = &view.patch else {
+            return vec![];
+        };
+        if file_patch.kind != FileKind::Modified {
+            self.notice = Some("Only hunks of changed files can be edited");
+            return vec![];
+        }
+        if file_patch.hunks.is_empty() {
+            self.notice = Some(NO_CHANGES);
+            return vec![];
+        }
+        match patch::build(
+            file_patch,
+            &PatchSelection::Hunk(view.hunk),
+            Direction::Stage,
+        ) {
+            Ok(built) => vec![Effect::HandOff(HandOff::edit_hunk(&built))],
+            Err(error) => {
+                self.notice = Some(error.message());
+                vec![]
+            }
+        }
+    }
+
+    /// Back from the editor: the file may have changed, so reload.
+    fn editor_closed(&mut self, result: Result<(), String>) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        match result {
+            Ok(()) => {
+                self.status_selection = Selection::KeepPath;
+                self.refresh_status()
+            }
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not open the editor",
+                    &message,
+                    "Check core.editor, $VISUAL or $EDITOR, then try again.",
+                ));
+                vec![]
+            }
+        }
+    }
+
+    /// Back from editing a hunk: stage what the user left, if anything.
+    fn hunk_edited(&mut self, result: Result<Option<Vec<u8>>, String>) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        match result {
+            Ok(Some(patch)) => self.start_op(Ok(Some(GitOp::ApplyEdited { patch }))),
+            Ok(None) => {
+                self.notice = Some("Edit cancelled");
+                vec![]
+            }
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not edit the hunk",
+                    &message,
+                    "Nothing was staged. Fix the cause above, then try again.",
+                ));
+                vec![]
+            }
+        }
     }
 
     /// Select the first file whose path contains `text`, ignoring case.
@@ -859,6 +968,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::DiscardWorktree(_) => "Could not discard the changes",
         GitOp::DeleteUntracked(_) => "Could not delete the file",
         GitOp::ApplyWorktree { .. } => "Could not discard the change",
+        GitOp::ApplyEdited { .. } => "Could not stage the edited hunk",
     }
 }
 
@@ -3027,8 +3137,221 @@ mod tests {
                 GitOp::ApplyWorktree { patch: vec![] },
                 "Could not discard the change",
             ),
+            (
+                GitOp::ApplyEdited { patch: vec![] },
+                "Could not stage the edited hunk",
+            ),
         ] {
             assert_eq!(failure_title(&op), title);
         }
+    }
+
+    fn hand_off(effects: &[Effect]) -> &HandOff {
+        match effects {
+            [Effect::HandOff(job)] => job,
+            other => panic!("expected one HandOff, got {other:?}"),
+        }
+    }
+
+    fn open_file(path: &str, line: Option<u32>) -> HandOff {
+        HandOff::OpenFile {
+            path: path.into(),
+            line,
+        }
+    }
+
+    #[test]
+    fn o_in_the_files_panel_opens_the_selected_file_at_the_top() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", None));
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn o_in_the_diff_opens_at_the_selected_change_on_the_worktree_side() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        // Hunk 0 starts with `-a`, which sat at new line 1.
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", Some(1)));
+        press(&mut state, KeyCode::Char('j'));
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", Some(10)));
+        assert_eq!(view(&state).editor_line(), Some(10));
+
+        // Line mode follows the cursor: `+b` then `+c`.
+        press(&mut state, KeyCode::Char('k'));
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('j'));
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", Some(1)));
+        press(&mut state, KeyCode::Char('j'));
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", Some(2)));
+    }
+
+    #[test]
+    fn o_in_the_staged_view_opens_without_a_line() {
+        let mut state = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
+        assert_eq!(view(&state).side, DiffSide::Index);
+        let effects = press(&mut state, KeyCode::Char('o'));
+        assert_eq!(hand_off(&effects), &open_file("a.rs", None));
+    }
+
+    #[test]
+    fn o_on_a_file_deleted_from_the_worktree_says_so_and_opens_nothing() {
+        for (index, worktree) in [('.', 'D'), ('D', '.')] {
+            let (mut state, _) = with_files(vec![changed("gone.rs", index, worktree)], 24);
+            assert_eq!(press(&mut state, KeyCode::Char('o')), vec![]);
+            assert_eq!(state.notice, Some("The file is deleted"));
+        }
+        let mut state = focused(vec![changed("gone.rs", '.', 'D')], ONE_HUNK);
+        assert_eq!(press(&mut state, KeyCode::Char('o')), vec![]);
+        assert_eq!(state.notice, Some("The file is deleted"));
+    }
+
+    #[test]
+    fn e_hands_the_selected_hunk_to_the_editor_split_at_its_first_hunk_line() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('j'));
+        let effects = press(&mut state, KeyCode::Char('e'));
+        let expected = patch::build(
+            &patch_of(TWO_HUNKS),
+            &PatchSelection::Hunk(1),
+            Direction::Stage,
+        )
+        .unwrap();
+        match hand_off(&effects) {
+            HandOff::EditHunk { header, hunk } => {
+                assert_eq!([header.as_slice(), hunk.as_slice()].concat(), expected);
+                assert_eq!(header.as_slice(), HEAD.as_bytes());
+                assert!(hunk.starts_with(b"@@ "), "{hunk:?}");
+            }
+            other => panic!("expected an EditHunk, got {other:?}"),
+        }
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn e_refuses_the_staged_side_other_kinds_and_a_running_op() {
+        let mut staged = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
+        assert_eq!(press(&mut staged, KeyCode::Char('e')), vec![]);
+        assert_eq!(staged.notice, Some("Edit hunks from the unstaged view"));
+
+        let new_file = b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n\
+            --- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n";
+        let mut added = focused(vec![untracked("n.txt")], new_file);
+        assert_eq!(press(&mut added, KeyCode::Char('e')), vec![]);
+        assert_eq!(
+            added.notice,
+            Some("Only hunks of changed files can be edited")
+        );
+
+        let mut running = focused(three_files(), TWO_HUNKS);
+        running.op_seq = Some(5);
+        assert_eq!(running.update(AppIntent::EditHunk), vec![]);
+        assert_eq!(running.update(AppIntent::OpenInEditor), vec![]);
+
+        // Still loading: no patch to edit yet.
+        let (mut loading, _) = with_files(three_files(), 24);
+        press(&mut loading, KeyCode::Enter);
+        assert_eq!(loading.update(AppIntent::EditHunk), vec![]);
+
+        // From the Files panel there is no hunk.
+        let (mut files, _) = with_files(three_files(), 24);
+        assert_eq!(files.update(AppIntent::EditHunk), vec![]);
+    }
+
+    #[test]
+    fn an_edited_hunk_is_staged_with_one_apply_edited() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        let effects = state.update(AppIntent::HunkEdited {
+            result: Ok(Some(b"edited".to_vec())),
+        });
+        let (tag, op) = op_of(&effects);
+        assert!(tag.user);
+        assert_eq!(
+            op,
+            GitOp::ApplyEdited {
+                patch: b"edited".to_vec()
+            }
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+    }
+
+    #[test]
+    fn a_cancelled_edit_says_so_and_runs_nothing() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        assert_eq!(
+            state.update(AppIntent::HunkEdited { result: Ok(None) }),
+            vec![]
+        );
+        assert_eq!(state.notice, Some("Edit cancelled"));
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_failed_edit_or_editor_shows_an_error_popup() {
+        for (intent, title) in [
+            (
+                AppIntent::HunkEdited {
+                    result: Err("no editor".into()),
+                },
+                "Could not edit the hunk",
+            ),
+            (
+                AppIntent::EditorClosed {
+                    result: Err("no editor".into()),
+                },
+                "Could not open the editor",
+            ),
+        ] {
+            let mut state = focused(three_files(), TWO_HUNKS);
+            assert_eq!(state.update(intent), vec![]);
+            match state.popups.as_slice() {
+                [Popup::Error(error)] => {
+                    assert_eq!(error.title, title);
+                    assert_eq!(error.message, "no editor");
+                }
+                other => panic!("expected one error popup, got {other:?}"),
+            }
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn a_closed_editor_reloads_the_status() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let effects = state.update(AppIntent::EditorClosed { result: Ok(()) });
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStatus { tag }] if tag.user),
+            "{effects:?}"
+        );
+        assert_eq!(state.busy, 1);
+    }
+
+    #[test]
+    fn editor_intents_do_nothing_outside_the_workspace() {
+        let mut review = AppState::new(Context::Review { number: 1 });
+        review.files = three_files();
+        review.selected = Some(0);
+        for intent in [
+            AppIntent::OpenInEditor,
+            AppIntent::EditHunk,
+            AppIntent::EditorClosed { result: Ok(()) },
+            AppIntent::EditorClosed {
+                result: Err("x".into()),
+            },
+            AppIntent::HunkEdited {
+                result: Ok(Some(b"p".to_vec())),
+            },
+            AppIntent::HunkEdited { result: Ok(None) },
+        ] {
+            assert_eq!(review.update(intent.clone()), vec![], "{intent:?}");
+        }
+        assert_eq!(review.popups, []);
+        assert_eq!(review.notice, None);
     }
 }

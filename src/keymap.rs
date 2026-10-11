@@ -370,6 +370,35 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
     }
 }
 
+/// Why `o` cannot open the editor right now.
+fn open_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    no_file_selected(state)
+}
+
+/// Why `e` cannot edit the selected hunk right now. What kind of change
+/// can be edited is the model's call once it runs.
+fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    let Focus::Diff(view) = &state.focus else {
+        return Some(NO_CHANGES);
+    };
+    if view.lines.is_some() {
+        return Some("Press Esc to edit the whole hunk");
+    }
+    if view.loading() {
+        return Some("Loading…");
+    }
+    match &view.patch {
+        Some(patch) if !patch.hunks.is_empty() => None,
+        _ => Some(NO_CHANGES),
+    }
+}
+
 /// The editor's keys wait while the commit runs, so the message cannot change.
 fn commit_editor_disabled(state: &AppState) -> Option<&'static str> {
     let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_seq.is_some();
@@ -507,6 +536,16 @@ static REGISTRY: &[Binding] = &[
         disabled: discard_disabled,
     },
     Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenInEditor,
+        description: "Open the selected file in your editor",
+        label: "open in editor",
+        // Left out of the bar until the layout review (#10).
+        bar: false,
+        disabled: open_disabled,
+    },
+    Binding {
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Files,
         intent: AppIntent::FocusDiff,
@@ -575,6 +614,26 @@ static REGISTRY: &[Binding] = &[
         label: "discard",
         bar: true,
         disabled: discard_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::OpenInEditor,
+        description: "Open the file in your editor at the selected hunk",
+        label: "open in editor",
+        // Left out of the bar until the layout review (#10).
+        bar: false,
+        disabled: open_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::EditHunk,
+        description: "Edit the selected hunk in your editor, then stage it",
+        label: "edit hunk",
+        // Left out of the bar until the layout review (#10).
+        bar: false,
+        disabled: edit_hunk_disabled,
     },
     Binding {
         keys: &[
@@ -666,6 +725,16 @@ static REGISTRY: &[Binding] = &[
         label: "discard",
         bar: true,
         disabled: discard_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Lines,
+        intent: AppIntent::OpenInEditor,
+        description: "Open the file in your editor at the selected line",
+        label: "open in editor",
+        // Left out of the bar until the layout review (#10).
+        bar: false,
+        disabled: open_disabled,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -1410,6 +1479,80 @@ mod tests {
         for k in [plain('q'), plain('?'), plain('d'), plain(' ')] {
             assert_eq!(confirm(k), None, "{k:?}");
         }
+    }
+
+    #[test]
+    fn o_opens_the_editor_from_files_diff_and_lines_and_e_edits_a_hunk_in_the_diff() {
+        use AppIntent::*;
+        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
+            assert_eq!(from(scope, plain('o')), Some(OpenInEditor), "{scope:?}");
+            assert_eq!(
+                from(scope, key(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+                None,
+                "{scope:?}"
+            );
+        }
+        let bound = |scope, k| {
+            registry()
+                .iter()
+                .find(|b| b.scope == scope && b.matches(k))
+                .map(|b| b.intent.clone())
+        };
+        assert_eq!(bound(KeyScope::Diff, plain('e')), Some(EditHunk));
+        assert_eq!(bound(KeyScope::Files, plain('e')), None);
+        assert_eq!(bound(KeyScope::Lines, plain('e')), None);
+        assert_eq!(
+            bound(
+                KeyScope::Diff,
+                key(KeyCode::Char('e'), KeyModifiers::CONTROL)
+            ),
+            None
+        );
+        assert_eq!(from(KeyScope::Files, plain('e')), None);
+    }
+
+    #[test]
+    fn o_and_e_say_why_they_cannot_run() {
+        use crate::git::diff::DiffSide;
+        use crate::git::patch::parse;
+        use crate::hunk_view::{HunkView, LineCursor};
+
+        let reason = |state: &AppState, scope, c| match resolve(registry(), scope, state, plain(c))
+        {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound => panic!("{c} is unbound in {scope:?}"),
+        };
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(
+            reason(&state, KeyScope::Files, 'o'),
+            Some("No file selected")
+        );
+        state.op_seq = Some(1);
+        assert_eq!(reason(&state, KeyScope::Files, 'o'), Some(OP_RUNNING));
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(OP_RUNNING));
+        state.op_seq = None;
+
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.seq = Some(3);
+        state.focus = Focus::Diff(view.clone());
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some("Loading…"));
+        view.seq = None;
+        state.focus = Focus::Diff(view.clone());
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(NO_CHANGES));
+        view.patch =
+            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
+        state.focus = Focus::Diff(view.clone());
+        assert_eq!(reason(&state, KeyScope::Diff, 'e'), None);
+        view.lines = Some(LineCursor {
+            anchor: 0,
+            cursor: 0,
+        });
+        state.focus = Focus::Diff(view);
+        assert_eq!(
+            reason(&state, KeyScope::Lines, 'e'),
+            Some("Press Esc to edit the whole hunk")
+        );
     }
 
     #[test]

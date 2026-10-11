@@ -47,6 +47,21 @@ impl TestRepo {
         self
     }
 
+    /// Make a script with `body` the repo's `core.editor`, kept in `.git`
+    /// so it is not a change itself. It runs in the top level with the
+    /// file to edit as `$1`.
+    #[cfg(unix)]
+    pub fn editor(self, body: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = self.dir.path().join(".git").join("editor.sh");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let quoted = format!("'{}'", script.display());
+        self.git(["config", "core.editor", quoted.as_str()]);
+        self
+    }
+
     /// The full message of the `HEAD` commit, as git prints it.
     pub fn head_message(&self) -> String {
         String::from_utf8(self.git(["log", "-1", "--format=%B"])).unwrap()
@@ -95,6 +110,11 @@ impl TestRepo {
     pub fn try_git<A: AsRef<OsStr>>(&self, args: impl IntoIterator<Item = A>) -> bool {
         let args: Vec<A> = args.into_iter().collect();
         try_git(self.dir.path(), &args)
+    }
+
+    /// The repository's top level.
+    pub fn path(&self) -> &std::path::Path {
+        self.dir.path()
     }
 
     pub fn exists(&self, path: &str) -> bool {

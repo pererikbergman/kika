@@ -45,6 +45,12 @@ pub enum GitOp {
     ApplyWorktree {
         patch: Vec<u8>,
     },
+    /// Apply a hunk the user edited to the index, from stdin. Its `@@`
+    /// counts are recounted, since the edit invalidates them; git applies
+    /// all or nothing, so a broken edit leaves the index as it was.
+    ApplyEdited {
+        patch: Vec<u8>,
+    },
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -136,6 +142,12 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // Without `--cached`, git applies to the worktree only.
         GitOp::ApplyWorktree { patch } => GitCommand::new("apply")
             .arg("--reverse")
+            .arg("--whitespace=nowarn")
+            .arg("-")
+            .stdin(patch.clone()),
+        GitOp::ApplyEdited { patch } => GitCommand::new("apply")
+            .arg("--cached")
+            .arg("--recount")
             .arg("--whitespace=nowarn")
             .arg("-")
             .stdin(patch.clone()),
@@ -414,6 +426,76 @@ mod tests {
                 ("LC_ALL".into(), "C".into())
             ]]
         );
+    }
+
+    #[test]
+    fn apply_edited_recounts_and_sends_the_patch_on_stdin() {
+        let runner = FakeRunner::new().expect(
+            &["apply", "--cached", "--recount", "--whitespace=nowarn", "-"],
+            ok(b""),
+        );
+        let op = GitOp::ApplyEdited {
+            patch: b"the patch\n".to_vec(),
+        };
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
+        assert_eq!(
+            runner.envs(),
+            [vec![
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                ("LC_ALL".into(), "C".into())
+            ]]
+        );
+    }
+
+    /// `e.txt` committed as `one`, then `two` and `three` added after it.
+    fn edit_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("edited");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("e.txt"), "one\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.join("e.txt"), "one\ntwo\nthree\n").unwrap();
+        tmp
+    }
+
+    #[test]
+    fn an_edited_hunk_with_stale_counts_stages_exactly_what_is_left_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = edit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        // `+three` was deleted in the editor; the counts still say 3.
+        let patch = b"diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n\
+            @@ -1 +1,3 @@\n one\n+two\n"
+            .to_vec();
+        run_op(&runner, &GitOp::ApplyEdited { patch }).unwrap();
+        assert_eq!(git(dir, &["show", ":e.txt"]), b"one\ntwo\n");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("e.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+    }
+
+    #[test]
+    fn a_garbage_edit_fails_and_leaves_the_index_alone_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = edit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let header = "diff --git a/e.txt b/e.txt\n--- a/e.txt\n+++ b/e.txt\n";
+        for body in ["garbage\n", "@@ -1 +1,2 @@\n nope\n+two\n"] {
+            let patch = format!("{header}{body}").into_bytes();
+            let result = run_op(&runner, &GitOp::ApplyEdited { patch });
+            assert!(result.is_err(), "{body:?}: {result:?}");
+            assert_eq!(git(dir, &["diff", "--cached"]), b"", "{body:?}");
+        }
     }
 
     /// `d.txt` committed as `head`, `staged` in the index, `work` in the
