@@ -38,6 +38,8 @@ mod recent;
 mod recent_list;
 mod refresh;
 mod remote_run;
+mod remotes;
+mod remotes_view;
 mod rendered_view;
 mod sequence_editor;
 mod submodule_list;

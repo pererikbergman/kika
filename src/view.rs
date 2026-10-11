@@ -1,4 +1,5 @@
 use crate::blame_view::{BlameView, CommitView};
+use crate::branches::BranchesTab;
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
@@ -15,6 +16,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
+use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -90,6 +92,13 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
     };
     match (&state.focus, state.rendered_shown(), label) {
         // What the selected branch holds, before acting on it.
+        // A remote's header row has no log; what the remote is instead.
+        (Focus::Branches, ..)
+            if state.branches.tab == BranchesTab::Remotes
+                && state.branches.remotes.selected_branch().is_none() =>
+        {
+            remotes_view::render_remote(&state.branches.remotes, &look, frame, area)
+        }
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
         // A commit's file, streamed like a working-tree diff; never rendered.
         (Focus::Commits, ..) if state.commits.open.is_some() => {
@@ -173,6 +182,11 @@ impl PanelLook {
             return elide_right(&key, self.title_width);
         }
         format!("{key} {}{}", elide_right(text, room), self.mode)
+    }
+
+    /// Whether ` [n] <text><mode> ` fits the border whole.
+    pub(crate) fn fits(&self, text: &str) -> bool {
+        width_of(&format!(" [{}] {text}{} ", self.number, self.mode)) <= self.title_width
     }
 
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
@@ -3445,6 +3459,11 @@ mod tests {
             _ => String::new(),
         };
         match (panel, &state.focus) {
+            // Expanded, the Branches panel names its tabs; at 80 columns
+            // they take the place of its name.
+            (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
+                format!("[Local] Remotes{mode} ")
+            }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
             // The selected branch's commits take the diff's place.

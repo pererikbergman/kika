@@ -21,6 +21,7 @@ pub mod prompts;
 pub mod rebase_plan;
 pub mod refs;
 pub mod remote;
+pub mod remotes;
 pub mod repo_root;
 pub mod repo_state;
 pub mod retry;

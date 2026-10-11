@@ -453,6 +453,9 @@ means a repository's `.kika.toml` cannot change it.
 | `branches.rename` | `R` | Rename the selected branch | |
 | `branches.delete` | `d` | Delete the selected branch, asking first | locked |
 | `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
+| `branches.set_upstream` | `u` | Set the remote branch the selected branch tracks | |
+| `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
+| `branches.switch_tab` | `[`, `]` | Show the remotes and their branches | |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -462,6 +465,33 @@ staged for you to commit), or rebasing the current branch onto the selected
 one. A merge commit, a rebase, and continuing or skipping run git on the
 terminal, so hooks, signing and git's editor for the message work as on the
 command line.
+
+`u` asks for the upstream as `remote/branch`, starting from the current one,
+or else the same name on `origin` (or the first remote). It must name a
+remote branch Kika has listed; fetch first if it is new.
+
+### Remotes
+
+`[` or `]` in the Branches panel shows the Remotes tab: each remote with its
+URL (any user name and password in it left out), and its remote-tracking
+branches below it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `remotes.next` | `j`, `down` | Select the next remote or remote branch | |
+| `remotes.prev` | `k`, `up` | Select the previous remote or remote branch | |
+| `remotes.checkout` | `space` | Check out the selected remote branch as a new branch tracking it | |
+| `remotes.add` | `a` | Add a remote; fetch to see its branches | |
+| `remotes.rename` | `R` | Rename the selected remote | |
+| `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
+| `remotes.switch_tab` | `[`, `]` | Show the local branches | |
+
+None of these reaches the network. A remote you add shows no branches until
+you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
+transport (`ext::…`, `ext://…`, `fd::…`, `fd://…`), since those run a command
+or use a file descriptor on every fetch; add such a remote with git directly. A remote named like an option
+(starting with `-`), or refs left under a name no remote has, cannot be
+renamed or removed from Kika.
 
 ### Status
 
@@ -722,6 +752,17 @@ that are not merged asks in stronger words, and only `D` deletes it.
 | `delete_branch.force` | `D` | Yes, delete the branch and its unmerged commits | locked |
 | `delete_branch.no` | `n`, `esc` | No, keep the branch | locked |
 | `delete_branch.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Remove this remote?
+
+Removing a remote also deletes its remote-tracking branches, so `enter` does
+not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `remove_remote.yes` | `y` | Yes, remove the remote and its remote-tracking branches | locked |
+| `remove_remote.no` | `n`, `esc` | No, keep the remote | locked |
+| `remove_remote.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Reset hard?
 
