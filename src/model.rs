@@ -4,7 +4,7 @@ use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
 use crate::git::diff::{DiffChunk, DiffRequest, DiffSide};
 use crate::git::ops::GitOp;
-use crate::git::patch::{self, FilePatch, PatchSelection};
+use crate::git::patch::{self, Direction, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::status::{BranchStatus, RepoStatus};
 use crate::hunk_view::HunkView;
@@ -188,6 +188,11 @@ impl AppState {
                 }
             }
             AppIntent::ToggleHunkStage => return self.toggle_hunk_stage(),
+            AppIntent::EnterLineMode => self.with_lines(HunkView::enter_lines),
+            AppIntent::ExitLineMode => self.with_lines(HunkView::exit_lines),
+            AppIntent::NextLine { extend } => self.with_lines(|view| view.next_line(extend)),
+            AppIntent::PrevLine { extend } => self.with_lines(|view| view.prev_line(extend)),
+            AppIntent::ToggleLinesStage => return self.toggle_lines_stage(),
             AppIntent::ToggleDiffSide => return self.toggle_diff_side(),
             AppIntent::PatchLoaded { tag, result } => self.patch_loaded(tag, result),
             AppIntent::ToggleStage => {
@@ -279,6 +284,7 @@ impl AppState {
     pub fn panel_focus(&self) -> KeyScope {
         match (&self.context, &self.focus) {
             (Context::Workspace, Focus::Files) => KeyScope::Files,
+            (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Review { .. }, _) => KeyScope::Review,
         }
@@ -490,18 +496,47 @@ impl AppState {
         }
     }
 
-    /// Stage the selected hunk, or unstage it from the staged view. When it
-    /// is the file's only hunk, the whole file is staged instead: the same
-    /// change, without a patch that could fail to apply.
+    /// Change the focused view's line cursor, keeping it on screen.
+    fn with_lines(&mut self, change: impl FnOnce(&mut HunkView)) {
+        let rows = self.pane_rows();
+        if let Focus::Diff(view) = &mut self.focus {
+            change(view);
+            view.scroll_to_cursor(rows);
+        }
+    }
+
     fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
+        match &self.focus {
+            Focus::Diff(view) => self.toggle_selection_stage(PatchSelection::Hunk(view.hunk)),
+            Focus::Files => vec![],
+        }
+    }
+
+    fn toggle_lines_stage(&mut self) -> Vec<Effect> {
+        match &self.focus {
+            Focus::Diff(view) => {
+                self.toggle_selection_stage(PatchSelection::Lines(view.selected_lines()))
+            }
+            Focus::Files => vec![],
+        }
+    }
+
+    /// Stage the selected hunk or lines, or unstage them from the staged
+    /// view. When that is the file's whole change, the file is staged
+    /// instead: the same change, without a patch that could fail to apply.
+    fn toggle_selection_stage(&mut self, selection: PatchSelection) -> Vec<Effect> {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
         let Some(file_patch) = &view.patch else {
             return vec![];
         };
-        let selection = PatchSelection::Hunk(view.hunk);
-        let built = match patch::build(file_patch, &selection) {
+        let direction = if view.side == DiffSide::Index {
+            Direction::Unstage
+        } else {
+            Direction::Stage
+        };
+        let built = match patch::build(file_patch, &selection, direction) {
             Ok(built) => built,
             Err(error) => {
                 self.notice = Some(error.message());
@@ -746,8 +781,8 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::StageAll => "Could not stage everything",
         GitOp::UnstageAll => "Could not unstage everything",
         GitOp::Commit { .. } => "Could not commit",
-        GitOp::ApplyCached { reverse: false, .. } => "Could not stage the hunk",
-        GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the hunk",
+        GitOp::ApplyCached { reverse: false, .. } => "Could not stage the change",
+        GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the change",
     }
 }
 
@@ -2504,7 +2539,7 @@ mod tests {
         let (tag, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
         state.update(finished(tag, op, Err("error: patch failed".into())));
         assert!(
-            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not stage the hunk"),
+            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not stage the change"),
             "{:?}",
             state.popups
         );
@@ -2513,7 +2548,7 @@ mod tests {
         let (tag, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
         state.update(finished(tag, op, Err("no".into())));
         assert!(
-            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not unstage the hunk"),
+            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not unstage the change"),
             "{:?}",
             state.popups
         );
@@ -2589,5 +2624,122 @@ mod tests {
         );
         assert_eq!(view(&state).scroll, 1);
         assert_eq!(state.diff, before);
+    }
+
+    const HEAD: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n";
+
+    #[test]
+    fn v_enters_line_mode_and_esc_or_v_leaves_it_without_leaving_the_diff() {
+        for leave in [KeyCode::Esc, KeyCode::Char('v')] {
+            let mut state = focused(three_files(), TWO_HUNKS);
+            press(&mut state, KeyCode::Char('v'));
+            assert!(view(&state).lines.is_some());
+            assert_eq!(state.panel_focus(), KeyScope::Lines);
+            assert_eq!(state.key_focus(), KeyScope::Lines);
+            assert_eq!(press(&mut state, leave), vec![]);
+            assert_eq!(view(&state).lines, None, "{leave:?}");
+            assert_eq!(state.panel_focus(), KeyScope::Diff);
+        }
+    }
+
+    #[test]
+    fn in_line_mode_j_and_k_move_between_lines_not_hunks() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Char('j'));
+        press(&mut state, KeyCode::Char('j'));
+        assert_eq!(view(&state).hunk, 0);
+        assert_eq!(view(&state).selected_range(), [2]);
+        press(&mut state, KeyCode::Char('k'));
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('K'),
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(view(&state).selected_range(), [0, 1]);
+    }
+
+    #[test]
+    fn space_in_line_mode_applies_the_selected_lines_per_side() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('j'));
+        let (tag, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+        assert!(tag.user);
+        assert_eq!(
+            op,
+            GitOp::ApplyCached {
+                patch: format!("{HEAD}@@ -1,2 +1,3 @@\n a\n+b\n d\n").into_bytes(),
+                reverse: false,
+            }
+        );
+
+        let mut state = focused(vec![changed("a.rs", 'M', '.')], TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('j'));
+        let (_, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+        assert_eq!(
+            op,
+            GitOp::ApplyCached {
+                patch: format!("{HEAD}@@ -1,2 +1,3 @@\n+b\n c\n d\n").into_bytes(),
+                reverse: true,
+            }
+        );
+    }
+
+    #[test]
+    fn selecting_every_line_of_the_file_stages_or_unstages_the_file() {
+        for (index, worktree, expected) in [
+            ('.', 'M', GitOp::Stage(vec!["a.rs".into()])),
+            ('M', '.', GitOp::Unstage(vec!["a.rs".into()])),
+        ] {
+            let mut state = focused(vec![changed("a.rs", index, worktree)], ONE_HUNK);
+            press(&mut state, KeyCode::Char('v'));
+            press(&mut state, KeyCode::Char('J'));
+            let (_, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+            assert_eq!(op, expected);
+        }
+    }
+
+    #[test]
+    fn a_refused_line_selection_says_why_and_runs_nothing() {
+        let new_file = b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n\
+            --- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n";
+        let mut state = focused(vec![untracked("n.txt")], new_file);
+        press(&mut state, KeyCode::Char('v'));
+        assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("New file: press Esc, then Space for the whole file")
+        );
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.busy, 0);
+    }
+
+    #[test]
+    fn t_leaves_line_mode_and_v_is_refused_without_hunks() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        press(&mut state, KeyCode::Char('t'));
+        assert_eq!(view(&state).lines, None);
+        assert_eq!(state.panel_focus(), KeyScope::Diff);
+
+        let mut empty = focused(three_files(), b"");
+        assert_eq!(press(&mut empty, KeyCode::Char('v')), vec![]);
+        assert_eq!(empty.notice, Some("No changes in this view"));
+        assert_eq!(view(&empty).lines, None);
+    }
+
+    #[test]
+    fn a_failed_lines_stage_names_the_change() {
+        let mut state = focused(three_files(), TWO_HUNKS);
+        press(&mut state, KeyCode::Char('v'));
+        let (tag, op) = op_of(&press(&mut state, KeyCode::Char(' ')));
+        state.update(finished(tag, op, Err("error: patch failed".into())));
+        assert!(
+            matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not stage the change"),
+            "{:?}",
+            state.popups
+        );
     }
 }
