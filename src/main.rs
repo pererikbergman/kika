@@ -36,6 +36,8 @@ mod recent;
 mod recent_list;
 mod refresh;
 mod rendered_view;
+mod stash;
+mod stash_view;
 mod submodule_list;
 mod view;
 mod watch;

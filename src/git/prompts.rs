@@ -156,6 +156,10 @@ mod tests {
         use crate::git::commit_files::CommitId;
         use crate::git::ops::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
+        let stash = || crate::git::stash::StashRef {
+            index: 0,
+            oid: oid(),
+        };
         let merge = |strategy| GitOp::Merge {
             branch: "b".into(),
             strategy,
@@ -186,6 +190,19 @@ mod tests {
             },
             GitOp::Abort(Operation::Revert),
             GitOp::StageAll,
+            // A stash makes commits, but no hooks run for them.
+            GitOp::StashPush {
+                mode: crate::git::ops::StashMode::All,
+                message: None,
+                paths: vec![],
+            },
+            GitOp::StashApply(stash()),
+            GitOp::StashPop(stash()),
+            GitOp::StashDrop(stash()),
+            GitOp::StashRename {
+                stash: stash(),
+                message: "m".into(),
+            },
         ];
         for op in detached {
             assert!(!runs_attached(&op), "{op:?}");

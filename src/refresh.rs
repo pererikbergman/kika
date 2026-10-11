@@ -21,6 +21,8 @@ pub enum Scope {
     Branches,
     /// The Commits panel's log and markers.
     Commits,
+    /// The Stash panel's list.
+    Stash,
 }
 
 /// How the file selection survives a refresh.
@@ -87,6 +89,18 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // The parent lists a submodule whose checkout moved as modified.
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
+        }
+        // A push takes changes out of the worktree into a new entry.
+        GitOp::StashPush { .. } => (&[Scope::Files, Scope::Stash][..], Selection::KeepPath),
+        // Applying can stop on conflicts the Status panel counts, and a
+        // pop also takes the entry out of the list.
+        GitOp::StashApply(_) | GitOp::StashPop(_) => (
+            &[Scope::Files, Scope::Branch, Scope::Stash][..],
+            Selection::KeepPath,
+        ),
+        // These change only the list.
+        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+            (&[Scope::Stash][..], Selection::KeepPath)
         }
     };
     RefreshPlan {
@@ -192,6 +206,46 @@ mod tests {
                     Scope::Branches,
                     Scope::Commits
                 ]),
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stash_ops_reload_the_list_and_what_they_change_in_the_worktree() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::StashMode;
+        use crate::git::stash::StashRef;
+        let at = || StashRef {
+            index: 1,
+            oid: CommitId::parse("abc").unwrap(),
+        };
+        let push = GitOp::StashPush {
+            mode: StashMode::All,
+            message: None,
+            paths: vec![],
+        };
+        let worktree = [Scope::Files, Scope::Branch, Scope::Diff, Scope::Stash];
+        let cases: [(GitOp, &[Scope]); 5] = [
+            (push, &[Scope::Files, Scope::Diff, Scope::Stash]),
+            (GitOp::StashApply(at()), &worktree),
+            (GitOp::StashPop(at()), &worktree),
+            (GitOp::StashDrop(at()), &[Scope::Stash]),
+            (
+                GitOp::StashRename {
+                    stash: at(),
+                    message: "m".into(),
+                },
+                &[Scope::Stash],
+            ),
+        ];
+        for (op, scopes) in cases {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(scopes),
+                    selection: Selection::KeepPath,
+                },
                 "{op:?}"
             );
         }

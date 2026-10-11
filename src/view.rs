@@ -16,6 +16,7 @@ use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use crate::rendered_view::RenderedDiff;
+use crate::stash_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -64,7 +65,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             SidePanel::Commits => {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
-            SidePanel::Stash => render_placeholder(side, &look, expanded, frame, area),
+            SidePanel::Stash => {
+                stash_view::render_stash_panel(&state.stash, &look, expanded, frame, area)
+            }
         }
     }
     let Some(area) = layout.rect(Panel::Diff) else {
@@ -89,6 +92,10 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
         // A commit's file, streamed like a working-tree diff; never rendered.
         (Focus::Commits, ..) if state.commits.open.is_some() => {
+            render_diff_pane(&state.diff, options, &look, frame, area)
+        }
+        // A stash's file, the same way.
+        (Focus::Stash, ..) if state.stash.open.is_some() => {
             render_diff_pane(&state.diff, options, &look, frame, area)
         }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
@@ -211,25 +218,6 @@ fn panel_block(title: String, focused: bool) -> Block<'static> {
     } else {
         block.border_style(Style::new().fg(Color::DarkGray))
     }
-}
-
-/// A side panel with nothing to show yet. Expanded, it says so.
-fn render_placeholder(
-    side: SidePanel,
-    look: &PanelLook,
-    expanded: bool,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let text = if expanded {
-        Line::styled("Nothing here yet", Style::new().fg(Color::DarkGray))
-    } else {
-        Line::raw("")
-    };
-    frame.render_widget(
-        Paragraph::new(text).block(look.block(look.title(side.title()))),
-        area,
-    );
 }
 
 /// Where the user is: the branch, its upstream, and any operation in
@@ -1834,21 +1822,6 @@ mod tests {
     }
 
     #[test]
-    fn an_expanded_placeholder_says_nothing_is_here_yet() {
-        let mut state = loaded(vec![]);
-        assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        // Only Stash is still a placeholder.
-        let side = SidePanel::Stash;
-        state.focus = Focus::side(side);
-        state.expanded = side;
-        let buffer = draw_buffer(&state, 80, 24);
-        let (x, y) = find(&buffer, "Nothing here yet");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-        let title = format!("[{}] {}", side.number(), side.title());
-        assert!(y > find(&buffer, &title).1);
-    }
-
-    #[test]
     fn tiny_terminals_do_not_panic_with_a_status_panel() {
         let mut main = branch(Head::Branch("a-long-branch-name".into()));
         main.upstream = Some("origin/a-long-branch-name".into());
@@ -1998,7 +1971,7 @@ mod tests {
             state,
             &[
                 ("workspace.zoom", &["Z"]),
-                ("workspace.focus_status", &["s"]),
+                ("workspace.focus_status", &["x"]),
             ],
         );
         state.help_open = true;
@@ -2010,11 +1983,11 @@ mod tests {
                 .clone()
         };
         assert!(row("Zoom the focused panel").contains(" Z "), "{rows:#?}");
-        assert!(row("Focus the Status panel").contains(" s "), "{rows:#?}");
+        assert!(row("Focus the Status panel").contains(" x "), "{rows:#?}");
 
         state.help_open = false;
         state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
-            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyCode::Char('x'),
             crossterm::event::KeyModifiers::NONE,
         )));
         assert_eq!(state.focus, Focus::Status);
@@ -3117,7 +3090,7 @@ mod tests {
         assert!(!contains(&rows, "ctrl-t"), "{rows:#?}");
 
         state.help_open = true;
-        let rows = draw(&state, 100, 40);
+        let rows = draw(&state, 100, 42);
         let row = rows
             .iter()
             .find(|row| row.contains("Tidy"))

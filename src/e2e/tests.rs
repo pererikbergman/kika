@@ -1493,3 +1493,47 @@ async fn a_hard_reset_from_the_menu_asks_then_leaves_a_clean_worktree_at_the_tar
         format!("# branch.oid {first}\n# branch.head main\n")
     );
 }
+
+fn stash_count(repo: &TestRepo) -> usize {
+    String::from_utf8(repo.git(["stash", "list"]))
+        .unwrap()
+        .lines()
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stashing_from_the_files_menu_then_applying_and_dropping_from_the_stash_panel() {
+    let repo = on_main().write("a.txt", "changed\n");
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+
+    app.press(KeyCode::Char('s')).await;
+    app.assert_screen_contains("Stash all changes");
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.type_text("put aside").await;
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(stash_count(&repo), 1);
+    app.press(KeyCode::Char('5')).await;
+    app.assert_screen_contains("stash@{0}  On main: put aside");
+
+    // Its file, and that file's change in the diff pane.
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("M a.txt");
+    app.assert_screen_contains("+changed");
+    app.press(KeyCode::Esc).await;
+
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(repo.read("a.txt"), "changed\n");
+    assert_eq!(stash_count(&repo), 1);
+
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Drop stash@{0}: On main: put aside?");
+    // Enter does not answer; the stash is still there.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(stash_count(&repo), 1);
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(stash_count(&repo), 0);
+    app.assert_screen_contains("No stashes");
+}

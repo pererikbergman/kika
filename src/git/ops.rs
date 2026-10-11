@@ -8,8 +8,10 @@ use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::repo_state::Operation;
-use super::runner::{GitCommand, GitRunner};
+use super::runner::{GitCommand, GitOutput, GitRunner};
+use super::stash::StashRef;
 use super::status::{EntryKind, FileEntry};
+use super::version::{GitVersion, parse_version, version_command};
 
 /// One repository-changing Git operation. Path payloads are repo file names,
 /// in argv order.
@@ -120,7 +122,50 @@ pub enum GitOp {
     /// Resolve this conflicted file in the user's merge tool, on the
     /// terminal. The tool may ask which one to use or wait for Enter.
     MergeTool(RepoPath),
+    /// Put changes aside as a new `stash@{0}`, as `mode` says, with the
+    /// message given or git's own. With `paths`, only those files go.
+    StashPush {
+        mode: StashMode,
+        message: Option<String>,
+        paths: Vec<RepoPath>,
+    },
+    /// Apply the entry to the worktree and keep it in the list.
+    StashApply(StashRef),
+    /// Apply the entry and drop it from the list once it applied cleanly.
+    StashPop(StashRef),
+    /// Drop the entry from the list. Nothing in the worktree changes.
+    StashDrop(StashRef),
+    /// Give the entry a new message. Git has no rename, so it is stored
+    /// again as `stash@{0}` and the old place dropped.
+    StashRename {
+        stash: StashRef,
+        message: String,
+    },
 }
+
+/// Which changes a stash push puts aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StashMode {
+    /// Every tracked change, staged or not. Untracked files stay.
+    All,
+    /// Every change, untracked files too (`-u`).
+    IncludeUntracked,
+    /// Only what is staged (`--staged`). Gated: git added it in 2.35,
+    /// newer than the 2.15 Kika needs, and an older git answers it with a
+    /// usage dump, so `run_op` checks the version first and refuses with
+    /// one plain sentence that names the version found.
+    Staged,
+}
+
+/// The first git with `stash push --staged`.
+const STASH_STAGED_GIT: GitVersion = GitVersion {
+    major: 2,
+    minor: 35,
+    patch: 0,
+};
+
+/// Why a stash action is refused when its entry moved since it was chosen.
+pub const STASH_LIST_CHANGED: &str = "The stash list changed; refresh and try again";
 
 /// How a merge records the other branch's commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +255,25 @@ impl GitOp {
             _ if entry.worktree == '.' => Err("No unstaged changes to discard"),
             _ => Ok(Some(GitOp::DiscardWorktree(vec![entry.path.clone()]))),
         }
+    }
+
+    /// What stashing only `entry` puts aside: its path, plus the old one of
+    /// a staged rename so both sides go together. An untracked file needs
+    /// `-u`, since git does not match untracked files by pathspec without
+    /// it. Conflicts cannot be stashed.
+    pub fn stash_file_for(entry: &FileEntry) -> Option<(StashMode, Vec<RepoPath>)> {
+        let mode = match entry.kind {
+            EntryKind::Conflicted => return None,
+            EntryKind::Untracked => StashMode::IncludeUntracked,
+            _ => StashMode::All,
+        };
+        let paths = entry
+            .orig_path
+            .iter()
+            .chain([&entry.path])
+            .cloned()
+            .collect();
+        Some((mode, paths))
     }
 }
 
@@ -302,6 +366,42 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(mode.flag())
             .arg(to.as_str())
             .arg("--"),
+        // Paths only with `-u` or no flag: `--staged` takes the whole
+        // index, and no key builds it with paths. Only a push that names
+        // files reads pathspecs literally: without paths, `-u` cleans the
+        // untracked files through a `:/` pathspec of git's own, which a
+        // literal reading turns into a name that matches nothing, and they
+        // would stay in the worktree as well as in the stash.
+        GitOp::StashPush {
+            mode,
+            message,
+            paths,
+        } => {
+            let cmd = GitCommand::new("stash").arg("push");
+            let cmd = match mode {
+                StashMode::All => cmd,
+                StashMode::IncludeUntracked => cmd.arg("-u"),
+                StashMode::Staged => cmd.arg("--staged"),
+            };
+            let cmd = match message.as_deref().filter(|m| !m.trim().is_empty()) {
+                Some(message) => cmd.arg("-m").arg(message),
+                None => cmd,
+            };
+            debug_assert!(
+                *mode != StashMode::Staged || paths.is_empty(),
+                "--staged takes no paths"
+            );
+            if paths.is_empty() || *mode == StashMode::Staged {
+                return cmd.env("LC_ALL", "C");
+            }
+            with_paths(cmd, paths)
+        }
+        // These take no file names, so nothing is read as a pathspec.
+        GitOp::StashApply(stash) => return stash_command("apply", stash),
+        GitOp::StashPop(stash) => return stash_command("pop", stash),
+        GitOp::StashDrop(stash) => return stash_command("drop", stash),
+        // The first of the two steps `run_op` takes; see `rename_stash`.
+        GitOp::StashRename { stash, message } => return store_command(stash, message),
         GitOp::RenameBranch { from, to } => GitCommand::new("branch")
             .arg("-m")
             .arg("--")
@@ -360,6 +460,25 @@ pub fn op_command(op: &GitOp) -> GitCommand {
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
 }
 
+/// `git stash store`: the entry's commit again, as `stash@{0}`, under
+/// `message`. The id is hex digits only, so it cannot be read as an option.
+fn store_command(stash: &StashRef, message: &str) -> GitCommand {
+    GitCommand::new("stash")
+        .arg("store")
+        .arg("-m")
+        .arg(message)
+        .arg(stash.oid.as_str())
+        .env("LC_ALL", "C")
+}
+
+/// `git stash <verb> stash@{N}`.
+fn stash_command(verb: &str, stash: &StashRef) -> GitCommand {
+    GitCommand::new("stash")
+        .arg(verb)
+        .arg(stash.arg())
+        .env("LC_ALL", "C")
+}
+
 /// `git commit` taking its message from `message_file` (`-` is stdin), or
 /// keeping `HEAD`'s with none. Shared by the detached run and the one on
 /// the terminal, whose stdin is the user's, so the two differ only there.
@@ -378,9 +497,12 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
 }
 
 /// Run `op`. Failures carry git's message, made safe to draw since it can
-/// quote repo-controlled paths. A commit's, a merge's or a revert's
-/// failure also carries stdout: hooks print to stderr, but git says "nothing to commit"
-/// and names each conflict on stdout.
+/// quote repo-controlled paths. A commit's, a merge's, a revert's or a
+/// stash apply's failure also carries stdout: hooks print to stderr, but
+/// git says "nothing to commit" and names each conflict on stdout.
+///
+/// A stash action first checks its entry is still where it was chosen,
+/// and `--staged` first checks git is new enough.
 pub fn run_op(runner: &dyn GitRunner, op: &GitOp) -> Result<(), String> {
     run_op_with(runner, op, &|key| std::env::var_os(key).is_some())
 }
@@ -398,6 +520,20 @@ fn run_op_with(
     {
         run_op(runner, &GitOp::StageAll)?;
     }
+    match op {
+        GitOp::StashApply(stash)
+        | GitOp::StashPop(stash)
+        | GitOp::StashDrop(stash)
+        | GitOp::StashRename { stash, .. } => verify_stash(runner, stash)?,
+        GitOp::StashPush {
+            mode: StashMode::Staged,
+            ..
+        } => staged_stash_supported(runner)?,
+        _ => {}
+    }
+    if let GitOp::StashRename { stash, message } = op {
+        return rename_stash(runner, stash, message);
+    }
     let mut cmd = op_command(op);
     if matches!(op, GitOp::SubmoduleUpdate(_)) && ssh_is_default(runner, env_set) {
         cmd = cmd.env("GIT_SSH_COMMAND", BATCH_SSH);
@@ -407,14 +543,16 @@ fn run_op_with(
         return Ok(());
     }
     let message = match op {
-        GitOp::Commit { .. } | GitOp::Merge { .. } | GitOp::Revert(_) => {
-            [&output.stderr, &output.stdout]
-                .map(|bytes| terminal_safe(bytes))
-                .into_iter()
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
+        GitOp::Commit { .. }
+        | GitOp::Merge { .. }
+        | GitOp::Revert(_)
+        | GitOp::StashApply(_)
+        | GitOp::StashPop(_) => [&output.stderr, &output.stdout]
+            .map(|bytes| terminal_safe(bytes))
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
@@ -422,6 +560,88 @@ fn run_op_with(
         return Err(format!("git {subcommand} failed"));
     }
     Err(message)
+}
+
+/// Run `cmd`, with git's message, made safe to draw, as the error.
+fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
+    let output = runner.run(cmd).map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(output);
+    }
+    let message = terminal_safe(&output.stderr);
+    if message.is_empty() {
+        let subcommand = cmd.args()[0].to_string_lossy();
+        return Err(format!("git {subcommand} failed"));
+    }
+    Err(message)
+}
+
+/// Whether `stash@{N}` still names the commit `stash` was chosen as.
+fn stash_is(runner: &dyn GitRunner, stash: &StashRef) -> Result<bool, String> {
+    let cmd = GitCommand::new("rev-parse")
+        .arg("-q")
+        .arg("--verify")
+        .arg(stash.arg())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C");
+    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
+    // `-q` makes a missing entry a quiet failure, not an error.
+    let found = String::from_utf8_lossy(&output.stdout);
+    Ok(output.success && found.trim().eq_ignore_ascii_case(stash.oid.as_str()))
+}
+
+/// Refuse when `stash` no longer names the entry it was chosen as: the
+/// list changed under Kika, and the number now means another stash.
+fn verify_stash(runner: &dyn GitRunner, stash: &StashRef) -> Result<(), String> {
+    if stash_is(runner, stash)? {
+        Ok(())
+    } else {
+        Err(STASH_LIST_CHANGED.into())
+    }
+}
+
+/// Refuse `--staged` on a git older than 2.35. A version Kika cannot read
+/// is let through, as at startup.
+fn staged_stash_supported(runner: &dyn GitRunner) -> Result<(), String> {
+    let output = runner.run(&version_command()).map_err(|e| e.to_string())?;
+    match parse_version(&output.stdout).filter(|_| output.success) {
+        Some(found) if found < STASH_STAGED_GIT => Err(format!(
+            "Stashing only staged changes needs Git {}.{} or newer; found {found}",
+            STASH_STAGED_GIT.major, STASH_STAGED_GIT.minor
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Store the entry again under `message`, then drop its old place, which
+/// the store moved down by one. Storing first means a failure leaves a
+/// copy, never a loss.
+///
+/// Git does not log a ref update that leaves the ref where it was, so
+/// storing the entry `refs/stash` already points at (`stash@{0}`) adds
+/// nothing, and dropping `stash@{1}` then would drop another stash. That
+/// entry is dropped first instead; if the store then fails, the error
+/// names its id so it can be stored by hand.
+fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Result<(), String> {
+    let store = store_command(stash, message);
+    let at = |index| StashRef {
+        index,
+        oid: stash.oid.clone(),
+    };
+    let drop = |index| op_command(&GitOp::StashDrop(at(index)));
+    if stash_is(runner, &at(0))? {
+        run_checked(runner, &drop(stash.index))?;
+        return run_checked(runner, &store).map(|_| ()).map_err(|message| {
+            format!(
+                "{message}\nThe stash was dropped but not stored again; \
+                 git stash store {} brings it back.",
+                stash.oid.as_str()
+            )
+        });
+    }
+    run_checked(runner, &store)?;
+    verify_stash(runner, &at(stash.index + 1))?;
+    run_checked(runner, &drop(stash.index + 1)).map(|_| ())
 }
 
 /// ssh that fails instead of asking. `GIT_TERMINAL_PROMPT=0` stops git's
@@ -1922,5 +2142,496 @@ mod tests {
         run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
         assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
         assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
+    }
+
+    // --- Stash ---
+
+    use crate::git::stash::StashRef;
+
+    const STASH_OID: &str = "5a5a5a";
+
+    fn at(index: usize) -> StashRef {
+        StashRef {
+            index,
+            oid: oid(STASH_OID),
+        }
+    }
+
+    fn push(mode: StashMode, message: Option<&str>, paths: &[&str]) -> GitOp {
+        GitOp::StashPush {
+            mode,
+            message: message.map(Into::into),
+            paths: paths.iter().map(|&p| p.into()).collect(),
+        }
+    }
+
+    fn literal_env(cmd: &GitCommand) -> Vec<(&str, &str)> {
+        cmd.envs()
+            .iter()
+            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn each_stash_push_mode_with_and_without_a_message() {
+        let cases: [(GitOp, &[&str]); 7] = [
+            (push(StashMode::All, None, &[]), &["stash", "push"]),
+            (
+                push(StashMode::All, Some("wip"), &[]),
+                &["stash", "push", "-m", "wip"],
+            ),
+            (
+                push(StashMode::IncludeUntracked, None, &[]),
+                &["stash", "push", "-u"],
+            ),
+            (
+                push(StashMode::IncludeUntracked, Some("-x"), &[]),
+                &["stash", "push", "-u", "-m", "-x"],
+            ),
+            (
+                push(StashMode::Staged, None, &[]),
+                &["stash", "push", "--staged"],
+            ),
+            (
+                push(StashMode::Staged, Some("idx"), &[]),
+                &["stash", "push", "--staged", "-m", "idx"],
+            ),
+            // An empty message is git's own.
+            (push(StashMode::All, Some("  "), &[]), &["stash", "push"]),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert_eq!(literal_env(&cmd), [("LC_ALL", "C")], "{op:?}");
+        }
+    }
+
+    #[test]
+    fn stashing_one_file_names_it_after_the_separator_and_untracked_adds_u() {
+        let changed = entry("-a.rs", '.', 'M', EntryKind::Changed);
+        let untracked = entry("new.rs", '?', '?', EntryKind::Untracked);
+        let mut renamed = entry("new name.rs", 'R', '.', EntryKind::Renamed);
+        renamed.orig_path = Some("old.rs".into());
+        let conflicted = entry("both.rs", 'U', 'U', EntryKind::Conflicted);
+
+        let cases: [(&FileEntry, &[&str]); 3] = [
+            (&changed, &["stash", "push", "-m", "m", "--", "-a.rs"]),
+            (
+                &untracked,
+                &["stash", "push", "-u", "-m", "m", "--", "new.rs"],
+            ),
+            (
+                &renamed,
+                &["stash", "push", "-m", "m", "--", "old.rs", "new name.rs"],
+            ),
+        ];
+        for (entry, expected) in cases {
+            let (mode, paths) = GitOp::stash_file_for(entry).unwrap();
+            let op = GitOp::StashPush {
+                mode,
+                message: Some("m".into()),
+                paths,
+            };
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert_eq!(
+                literal_env(&cmd),
+                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")]
+            );
+        }
+        assert_eq!(GitOp::stash_file_for(&conflicted), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stashed_files_name_reaches_argv_as_its_raw_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut untracked = entry("x", '?', '?', EntryKind::Untracked);
+        untracked.path = RepoPath::from_bytes(b"x\xff");
+        let (mode, paths) = GitOp::stash_file_for(&untracked).unwrap();
+        let cmd = op_command(&GitOp::StashPush {
+            mode,
+            message: None,
+            paths,
+        });
+        let args: Vec<&[u8]> = cmd.args().iter().map(|a| a.as_bytes()).collect();
+        assert_eq!(args, [&b"stash"[..], b"push", b"-u", b"--", b"x\xff"]);
+    }
+
+    #[test]
+    fn apply_pop_and_drop_name_the_entry_by_its_place() {
+        let cases: [(GitOp, &[&str]); 3] = [
+            (GitOp::StashApply(at(3)), &["stash", "apply", "stash@{3}"]),
+            (GitOp::StashPop(at(0)), &["stash", "pop", "stash@{0}"]),
+            (GitOp::StashDrop(at(12)), &["stash", "drop", "stash@{12}"]),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert_eq!(literal_env(&cmd), [("LC_ALL", "C")], "{op:?}");
+        }
+    }
+
+    fn verify(index: usize, found: &str) -> (Vec<String>, GitOutput) {
+        let argv = ["rev-parse", "-q", "--verify", &format!("stash@{{{index}}}")]
+            .map(String::from)
+            .to_vec();
+        let output = if found.is_empty() {
+            fail("")
+        } else {
+            ok(format!("{found}\n").as_bytes())
+        };
+        (argv, output)
+    }
+
+    fn expect_verify(runner: FakeRunner, index: usize, found: &str) -> FakeRunner {
+        let (argv, output) = verify(index, found);
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        runner.expect(&argv, output)
+    }
+
+    #[test]
+    fn each_stash_action_checks_its_entry_first_then_runs() {
+        for (op, expected) in [
+            (GitOp::StashApply(at(2)), ["stash", "apply", "stash@{2}"]),
+            (GitOp::StashPop(at(2)), ["stash", "pop", "stash@{2}"]),
+            (GitOp::StashDrop(at(2)), ["stash", "drop", "stash@{2}"]),
+        ] {
+            let runner = expect_verify(FakeRunner::new(), 2, STASH_OID).expect(&expected, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn rename_stores_the_entry_then_drops_its_old_place_one_further_down() {
+        let op = GitOp::StashRename {
+            stash: at(2),
+            message: "better words".into(),
+        };
+        assert_eq!(
+            argv(&op_command(&op)),
+            ["stash", "store", "-m", "better words", STASH_OID]
+        );
+        let runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
+        let runner = expect_verify(runner, 0, "0ther");
+        let runner = runner.expect(
+            &["stash", "store", "-m", "better words", STASH_OID],
+            ok(b""),
+        );
+        let runner =
+            expect_verify(runner, 3, STASH_OID).expect(&["stash", "drop", "stash@{3}"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn renaming_the_top_entry_drops_it_first_since_storing_it_again_adds_nothing() {
+        let op = GitOp::StashRename {
+            stash: at(0),
+            message: "m".into(),
+        };
+        let store = ["stash", "store", "-m", "m", STASH_OID];
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+        let runner = expect_verify(runner, 0, STASH_OID)
+            .expect(&["stash", "drop", "stash@{0}"], ok(b""))
+            .expect(&store, ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+
+        // A failed store says how to bring the entry back.
+        let runner = expect_verify(FakeRunner::new(), 0, STASH_OID);
+        let runner = expect_verify(runner, 0, STASH_OID)
+            .expect(&["stash", "drop", "stash@{0}"], ok(b""))
+            .expect(&store, fail("fatal: no space"));
+        let error = run_op(&runner, &op).unwrap_err();
+        assert!(error.starts_with("fatal: no space\n"), "{error}");
+        assert!(
+            error.contains(&format!("git stash store {STASH_OID}")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_rename_whose_old_place_moved_after_the_store_drops_nothing() {
+        let op = GitOp::StashRename {
+            stash: at(1),
+            message: "m".into(),
+        };
+        let runner = expect_verify(FakeRunner::new(), 1, STASH_OID);
+        let runner = expect_verify(runner, 0, "0ther")
+            .expect(&["stash", "store", "-m", "m", STASH_OID], ok(b""));
+        let runner = expect_verify(runner, 2, "f00");
+        assert_eq!(run_op(&runner, &op), Err(STASH_LIST_CHANGED.into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_stash_that_moved_is_refused_without_running_anything() {
+        let ops = [
+            GitOp::StashApply(at(1)),
+            GitOp::StashPop(at(1)),
+            GitOp::StashDrop(at(1)),
+            GitOp::StashRename {
+                stash: at(1),
+                message: "m".into(),
+            },
+        ];
+        for op in ops {
+            for found in ["f00", ""] {
+                let runner = expect_verify(FakeRunner::new(), 1, found);
+                assert_eq!(
+                    run_op(&runner, &op),
+                    Err("The stash list changed; refresh and try again".into()),
+                    "{op:?}"
+                );
+                runner.assert_done();
+            }
+        }
+    }
+
+    #[test]
+    fn stashing_only_staged_changes_needs_git_2_35() {
+        let op = push(StashMode::Staged, None, &[]);
+        let runner = FakeRunner::new().expect(&["--version"], ok(b"git version 2.34.1\n"));
+        assert_eq!(
+            run_op(&runner, &op),
+            Err("Stashing only staged changes needs Git 2.35 or newer; found 2.34.1".into())
+        );
+        runner.assert_done();
+
+        for version in [&b"git version 2.35.0\n"[..], b"git version odd\n"] {
+            let runner = FakeRunner::new()
+                .expect(&["--version"], ok(version))
+                .expect(&["stash", "push", "--staged"], ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()));
+            runner.assert_done();
+        }
+
+        // The other modes ask no version.
+        let runner = FakeRunner::new().expect(&["stash", "push", "-u"], ok(b""));
+        let op = push(StashMode::IncludeUntracked, None, &[]);
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_apply_shows_the_conflicts_git_printed_on_stdout() {
+        let output = GitOutput {
+            success: false,
+            stdout: b"CONFLICT (content): Merge conflict in a.txt\n".to_vec(),
+            stderr: b"error: could not apply\n".to_vec(),
+        };
+        for op in [GitOp::StashApply(at(0)), GitOp::StashPop(at(0))] {
+            let verb = if matches!(op, GitOp::StashPop(_)) {
+                "pop"
+            } else {
+                "apply"
+            };
+            let runner = expect_verify(FakeRunner::new(), 0, STASH_OID)
+                .expect(&["stash", verb, "stash@{0}"], output.clone());
+            assert_eq!(
+                run_op(&runner, &op),
+                Err("error: could not apply\nCONFLICT (content): Merge conflict in a.txt".into())
+            );
+        }
+    }
+
+    // --- Stash, in real git ---
+
+    /// `a.txt` and `b.txt` committed, with an identity and no signing.
+    fn stash_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("stash");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--template="]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(dir, &["config", key, value]);
+        }
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "first"]);
+        tmp
+    }
+
+    fn porcelain(dir: &Path) -> String {
+        String::from_utf8(crate::git::fake::git(dir, &["status", "--porcelain"])).unwrap()
+    }
+
+    fn read(dir: &Path, name: &str) -> String {
+        std::fs::read_to_string(dir.join(name)).unwrap()
+    }
+
+    fn real_entries(dir: &Path) -> Vec<crate::git::stash::StashEntry> {
+        crate::git::stash::list_stashes(&crate::git::CliRunner::isolated(dir)).unwrap()
+    }
+
+    fn real_ref(dir: &Path, index: usize) -> StashRef {
+        real_entries(dir)[index].stash_ref()
+    }
+
+    #[test]
+    fn stash_all_leaves_a_clean_worktree_but_the_untracked_file() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &push(StashMode::All, Some("wip"), &[])).unwrap();
+        assert_eq!(porcelain(dir), "?? new.txt\n");
+        assert_eq!(read(dir, "a.txt"), "a\n");
+        let entries = real_entries(dir);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].subject.ends_with(": wip"), "{entries:?}");
+        assert_eq!(entries[0].untracked, None);
+    }
+
+    #[test]
+    fn stash_including_untracked_takes_the_untracked_file_into_a_third_parent() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &push(StashMode::IncludeUntracked, None, &[])).unwrap();
+        assert_eq!(porcelain(dir), "");
+        assert!(!dir.join("new.txt").exists());
+        assert!(real_entries(dir)[0].untracked.is_some());
+    }
+
+    /// `--staged` came in git 2.35; an older one skips this test.
+    fn has_staged_stash() -> bool {
+        let out = crate::git::fake::git(Path::new("."), &["--version"]);
+        parse_version(&out).is_some_and(|v| v >= STASH_STAGED_GIT)
+    }
+
+    #[test]
+    fn stash_staged_takes_only_the_staged_change() {
+        if !has_staged_stash() {
+            eprintln!("skipped: git older than 2.35 has no stash --staged");
+            return;
+        }
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("a.txt"), "staged\n").unwrap();
+        crate::git::fake::git(dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("b.txt"), "unstaged\n").unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &push(StashMode::Staged, None, &[])).unwrap();
+        assert_eq!(porcelain(dir), " M b.txt\n");
+        assert_eq!(read(dir, "a.txt"), "a\n");
+        assert_eq!(read(dir, "b.txt"), "unstaged\n");
+    }
+
+    #[test]
+    fn stash_this_file_takes_only_it_and_leaves_the_other_byte_for_byte() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("a.txt"), "changed a\n").unwrap();
+        let other = b"changed b\r\nno newline \xff";
+        std::fs::write(dir.join("b.txt"), other).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let a = entry("a.txt", '.', 'M', EntryKind::Changed);
+        let (mode, paths) = GitOp::stash_file_for(&a).unwrap();
+        run_op(
+            &runner,
+            &GitOp::StashPush {
+                mode,
+                message: None,
+                paths,
+            },
+        )
+        .unwrap();
+        assert_eq!(read(dir, "a.txt"), "a\n");
+        assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), other);
+        assert_eq!(porcelain(dir), " M b.txt\n");
+
+        // An untracked file goes too, with `-u`.
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let new = entry("new.txt", '?', '?', EntryKind::Untracked);
+        let (mode, paths) = GitOp::stash_file_for(&new).unwrap();
+        run_op(
+            &runner,
+            &GitOp::StashPush {
+                mode,
+                message: None,
+                paths,
+            },
+        )
+        .unwrap();
+        assert!(!dir.join("new.txt").exists());
+        assert_eq!(porcelain(dir), " M b.txt\n");
+        assert_eq!(real_entries(dir).len(), 2);
+    }
+
+    #[test]
+    fn apply_keeps_the_entry_and_pop_and_drop_remove_it() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        run_op(&runner, &push(StashMode::All, None, &[])).unwrap();
+
+        run_op(&runner, &GitOp::StashApply(real_ref(dir, 0))).unwrap();
+        assert_eq!(read(dir, "a.txt"), "changed\n");
+        assert_eq!(real_entries(dir).len(), 1);
+
+        crate::git::fake::git(dir, &["checkout", "-q", "--", "a.txt"]);
+        run_op(&runner, &GitOp::StashPop(real_ref(dir, 0))).unwrap();
+        assert_eq!(read(dir, "a.txt"), "changed\n");
+        assert_eq!(real_entries(dir).len(), 0);
+
+        run_op(&runner, &push(StashMode::All, None, &[])).unwrap();
+        run_op(&runner, &GitOp::StashDrop(real_ref(dir, 0))).unwrap();
+        assert_eq!(real_entries(dir).len(), 0);
+        assert_eq!(read(dir, "a.txt"), "a\n");
+    }
+
+    #[test]
+    fn rename_puts_the_new_subject_on_top_with_the_same_tree_and_count() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        for (name, text) in [("a.txt", "one\n"), ("b.txt", "two\n"), ("a.txt", "three\n")] {
+            std::fs::write(dir.join(name), text).unwrap();
+            run_op(&runner, &push(StashMode::All, Some(text.trim()), &[])).unwrap();
+        }
+        let tree =
+            |rev: &str| crate::git::fake::git(dir, &["rev-parse", &format!("{rev}^{{tree}}")]);
+
+        // The middle one, then the top one, which takes the other path.
+        for (index, subject) in [(1, "renamed two"), (0, "renamed again")] {
+            let before = real_entries(dir);
+            let moved = before[index].clone();
+            let old_tree = tree(moved.oid.as_str());
+            run_op(
+                &runner,
+                &GitOp::StashRename {
+                    stash: moved.stash_ref(),
+                    message: subject.into(),
+                },
+            )
+            .unwrap();
+            let after = real_entries(dir);
+            assert_eq!(after.len(), 3, "{after:?}");
+            assert_eq!(after[0].subject, subject);
+            assert_eq!(after[0].oid, moved.oid);
+            assert_eq!(tree("stash@{0}"), old_tree);
+            // Every other entry is still there, in its order.
+            let others = |entries: &[crate::git::stash::StashEntry]| {
+                entries
+                    .iter()
+                    .filter(|e| e.oid != moved.oid)
+                    .map(|e| e.oid.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(others(&after), others(&before));
+        }
     }
 }

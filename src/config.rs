@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [keys]
-//! "files.stage" = ["s", "ctrl-s"]   # replace this binding's keys
+//! "files.stage" = ["x", "ctrl-s"]   # replace this binding's keys
 //! "files.discard" = []              # disable it
 //! [watch]
 //! refs = 2        # seconds

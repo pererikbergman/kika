@@ -26,6 +26,7 @@ pub enum Popup {
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
+    DropStash(DropStashConfirm),
     Submodules(SubmoduleList),
     Recent(RecentList),
 }
@@ -130,6 +131,29 @@ impl ResetHardConfirm {
     }
 }
 
+/// "Drop this stash?" Like [`ResetHardConfirm`], it carries the op chosen
+/// when it was asked, so a reload before the answer cannot change which
+/// entry goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropStashConfirm {
+    /// `stash@{N}: <subject>`, already terminal-safe.
+    pub label: String,
+    pub op: GitOp,
+}
+
+impl DropStashConfirm {
+    pub fn title(&self) -> &'static str {
+        "Drop stash"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Drop {}? It cannot be recovered from the stash list. (y/n)",
+            self.label
+        )
+    }
+}
+
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
@@ -224,6 +248,10 @@ pub enum PromptKind {
     NewBranch,
     /// A new name for the selected branch.
     RenameBranch,
+    /// The message of a stash being made; empty for git's own.
+    StashMessage,
+    /// A new message for the selected stash.
+    RenameStash,
 }
 
 impl PromptKind {
@@ -233,6 +261,8 @@ impl PromptKind {
             PromptKind::Command => "Command",
             PromptKind::NewBranch => "New branch",
             PromptKind::RenameBranch => "Rename branch",
+            PromptKind::StashMessage => "Stash message (optional)",
+            PromptKind::RenameStash => "Rename stash",
         }
     }
 
@@ -242,6 +272,8 @@ impl PromptKind {
             PromptKind::Command => AppIntent::CommandPromptAnswered(text),
             PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
             PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
+            PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
+            PromptKind::RenameStash => AppIntent::RenameStashTo(text),
         }
     }
 }
@@ -353,6 +385,38 @@ mod tests {
         assert_eq!(revert.title(), "Abort revert");
         assert!(revert.question().starts_with("Abort the revert "));
         assert_eq!(revert.yes(), AppIntent::ConfirmAbort(Operation::Revert));
+    }
+
+    #[test]
+    fn the_drop_stash_question_names_the_entry_and_says_it_is_gone_for_good() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::stash::StashRef;
+        let ask = DropStashConfirm {
+            label: "stash@{2}: On main: wip".into(),
+            op: GitOp::StashDrop(StashRef {
+                index: 2,
+                oid: CommitId::parse("abc").unwrap(),
+            }),
+        };
+        assert_eq!(ask.title(), "Drop stash");
+        assert_eq!(
+            ask.question(),
+            "Drop stash@{2}: On main: wip? It cannot be recovered from the stash list. (y/n)"
+        );
+    }
+
+    #[test]
+    fn the_stash_prompts_answer_with_their_text() {
+        assert_eq!(PromptKind::StashMessage.title(), "Stash message (optional)");
+        assert_eq!(
+            PromptKind::StashMessage.submit("wip".into()),
+            AppIntent::StashMessageAnswered("wip".into())
+        );
+        assert_eq!(PromptKind::RenameStash.title(), "Rename stash");
+        assert_eq!(
+            PromptKind::RenameStash.submit("new".into()),
+            AppIntent::RenameStashTo("new".into())
+        );
     }
 
     #[test]
