@@ -25,6 +25,7 @@ pub enum Popup {
     Error(ErrorPopup),
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
+    ResetHard(ResetHardConfirm),
     Submodules(SubmoduleList),
     Recent(RecentList),
 }
@@ -105,6 +106,30 @@ impl DeleteBranchConfirm {
     }
 }
 
+/// "Reset hard and lose every uncommitted change?" Like
+/// [`DeleteBranchConfirm`], it carries the op chosen when it was asked, so
+/// a reload before the answer cannot change the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetHardConfirm {
+    /// The target's short id, as the log shows it.
+    pub short_oid: String,
+    pub op: GitOp,
+}
+
+impl ResetHardConfirm {
+    pub fn title(&self) -> &'static str {
+        "Reset hard"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Reset to {} and throw away every uncommitted change, staged and \
+             unstaged? Commits after it leave the branch. (y/n)",
+            self.short_oid
+        )
+    }
+}
+
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
@@ -112,6 +137,10 @@ pub enum ConfirmKind {
     /// Abort this operation in progress. It names the operation found when
     /// asked, so the answer aborts what the question said.
     Abort(Operation),
+    /// Check out the commit kept in the Commits panel's `pending` as a
+    /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
+    /// is lost and Enter may answer.
+    DetachedCheckout,
 }
 
 impl ConfirmKind {
@@ -121,7 +150,9 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Merge) => "Abort merge",
             ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
+            ConfirmKind::Abort(Operation::Revert) => "Abort revert",
             ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
+            ConfirmKind::DetachedCheckout => "Detached checkout",
         }
     }
 
@@ -140,8 +171,19 @@ impl ConfirmKind {
                 "Abort the cherry-pick and return to where it started? \
                  Resolved conflicts are lost. (y/n)"
             }
+            ConfirmKind::Abort(Operation::Revert) => {
+                "Abort the revert and return to where it started? \
+                 Resolved conflicts are lost. (y/n)"
+            }
             // Never asked: a bisect is not resumable.
             ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
+            // `AppState::confirm_question` names the commit; this is the
+            // fallback when it cannot.
+            ConfirmKind::DetachedCheckout => {
+                "Check out this commit as a detached HEAD? You will be on no \
+                 branch; new commits there belong to no branch until you \
+                 create one. (y/n)"
+            }
         }
     }
 
@@ -149,12 +191,13 @@ impl ConfirmKind {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
+            ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
         }
     }
 
     pub fn no(self) -> Option<AppIntent> {
         match self {
-            ConfirmKind::Quit | ConfirmKind::Abort(_) => None,
+            ConfirmKind::Quit | ConfirmKind::Abort(_) | ConfirmKind::DetachedCheckout => None,
         }
     }
 }
@@ -295,6 +338,38 @@ mod tests {
         assert_eq!(
             ConfirmKind::Abort(Operation::Rebase).title(),
             "Abort rebase"
+        );
+        let revert = ConfirmKind::Abort(Operation::Revert);
+        assert_eq!(revert.title(), "Abort revert");
+        assert!(revert.question().starts_with("Abort the revert "));
+        assert_eq!(revert.yes(), AppIntent::ConfirmAbort(Operation::Revert));
+    }
+
+    #[test]
+    fn the_detached_checkout_question_warns_and_yes_checks_out() {
+        let ask = ConfirmKind::DetachedCheckout;
+        assert_eq!(ask.title(), "Detached checkout");
+        assert!(ask.question().contains("detached HEAD"));
+        assert_eq!(ask.yes(), AppIntent::ConfirmCheckoutCommit);
+        assert_eq!(ask.no(), None);
+    }
+
+    #[test]
+    fn the_hard_reset_question_names_the_target_and_what_is_lost() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        let ask = ResetHardConfirm {
+            short_oid: "abc1234".into(),
+            op: GitOp::Reset {
+                to: CommitId::parse("abc1234").unwrap(),
+                mode: ResetMode::Hard,
+            },
+        };
+        assert_eq!(ask.title(), "Reset hard");
+        assert_eq!(
+            ask.question(),
+            "Reset to abc1234 and throw away every uncommitted change, staged and \
+             unstaged? Commits after it leave the branch. (y/n)"
         );
     }
 
