@@ -1,0 +1,2 @@
+# Patch fixtures hold CRLF and no-newline-at-EOF lines byte for byte.
+* -text

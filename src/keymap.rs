@@ -3,10 +3,13 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::git::diff::DiffSide;
+use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::EntryKind;
+use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::menu::MenuId;
-use crate::model::{AppState, CommitFlow};
+use crate::model::{AppState, CommitFlow, Focus};
 
 /// A key as pressed: just the code and modifiers, without the event kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +90,7 @@ impl KeyPattern {
             KeyCode::Enter => "enter".to_string(),
             KeyCode::Down => "↓".to_string(),
             KeyCode::Up => "↑".to_string(),
+            KeyCode::Left => "←".to_string(),
             KeyCode::PageDown => "PgDn".to_string(),
             KeyCode::PageUp => "PgUp".to_string(),
             other => other.to_string(),
@@ -105,6 +109,8 @@ pub enum KeyScope {
     Global,
     Workspace,
     Files,
+    /// The Diff pane with focus, working on hunks.
+    Diff,
     Review,
     Help,
     /// "Stage everything and commit?"
@@ -132,7 +138,7 @@ impl KeyScope {
     /// there is always a way out.
     pub fn parent(self) -> Option<KeyScope> {
         match self {
-            KeyScope::Files => Some(KeyScope::Workspace),
+            KeyScope::Files | KeyScope::Diff => Some(KeyScope::Workspace),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
             | KeyScope::CommitConfirm
@@ -152,6 +158,7 @@ impl KeyScope {
             KeyScope::Global => "Global",
             KeyScope::Workspace => "Workspace",
             KeyScope::Files => "Files",
+            KeyScope::Diff => "Diff",
             KeyScope::Review => "Review",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
@@ -275,6 +282,47 @@ pub(crate) fn stage_disabled(state: &AppState) -> Option<&'static str> {
             Some("Resolve the conflict before staging this file")
         }
         Some(_) => None,
+    }
+}
+
+fn no_file_selected(state: &AppState) -> Option<&'static str> {
+    let selected = state.selected.and_then(|i| state.files.get(i));
+    selected.is_none().then_some("No file selected")
+}
+
+/// Why the selected hunk cannot be staged or unstaged right now.
+pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING);
+    }
+    let Focus::Diff(view) = &state.focus else {
+        return Some(NO_CHANGES);
+    };
+    if view.loading() {
+        return Some("Loading…");
+    }
+    let entry = state.selected.and_then(|i| state.files.get(i));
+    match entry.map(|e| e.kind) {
+        Some(EntryKind::Conflicted) => return Some("Resolve the conflict first"),
+        Some(EntryKind::Renamed | EntryKind::Copied) => {
+            return Some(PatchError::Renamed.message());
+        }
+        _ => {}
+    }
+    match &view.patch {
+        Some(patch) if patch.kind == FileKind::Binary => Some(PatchError::Binary.message()),
+        Some(patch) if !patch.hunks.is_empty() => None,
+        _ => Some(NO_CHANGES),
+    }
+}
+
+/// An untracked file has only one side to show.
+fn side_disabled(state: &AppState) -> Option<&'static str> {
+    match &state.focus {
+        Focus::Diff(view) if view.side == DiffSide::Untracked => {
+            Some("Untracked file: nothing is staged")
+        }
+        _ => None,
     }
 }
 
@@ -428,6 +476,71 @@ static REGISTRY: &[Binding] = &[
         label: "commit",
         bar: true,
         disabled: commit_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Files,
+        intent: AppIntent::FocusDiff,
+        description: "Work on the hunks of the selected file",
+        label: "hunks",
+        // Left out of the bar until the layout review (#10), like `m`.
+        bar: false,
+        disabled: no_file_selected,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Diff,
+        intent: AppIntent::NextHunk,
+        description: "Select the next hunk",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Diff,
+        intent: AppIntent::PrevHunk,
+        description: "Select the previous hunk",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::ToggleHunkStage,
+        description: "Stage the selected hunk, or unstage it in the staged view",
+        label: "hunk",
+        bar: true,
+        disabled: hunk_disabled,
+    },
+    Binding {
+        keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::ToggleDiffSide,
+        description: "Switch between the unstaged and the staged changes",
+        label: "staged/unstaged",
+        bar: true,
+        disabled: side_disabled,
+    },
+    Binding {
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('h'), NONE),
+            KeyPattern::any(KeyCode::Left),
+        ],
+        scope: KeyScope::Diff,
+        intent: AppIntent::FocusFiles,
+        description: "Back to the file list",
+        label: "back",
+        bar: true,
+        disabled: never,
     },
     Binding {
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -873,6 +986,36 @@ mod tests {
         assert_eq!(files(plain('c')), Some(OpenCommit));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
+    }
+
+    #[test]
+    fn the_diff_pane_has_its_own_keys_and_esc_goes_back() {
+        use AppIntent::*;
+        let none = KeyModifiers::NONE;
+        assert_eq!(
+            from(KeyScope::Files, key(KeyCode::Enter, none)),
+            Some(FocusDiff)
+        );
+        let diff = |k| from(KeyScope::Diff, k);
+        assert_eq!(diff(plain('j')), Some(NextHunk));
+        assert_eq!(diff(key(KeyCode::Down, none)), Some(NextHunk));
+        assert_eq!(diff(plain('k')), Some(PrevHunk));
+        assert_eq!(diff(key(KeyCode::Up, none)), Some(PrevHunk));
+        assert_eq!(diff(plain('t')), Some(ToggleDiffSide));
+        for k in [
+            key(KeyCode::Esc, none),
+            plain('h'),
+            key(KeyCode::Left, none),
+        ] {
+            assert_eq!(diff(k), Some(FocusFiles), "{k:?}");
+        }
+        // Workspace and global keys still reach through.
+        assert_eq!(diff(plain('r')), Some(RefreshStatus));
+        assert_eq!(diff(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
+        assert_eq!(diff(plain('q')), Some(Quit));
+        // File keys do not.
+        assert_eq!(diff(plain('a')), None);
+        assert_eq!(diff(plain('c')), None);
     }
 
     #[test]

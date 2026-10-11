@@ -1,11 +1,13 @@
 use crate::commit_editor::{CommitEditor, Field};
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
-use crate::git::diff::{DiffLine, LineKind};
+use crate::git::diff::{DiffLine, DiffSide, LineKind, sanitize};
+use crate::git::patch::{FileKind, PatchError};
 use crate::git::repo_state::Operation;
 use crate::git::status::Head;
+use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
 use crate::keymap::{KeyPattern, available, registry};
-use crate::model::{AppState, CommitFlow, Context};
+use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -22,7 +24,10 @@ pub fn render(state: &AppState, frame: &mut Frame) {
             let areas = workspace_layout(main);
             render_status_panel(state, frame, areas.status);
             render_files_panel(state, frame, areas.files);
-            render_diff_pane(&state.diff, frame, areas.diff);
+            match &state.focus {
+                Focus::Files => render_diff_pane(&state.diff, frame, areas.diff),
+                Focus::Diff(view) => render_hunk_view(view, frame, areas.diff),
+            }
         }
         Context::Review { number } => {
             frame.render_widget(
@@ -648,6 +653,63 @@ fn render_diff_pane(diff: &DiffPane, frame: &mut Frame, area: Rect) {
                 .map(styled_diff_line)
                 .collect::<Vec<_>>(),
         )
+    };
+    frame.render_widget(pane.block(block), area);
+}
+
+/// The focused Diff pane: one side of the file as hunks, the selected one
+/// marked by a reversed `@@` row and a `▌` gutter, so it reads without colour.
+fn render_hunk_view(view: &HunkView, frame: &mut Frame, area: Rect) {
+    let title = match view.side {
+        DiffSide::Index => " Staged ",
+        DiffSide::Worktree | DiffSide::Untracked => " Unstaged ",
+    };
+    let block = Block::bordered()
+        .title(title)
+        .title_style(Style::new().add_modifier(Modifier::BOLD))
+        .border_style(Style::new().fg(FOCUSED));
+    let inner = block.inner(area);
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    let pane = match &view.patch {
+        None if view.loading() => Paragraph::new("Loading…"),
+        None => Paragraph::new("Could not read the diff"),
+        Some(patch) if patch.kind == FileKind::Binary => {
+            Paragraph::new(PatchError::Binary.message())
+        }
+        Some(patch) if patch.kind == FileKind::Unsupported => {
+            Paragraph::new(PatchError::Unsupported.message())
+        }
+        Some(patch) if patch.hunks.is_empty() => Paragraph::new(NO_CHANGES),
+        Some(_) => {
+            let lines = view
+                .rows()
+                .into_iter()
+                .skip(view.scroll)
+                .take(rows)
+                .map(|row| {
+                    let selected = row.hunk == Some(view.hunk);
+                    let gutter = if selected { "▌" } else { " " };
+                    let style = match row.kind {
+                        RowKind::Header => Style::new().add_modifier(Modifier::BOLD),
+                        RowKind::HunkHeader => Style::new().fg(Color::Cyan),
+                        RowKind::Added => Style::new().fg(Color::Green),
+                        RowKind::Removed => Style::new().fg(Color::Red),
+                        RowKind::Context => Style::new(),
+                        RowKind::NoNewline => Style::new().fg(Color::DarkGray),
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(gutter, Style::new().fg(FOCUSED)),
+                        Span::styled(sanitize(&row.text), style),
+                    ]);
+                    if selected && row.kind == RowKind::HunkHeader {
+                        reversed(line, width)
+                    } else {
+                        line
+                    }
+                })
+                .collect::<Vec<_>>();
+            Paragraph::new(lines)
+        }
     };
     frame.render_widget(pane.block(block), area);
 }
@@ -1862,5 +1924,115 @@ mod tests {
         let state = with_commit(CommitFlow::Editing(commit_editor("subj", &[""])));
         let rows = draw(&state, 20, 6);
         assert!(contains(&rows, "subj"), "{rows:#?}");
+    }
+
+    const TWO_HUNKS: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+        @@ -1,2 +1,2 @@\n-old one\n+new one\n same\n\
+        @@ -9 +9 @@ fn \x1b[2Jx\n-old nine\n+new nine\n";
+
+    /// A workspace with `a.rs` selected and the Diff pane focused on `side`,
+    /// its patch loaded from `bytes`.
+    fn hunks(side: DiffSide, bytes: &[u8]) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut view = HunkView::new("a.rs".into(), side);
+        view.loaded(crate::git::patch::parse(bytes).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        state
+    }
+
+    #[test]
+    fn the_focused_pane_is_titled_by_its_side_and_marked() {
+        let buffer = draw_buffer(&hunks(DiffSide::Worktree, TWO_HUNKS), 100, 20);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, " Unstaged "), "{rows:#?}");
+        assert!(!contains(&rows, " Diff "), "{rows:#?}");
+        let (x, y) = find(&buffer, " Unstaged ");
+        assert_eq!(buffer[(x - 1, y)].style().fg, Some(Color::Cyan));
+
+        let rows = draw(&hunks(DiffSide::Index, TWO_HUNKS), 100, 20);
+        assert!(contains(&rows, " Staged "), "{rows:#?}");
+        let rows = draw(&hunks(DiffSide::Untracked, TWO_HUNKS), 100, 20);
+        assert!(contains(&rows, " Unstaged "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_selected_hunk_has_a_reversed_header_and_a_gutter() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        let reversed_at = |state: &AppState, needle: &str| {
+            let buffer = draw_buffer(state, 100, 20);
+            let (x, y) = find(&buffer, needle);
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(reversed_at(&state, "@@ -1,2 +1,2 @@"));
+        assert!(!reversed_at(&state, "@@ -9 +9 @@"));
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "▌-old one"), "{rows:#?}");
+        assert!(contains(&rows, " -old nine"), "{rows:#?}");
+        // The heading's control bytes never reach the terminal.
+        assert!(contains(&rows, "@@ -9 +9 @@ fn \u{FFFD}[2Jx"), "{rows:#?}");
+
+        if let Focus::Diff(view) = &mut state.focus {
+            view.next(20);
+        }
+        assert!(!reversed_at(&state, "@@ -1,2 +1,2 @@"));
+        assert!(reversed_at(&state, "@@ -9 +9 @@"));
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "▌+new nine"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_binary_patch_says_how_to_stage_it() {
+        let binary = b"diff --git a/a.rs b/a.rs\nBinary files a/a.rs and b/a.rs differ\n";
+        let rows = draw(&hunks(DiffSide::Worktree, binary), 100, 20);
+        assert!(
+            contains(&rows, "Binary file: stage it from the Files panel"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_side_or_a_load_says_so() {
+        let rows = draw(&hunks(DiffSide::Index, b""), 100, 20);
+        assert!(contains(&rows, "No changes in this view"), "{rows:#?}");
+
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.seq = Some(3);
+        state.focus = Focus::Diff(view);
+        let rows = draw(&state, 100, 20);
+        assert!(contains(&rows, "Loading…"), "{rows:#?}");
+    }
+
+    #[test]
+    fn help_in_the_diff_focus_lists_the_diff_keys() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        state.help_open = true;
+        let rows = draw(&state, 100, 30);
+        assert!(contains(&rows, " Keys: Diff "), "{rows:#?}");
+        assert!(contains(&rows, "Stage the selected hunk"), "{rows:#?}");
+        assert!(contains(&rows, "esc/h/←"), "{rows:#?}");
+        assert!(!contains(&rows, "Select the next file"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_bar_in_the_diff_focus_offers_the_hunk_keys() {
+        let rows = draw(&hunks(DiffSide::Worktree, TWO_HUNKS), 100, 20);
+        assert!(
+            rows[19].starts_with(" space hunk  t staged/unstaged  esc back  r refresh"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_the_diff_focused() {
+        let state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {
+            draw(&state, w, h);
+        }
     }
 }

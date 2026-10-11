@@ -1,0 +1,13 @@
+diff --git a/old.txt b/moved.txt
+similarity index 79%
+rename from old.txt
+rename to moved.txt
+index b2f931a..17eb8c9 100644
+--- a/old.txt
++++ b/moved.txt
+@@ -2,4 +2,4 @@ one
+ two
+ three
+ four
+-five
++FIVE

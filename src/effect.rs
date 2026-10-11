@@ -5,7 +5,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::diff_stream::DiffStreamer;
 use crate::git::GitRunner;
-use crate::git::diff::{DiffRequest, terminal_safe};
+use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::status::read_status;
 use crate::intent::AppIntent;
@@ -47,6 +47,12 @@ pub enum Effect {
     /// Stop git commands still running, because Kika is quitting. Answered
     /// by nothing; the stopped operation reports as failed, if anyone listens.
     InterruptGit,
+    /// Load the whole diff of one file as a patch; always answered by one
+    /// `PatchLoaded`.
+    LoadPatch {
+        tag: Tag,
+        request: DiffRequest,
+    },
     /// Run a Git operation; always answered by one `OpFinished`.
     RunOp {
         tag: Tag,
@@ -88,6 +94,18 @@ impl Runtime {
                         .unwrap_or_else(|e| Err(format!("git status crashed: {e}")));
                     // A closed channel means the app is quitting; nothing to report to.
                     let _ = tx.send(AppIntent::StatusLoaded { tag, result });
+                });
+            }
+            Effect::LoadPatch { tag, request } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || load_patch(runner.as_ref(), &request))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(format!("git diff crashed: {e}").as_bytes()))
+                            });
+                    let _ = tx.send(AppIntent::PatchLoaded { tag, result });
                 });
             }
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
@@ -305,6 +323,86 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
+        }
+    }
+
+    fn patch_request() -> DiffRequest {
+        DiffRequest {
+            path: "a.rs".into(),
+            orig_path: None,
+            side: DiffSide::Index,
+        }
+    }
+
+    #[tokio::test]
+    async fn load_patch_reports_back_with_the_same_tag() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "-U3",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--cached",
+                "--",
+                "a.rs",
+            ],
+            ok(b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadPatch {
+            tag,
+            request: patch_request(),
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::PatchLoaded {
+                tag: got,
+                result: Ok(patch),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(patch.hunks.len(), 1);
+            }
+            other => panic!("expected a loaded patch, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_patch_load_still_reports_back() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 7,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadPatch {
+            tag,
+            request: patch_request(),
+        });
+
+        match rx.recv().await {
+            Some(AppIntent::PatchLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(message.starts_with("git diff crashed: "), "{message:?}");
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed PatchLoaded, got {other:?}"),
         }
     }
 

@@ -27,6 +27,12 @@ pub enum GitOp {
         message: String,
         stage_all: bool,
     },
+    /// Apply `patch` to the index only, from stdin; with `reverse`, take it
+    /// back out. How a single hunk is staged or unstaged.
+    ApplyCached {
+        patch: Vec<u8>,
+        reverse: bool,
+    },
 }
 
 /// Why staging everything is refused while conflicts exist.
@@ -89,6 +95,13 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::Unstage(paths) => with_paths(GitCommand::new("reset").arg("-q"), paths),
         GitOp::StageAll => GitCommand::new("add").arg("-A"),
         GitOp::UnstageAll => GitCommand::new("reset").arg("-q"),
+        // `--whitespace=nowarn` so the user's `apply.whitespace` can never
+        // reject or rewrite the patch.
+        GitOp::ApplyCached { patch, reverse } => {
+            let cmd = GitCommand::new("apply").arg("--cached");
+            let cmd = if *reverse { cmd.arg("--reverse") } else { cmd };
+            cmd.arg("--whitespace=nowarn").arg("-").stdin(patch.clone())
+        }
         GitOp::Commit { message, .. } => {
             return GitCommand::new("commit")
                 .arg("-F")
@@ -258,6 +271,113 @@ mod tests {
                 "{op:?}: {envs:?}"
             );
         }
+    }
+
+    #[test]
+    fn apply_cached_sends_the_patch_on_stdin() {
+        for (reverse, argv) in [
+            (
+                false,
+                &["apply", "--cached", "--whitespace=nowarn", "-"][..],
+            ),
+            (
+                true,
+                &["apply", "--cached", "--reverse", "--whitespace=nowarn", "-"][..],
+            ),
+        ] {
+            let runner = FakeRunner::new().expect(argv, ok(b""));
+            let op = GitOp::ApplyCached {
+                patch: b"the patch\n".to_vec(),
+                reverse,
+            };
+            assert_eq!(run_op(&runner, &op), Ok(()));
+            runner.assert_done();
+            assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
+            assert_eq!(
+                runner.envs(),
+                [vec![
+                    ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+                    ("LC_ALL".into(), "C".into())
+                ]]
+            );
+        }
+    }
+
+    /// Stage hunk 1 of a two-hunk file through the real patch engine and
+    /// `git apply`, then unstage it again from the staged diff.
+    fn stage_and_unstage_one_hunk(name: &str) {
+        use crate::git::diff::{DiffRequest, DiffSide, load_patch};
+        use crate::git::fake::{TempDir, git};
+        use crate::git::patch::{PatchSelection, build};
+
+        let tmp = TempDir::new("apply");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        let lines: Vec<String> = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join(name), lines.concat()).unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "init"]);
+        let mut changed = lines.clone();
+        changed[0] = "line 1a\nline 1b\n".into();
+        changed[19] = "line twenty\n".into();
+        std::fs::write(dir.join(name), changed.concat()).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let request = |side| DiffRequest {
+            path: name.into(),
+            orig_path: None,
+            side,
+        };
+        let cached = || String::from_utf8(git(dir, &["diff", "--cached"])).unwrap();
+        let worktree = || String::from_utf8(git(dir, &["diff"])).unwrap();
+
+        let patch = load_patch(&runner, &request(DiffSide::Worktree)).unwrap();
+        let hunk = build(&patch, &PatchSelection::Hunk(1)).unwrap();
+        let stage = GitOp::ApplyCached {
+            patch: hunk,
+            reverse: false,
+        };
+        run_op(&runner, &stage).unwrap();
+        let (index, work) = (cached(), worktree());
+        assert!(
+            index.contains("+line twenty") && !index.contains("+line 1a"),
+            "{index}"
+        );
+        assert!(
+            work.contains("+line 1a") && !work.contains("line twenty"),
+            "{work}"
+        );
+
+        // Stage the rest too, then take only hunk 0 back out of the index.
+        git(dir, &["add", "--", name]);
+        let patch = load_patch(&runner, &request(DiffSide::Index)).unwrap();
+        assert_eq!(patch.hunks.len(), 2);
+        let hunk = build(&patch, &PatchSelection::Hunk(0)).unwrap();
+        let unstage = GitOp::ApplyCached {
+            patch: hunk,
+            reverse: true,
+        };
+        run_op(&runner, &unstage).unwrap();
+        let (index, work) = (cached(), worktree());
+        assert!(
+            index.contains("+line twenty") && !index.contains("+line 1a"),
+            "{index}"
+        );
+        assert!(
+            work.contains("+line 1a") && !work.contains("line twenty"),
+            "{work}"
+        );
+    }
+
+    #[test]
+    fn a_built_hunk_stages_and_unstages_only_itself_in_real_git() {
+        stage_and_unstage_one_hunk("a.txt");
+    }
+
+    /// git quotes this name in the diff header; the patch keeps it quoted.
+    #[cfg(unix)]
+    #[test]
+    fn a_hunk_of_a_file_whose_name_needs_quoting_stages_in_real_git() {
+        stage_and_unstage_one_hunk("tab\there \"q\".txt");
     }
 
     #[test]
