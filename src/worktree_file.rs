@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -17,10 +17,22 @@ use crate::git::path::RepoPath;
 /// Why a replace was refused: someone else wrote the file since it was read.
 pub const CHANGED_ON_DISK: &str = "The file changed on disk; reopen it";
 
-/// The bytes of `path` under `root`.
-pub fn read(root: &Path, path: &RepoPath) -> Result<Vec<u8>, String> {
+/// The bytes of `path` under `root`, refused when there are more than
+/// `max`: they are read into memory and drawn row by row.
+pub fn read(root: &Path, path: &RepoPath, max: u64) -> Result<Vec<u8>, String> {
     let file = checked(root, path)?;
-    fs::read(&file).map_err(|e| format!("Could not read {}: {e}", path.display()))
+    let fail = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
+    let mut bytes = Vec::new();
+    File::open(&file)
+        .and_then(|f| f.take(max.saturating_add(1)).read_to_end(&mut bytes))
+        .map_err(fail)?;
+    if bytes.len() as u64 > max {
+        return Err(format!(
+            "The file is larger than {} MB, too large to resolve here.",
+            max / (1024 * 1024)
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Write `content` over `path` under `root`, only if it still holds
@@ -46,10 +58,37 @@ pub fn replace(
         fs::rename(&temp, &file)
     })();
     if let Err(e) = written {
-        let _ = fs::remove_file(&temp);
+        remove_temp(&temp);
         return Err(fail(e));
     }
     Ok(())
+}
+
+/// Remove a temp file left by a failed replace. It may carry a read-only
+/// target's permissions, which on Windows keep it from being removed.
+fn remove_temp(temp: &Path) {
+    if fs::remove_file(temp).is_err() && clear_read_only(temp) {
+        let _ = fs::remove_file(temp);
+    }
+}
+
+/// Clear Windows' read-only attribute, so the file can be removed.
+#[cfg(windows)]
+fn clear_read_only(file: &Path) -> bool {
+    let Ok(meta) = fs::metadata(file) else {
+        return false;
+    };
+    let mut permissions = meta.permissions();
+    // On Windows this clears one attribute; it grants nobody anything.
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(file, permissions).is_ok()
+}
+
+/// Elsewhere the directory's permissions decide removal, not the file's.
+#[cfg(not(windows))]
+fn clear_read_only(_: &Path) -> bool {
+    false
 }
 
 /// A new file beside `file`, named `.<name>.kika-<pid>-<n>`. `create_new`
@@ -97,6 +136,11 @@ fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, String> {
     }
     let parent = at.clone();
     at.push(name);
+    // Pushing a part with a prefix would replace the path, not extend it;
+    // `components` refuses those, and this makes sure of it.
+    if at.parent() != Some(parent.as_path()) || !at.starts_with(root) {
+        return Err(refuse("it is outside the repository"));
+    }
     let meta = fs::symlink_metadata(&at).map_err(|e| refuse(&e.to_string()))?;
     if meta.file_type().is_symlink() {
         return Err(refuse("it is a symlink"));
@@ -116,15 +160,27 @@ fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, String> {
 
 /// The `/`-separated parts of a relative path, from its raw bytes. `None`
 /// for an absolute path or one with an empty, `.` or `..` part, which a
-/// path from git never has.
+/// path from git never has. Each part must be one plain name to the
+/// platform too: on Windows a `\` separates and a `:` makes a drive
+/// prefix (`D:x`) or a stream name, either of which would leave the
+/// worktree.
 fn components(path: &RepoPath) -> Option<Vec<OsString>> {
     let raw = raw_bytes(path)?;
-    let parts: Vec<&[u8]> = raw.split(|&b| b == b'/').collect();
-    let plain = |part: &&[u8]| !part.is_empty() && *part != b"." && *part != b"..";
-    if !parts.iter().all(plain) || (cfg!(windows) && raw.contains(&b'\\')) {
+    if cfg!(windows) && raw.iter().any(|&b| b == b'\\' || b == b':') {
         return None;
     }
-    Some(parts.into_iter().map(crate::git::path::os_string).collect())
+    let parts: Vec<OsString> = raw
+        .split(|&b| b == b'/')
+        .map(crate::git::path::os_string)
+        .collect();
+    let plain = |part: &OsString| {
+        let mut inside = Path::new(part).components();
+        matches!(
+            (inside.next(), inside.next()),
+            (Some(std::path::Component::Normal(name)), None) if name == part.as_os_str()
+        )
+    };
+    parts.iter().all(plain).then_some(parts)
 }
 
 #[cfg(unix)]
@@ -165,13 +221,39 @@ mod tests {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
         let path = RepoPath::from("dir/a.sh");
 
-        assert_eq!(read(root, &path), Ok(b"old\n".to_vec()));
+        assert_eq!(read(root, &path, 1024), Ok(b"old\n".to_vec()));
         assert_eq!(replace(root, &path, b"old\n", b"new\r\n"), Ok(()));
 
         assert_eq!(fs::read(&file).unwrap(), b"new\r\n");
         let mode = fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o755);
         assert_eq!(temps(&root.join("dir")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_file_over_the_limit_is_refused() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        fs::write(root.join("big.txt"), vec![b'x'; 2 * 1024 * 1024 + 1]).unwrap();
+        let path = RepoPath::from("big.txt");
+        assert_eq!(
+            read(root, &path, 2 * 1024 * 1024),
+            Err("The file is larger than 2 MB, too large to resolve here.".to_string())
+        );
+        assert_eq!(
+            read(root, &path, 3 * 1024 * 1024).map(|b| b.len()),
+            Ok(2 * 1024 * 1024 + 1)
+        );
+    }
+
+    #[test]
+    fn each_part_must_be_one_plain_name() {
+        for name in ["a", "dir/a.txt", "a.", "...", "a\\b", "c:d"] {
+            assert!(components(&RepoPath::from(name)).is_some(), "{name:?}");
+        }
+        for name in ["", "/a", "a/", "a//b", "./a", "a/.", "../a", "a/../b"] {
+            assert_eq!(components(&RepoPath::from(name)), None, "{name:?}");
+        }
     }
 
     #[test]
@@ -214,7 +296,7 @@ mod tests {
             "",
         ] {
             let path = RepoPath::from(name);
-            assert!(read(&root, &path).is_err(), "read {name:?}");
+            assert!(read(&root, &path, 1024).is_err(), "read {name:?}");
             let result = replace(&root, &path, b"secret\n", b"pwned\n");
             assert!(result.is_err(), "replace {name:?}");
         }
@@ -241,5 +323,77 @@ mod tests {
             assert_eq!(fs::read(root.join("ro/a.txt")).unwrap(), b"old\n");
         }
         assert_eq!(temps(&root.join("ro")), Vec::<String>::new());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crate::git::fake::TempDir;
+
+    #[test]
+    fn drive_prefixes_streams_and_backslashes_are_refused() {
+        for name in [
+            "D:x",
+            "C:",
+            "dir/D:x",
+            "a:b",
+            "a.txt:stream",
+            "a\\b",
+            "..\\x",
+        ] {
+            assert_eq!(components(&RepoPath::from(name)), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_drive_relative_name_never_reaches_outside_the_worktree() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.txt"), "inside\n").unwrap();
+        for name in ["D:x", "C:a.txt", "sub/C:a.txt"] {
+            let path = RepoPath::from(name);
+            assert!(read(&root, &path, 1024).is_err(), "read {name:?}");
+            assert!(
+                replace(&root, &path, b"inside\n", b"pwned\n").is_err(),
+                "replace {name:?}"
+            );
+        }
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"inside\n");
+    }
+
+    #[test]
+    fn a_read_only_file_that_cannot_be_replaced_leaves_no_temp_file() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let file = root.join("a.txt");
+        fs::write(&file, "old\n").unwrap();
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+
+        let _ = replace(root, &RepoPath::from("a.txt"), b"old\n", b"new\n");
+
+        let left: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".kika-"))
+            .collect();
+        assert_eq!(left, Vec::<String>::new());
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&file, permissions).unwrap();
+    }
+
+    #[test]
+    fn a_plain_file_is_replaced() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        fs::write(root.join("a.txt"), "old\r\n").unwrap();
+        let path = RepoPath::from("a.txt");
+        assert_eq!(replace(root, &path, b"old\r\n", b"new\r\n"), Ok(()));
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"new\r\n");
     }
 }

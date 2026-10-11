@@ -3226,6 +3226,9 @@ impl AppState {
         };
         match result {
             Ok(content) => {
+                // Asked again after any later pick: answering no leaves
+                // the row conflicted, which Files will not stage, so a
+                // pick is the way back to the question.
                 let resolved = view.is_some_and(|view| {
                     view.pending = None;
                     if let Some(loaded) = &mut view.loaded {
@@ -10383,6 +10386,13 @@ mod tests {
         state.update(written(tag, Ok(content.clone())));
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
         assert_eq!(conflict(&state).loaded.as_ref().unwrap().on_disk, content);
+
+        // After no, a later pick asks again: Files will not stage the row.
+        press_char(&mut state, 'n');
+        assert_eq!(state.popups, []);
+        let (again, _, both) = write_of(&press_char(&mut state, 'b'));
+        state.update(written(again, Ok(both)));
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
 
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Stage(vec!["c.txt".into()]));

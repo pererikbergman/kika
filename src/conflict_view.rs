@@ -235,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn tiny_terminals_do_not_panic() {
+        let mut view = ConflictView::new("a.txt".into(), 1);
+        view.loaded(Ok((TWO.to_vec(), 7)), 1);
+        let mut broken = ConflictView::new("a.txt".into(), 1);
+        broken.loaded(Ok((b"none\n".to_vec(), 7)), 1);
+        for state in [state(view), state(broken)] {
+            for (w, h) in [(0, 0), (1, 1), (20, 6), (5, 3), (80, 2)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|frame| render(&state, frame)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn file_text_never_reaches_the_terminal_raw() {
         let mut view = ConflictView::new("a.txt".into(), 1);
         let bytes = b"\x1b[2J\n<<<<<<< a\x1b]0;x\x07\nours\x1b[31m\n=======\n>>>>>>> b\n";

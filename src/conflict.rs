@@ -15,6 +15,11 @@ use crate::intent::Scroll;
 /// says otherwise.
 pub const DEFAULT_MARKER_SIZE: usize = 7;
 
+/// The largest file the view reads. A conflicted file is held in memory
+/// and its rows drawn from it; one far past this is better left to the
+/// merge tool.
+pub const MAX_CONFLICT_FILE: u64 = 8 * 1024 * 1024;
+
 /// A conflicted file: text git merged cleanly, and the blocks it could not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFile {

@@ -9,6 +9,7 @@ use crate::ansi;
 use crate::captured_command::run_captured;
 use crate::commits;
 use crate::config::{self, ConfigPaths};
+use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
 use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
@@ -395,7 +396,8 @@ impl Runtime {
                     // A panic still reports back, or the busy counter would stay raised.
                     let result = tokio::task::spawn_blocking(move || {
                         let size = conflict_marker_size(runner.as_ref(), &read)?;
-                        Ok((worktree_file::read(&workdir, &read)?, size))
+                        let bytes = worktree_file::read(&workdir, &read, MAX_CONFLICT_FILE)?;
+                        Ok((bytes, size))
                     })
                     .await
                     .unwrap_or_else(|e| {
