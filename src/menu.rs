@@ -1,7 +1,10 @@
 //! Every menu Kika shows, declared once like the keymap. An item's result
 //! is an intent, and it can be disabled with a reason, as a key can.
 
+use crate::bisect;
+use crate::git::bisect::BisectMark;
 use crate::git::ops::{MergeStrategy, ResetMode};
+use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::{
     amend_disabled, commit_disabled, merge_disabled, never, reset_disabled, stage_all_disabled,
@@ -18,6 +21,8 @@ pub enum MenuId {
     Merge,
     /// Reset the current branch to the selected commit.
     Reset,
+    /// Mark the selected commit for a bisect, or end the bisect.
+    Bisect,
 }
 
 impl MenuId {
@@ -27,6 +32,7 @@ impl MenuId {
             MenuId::Stage => "Stage",
             MenuId::Merge => "Merge / rebase",
             MenuId::Reset => "Reset to commit",
+            MenuId::Bisect => "Bisect",
         }
     }
 }
@@ -151,11 +157,35 @@ static RESET: &[MenuItem] = &[
     },
 ];
 
+static BISECT: &[MenuItem] = &[
+    MenuItem {
+        label: "Mark selected bad (starts a bisect)",
+        intent: AppIntent::BisectSelected(BisectMark::Bad),
+        disabled: bisect::selected_bad_disabled,
+    },
+    MenuItem {
+        label: "Mark selected good (starts a bisect)",
+        intent: AppIntent::BisectSelected(BisectMark::Good),
+        disabled: bisect::selected_good_disabled,
+    },
+    MenuItem {
+        label: "Skip selected",
+        intent: AppIntent::BisectSelected(BisectMark::Skip),
+        disabled: bisect::selected_skip_disabled,
+    },
+    MenuItem {
+        label: "Reset bisect…",
+        intent: AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)),
+        disabled: bisect::reset_disabled,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
         MenuId::Stage => STAGE,
         MenuId::Merge => MERGE,
         MenuId::Reset => RESET,
+        MenuId::Bisect => BISECT,
     }
 }

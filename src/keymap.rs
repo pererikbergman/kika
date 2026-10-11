@@ -5,9 +5,11 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::bisect;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandTable, CustomCommand};
 use crate::external_diff::NO_RENDERER;
+use crate::git::bisect::BisectMark;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
@@ -454,6 +456,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "status.continue",
     "status.skip",
     "status.abort",
+    "status.bisect_good",
+    "status.bisect_bad",
+    "commits.bisect",
     "delete_branch.yes",
     "delete_branch.force",
     "delete_branch.no",
@@ -3235,6 +3240,16 @@ static REGISTRY: &[Binding] = &[
         disabled: tag_commit_disabled,
     },
     Binding {
+        id: "commits.bisect",
+        keys: &[KeyPattern::any(KeyCode::Char('B'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenMenu(MenuId::Bisect),
+        description: "Mark the selected commit good, bad or skipped for a bisect, or reset it",
+        label: "bisect",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "status.continue",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Status,
@@ -3242,27 +3257,47 @@ static REGISTRY: &[Binding] = &[
         description: "Continue the merge, rebase, cherry-pick or revert once conflicts are resolved",
         label: "continue",
         bar: true,
-        disabled: resume_disabled,
+        disabled: bisect::continue_disabled,
     },
     Binding {
         id: "status.skip",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
         scope: KeyScope::Status,
         intent: AppIntent::SkipOperation,
-        description: "Skip the commit the rebase, cherry-pick or revert stopped on",
+        description: "Skip the commit the rebase, cherry-pick or revert stopped on, or the one a bisect is testing",
         label: "skip",
         bar: true,
-        disabled: skip_disabled,
+        disabled: bisect::skip_disabled,
     },
     Binding {
         id: "status.abort",
         keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
         scope: KeyScope::Status,
         intent: AppIntent::AbortOperation,
-        description: "Abort the operation in progress, asking first",
+        description: "Abort the operation in progress, or reset the bisect, asking first",
         label: "abort",
         bar: true,
-        disabled: resume_disabled,
+        disabled: bisect::abort_disabled,
+    },
+    Binding {
+        id: "status.bisect_good",
+        keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
+        scope: KeyScope::Status,
+        intent: AppIntent::BisectHead(BisectMark::Good),
+        description: "Mark the commit the bisect is testing good",
+        label: "good",
+        bar: true,
+        disabled: bisect::head_good_disabled,
+    },
+    Binding {
+        id: "status.bisect_bad",
+        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
+        scope: KeyScope::Status,
+        intent: AppIntent::BisectHead(BisectMark::Bad),
+        description: "Mark the commit the bisect is testing bad",
+        label: "bad",
+        bar: true,
+        disabled: bisect::head_bad_disabled,
     },
     // As with discarding, Enter is left unbound: a delete cannot be undone.
     Binding {
@@ -4029,6 +4064,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![Operation::Rebase],
+            bisect: None,
         });
         let status = |c| match resolve(
             registry(),
@@ -4308,6 +4344,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(
@@ -5452,6 +5489,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![Operation::Revert],
+            bisect: None,
         });
         let busy = Some("Finish or abort the operation in progress");
         assert_eq!(revert_disabled(&state), busy);
@@ -5551,6 +5589,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![Operation::Rebase],
+            bisect: None,
         });
         for disabled in all {
             assert_eq!(
@@ -5723,6 +5762,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![Operation::Bisect],
+            bisect: None,
         });
         assert_eq!(
             undo_disabled(&state),
@@ -5772,6 +5812,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         });
         let run = |k| match resolve(registry(), &Keymap::default(), KeyScope::Commits, &state, k) {
             Resolution::Run(binding) => binding.intent.clone(),
@@ -6317,6 +6358,8 @@ mod tests {
                     | ConfirmDeleteTag
                     | PushTag
                     | RewriteCommit(_)
+                    | BisectHead(_)
+                    | OpenMenu(MenuId::Bisect)
                     | OpenWorktree
                     | AddWorktree
                     | RemoveWorktree
@@ -6519,5 +6562,140 @@ mod tests {
         assert_eq!(listed(KeyScope::Diff), [1, 2]);
         assert_eq!(listed(KeyScope::Lines), [2]);
         assert!(listed(KeyScope::Blame).is_empty());
+    }
+
+    #[test]
+    fn shift_b_in_commits_opens_the_bisect_menu_and_g_b_mark_from_status() {
+        use AppIntent::*;
+        assert_eq!(
+            from(
+                KeyScope::Commits,
+                key(KeyCode::Char('B'), KeyModifiers::SHIFT)
+            ),
+            Some(OpenMenu(MenuId::Bisect))
+        );
+        let mut state = AppState::new(Context::Workspace);
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Detached("abc".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+            bisect: Some(crate::git::bisect::BisectState::default()),
+        });
+        let status = |c| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Status,
+            &state,
+            plain(c),
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            other => panic!("{c}: {other:?}"),
+        };
+        assert_eq!(status('g'), Some(BisectHead(BisectMark::Good)));
+        assert_eq!(status('b'), Some(BisectHead(BisectMark::Bad)));
+        assert_eq!(status('s'), Some(SkipOperation));
+        assert_eq!(status('a'), Some(AbortOperation));
+    }
+
+    #[test]
+    fn the_bisect_keys_clash_with_nothing_they_could_hide_or_be_hidden_by() {
+        // Commits and Status fall back to Workspace, then Global; neither
+        // has a scope below it.
+        let ids = ["commits.bisect", "status.bisect_good", "status.bisect_bad"];
+        for id in ids {
+            let new = registry().iter().find(|b| b.id == id).unwrap();
+            for other in registry() {
+                let reachable = new.scope.chain().any(|s| s == other.scope)
+                    || other.scope.chain().any(|s| s == new.scope);
+                if other.id == id || !reachable {
+                    continue;
+                }
+                for key in new.keys {
+                    assert!(
+                        !other.keys.iter().any(|k| k.overlaps(key)),
+                        "{id} clashes with {}",
+                        other.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bisect_menu_refuses_as_the_marks_do() {
+        use crate::bisect::{Target, mark_disabled, reset_disabled};
+        use crate::git::bisect::{BisectState, Terms};
+        use crate::git::status::BranchStatus;
+
+        let branch = |head: Head, ops: &[Operation], bisect: Option<BisectState>| {
+            Some(BranchStatus {
+                head,
+                upstream: None,
+                ahead_behind: None,
+                in_progress: ops.to_vec(),
+                bisect,
+            })
+        };
+        let custom = BisectState {
+            terms: Terms {
+                bad: "new".into(),
+                good: "old".into(),
+            },
+            ..BisectState::default()
+        };
+        let mut states = Vec::new();
+        for (head, ops, bisect) in [
+            (Head::Branch("main".into()), vec![], None),
+            (Head::Unborn("main".into()), vec![], None),
+            (Head::Branch("main".into()), vec![Operation::Merge], None),
+            (
+                Head::Detached("abc".into()),
+                vec![Operation::Bisect],
+                Some(BisectState::default()),
+            ),
+            (
+                Head::Detached("abc".into()),
+                vec![Operation::Bisect],
+                Some(custom),
+            ),
+        ] {
+            let mut state = AppState::new(Context::Workspace);
+            state.commits.rows = vec![crate::git::log::CommitRow {
+                oid: "abc".into(),
+                short_oid: "abc".into(),
+                parents: vec![],
+                author: "Ann".into(),
+                time: 0,
+                subject: "s".into(),
+            }];
+            state.branch = branch(head, &ops, bisect);
+            states.push(state.clone());
+            state.op_seq = Some(1);
+            states.push(state.clone());
+            state.op_seq = None;
+            state.files = vec![crate::git::FileEntry {
+                path: "a.rs".into(),
+                orig_path: None,
+                index: 'M',
+                worktree: '.',
+                kind: EntryKind::Changed,
+            }];
+            states.push(state.clone());
+            state.commits.rows.clear();
+            states.push(state);
+        }
+        let items = crate::menu::items(MenuId::Bisect);
+        assert_eq!(items.len(), 4);
+        for state in &states {
+            for item in items {
+                let expected = match item.intent {
+                    AppIntent::BisectSelected(mark) => mark_disabled(state, Target::Selected, mark),
+                    AppIntent::Ask(_) => reset_disabled(state),
+                    ref other => panic!("unexpected item {other:?}"),
+                };
+                assert_eq!((item.disabled)(state), expected, "{}", item.label);
+            }
+        }
     }
 }
