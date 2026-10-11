@@ -682,6 +682,8 @@ mod tests {
             let args = cmd.args();
             let at = args.iter().position(|a| a == "-F").unwrap();
             let path = PathBuf::from(&args[at + 1]);
+            // Off Unix only the file's existence is checked; its mode is not read.
+            #[cfg_attr(not(unix), allow(unused_variables))]
             let meta = fs::metadata(&path).unwrap();
             #[cfg(unix)]
             let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777;
