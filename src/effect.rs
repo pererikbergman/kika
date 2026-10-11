@@ -17,7 +17,7 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
-use crate::git::branches::{BranchName, branch_log, list_branches};
+use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
 use crate::git::fetch::run_fetch;
@@ -28,6 +28,7 @@ use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
+use crate::git::remotes::list_remotes;
 use crate::git::repo_root::init_repo;
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
@@ -110,11 +111,17 @@ pub enum Effect {
     LoadBranches {
         tag: Tag,
     },
-    /// Read `name`'s newest commits; always answered by one
-    /// `BranchLogLoaded` for the same `name`.
+    /// Read the newest commits of the full ref `refname`, local or
+    /// remote-tracking; always answered by one `BranchLogLoaded` for the
+    /// same `refname`.
     LoadBranchLog {
         tag: Tag,
-        name: BranchName,
+        refname: Vec<u8>,
+    },
+    /// List the remotes and their remote-tracking branches; always
+    /// answered by one `RemotesLoaded`.
+    LoadRemotes {
+        tag: Tag,
     },
     /// Read the recent-repositories list; answered by `RecentLoaded`
     /// with the same `seq`.
@@ -343,9 +350,9 @@ impl Runtime {
                     let _ = tx.send(AppIntent::BranchesLoaded { tag, result });
                 });
             }
-            Effect::LoadBranchLog { tag, name } => {
+            Effect::LoadBranchLog { tag, refname } => {
                 tokio::spawn(async move {
-                    let read = name.clone();
+                    let read = crate::git::path::os_string(&refname);
                     // A panic still reports back, or the busy counter would stay raised.
                     let result =
                         tokio::task::spawn_blocking(move || branch_log(runner.as_ref(), &read))
@@ -353,7 +360,24 @@ impl Runtime {
                             .unwrap_or_else(|e| {
                                 Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
                             });
-                    let _ = tx.send(AppIntent::BranchLogLoaded { tag, name, result });
+                    let _ = tx.send(AppIntent::BranchLogLoaded {
+                        tag,
+                        refname,
+                        result,
+                    });
+                });
+            }
+            Effect::LoadRemotes { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || list_remotes(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git for-each-ref crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::RemotesLoaded { tag, result });
                 });
             }
             // Synchronous, so no later effect runs in the old repository.
@@ -1441,13 +1465,13 @@ mod tests {
         );
         runtime.spawn(Effect::LoadBranchLog {
             tag,
-            name: "main".into(),
+            refname: b"refs/heads/main".to_vec(),
         });
         assert_eq!(
             rx.recv().await,
             Some(AppIntent::BranchLogLoaded {
                 tag,
-                name: "main".into(),
+                refname: b"refs/heads/main".to_vec(),
                 result: Ok(vec![crate::git::branches::LogRow {
                     short_oid: "abc".into(),
                     date: "2024-01-02".into(),
@@ -1475,12 +1499,58 @@ mod tests {
         ));
         runtime.spawn(Effect::LoadBranchLog {
             tag,
-            name: "x".into(),
+            refname: b"refs/heads/x".to_vec(),
         });
         assert!(matches!(
             rx.recv().await,
             Some(AppIntent::BranchLogLoaded { result: Err(_), .. })
         ));
+        runtime.spawn(Effect::LoadRemotes { tag });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::RemotesLoaded { result: Err(_), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_remotes_load_reports_back_with_the_same_tag() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
+                    ok(b"remote.origin.url\n/srv/r\0"),
+                )
+                .expect(
+                    &[
+                        "for-each-ref",
+                        "--format=%(refname)%00%(symref)",
+                        "refs/remotes",
+                    ],
+                    ok(b"refs/remotes/origin/main\0\n"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 5,
+            user: false,
+        };
+
+        runtime.spawn(Effect::LoadRemotes { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::RemotesLoaded {
+                tag: got,
+                result: Ok(remotes),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(remotes.len(), 1);
+                assert_eq!(remotes[0].branches[0].display(), "origin/main");
+            }
+            other => panic!("expected RemotesLoaded, got {other:?}"),
+        }
+        runner.assert_done();
     }
 
     #[tokio::test]

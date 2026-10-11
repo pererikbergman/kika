@@ -1,6 +1,7 @@
 //! Mutations of the index and history. Each is a [`GitOp`] so the reducer can
 //! name the work, and the refresh planner can say what it invalidates.
 
+use std::ffi::OsString;
 use std::path::Path;
 
 use super::branches::BranchName;
@@ -8,6 +9,8 @@ use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::rebase_plan::{RebasePlan, encode};
+use super::remote::redact_userinfo;
+use super::remotes::{RemoteBranch, RemoteName};
 use super::repo_state::Operation;
 use super::runner::{GitCommand, GitRunner};
 use super::status::{EntryKind, FileEntry};
@@ -127,6 +130,34 @@ pub enum GitOp {
     /// Resolve this conflicted file in the user's merge tool, on the
     /// terminal. The tool may ask which one to use or wait for Enter.
     MergeTool(RepoPath),
+    /// Make branch `name` at the remote branch `from`, tracking it, and
+    /// switch to it. Git refuses when `name` exists.
+    CheckoutTracking {
+        name: String,
+        from: RemoteBranch,
+    },
+    /// Make `branch` track the remote branch `upstream`.
+    SetUpstream {
+        branch: BranchName,
+        upstream: RemoteBranch,
+    },
+    /// Stop `branch` tracking anything.
+    UnsetUpstream(BranchName),
+    /// Add a remote. Never fetched here: its branches appear after the
+    /// user's own fetch.
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    /// Rename a remote, its remote-tracking branches and the upstreams
+    /// that name it.
+    RenameRemote {
+        from: RemoteName,
+        to: String,
+    },
+    /// Remove a remote, its remote-tracking branches and the upstreams
+    /// that name it.
+    RemoveRemote(RemoteName),
 }
 
 /// How a merge records the other branch's commits.
@@ -318,6 +349,43 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(if *force { "-D" } else { "-d" })
             .arg("--")
             .arg(name.as_os_string()),
+        // The start point as a full ref, as for `CreateBranch`.
+        GitOp::CheckoutTracking { name, from } => GitCommand::new("checkout")
+            .arg("-q")
+            .arg("--track")
+            .arg("-b")
+            .arg(name)
+            .arg(from.full_ref())
+            .arg("--"),
+        GitOp::SetUpstream { branch, upstream } => {
+            let mut flag = OsString::from("--set-upstream-to=");
+            flag.push(upstream.full_ref());
+            GitCommand::new("branch")
+                .arg(flag)
+                .arg("--")
+                .arg(branch.as_os_string())
+        }
+        GitOp::UnsetUpstream(branch) => GitCommand::new("branch")
+            .arg("--unset-upstream")
+            .arg("--")
+            .arg(branch.as_os_string()),
+        // Never `-f`: adding a remote must not reach the network.
+        GitOp::AddRemote { name, url } => GitCommand::new("remote")
+            .arg("add")
+            .arg("--")
+            .arg(name)
+            .arg(url),
+        // In git 2.15 `remote rename` and `remote remove` parse no options,
+        // so `--` would be a usage error. The new name passed
+        // `validate_remote_name`, and no key acts on an old name that
+        // starts with `-`, so neither is read as an option.
+        GitOp::RenameRemote { from, to } => GitCommand::new("remote")
+            .arg("rename")
+            .arg(from.as_os_string())
+            .arg(to),
+        GitOp::RemoveRemote(name) => GitCommand::new("remote")
+            .arg("remove")
+            .arg(name.as_os_string()),
         // These take no paths and may run hooks, which must see the env they
         // would see outside Kika, as a commit's do. The branch is a full
         // ref, so a name like an option, or one a tag shadows, stays this
@@ -439,6 +507,14 @@ fn run_op_with(
                 .collect::<Vec<_>>()
                 .join("\n")
         }
+        // Git quotes a remote's URL in these errors, and it can carry a
+        // token.
+        GitOp::CheckoutTracking { .. }
+        | GitOp::SetUpstream { .. }
+        | GitOp::UnsetUpstream(_)
+        | GitOp::AddRemote { .. }
+        | GitOp::RenameRemote { .. }
+        | GitOp::RemoveRemote(_) => redact_userinfo(&terminal_safe(&output.stderr)),
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
@@ -1050,6 +1126,213 @@ mod tests {
         };
         run_op(&runner, &delete).unwrap();
         assert_eq!(branches(), "made\nmain\n");
+    }
+
+    fn origin_main() -> RemoteBranch {
+        RemoteBranch {
+            remote: "origin".into(),
+            short: b"main".to_vec(),
+            refname: b"refs/remotes/origin/main".to_vec(),
+        }
+    }
+
+    #[test]
+    fn remote_and_upstream_ops_build_exact_argv_and_never_fetch() {
+        let cases: [(GitOp, &[&str]); 7] = [
+            (
+                GitOp::CheckoutTracking {
+                    name: "main".into(),
+                    from: origin_main(),
+                },
+                &[
+                    "checkout",
+                    "-q",
+                    "--track",
+                    "-b",
+                    "main",
+                    "refs/remotes/origin/main",
+                    "--",
+                ],
+            ),
+            (
+                GitOp::SetUpstream {
+                    branch: "topic".into(),
+                    upstream: origin_main(),
+                },
+                &[
+                    "branch",
+                    "--set-upstream-to=refs/remotes/origin/main",
+                    "--",
+                    "topic",
+                ],
+            ),
+            (
+                GitOp::UnsetUpstream("topic".into()),
+                &["branch", "--unset-upstream", "--", "topic"],
+            ),
+            (
+                GitOp::AddRemote {
+                    name: "fork".into(),
+                    url: "https://h/fork.git".into(),
+                },
+                &["remote", "add", "--", "fork", "https://h/fork.git"],
+            ),
+            // No `--`: git 2.15's `remote rename` and `remote remove` parse
+            // no options and would take it for a name.
+            (
+                GitOp::RenameRemote {
+                    from: "fork".into(),
+                    to: "mine".into(),
+                },
+                &["remote", "rename", "fork", "mine"],
+            ),
+            (
+                GitOp::RemoveRemote("fork".into()),
+                &["remote", "remove", "fork"],
+            ),
+            (
+                GitOp::RemoveRemote("my.fork/x".into()),
+                &["remote", "remove", "my.fork/x"],
+            ),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            let got = argv(&cmd);
+            assert_eq!(got, expected, "{op:?}");
+            for banned in ["-f", "--fetch", "fetch", "--end-of-options"] {
+                assert!(!got.iter().any(|a| a == banned), "{op:?}: {banned}");
+            }
+            let runner = FakeRunner::new().expect(expected, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_failed_remote_op_says_why_without_credentials() {
+        let runner = FakeRunner::new().expect(
+            &["remote", "add", "--", "o", "https://u:tok@h/r"],
+            fail("error: remote o already exists at 'https://u:tok@h/r'\n"),
+        );
+        let op = GitOp::AddRemote {
+            name: "o".into(),
+            url: "https://u:tok@h/r".into(),
+        };
+        assert_eq!(
+            run_op(&runner, &op),
+            Err("error: remote o already exists at 'https://h/r'".into())
+        );
+    }
+
+    /// A repository on `main` with one commit, and `origin`: a local bare
+    /// repository holding `main` and `feature`, fetched once.
+    fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {
+        use crate::git::fake::{TempDir, git};
+        let bare = TempDir::new("remote-bare");
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let tmp = TempDir::new("remote-ops");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let url = bare.path().to_str().unwrap();
+        git(dir, &["remote", "add", "origin", url]);
+        git(dir, &["push", "-q", "origin", "main", "main:feature"]);
+        git(dir, &["fetch", "-q", "origin"]);
+        (tmp, bare)
+    }
+
+    fn config(dir: &std::path::Path, key: &str) -> Option<String> {
+        let mut cmd = std::process::Command::new("git");
+        let out = cmd
+            .current_dir(dir)
+            .envs(crate::git::runner::isolation_env())
+            .args(["config", "--get", key])
+            .output()
+            .unwrap();
+        out.status
+            .success()
+            .then(|| String::from_utf8(out.stdout).unwrap().trim().to_string())
+    }
+
+    fn remote_refs(dir: &std::path::Path) -> String {
+        String::from_utf8(crate::git::fake::git(
+            dir,
+            &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn remotes_are_added_renamed_and_removed_without_a_fetch_in_real_git() {
+        let (tmp, bare) = cloned_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let url = bare.path().to_str().unwrap().to_string();
+
+        let add = GitOp::AddRemote {
+            name: "fork".into(),
+            url: url.clone(),
+        };
+        run_op(&runner, &add).unwrap();
+        assert_eq!(config(dir, "remote.fork.url"), Some(url));
+        assert!(!remote_refs(dir).contains("refs/remotes/fork/"), "fetched");
+
+        // Its refs move with it once there are some.
+        crate::git::fake::git(dir, &["fetch", "-q", "fork"]);
+        let rename = GitOp::RenameRemote {
+            from: "fork".into(),
+            to: "mine".into(),
+        };
+        run_op(&runner, &rename).unwrap();
+        assert_eq!(config(dir, "remote.fork.url"), None);
+        let refs = remote_refs(dir);
+        assert!(refs.contains("refs/remotes/mine/feature"), "{refs}");
+        assert!(!refs.contains("refs/remotes/fork/"), "{refs}");
+
+        run_op(&runner, &GitOp::RemoveRemote("mine".into())).unwrap();
+        assert_eq!(config(dir, "remote.mine.url"), None);
+        assert!(!remote_refs(dir).contains("refs/remotes/mine/"));
+    }
+
+    #[test]
+    fn a_tracking_checkout_then_set_and_unset_upstream_in_real_git() {
+        let (tmp, _bare) = cloned_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let feature = RemoteBranch {
+            remote: "origin".into(),
+            short: b"feature".to_vec(),
+            refname: b"refs/remotes/origin/feature".to_vec(),
+        };
+
+        let checkout = GitOp::CheckoutTracking {
+            name: "feature".into(),
+            from: feature.clone(),
+        };
+        run_op(&runner, &checkout).unwrap();
+        let head = crate::git::fake::git(dir, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(head, b"feature\n");
+        assert_eq!(
+            config(dir, "branch.feature.merge").as_deref(),
+            Some("refs/heads/feature")
+        );
+        assert_eq!(
+            config(dir, "branch.feature.remote").as_deref(),
+            Some("origin")
+        );
+
+        assert_eq!(config(dir, "branch.main.merge"), None);
+        let set = GitOp::SetUpstream {
+            branch: "main".into(),
+            upstream: feature,
+        };
+        run_op(&runner, &set).unwrap();
+        assert_eq!(
+            config(dir, "branch.main.merge").as_deref(),
+            Some("refs/heads/feature")
+        );
+        run_op(&runner, &GitOp::UnsetUpstream("main".into())).unwrap();
+        assert_eq!(config(dir, "branch.main.merge"), None);
     }
 
     fn paths(paths: &[&str]) -> Vec<RepoPath> {
