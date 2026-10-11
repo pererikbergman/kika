@@ -312,6 +312,67 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
+    /// `run` and `spawn` both build their process here, so every command
+    /// kind runs in the runner's workdir with its argv untouched.
+    #[test]
+    fn every_command_kind_runs_in_the_workdir() {
+        use crate::git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
+        use crate::git::ops::{GitOp, op_command};
+        use crate::git::path::RepoPath;
+        use crate::git::repo_state::git_dir_command;
+        use crate::git::status::status_command;
+        use std::path::Path;
+
+        let top = Path::new("/r/top");
+        let runner = CliRunner::new(top);
+        let request = |side| DiffRequest {
+            path: RepoPath::from("a.txt"),
+            orig_path: None,
+            side,
+        };
+        let tracked = request(DiffSide::Worktree);
+        let staged = request(DiffSide::Index);
+        let untracked = request(DiffSide::Untracked);
+        let paths = vec![RepoPath::from("a.txt")];
+        let ops = [
+            GitOp::Stage(paths.clone()),
+            GitOp::Unstage(paths),
+            GitOp::StageAll,
+            GitOp::UnstageAll,
+            GitOp::ApplyCached {
+                patch: b"patch".to_vec(),
+                reverse: false,
+            },
+            GitOp::ApplyCached {
+                patch: b"patch".to_vec(),
+                reverse: true,
+            },
+            GitOp::Commit {
+                message: "msg".into(),
+                stage_all: false,
+            },
+        ];
+        let commands = [
+            status_command(),
+            diff_command(&tracked),
+            diff_command(&staged),
+            diff_command(&untracked),
+            patch_diff_command(&tracked),
+            patch_diff_command(&staged),
+            patch_diff_command(&untracked),
+            git_dir_command(),
+        ]
+        .into_iter()
+        .chain(ops.iter().map(op_command));
+
+        for cmd in commands {
+            let process = runner.command(&cmd);
+            assert_eq!(process.get_current_dir(), Some(top), "{cmd:?}");
+            let argv: Vec<_> = process.get_args().collect();
+            assert_eq!(argv, cmd.args(), "{cmd:?}");
+        }
+    }
+
     #[test]
     fn spawn_streams_stdout_and_finish_reports_the_exit() {
         let runner = CliRunner::new(std::env::temp_dir());

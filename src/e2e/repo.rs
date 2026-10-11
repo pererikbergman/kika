@@ -5,6 +5,7 @@ use std::ffi::OsStr;
 
 use crate::git::fake::{TempDir, git, try_git};
 use crate::git::path::RepoPath;
+use crate::git::repo_root::resolve_workdir;
 use crate::git::status::read_status;
 use crate::git::{CliRunner, FileEntry};
 
@@ -116,6 +117,13 @@ impl TestRepo {
     /// The runner the app uses in tests: real git, host config shut out.
     pub fn runner(&self) -> CliRunner {
         CliRunner::isolated(self.dir.path())
+    }
+
+    /// The runner Kika builds when launched in `<repo>/<sub>`.
+    pub fn runner_from(&self, sub: &str) -> CliRunner {
+        let launch = self.dir.path().join(sub);
+        let top = resolve_workdir(&CliRunner::isolated(&launch), launch);
+        CliRunner::isolated(top)
     }
 
     /// The file's status as the app's own status reader sees it.

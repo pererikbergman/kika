@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::path::path_from_stdout;
 use super::runner::GitCommand;
 
 /// An operation in progress, which the user has to finish or abort.
@@ -25,16 +26,7 @@ pub fn git_dir_command() -> GitCommand {
 /// The path `rev-parse --absolute-git-dir` printed, from its raw bytes so a
 /// directory name that is not UTF-8 survives.
 pub fn git_dir_from(stdout: &[u8]) -> PathBuf {
-    let bytes = stdout.strip_suffix(b"\n").unwrap_or(stdout);
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
-    }
-    #[cfg(not(unix))]
-    {
-        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
-    }
+    path_from_stdout(stdout)
 }
 
 /// Every operation in progress in `git_dir`, in a fixed order. A

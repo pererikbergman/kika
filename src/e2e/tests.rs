@@ -4,6 +4,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::e2e::harness::Harness;
 use crate::e2e::repo::TestRepo;
+use crate::git::CliRunner;
+use crate::git::repo_root::resolve_workdir;
 use crate::git::status::EntryKind;
 
 #[test]
@@ -477,4 +479,125 @@ async fn t_switches_between_the_unstaged_and_staged_changes() {
     app.press(KeyCode::Esc).await;
     assert!(!app.state().should_quit);
     app.assert_screen_contains(" Diff ");
+}
+
+/// `a.txt` and `d/a.txt`, each 20 committed lines with lines 1 and 20 then
+/// changed in the worktree, so both have two hunks, but with different text
+/// (`line` at the root, `sub` below `d/`). `d/e/` exists, holding only a
+/// committed placeholder, so Kika can be started there.
+fn same_name_repo() -> TestRepo {
+    let numbered = |word: &str| -> String { (1..=20).map(|i| format!("{word} {i}\n")).collect() };
+    let changed = |word: &str| {
+        numbered(word)
+            .replace(&format!("{word} 1\n"), &format!("{word} one\n"))
+            .replace(&format!("{word} 20\n"), &format!("{word} twenty\n"))
+    };
+    TestRepo::new()
+        .write("a.txt", &numbered("line"))
+        .write("d/a.txt", &numbered("sub"))
+        .write("d/e/keep", "")
+        .commit("init")
+        .write("a.txt", &changed("line"))
+        .write("d/a.txt", &changed("sub"))
+}
+
+fn listed(app: &Harness) -> Vec<String> {
+    app.state()
+        .files
+        .iter()
+        .map(|entry| entry.path.display().to_string())
+        .collect()
+}
+
+/// Move the Files selection down until `name` is highlighted.
+async fn select_file(app: &mut Harness, name: &str) {
+    for _ in 0..listed(app).len() {
+        if app.selected_line().is_some_and(|line| line.ends_with(name)) {
+            return;
+        }
+        app.press(KeyCode::Char('j')).await;
+    }
+    panic!("{name} never selected:\n{}", app.screen().join("\n"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn started_in_a_subdirectory_kika_acts_on_root_relative_paths() {
+    let repo = same_name_repo();
+    let from_root = listed(&Harness::start(&repo).await);
+    let sub_before = repo.read("d/a.txt");
+
+    let mut app = Harness::start_from(&repo, "d/e").await;
+
+    // Status: the same files as from the root.
+    assert_eq!(listed(&app), ["a.txt", "d/a.txt"]);
+    assert_eq!(listed(&app), from_root);
+    assert!(app.state().status_error.is_none());
+
+    // Diff: the root a.txt, not d/a.txt.
+    let selected = app.selected_line().expect("a file is selected");
+    assert!(
+        selected.ends_with("a.txt") && !selected.contains("d/"),
+        "selected: {selected:?}"
+    );
+    app.assert_screen_contains("+line one");
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("sub ")),
+        "{}",
+        screen.join("\n")
+    );
+
+    // Hunk staging: the second hunk of the root a.txt only.
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    assert!(app.state().popups.is_empty(), "{}", app.screen().join("\n"));
+    assert_eq!(repo.staged(), ["a.txt"]);
+    let cached = diff_text(&repo, true);
+    assert!(cached.contains("+line twenty"), "{cached}");
+    assert!(!cached.contains("line one"), "{cached}");
+    assert!(!cached.contains("sub "), "{cached}");
+    assert_eq!(repo.read("d/a.txt"), sub_before);
+    let entry = repo.entry("d/a.txt").expect("d/a.txt is listed");
+    assert_eq!((entry.index, entry.worktree), ('.', 'M'));
+
+    // Whole-file staging and unstaging of d/a.txt.
+    app.press(KeyCode::Esc).await;
+    select_file(&mut app, "d/a.txt").await;
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(repo.staged(), ["a.txt", "d/a.txt"]);
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(repo.staged(), ["a.txt"]);
+    let cached = diff_text(&repo, true);
+    assert!(cached.contains("+line twenty"), "{cached}");
+
+    // Unstage the root a.txt, outside the launch directory, from its staged view.
+    app.press(KeyCode::Char('k')).await;
+    let selected = app.selected_line().expect("a file is selected");
+    assert!(!selected.contains("d/"), "selected: {selected:?}");
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('t')).await;
+    app.assert_screen_contains(" Staged ");
+    app.press(KeyCode::Char(' ')).await;
+    assert!(app.state().popups.is_empty(), "{}", app.screen().join("\n"));
+    assert!(repo.staged().is_empty());
+    assert!(!app.state().should_quit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
+    let outside = crate::git::fake::TempDir::new("outside");
+    let launch = outside.path().to_path_buf();
+    let top = resolve_workdir(&CliRunner::isolated(&launch), launch.clone());
+    assert_eq!(top, launch);
+
+    let mut app = Harness::start_with(CliRunner::isolated(top), 80, 24).await;
+
+    let error = app.state().status_error.clone().expect("status failed");
+    assert!(error.contains("not a git repository"), "{error}");
+    app.assert_screen_contains("not a git repository");
+    assert!(!app.state().should_quit);
+    app.press(KeyCode::Char('r')).await;
+    assert!(!app.state().should_quit);
+    app.assert_screen_contains("not a git repository");
 }
