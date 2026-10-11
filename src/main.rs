@@ -1,4 +1,5 @@
 mod app;
+mod blame_view;
 mod cli;
 mod commit_editor;
 mod diff_pane;
