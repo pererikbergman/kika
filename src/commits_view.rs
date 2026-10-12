@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::commit_files::CommitFilesList;
+use crate::commit_files::{CommitFilesList, drawn_path};
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
@@ -20,7 +20,8 @@ use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
 use crate::view::{
-    PanelLook, elide_right, filter_title, query_title, range_row, reversed, width_of,
+    PanelLook, elide_right, filter_title, no_matches, query_title, range_row, reversed, scrolled,
+    width_of,
 };
 
 /// Authors longer than this lose their end, so the subject keeps room.
@@ -180,15 +181,23 @@ fn render_commit_files(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let title = match &open.against {
+    let base = match &open.against {
         Some(against) => format!("Files · {} vs {against}", open.short_oid),
         None => format!("Commit {}", open.short_oid),
     };
-    let title = match patch {
-        Some(patch) if look.fits(&format!("{title} · {}", patch.summary())) => {
-            format!("{title} · {}", patch.summary())
+    // Counting the shown rows walks every file, so only with a filter.
+    let shown = (!open.filter.is_empty()).then(|| open.visible());
+    // A filter names itself in place of the patch; the row marks still
+    // say what is picked.
+    let title = match (&shown, patch) {
+        (Some(shown), _) => {
+            let counts = format!("{} of {}", shown.len(), open.files.len());
+            filter_title(look, &base, &open.filter, &counts)
         }
-        _ => title,
+        (None, Some(patch)) if look.fits(&format!("{base} · {}", patch.summary())) => {
+            format!("{base} · {}", patch.summary())
+        }
+        (None, _) => base,
     };
     // Picks show only on the commit they come from.
     let picks = patch.filter(|p| open.against.is_none() && p.is_from(&open.range));
@@ -208,12 +217,13 @@ fn render_commit_files(
             "No files changed",
             Style::new().fg(Color::DarkGray),
         )),
+        None if shown.as_ref().is_some_and(Vec::is_empty) => Paragraph::new(no_matches()),
         None => {
-            let start = (open.selected + 1).saturating_sub(height.max(1));
-            let end = (start + height).min(open.files.len());
+            let shown = shown.unwrap_or_else(|| (0..open.files.len()).collect());
             Paragraph::new(
-                (start..end)
-                    .map(|i| {
+                scrolled(&shown, Some(open.selected), height)
+                    .iter()
+                    .map(|&i| {
                         let file = &open.files[i];
                         let line = match picks {
                             Some(patch) => picked_file_line(patch, file, width),
@@ -253,22 +263,24 @@ fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Lin
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
 pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
-    let colour = match file.status {
-        'A' => Color::Green,
-        'D' => Color::Red,
-        'M' => Color::Yellow,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Reset,
-    };
-    let path = match &file.orig_path {
-        Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
-        None => file.path.display().to_string(),
-    };
+    let colour = status_colour(file.status);
+    let path = drawn_path(file);
     Line::from(vec![
         Span::styled(file.status.to_string(), Style::new().fg(colour)),
         Span::raw(" "),
         Span::raw(elide_right(&path, width.saturating_sub(2))),
     ])
+}
+
+/// The colour of a changed file's status letter.
+pub(crate) fn status_colour(status: char) -> Color {
+    match status {
+        'A' => Color::Green,
+        'D' => Color::Red,
+        'M' => Color::Yellow,
+        'R' | 'C' => Color::Cyan,
+        _ => Color::Reset,
+    }
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
@@ -1404,6 +1416,62 @@ mod tests {
             let rows = buffer_rows(&draw(&state, width, 10));
             assert_eq!(rows.len(), 10);
         }
+    }
+
+    #[test]
+    fn a_filter_shows_only_matching_files_and_draws_sanitised_in_the_title() {
+        let mut state = opened(Some(Ok(five_files())));
+        with_patch(&mut state);
+        let open = state.commits.open.as_mut().unwrap();
+        open.set_filter("d.".into()); // not typed
+        let rows = buffer_rows(&draw(&state, 80, 20));
+        line_with(&rows, "Commit a000000 · /d. 4 of 5");
+        assert!(!rows[0].contains("patch"), "the filter in its place");
+        line_with(&rows, "● A added.rs");
+        line_with(&rows, "◐ M modified.rs");
+        line_with(&rows, "R older.rs → old.rs");
+        assert!(!rows.iter().any(|r| r.contains("typed")), "{rows:#?}");
+
+        // A hostile filter matches nothing and draws made safe.
+        let open = state.commits.open.as_mut().unwrap();
+        open.set_filter("x\x1b[2J\u{9b}31m\u{202E}\r\0".into());
+        let rows = buffer_rows(&draw(&state, 80, 20));
+        line_with(&rows, "No matches");
+        line_with(&rows, "Commit a000000 · /");
+        line_with(&rows, " 0 of 5");
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+
+        // An empty commit still says so, filter or not.
+        let mut state = opened(Some(Ok(vec![])));
+        state.commits.open.as_mut().unwrap().set_filter("x".into());
+        line_with(&buffer_rows(&draw(&state, 80, 20)), "No files changed");
+    }
+
+    #[test]
+    fn a_filtered_list_scrolls_over_the_shown_files_to_the_cursor() {
+        let files: Vec<CommitFile> = (0..30)
+            .map(|i| {
+                commit_file(
+                    'M',
+                    &format!("{}{i:02}.rs", if i % 2 == 0 { "even" } else { "odd" }),
+                    None,
+                )
+            })
+            .collect();
+        let mut state = opened(Some(Ok(files)));
+        let open = state.commits.open.as_mut().unwrap();
+        open.set_filter("even".into());
+        while open.move_by(1) {}
+        assert_eq!(open.selected, 28);
+        let rows = buffer_rows(&draw(&state, 80, 12));
+        line_with(&rows, "M even28.rs");
+        assert!(!rows.iter().any(|r| r.contains("odd")), "{rows:#?}");
+        line_with(&rows, "15 of 30");
     }
 
     #[test]

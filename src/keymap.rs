@@ -246,6 +246,10 @@ pub enum KeyScope {
     /// A conflicted file's blocks, with a cursor on one.
     Conflict,
     Review,
+    /// Review mode's files screen with the file list focused.
+    ReviewFiles,
+    /// Review mode's files screen with the diff focused.
+    ReviewDiff,
     Help,
     /// "Stage everything and commit?"
     CommitConfirm,
@@ -338,6 +342,8 @@ impl KeyScope {
             | KeyScope::Conflict
             | KeyScope::Reflog => Some(KeyScope::Workspace),
             KeyScope::Lines => Some(KeyScope::Diff),
+            KeyScope::ReviewFiles => Some(KeyScope::Review),
+            KeyScope::ReviewDiff => Some(KeyScope::ReviewFiles),
             KeyScope::Workspace | KeyScope::Review | KeyScope::Help => Some(KeyScope::Global),
             KeyScope::Global
             | KeyScope::CommitConfirm
@@ -394,6 +400,8 @@ impl KeyScope {
             KeyScope::BlameCommit => "Commit",
             KeyScope::Conflict => "Conflict",
             KeyScope::Review => "Review",
+            KeyScope::ReviewFiles => "Pull request files",
+            KeyScope::ReviewDiff => "Pull request diff",
             KeyScope::Help => "Help",
             KeyScope::CommitConfirm => "Stage all and commit",
             KeyScope::CommitEditor => "Commit message",
@@ -617,6 +625,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "review.refresh",
     "review.open_check",
     "review.back",
+    "review.files",
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
@@ -1097,17 +1106,17 @@ fn no_command_running(state: &AppState) -> Option<Reason> {
 }
 
 /// Why the diff cannot take focus: with a commit's files open, the hunks
-/// are its selected file's, picked for the custom patch; otherwise the
-/// selected working-tree file's.
+/// are its selected file's, picked for the custom patch, so the filter must
+/// show that file; otherwise the selected working-tree file's.
 fn focus_diff_disabled(state: &AppState) -> Option<Reason> {
     match &state.commits.open {
-        Some(open) if state.focus == Focus::Commits => {
-            commit_source_disabled(state, open).or_else(|| {
+        Some(open) if state.focus == Focus::Commits => list_guard(state, false)
+            .or_else(|| commit_source_disabled(state, open))
+            .or_else(|| {
                 open.selected_file()
                     .is_none()
                     .then_some("No file selected".into())
-            })
-        }
+            }),
         _ => no_file_selected(state),
     }
 }
@@ -1143,8 +1152,9 @@ pub(crate) fn patch_file_disabled(state: &AppState) -> Option<Reason> {
     let Some(open) = &state.commits.open else {
         return Some("No commit open".into());
     };
-    if let Some(reason) =
-        commit_source_disabled(state, open).or_else(|| other_commit_disabled(state, &open.range))
+    if let Some(reason) = list_guard(state, false)
+        .or_else(|| commit_source_disabled(state, open))
+        .or_else(|| other_commit_disabled(state, &open.range))
     {
         return Some(reason);
     }
@@ -2168,6 +2178,15 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
         KeyScope::Commits => (
             state.commits.todo_selected.is_none() && state.commits.selected_hidden(),
             state.commits.range_anchor.is_some(),
+        ),
+        // No range: nothing acts on a range of a commit's files.
+        KeyScope::CommitFiles => (
+            state
+                .commits
+                .open
+                .as_ref()
+                .is_some_and(CommitFilesList::selected_hidden),
+            false,
         ),
         _ => return None,
     };
@@ -3401,7 +3420,7 @@ static REGISTRY: &[Binding] = &[
         ],
         scope: KeyScope::Review,
         intent: AppIntent::ReviewNext,
-        description: "Select the next pull request, or scroll the open one down",
+        description: "Select the next pull request or file, or scroll the open one down",
         label: "",
         bar: false,
         disabled: never,
@@ -3414,7 +3433,7 @@ static REGISTRY: &[Binding] = &[
         ],
         scope: KeyScope::Review,
         intent: AppIntent::ReviewPrev,
-        description: "Select the previous pull request, or scroll the open one up",
+        description: "Select the previous pull request or file, or scroll the open one up",
         label: "",
         bar: false,
         disabled: never,
@@ -3484,7 +3503,113 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Review,
         intent: AppIntent::CloseReviewDetail,
-        description: "Back to the queue; in the queue, clear the filter, else back to the workspace",
+        description: "Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review.files",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenReviewFiles,
+        description: "Show the pull request's changed files and diff, fetching its commits once if they are not here",
+        label: "files",
+        bar: true,
+        disabled: crate::model::review_files::review_files_disabled,
+    },
+    Binding {
+        id: "review_files.focus",
+        keys: &[KeyPattern::any(KeyCode::Tab)],
+        scope: KeyScope::ReviewFiles,
+        intent: AppIntent::ToggleReviewFilesFocus,
+        description: "Move the keys between the file list and the diff",
+        label: "list/diff",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.down",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::ScrollDiff(Scroll::LineDown),
+        description: "Scroll the diff down a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.up",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::ScrollDiff(Scroll::LineUp),
+        description: "Scroll the diff up a line",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.page_down",
+        keys: &[KeyPattern::any(KeyCode::PageDown)],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::ScrollDiff(Scroll::PageDown),
+        description: "Scroll the diff down a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.page_up",
+        keys: &[KeyPattern::any(KeyCode::PageUp)],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::ScrollDiff(Scroll::PageUp),
+        description: "Scroll the diff up a page",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.search",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::OpenSearch,
+        description: "Search the lines of the diff loaded so far for typed text",
+        label: "search",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "review_diff.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the search",
+        label: "next match",
+        bar: false,
+        disabled: crate::model::review_files::review_search_step_disabled,
+    },
+    Binding {
+        id: "review_diff.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the search",
+        label: "previous match",
+        bar: false,
+        disabled: crate::model::review_files::review_search_step_disabled,
+    },
+    Binding {
+        id: "review_diff.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::ReviewDiff,
+        intent: AppIntent::DiffEscape,
+        description: "Clear the search, else go back to the file list",
         label: "back",
         bar: true,
         disabled: never,
@@ -5871,11 +5996,21 @@ static REGISTRY: &[Binding] = &[
         disabled: preview_step_disabled,
     },
     Binding {
+        id: "commit_files.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the commit's files by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "commit_files.escape",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitFiles,
         intent: AppIntent::PaneEscape,
-        description: "Clear the diff search, else go back to the log, at the same commit",
+        description: "Clear the filter, else the diff search, else go back to the log, at the same commit",
         label: "back",
         bar: true,
         disabled: never,
@@ -8913,6 +9048,7 @@ mod tests {
             ("commits.mark", &[Commits, Workspace, Global]),
             ("reflog.filter_path", &[Reflog, Workspace, Global]),
             ("reflog.filter_author", &[Reflog, Workspace, Global]),
+            ("commit_files.filter", &[CommitFiles, Workspace, Global]),
             ("branches.mark", &[Branches, Workspace, Global]),
             ("branches.diff", &[Branches, Workspace, Global]),
             ("files.log", &[Files, Workspace, Global]),
@@ -9223,6 +9359,63 @@ mod tests {
             from(KeyScope::Reflog, plain('V')),
             Some(AppIntent::ToggleRange)
         );
+    }
+
+    #[test]
+    fn the_commit_files_filter_is_remappable_but_its_escape_is_locked() {
+        // Esc with nothing to clear goes back to the log; unbound it would
+        // fall through to quit.
+        assert!(REPO_LOCKED.contains(&"commit_files.escape"));
+        assert!(build(&[("commit_files.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"commit_files.filter"));
+        assert!(build(&[("commit_files.filter", &["Z"])], Trust::Repo).is_ok());
+        assert_eq!(
+            from(KeyScope::CommitFiles, plain('/')),
+            Some(AppIntent::OpenFilter)
+        );
+        // No range: nothing acts on a range of a commit's files.
+        assert_ne!(
+            from(KeyScope::CommitFiles, plain('V')),
+            Some(AppIntent::ToggleRange)
+        );
+    }
+
+    #[test]
+    fn a_filter_hiding_the_commit_file_disables_picking_it_and_focusing_its_diff() {
+        use crate::git::commit_files::CommitFile;
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: CommitId::parse("def"),
+        };
+        let mut open = CommitFilesList::begin(range, "abc".into(), 1);
+        let file = CommitFile {
+            status: 'M',
+            path: "src/lib.rs".into(),
+            orig_path: None,
+        };
+        open.loaded(1, Ok(vec![file]));
+        state.commits.open = Some(open);
+        assert_eq!(state.panel_focus(), KeyScope::CommitFiles);
+        assert_eq!(patch_file_disabled(&state), None);
+        assert_eq!(focus_diff_disabled(&state), None);
+
+        state
+            .commits
+            .open
+            .as_mut()
+            .unwrap()
+            .set_filter("zzz".into());
+        assert_eq!(
+            patch_file_disabled(&state).as_deref(),
+            Some(FILTER_HIDES_ROW)
+        );
+        assert_eq!(
+            focus_diff_disabled(&state).as_deref(),
+            Some(FILTER_HIDES_ROW)
+        );
+        assert_eq!(list_guard(&state, true).as_deref(), Some(FILTER_HIDES_ROW));
     }
 
     #[test]
@@ -9683,6 +9876,8 @@ mod tests {
             KeyScope::BlameCommit => "blame_commit",
             KeyScope::Conflict => "conflict",
             KeyScope::Review => "review",
+            KeyScope::ReviewFiles => "review_files",
+            KeyScope::ReviewDiff => "review_diff",
             KeyScope::Help => "help",
             KeyScope::CommitConfirm => "commit_confirm",
             KeyScope::CommitEditor => "commit_editor",
@@ -10009,6 +10204,8 @@ mod tests {
                     | OpenPr
                     | RefreshReview
                     | OpenCheckDetails
+                    // It may fetch the pull request's commits.
+                    | OpenReviewFiles
                     | PickSelect
                     // Esc falls through to quit without it.
                     | CloseReviewDetail

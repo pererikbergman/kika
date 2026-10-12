@@ -272,7 +272,7 @@ impl PanelLook {
 /// A panel's frame: focused, a thick coloured border and a bold title, so
 /// the panel with the keys stands out without colour too; else a thin dim
 /// border.
-fn panel_block(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     let block = Block::bordered().title(title);
     if focused {
         block
@@ -993,11 +993,8 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             .into_iter()
             .map(|(binding, disabled)| {
                 let key = state.keymap.keys(binding).first().map(KeyPattern::label);
-                let label = if binding.scope == focus
-                    && binding.id.ends_with(".escape")
-                    && esc_clears_search(state, focus)
-                {
-                    "clear search"
+                let label = if binding.scope == focus && binding.id.ends_with(".escape") {
+                    esc_label(state, focus).unwrap_or(binding.label)
                 } else {
                     binding.label
                 };
@@ -1069,6 +1066,18 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             };
             (leading, vec!["reflog.filter"])
         }
+        KeyScope::CommitFiles => {
+            let [search, next, prev, escape] = SEARCH_KEYS[1];
+            let mut leading = if searching(state, focus) {
+                vec![next, prev]
+            } else {
+                vec![]
+            };
+            if commit_files_filtered(state) || searching(state, focus) {
+                leading.push(escape);
+            }
+            (leading, vec!["commit_files.filter", search])
+        }
         KeyScope::Stash => {
             let list = &state.stash;
             let leading = if list.range_anchor.is_some() || !list.filter.is_empty() {
@@ -1078,14 +1087,9 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             };
             (leading, vec!["stash.filter", "stash.range"])
         }
-        KeyScope::Diff
-        | KeyScope::CommitFiles
-        | KeyScope::StashFiles
-        | KeyScope::Blame
-        | KeyScope::BlameCommit => {
+        KeyScope::Diff | KeyScope::StashFiles | KeyScope::Blame | KeyScope::BlameCommit => {
             let [search, next, prev, escape] = match focus {
                 KeyScope::Diff => SEARCH_KEYS[0],
-                KeyScope::CommitFiles => SEARCH_KEYS[1],
                 KeyScope::StashFiles => SEARCH_KEYS[2],
                 KeyScope::Blame => SEARCH_KEYS[3],
                 _ => SEARCH_KEYS[4],
@@ -1150,12 +1154,37 @@ fn searching(state: &AppState, focus: KeyScope) -> bool {
     }
 }
 
+/// What Esc's next press does, where that differs from its own label: in
+/// a commit's files it clears the filter first, and a search after a list
+/// layer is gone.
+fn esc_label(state: &AppState, focus: KeyScope) -> Option<&'static str> {
+    if focus == KeyScope::CommitFiles && commit_files_filtered(state) {
+        Some("clear")
+    } else if esc_clears_search(state, focus) {
+        Some("clear search")
+    } else {
+        None
+    }
+}
+
 /// Esc's next press clears a search, so its hint says so. In Files a
-/// range or a filter goes first.
+/// range or a filter goes first, and in a commit's files the filter.
 fn esc_clears_search(state: &AppState, focus: KeyScope) -> bool {
-    let list_first = focus == KeyScope::Files
-        && (state.files_anchor.is_some() || !state.files_filter.is_empty());
+    let list_first = match focus {
+        KeyScope::Files => state.files_anchor.is_some() || !state.files_filter.is_empty(),
+        KeyScope::CommitFiles => commit_files_filtered(state),
+        _ => false,
+    };
     searching(state, focus) && !list_first
+}
+
+/// The open commit's files have a filter set.
+fn commit_files_filtered(state: &AppState) -> bool {
+    state
+        .commits
+        .open
+        .as_ref()
+        .is_some_and(|open| !open.filter.is_empty())
 }
 
 /// The bindings that lead the hints while commits are copied.
@@ -1603,41 +1632,54 @@ fn render_diff_pane(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let position = if diff.lines.is_empty() || diff.error.is_some() {
-        String::new()
-    } else {
-        let first = (diff.scroll + 1).min(diff.lines.len());
-        let more = if diff.done { "" } else { "+" };
-        format!(" · {first}/{}{more}", diff.lines.len())
-    };
     let found = found_note(diff.search.as_ref(), !diff.done);
-    let tail = format!("{position}{found}{}", options_note(options));
+    let tail = format!("{}{found}{}", diff_position(diff), options_note(options));
     let title = match &diff.path {
         Some(path) => look.path_title("Diff", path.display(), &tail),
         None => look.title(&format!("Diff{tail}")),
     };
     let block = look.block(title);
     let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    let pane = if let Some(error) = &diff.error {
-        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if diff.show_loading {
-        Paragraph::new("Loading…")
-    } else if diff.done && diff.lines.is_empty() {
-        Paragraph::new("No diff")
-    } else {
-        // Only the visible slice: a 50,000-line diff costs a screenful per frame.
-        let start = diff.scroll.min(diff.lines.len());
-        let end = start.saturating_add(rows).min(diff.lines.len());
-        Paragraph::new(
-            diff.lines[start..end]
-                .iter()
-                .zip(start..)
-                .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
-                .collect::<Vec<_>>(),
-        )
-    };
+    let pane = diff_pane_body(diff, inner);
     frame.render_widget(pane.block(block), area);
+}
+
+/// Where in the streamed diff the pane is: ` · <first shown>/<loaded>`,
+/// `+` while more are coming; empty with nothing to show.
+pub(crate) fn diff_position(diff: &DiffPane) -> String {
+    if diff.lines.is_empty() || diff.error.is_some() {
+        return String::new();
+    }
+    let first = (diff.scroll + 1).min(diff.lines.len());
+    let more = if diff.done { "" } else { "+" };
+    format!(" · {first}/{}{more}", diff.lines.len())
+}
+
+/// The inside of a streamed Diff pane at `inner`'s size: an error, a
+/// delayed "Loading…", "No diff", or the visible lines, with the
+/// search's matches marked on them.
+pub(crate) fn diff_pane_body(diff: &DiffPane, inner: Rect) -> Paragraph<'static> {
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    if let Some(error) = &diff.error {
+        let lines = error.lines().map(|l| Line::from(l.to_string()));
+        return Paragraph::new(lines.collect::<Vec<_>>()).wrap(Wrap { trim: false });
+    }
+    if diff.show_loading {
+        return Paragraph::new("Loading…");
+    }
+    if diff.done && diff.lines.is_empty() {
+        return Paragraph::new("No diff");
+    }
+    // Only the visible slice: a 50,000-line diff costs a screenful per frame.
+    let start = diff.scroll.min(diff.lines.len());
+    let end = start.saturating_add(rows).min(diff.lines.len());
+    Paragraph::new(
+        diff.lines[start..end]
+            .iter()
+            .zip(start..)
+            .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The focused Diff pane: one side of the file as hunks, the selected one
@@ -1858,7 +1900,7 @@ fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelL
 /// Where a search is, for a pane's title: " · match i of n", with `+` on
 /// the count while `more` lines can still come, or " · no matches". Never
 /// the query: the bottom bar shows that, escaped.
-fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
+pub(crate) fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
     let more = if more { "+" } else { "" };
     match search {
         Some(search) => match search.current {
@@ -6107,6 +6149,55 @@ mod tests {
         state.commits.reflog.set_filter("first".into());
         let rows = draw(&state, 120, 10);
         assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+    }
+
+    #[test]
+    fn esc_clear_leads_a_commits_files_bar_while_it_has_a_filter_then_clear_search() {
+        use crate::commit_files::CommitFilesList;
+        use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: CommitId::parse("def"),
+        };
+        let mut open = CommitFilesList::begin(range, "abc".into(), 1);
+        let file = CommitFile {
+            status: 'M',
+            path: "a.rs".into(),
+            orig_path: None,
+        };
+        open.loaded(1, Ok(vec![file]));
+        state.commits.open = Some(open);
+        let rows = draw(&state, 160, 10);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+        assert!(rows[9].contains("esc back"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+
+        state.diff.set_search("one");
+        let rows = draw(&state, 160, 10);
+        assert!(
+            rows[9].starts_with(" n next match  N previous match  esc clear search"),
+            "{:?}",
+            rows[9]
+        );
+
+        // The filter goes before the search, so Esc says "clear".
+        state.commits.open.as_mut().unwrap().set_filter("a".into());
+        let rows = draw(&state, 160, 10);
+        assert!(
+            rows[9].starts_with(" n next match  N previous match  esc clear "),
+            "{:?}",
+            rows[9]
+        );
+        assert!(!rows[9].contains("clear search"), "{:?}", rows[9]);
+
+        state.diff.search = None;
+        let rows = draw(&state, 160, 10);
+        assert!(rows[9].starts_with(" esc clear "), "{:?}", rows[9]);
         assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
     }
 }

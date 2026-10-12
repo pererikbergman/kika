@@ -25,6 +25,7 @@ pub mod log;
 pub mod ops;
 pub mod patch;
 pub mod path;
+pub mod pr_objects;
 pub mod prompts;
 pub mod rebase_plan;
 pub mod recording;
