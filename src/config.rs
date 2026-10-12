@@ -25,16 +25,18 @@
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! gitlab = ["gitlab.com"]   # only to build URLs; never contacted
 //! browser = ["open"]        # argv that opens a URL, given as its last argument
+//! [forge.allow]
+//! "github.com" = ["acme", "me/kika"]  # absent = every repository on the host
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! [clipboard]
 //! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
 //! ```
 //!
-//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[clipboard]`
-//! are read from the global file only, at startup. `[display] emoji_zwj_terminals` is off
-//! (empty) by default; [`emoji_zwj`] matches it against the running
-//! terminal once.
+//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and
+//! `[clipboard]` are read from the global file only, at startup.
+//! `[display] emoji_zwj_terminals` is off (empty) by default;
+//! [`emoji_zwj`] matches it against the running terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -49,6 +51,7 @@
 //! The user's guide to both files, with every binding id, is
 //! `docs/configuration.md`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
@@ -61,6 +64,7 @@ use serde::Deserialize;
 use crate::custom_command::CommandTable;
 use crate::external_diff::{check_argv, parse_command};
 use crate::forge::ForgeHost;
+use crate::forge::allow::AllowRule;
 use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
@@ -196,9 +200,10 @@ struct CommitTable {
     hooks_detached: Option<bool>,
 }
 
-/// The hosts Kika may ask about pull requests, by forge, and the program
-/// that opens a forge page. Only here, in the user's own file: a cloned
-/// repository can never make Kika contact a host or run a program.
+/// The hosts Kika may ask about pull requests, by forge, the repositories
+/// on them it may ask about, and the program that opens a forge page.
+/// Only here, in the user's own file: a cloned repository can never make
+/// Kika contact a host, widen what it asks about, or run a program.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForgeTable {
@@ -208,6 +213,10 @@ struct ForgeTable {
     #[serde(default)]
     gitlab: Vec<String>,
     browser: Option<Vec<String>>,
+    /// Per `github` host, the owners and `owner/repo`s `gh` may be asked
+    /// about; a host without a key allows all of them.
+    #[serde(default)]
+    allow: BTreeMap<String, Vec<String>>,
 }
 
 /// The program that copies text, given it on stdin. Only here, in the
@@ -412,7 +421,8 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
             .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.{key}: {e}")))
             .collect::<Result<Vec<_>, _>>()
     };
-    let forge_hosts = hosts(&file.forge.github, "github")?;
+    let forge_hosts = attach_allow(hosts(&file.forge.github, "github")?, &file.forge.allow)
+        .map_err(|e| format!("forge.allow: {e}"))?;
     let forge_gitlab_hosts = hosts(&file.forge.gitlab, "gitlab")?;
     let browser = file
         .forge
@@ -442,6 +452,35 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         emoji_zwj_terminals,
         clipboard_command,
     })
+}
+
+/// `github` with each `[forge.allow]` list attached to its host, and to
+/// every copy of it should the host be listed twice. A key must name one
+/// of `github`: a list for a host that is never asked would look like a
+/// limit while it limits nothing.
+fn attach_allow(
+    github: Vec<ForgeHost>,
+    allow: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<ForgeHost>, String> {
+    let mut lists = BTreeMap::new();
+    for (key, entries) in allow {
+        let name = ForgeHost::parse(key)?;
+        if !github.iter().any(|h| h.as_str() == name.as_str()) {
+            return Err(format!("{key:?} is not one of the forge.github hosts"));
+        }
+        let rules = entries
+            .iter()
+            .map(|entry| AllowRule::parse(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        lists.insert(name.as_str().to_string(), rules);
+    }
+    Ok(github
+        .into_iter()
+        .map(|host| match lists.get(host.as_str()) {
+            Some(rules) => host.with_allow(rules.clone()),
+            None => host,
+        })
+        .collect())
 }
 
 /// Whether the running terminal is one of `terminals`, the ones the user
@@ -491,6 +530,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+    use crate::forge::ForgeRepo;
+    use crate::forge::allow::AllowRule;
     use crate::keymap::{KeyPattern, parse_key, registry};
 
     fn keys_of<'a>(keymap: &'a Keymap, id: &str) -> &'a [KeyPattern] {
@@ -1216,6 +1257,122 @@ output = "none"
                 ForgeHost::parse("github.example.com").unwrap()
             ]
         );
+    }
+
+    #[test]
+    fn the_global_file_narrows_a_github_host_to_listed_owners() {
+        let hosts = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.forge_hosts)
+        };
+        let github = || ForgeHost::parse("github.com").unwrap();
+        let rule = |text: &str| AllowRule::parse(text).unwrap();
+        // Unset: today's per-host behaviour.
+        let [unset] = hosts("[forge]\ngithub = [\"github.com\"]\n")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(unset, github());
+        assert!(unset.allows(&ForgeRepo {
+            host: "github.com".into(),
+            owner: "anyone".into(),
+            name: "anything".into(),
+        }));
+        // A host listed twice is narrowed in both places.
+        let twice = hosts(
+            "[forge]\ngithub = [\"github.com\", \"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme\"]\n",
+        )
+        .unwrap();
+        assert_eq!(twice, vec![github().with_allow(vec![rule("acme")]); 2]);
+        assert_eq!(
+            hosts(
+                "[forge]\ngithub = [\"github.com\", \"github.example.com\"]\n\
+                 [forge.allow]\n\"github.com\" = [\"acme\", \"pererikbergman/kika\"]\n\
+                 \"github.example.com\" = []\n"
+            ),
+            Ok(vec![
+                github().with_allow(vec![rule("acme"), rule("pererikbergman/kika")]),
+                ForgeHost::parse("github.example.com")
+                    .unwrap()
+                    .with_allow(vec![]),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_bad_allow_entry_or_host_drops_the_global_file() {
+        let err = |allow: &str| {
+            apply_global(
+                &format!(
+                    "[forge]\ngithub = [\"github.com\"]\ngitlab = [\"gitlab.com\"]\n\
+                     [forge.allow]\n{allow}\n"
+                ),
+                &Keymap::default(),
+                DEFAULT_WATCH,
+            )
+            .map(|_| ())
+            .unwrap_err()
+        };
+        for entry in [
+            "*",
+            "acme/*",
+            "a/b/c",
+            "",
+            "acme/",
+            "/kika",
+            "acme/kika.git",
+        ] {
+            let message = err(&format!("\"github.com\" = [\"{entry}\"]"));
+            assert!(message.starts_with("forge.allow: "), "{entry:?}: {message}");
+        }
+        for key in ["github.example.com", "gitlab.com", "GitHub.com"] {
+            let message = err(&format!("\"{key}\" = [\"acme\"]"));
+            assert!(message.starts_with("forge.allow: "), "{key:?}: {message}");
+            assert!(message.contains(&format!("{key:?}")), "{message}");
+        }
+        // Control bytes in user text are escaped in the message.
+        let message = err("\"github.com\" = [\"a\\u001bb\"]");
+        assert!(message.contains("\\u{1b}"), "{message}");
+
+        let files = Files::new("forge-allow-bad");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme/*\"]\n",
+        );
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        let [error] = loaded.errors.try_into().unwrap();
+        assert!(error.message.starts_with("forge.allow: "), "{error}");
+        assert!(!error.dropped_binding);
+    }
+
+    #[test]
+    fn only_the_global_file_holds_an_allow_list() {
+        let files = Files::new("forge-allow-repo");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme\"]\n",
+        );
+        let want = vec![
+            ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![AllowRule::parse("acme").unwrap()]),
+        ];
+        for text in [
+            "[forge.allow]\n\"github.com\" = [\"evil\"]\n",
+            "[keys]\n\"files.stage\" = [\"y\"]\n[forge.allow]\n\"github.com\" = []\n",
+        ] {
+            let refused = repo(text).unwrap_err();
+            assert!(refused.contains("unknown field `forge`"), "{refused}");
+            files.repo(text);
+            let loaded = files.load();
+            assert_eq!(loaded.forge_hosts, want);
+            // Its keys do not apply either: the file is ignored whole.
+            assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
+            let [error] = loaded.errors.try_into().unwrap();
+            assert!(!error.dropped_binding);
+        }
     }
 
     #[test]

@@ -274,7 +274,7 @@ pub fn run(
             match stdout.try_recv() {
                 Ok(Ok(bytes)) => output = Some(bytes),
                 Ok(Err(Overflow)) => {
-                    kill(&mut child);
+                    kill_group(&mut child);
                     return Err(format!("Output of {label} is too large"));
                 }
                 Err(_) => {}
@@ -284,7 +284,7 @@ pub fn run(
             exited = match has_exited(&mut child) {
                 Ok(exited) => exited,
                 Err(e) => {
-                    kill(&mut child);
+                    kill_group(&mut child);
                     return Err(os_error(e));
                 }
             };
@@ -309,7 +309,7 @@ pub fn run(
             });
         }
         if Instant::now() >= deadline {
-            kill(&mut child);
+            kill_group(&mut child);
             return Err(format!("{label} timed out"));
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -317,7 +317,7 @@ pub fn run(
 }
 
 /// Whether the renderer has exited. On unix it is left unreaped, so its
-/// pid, which is also its group id, stays reserved for [`kill`]; `run`
+/// pid, which is also its group id, stays reserved for [`kill_group`]; `run`
 /// reaps it with `wait` once its output is in.
 #[cfg(unix)]
 fn has_exited(child: &mut Child) -> std::io::Result<bool> {
@@ -383,17 +383,18 @@ fn drain(
     rx
 }
 
-/// Stop the renderer and everything it started, then reap it. `child.kill`
-/// alone would leave the renderer's own children holding the pipes.
-fn kill(child: &mut Child) {
+/// Stop a child started in its own process group and everything it
+/// started, then reap it. `child.kill` alone would leave the child's own
+/// children holding the pipes. Renderers and the clipboard program use it.
+pub(crate) fn kill_group(child: &mut Child) {
     // A direct signal, not a `kill` program, so nothing is looked up on
     // `PATH`. Callers must not have reaped the child (`run` polls with
-    // WNOWAIT): unreaped, its pid, which is also its group id, stays
-    // reserved until `wait` below.
+    // WNOWAIT): the child is unreaped until `wait` below, so its pid, which
+    // is also its group id, stays reserved for it.
     #[cfg(unix)]
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
         // SAFETY: `killpg` only sends a signal; `pid` leads the group the
-        // renderer was started in. ESRCH (group already gone) is ignored.
+        // child was started in. ESRCH (group already gone) is ignored.
         let _ = unsafe { libc::killpg(pid, libc::SIGKILL) };
     }
     let _ = child.kill();
@@ -709,7 +710,7 @@ mod tests {
             0,
             "the exited child is an unreaped zombie, so its pid is reserved"
         );
-        kill(&mut child);
+        kill_group(&mut child);
         assert_gone_soon(pid);
     }
 

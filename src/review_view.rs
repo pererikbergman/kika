@@ -51,7 +51,7 @@ pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
     match problem {
         ReviewProblem::NoForgeHost => (
             NO_FORGE.to_string(),
-            Some("Add its host to [forge] github."),
+            Some("Add its host to [forge] github, or its owner to [forge.allow]."),
         ),
         ReviewProblem::Limited(until) => (
             format!("GitHub is rate limited until {} UTC", clock(until)),
@@ -736,7 +736,7 @@ mod tests {
             contains(&rows, "The remote is on no forge host in the"),
             "{rows:#?}"
         );
-        assert!(contains(&rows, "│global config "), "{rows:#?}");
+        assert!(contains(&rows, "│global config, or not"), "{rows:#?}");
         let problems = [
             ReviewProblem::NoForgeHost,
             ReviewProblem::Limited(1_700_003_600),
