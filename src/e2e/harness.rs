@@ -16,6 +16,7 @@ use ratatui::widgets::Block;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::app;
+use crate::clipboard::RecordingSink;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
 use crate::external_diff::ExternalRenderer;
@@ -42,6 +43,8 @@ pub struct Harness {
     /// Boot's renderer discovery has reported. It is not a user effect,
     /// so `busy` does not cover it.
     renderers_found: bool,
+    /// What the app sent to the clipboard, in place of the terminal.
+    clipboard: Arc<RecordingSink>,
 }
 
 impl Harness {
@@ -63,7 +66,8 @@ impl Harness {
     pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
-        let runtime = Runtime::new(runner.clone(), tx);
+        let clipboard = Arc::new(RecordingSink::default());
+        let runtime = Runtime::new(runner.clone(), tx).with_clipboard(clipboard.clone());
         // As `main` does, so submodule paths start from the right root.
         let launch = runner.workdir();
         let repo = find_toplevel(runner.as_ref());
@@ -74,6 +78,7 @@ impl Harness {
             runner,
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
             renderers_found: false,
+            clipboard,
         };
         app::boot(&mut harness.state, &harness.runtime, width, height);
         harness.wait_idle().await;
@@ -179,6 +184,11 @@ impl Harness {
             "{needle:?} not on screen:\n{}",
             screen.join("\n")
         );
+    }
+
+    /// Every OSC 52 sequence sent to the clipboard, oldest first.
+    pub fn clipboard(&self) -> Vec<Vec<u8>> {
+        self.clipboard.copies()
     }
 
     pub fn state(&self) -> &AppState {

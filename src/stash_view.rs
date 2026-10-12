@@ -212,6 +212,22 @@ mod tests {
     }
 
     #[test]
+    fn at_80x24_the_collapsed_panel_is_its_title_and_the_newest_stash() {
+        let mut state = showing(vec![entry(0, "a1", "newest"), entry(1, "a2", "older")]);
+        state.screen_mode = ScreenMode::Normal;
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let (_, rows) = rows(&state, 80, 24);
+        let title = row_of(&rows, "[5] Stash");
+        assert!(rows[title].starts_with(" [5] Stash ─"), "{rows:#?}");
+        assert!(
+            rows[title + 1].starts_with("stash@{0}  newest"),
+            "{rows:#?}"
+        );
+        assert!(!rows.iter().any(|r| r.contains("older")), "{rows:#?}");
+    }
+
+    #[test]
     fn collapsed_the_panel_shows_the_newest_stash() {
         let mut state = showing(vec![entry(0, "a1", "newest"), entry(1, "a2", "older")]);
         state.screen_mode = ScreenMode::Normal;

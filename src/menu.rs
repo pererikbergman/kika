@@ -2,14 +2,15 @@
 //! is an intent, and it can be disabled with a reason, as a key can.
 
 use crate::bisect;
+use crate::clipboard::CopyWhat;
 use crate::git::bisect::BisectMark;
 use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    OP_RUNNING, amend_disabled, commit_disabled, merge_disabled, never, reset_disabled,
-    stage_all_disabled, stage_disabled,
+    OP_RUNNING, amend_disabled, commit_disabled, merge_disabled, never, no_commit_selected,
+    reset_disabled, stage_all_disabled, stage_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -26,6 +27,8 @@ pub enum MenuId {
     Stash,
     /// Mark the selected commit for a bisect, or end the bisect.
     Bisect,
+    /// Copy the selected commit's hash or message to the clipboard.
+    Copy,
 }
 
 impl MenuId {
@@ -37,6 +40,7 @@ impl MenuId {
             MenuId::Reset => "Reset to commit",
             MenuId::Stash => "Stash",
             MenuId::Bisect => "Bisect",
+            MenuId::Copy => "Copy",
         }
     }
 }
@@ -247,6 +251,29 @@ static BISECT: &[MenuItem] = &[
     },
 ];
 
+static COPY: &[MenuItem] = &[
+    MenuItem {
+        label: "Full hash",
+        intent: AppIntent::CopyCommitText(CopyWhat::Hash),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Short hash",
+        intent: AppIntent::CopyCommitText(CopyWhat::ShortHash),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Subject",
+        intent: AppIntent::CopyCommitText(CopyWhat::Subject),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Full message",
+        intent: AppIntent::CopyCommitText(CopyWhat::Message),
+        disabled: no_commit_selected,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
@@ -254,6 +281,7 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
         MenuId::Merge => MERGE,
         MenuId::Reset => RESET,
         MenuId::Bisect => BISECT,
+        MenuId::Copy => COPY,
         MenuId::Stash => STASH,
     }
 }
