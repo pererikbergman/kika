@@ -1,16 +1,25 @@
-//! The forge's part of `update`, kept in model so that only model depends
-//! on forge and never the other way round.
+//! The per-branch pull-request badges: loading them, refreshing them on
+//! request, and taking the forge's answer. Only this side depends on forge,
+//! never the other way round.
 
 use std::collections::HashMap;
 
-use super::pull_request::refresh_disabled;
-use super::{AppState, Context};
+use super::create::refresh_disabled;
 use crate::effect::{Effect, Tag};
-use crate::forge::{ForgeStatus, PrBadge};
+use crate::forge::{ForgeHost, ForgeState, ForgeStatus, PrBadge};
 use crate::git::branches::BranchName;
+use crate::model::{AppState, Context};
 
 /// The forge's part of `update`.
 impl AppState {
+    /// The forge hosts the global config lets Kika contact; none is off.
+    pub fn with_forge_hosts(self, hosts: Vec<ForgeHost>) -> Self {
+        Self {
+            forge: ForgeState::new(hosts),
+            ..self
+        }
+    }
+
     /// Start a pull-request load when the forge is on and no call runs.
     pub(crate) fn load_pull_requests(&mut self) -> Vec<Effect> {
         if !self.forge.enabled() || self.forge.in_flight {
