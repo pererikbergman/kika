@@ -20,6 +20,10 @@ use crate::clipboard::RecordingSink;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
 use crate::external_diff::ExternalRenderer;
+use crate::forge::ForgeHost;
+use crate::forge::github::FakeGh;
+use crate::forge::task::ForgeContext;
+use crate::git::recording::CommandSink;
 use crate::git::repo_root::find_toplevel;
 use crate::git::version;
 use crate::git::{CliRunner, GitRunner};
@@ -69,10 +73,35 @@ impl Harness {
 
     /// Start over any runner, such as one resolved outside a repository.
     pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
+        Self::start_inner(runner, width, height, None).await
+    }
+
+    /// Start with `gh` standing in for GitHub on github.com. The host is
+    /// configured only once the first load is done, so starting asks
+    /// GitHub nothing.
+    pub async fn start_with_forge(repo: &TestRepo, gh: Arc<FakeGh>) -> Self {
+        let forge = ForgeContext {
+            gh,
+            sink: CommandSink::new(),
+            cache_dir: None,
+        };
+        let mut harness = Self::start_inner(repo.runner(), 120, 30, Some(forge)).await;
+        harness.state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap()];
+        harness
+    }
+
+    async fn start_inner(
+        runner: CliRunner,
+        width: u16,
+        height: u16,
+        forge: Option<ForgeContext>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
         let clipboard = Arc::new(RecordingSink::default());
-        let runtime = Runtime::new(runner.clone(), tx).with_clipboard(clipboard.clone());
+        let runtime = Runtime::new(runner.clone(), tx)
+            .with_clipboard(clipboard.clone())
+            .with_forge(forge);
         // As `main` does, so submodule paths start from the right root.
         let launch = runner.workdir();
         let repo = find_toplevel(runner.as_ref());
@@ -299,6 +328,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && state.commits.todo_seq.is_none()
         && state.stash.seq.is_none()
         && state.commits.reflog.seq.is_none()
+        && !state.review.loading()
 }
 
 /// Kika's hidden sequence-editor mode, for the script
