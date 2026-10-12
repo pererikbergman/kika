@@ -16,7 +16,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
-use crate::features::{repos, submodules, worktrees};
+use crate::features::{blame, repos, submodules, worktrees};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
@@ -25,7 +25,6 @@ use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
-use crate::git::blame::{read_blame, read_commit};
 use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
@@ -1103,18 +1102,7 @@ impl Runtime {
                 });
             }
             Effect::LoadBlame { tag, path } => {
-                let emoji = self.emoji_zwj;
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        read_blame(runner.as_ref(), &path, emoji)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
-                    });
-                    let _ = tx.send(AppIntent::BlameLoaded { tag, result });
-                });
+                blame::effects::load(runner, tx, tag, path, self.emoji_zwj)
             }
             Effect::FindFixupBase { tag } => {
                 tokio::spawn(async move {
@@ -1174,18 +1162,7 @@ impl Runtime {
                 });
             }
             Effect::LoadCommit { tag, oid } => {
-                let emoji = self.emoji_zwj;
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        read_commit(runner.as_ref(), &oid, emoji)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
-                    });
-                    let _ = tx.send(AppIntent::CommitLoaded { tag, result });
-                });
+                blame::effects::load_commit(runner, tx, tag, oid, self.emoji_zwj)
             }
             Effect::FindRenderers => {
                 let pager = self.diff_pager.clone();
