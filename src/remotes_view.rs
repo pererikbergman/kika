@@ -9,7 +9,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::git::remotes::Remote;
 use crate::remotes::{RemoteRow, RemotesList};
-use crate::view::{PanelLook, elide_right, reversed};
+use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
 
 /// What the tab shows when there are no remotes.
 const NO_REMOTES: &str = "No remotes. Press a to add one.";
@@ -19,7 +19,8 @@ pub const NO_BRANCHES: &str = "No branches yet. Press f to fetch.";
 
 /// The tab's body in `rows` by `width`: why the load failed, a
 /// placeholder, or a header row per remote with its branches indented
-/// below, the selection reversed and scrolled into view.
+/// below, as the filter shows them, the selection and the range reversed
+/// and scrolled into view.
 pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'static> {
     if let Some(error) = &list.error {
         let mut lines: Vec<Line> = error.lines().map(|l| Line::from(l.to_string())).collect();
@@ -32,28 +33,23 @@ pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'st
     if list.remotes.is_empty() {
         return Paragraph::new(NO_REMOTES);
     }
-    let selected = list.selected.unwrap_or(0);
-    // Scrolled just enough to keep the selection in view.
-    let first = selected.saturating_sub(rows.saturating_sub(1));
-    let lines = list
-        .rows()
-        .into_iter()
-        .enumerate()
-        .skip(first)
-        .take(rows)
-        .map(|(i, row)| {
-            let line = match row {
+    let shown = list.visible();
+    if shown.is_empty() {
+        return Paragraph::new(no_matches());
+    }
+    let all = list.rows();
+    let range = list.range();
+    let lines = scrolled(&shown, list.selected, rows)
+        .iter()
+        .map(|&i| {
+            let line = match all[i] {
                 RemoteRow::Remote(r) => header(&list.remotes[r], width),
                 RemoteRow::Branch(r, b) => {
                     let short = list.remotes[r].branches[b].short_display();
                     Line::from(elide_right(&format!("  {short}"), width))
                 }
             };
-            if Some(i) == list.selected {
-                reversed(line, width)
-            } else {
-                line
-            }
+            range_row(line, i, list.selected, &range, width)
         })
         .collect::<Vec<_>>();
     Paragraph::new(lines)
@@ -251,6 +247,41 @@ mod tests {
         assert!(contains(&rows, "Remote · origin"), "{rows:#?}");
         assert!(contains(&rows, "/srv/origin"), "{rows:#?}");
         assert!(!contains(&rows, NO_BRANCHES), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_filter_draws_safe_with_its_count_and_a_range_reversed() {
+        let mut state = focused(vec![
+            remote("fork", Some("/srv/fork"), &["x"]),
+            remote("origin", Some("/srv/origin"), &["main", "topic"]),
+        ]);
+        state.screen_mode = crate::layout::ScreenMode::Full;
+        state.branches.remotes.set_filter("o\x1b[31m".into());
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = buffer_rows(&buffer);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|c| !c.symbol().contains('\x1b'))
+        );
+        assert!(contains(&rows, "0 of 5"), "{rows:#?}");
+
+        // origin's header and its two branches show; fork's do not.
+        state.branches.remotes.set_filter("origin".into());
+        state.branches.remotes.toggle_range();
+        state.branches.remotes.move_by(1);
+        terminal.draw(|frame| render(&state, frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "/origin 3 of 5 · 2 selected"), "{rows:#?}");
+        assert!(!contains(&rows, "/srv/fork"), "{rows:#?}");
+        let reversed = crate::branches_view::tests::reversed_at;
+        assert!(reversed(&buffer, "origin  /srv/origin"));
+        assert!(reversed(&buffer, "  main"));
+        assert!(!reversed(&buffer, "  topic"));
     }
 
     #[test]

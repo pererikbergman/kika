@@ -59,7 +59,7 @@ use crate::list_filter::{self, InputTarget, ListInput};
 use crate::menu;
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
-    DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RemoveRemoteConfirm,
+    DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind, RemoveRemoteConfirm,
     RemoveWorktreeConfirm, TravelConfirm,
 };
 use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
@@ -1024,6 +1024,9 @@ impl AppState {
             AppIntent::NewAnnotatedTag => self.ask_tag_name(true),
             AppIntent::TagNamed(text) => return self.tag_named(text),
             AppIntent::TagMessaged(text) => return self.tag_messaged(&text),
+            AppIntent::DeleteTag if self.branches.tags.range_anchor.is_some() => {
+                self.ask_delete_range(RangeKind::Tags)
+            }
             AppIntent::DeleteTag => self.ask_delete_tag(),
             AppIntent::ConfirmDeleteTag => return self.confirm_delete_tag(),
             AppIntent::PushTag => return self.push_tag(),
@@ -1036,8 +1039,12 @@ impl AppState {
             AppIntent::AddRemoteUrl(text) => return self.remote_url(&text),
             AppIntent::RenameRemote => self.ask_remote_rename(),
             AppIntent::RenameRemoteTo(text) => return self.rename_remote_to(&text),
+            AppIntent::RemoveRemote if self.branches.remotes.range_anchor.is_some() => {
+                self.ask_delete_range(RangeKind::Remotes)
+            }
             AppIntent::RemoveRemote => self.ask_remove_remote(),
             AppIntent::ConfirmRemoveRemote => return self.confirm_remove_remote(),
+            AppIntent::ConfirmDeleteRange => return self.confirm_delete_range(),
             AppIntent::SetUpstream => self.ask_upstream(),
             AppIntent::SetUpstreamTo(text) => return self.set_upstream_to(&text),
             AppIntent::UnsetUpstream => {
@@ -1051,6 +1058,9 @@ impl AppState {
             AppIntent::CheckoutBranch => return self.checkout_branch(),
             AppIntent::NewBranch => self.ask_branch_name(PromptKind::NewBranch),
             AppIntent::RenameBranch => self.ask_branch_name(PromptKind::RenameBranch),
+            AppIntent::DeleteBranch if self.branches.range_anchor.is_some() => {
+                self.ask_delete_range(RangeKind::Branches)
+            }
             AppIntent::DeleteBranch => self.ask_delete_branch(),
             AppIntent::CreateBranchNamed(text) => {
                 return self
@@ -1314,6 +1324,7 @@ impl AppState {
             Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
             Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
+            Some(Popup::DeleteRange(_)) => return KeyScope::DeleteRange,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
             Some(Popup::LeaveCommits(_)) => return KeyScope::LeaveCommits,
             Some(Popup::DropStash(_)) => return KeyScope::DropStash,
@@ -1612,7 +1623,7 @@ impl AppState {
             // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
             // resets, only `ConfirmLeaveCommits` leaves commits behind, only
             // `ConfirmRemoveRemote` removes, only `ConfirmDeleteTag` deletes
-            // a tag, only `ConfirmTravel` undoes or redoes and only
+            // a tag, only `ConfirmDeleteRange` deletes a range, only `ConfirmTravel` undoes or redoes and only
             // `ConfirmDropStash` drops a stash; yes here keeps the question,
             // no closes it.
             Some(
@@ -1621,6 +1632,7 @@ impl AppState {
                 | Popup::LeaveCommits(_)
                 | Popup::RemoveRemote(_)
                 | Popup::DeleteTag(_)
+                | Popup::DeleteRange(_)
                 | Popup::Travel(_)
                 | Popup::DropStash(_),
             ) if !yes => vec![],
@@ -4103,6 +4115,7 @@ impl AppState {
         if self.context != Context::Workspace {
             return vec![];
         }
+        self.branches.clear_range(self.branches.tab);
         self.branches.tab = step(self.branches.tab);
         self.load_branch_log(true)
     }
@@ -4805,7 +4818,7 @@ impl AppState {
     }
 
     fn ask_remote_rename(&mut self) {
-        if !self.remotes_action(keymap::change_remote_disabled) {
+        if !self.remotes_action(keymap::rename_remote_disabled) {
             return;
         }
         let Some(name) = self
@@ -5426,6 +5439,9 @@ impl AppState {
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
+            KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.filter),
+            KeyScope::Remotes => (InputTarget::RemotesFilter, &self.branches.remotes.filter),
+            KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
             _ => return,
         };
         self.input = Some(ListInput {
@@ -5464,6 +5480,9 @@ impl AppState {
                     }
                 }
                 self.commits.reconcile();
+            }
+            InputTarget::BranchesFilter | InputTarget::RemotesFilter | InputTarget::TagsFilter => {
+                return self.apply_branches_filter(input.target, text);
             }
             InputTarget::DiffSearch => {
                 if let Focus::Diff(view) = &mut self.focus {
@@ -5527,6 +5546,9 @@ impl AppState {
                 let row = self.commits.rows.get(self.commits.selected);
                 self.commits.range_anchor = row.map(|r| r.oid.clone());
             }
+            KeyScope::Branches => self.branches.toggle_range(),
+            KeyScope::Remotes => self.branches.remotes.toggle_range(),
+            KeyScope::Tags => self.branches.tags.toggle_range(),
             _ => {}
         }
     }
@@ -5534,11 +5556,22 @@ impl AppState {
     /// Esc in a list: clear the range, else the filter, else (in Commits)
     /// the diff mark, else the log query, else quit as Esc always has.
     fn list_escape(&mut self) -> Vec<Effect> {
-        let (cleared, filter) = match self.panel_focus() {
+        let focus = self.panel_focus();
+        let branches = &mut self.branches;
+        let (cleared, filter) = match focus {
             KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
             KeyScope::Commits => (
                 self.commits.range_anchor.take().is_some(),
                 &mut self.commits.filter,
+            ),
+            KeyScope::Branches => (branches.range_anchor.take().is_some(), &mut branches.filter),
+            KeyScope::Remotes => (
+                branches.remotes.range_anchor.take().is_some(),
+                &mut branches.remotes.filter,
+            ),
+            KeyScope::Tags => (
+                branches.tags.range_anchor.take().is_some(),
+                &mut branches.tags.filter,
             ),
             _ => return self.update(AppIntent::Quit),
         };
@@ -5652,13 +5685,16 @@ fn failure_next(op: &GitOp) -> &'static str {
         }
         GitOp::RenameBranch { .. }
         | GitOp::DeleteBranch { .. }
+        | GitOp::DeleteBranches(_)
         | GitOp::SetUpstream { .. }
         | GitOp::UnsetUpstream(_)
         | GitOp::AddRemote { .. }
         | GitOp::RenameRemote { .. }
         | GitOp::RemoveRemote(_)
+        | GitOp::RemoveRemotes(_)
         | GitOp::CreateTag { .. }
-        | GitOp::DeleteTag { .. } => {
+        | GitOp::DeleteTag { .. }
+        | GitOp::DeleteTags(_) => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
         GitOp::MergeTool(_) => {
@@ -5775,6 +5811,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::CreateBranch { .. } => "Could not create the branch",
         GitOp::RenameBranch { .. } => "Could not rename the branch",
         GitOp::DeleteBranch { .. } => "Could not delete the branch",
+        GitOp::DeleteBranches(_) => "Could not delete every branch",
         GitOp::Merge { .. } => "Could not merge",
         GitOp::Rebase { .. } | GitOp::InteractiveRebase(_) => "Could not rebase",
         GitOp::CheckoutCommit(_) => "Could not check out the commit",
@@ -5804,8 +5841,10 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::AddRemote { .. } => "Could not add the remote",
         GitOp::RenameRemote { .. } => "Could not rename the remote",
         GitOp::RemoveRemote(_) => "Could not remove the remote",
+        GitOp::RemoveRemotes(_) => "Could not remove every remote",
         GitOp::CreateTag { .. } => "Could not create the tag",
         GitOp::DeleteTag { .. } => "Could not delete the tag",
+        GitOp::DeleteTags(_) => "Could not delete every tag",
         GitOp::BisectMark { .. } => "Could not mark the commit",
         GitOp::BisectReset => "Could not reset the bisect",
         GitOp::Travel {
@@ -5819,6 +5858,7 @@ fn failure_title(op: &GitOp) -> &'static str {
     }
 }
 
+mod branch_lists;
 mod fixup;
 mod leave_commits;
 mod log_query;

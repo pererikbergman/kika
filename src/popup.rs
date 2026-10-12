@@ -43,6 +43,8 @@ pub enum Popup {
     DropStash(DropStashConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     DeleteTag(DeleteTagConfirm),
+    /// Delete the branches or tags of a range, or remove its remotes.
+    DeleteRange(DeleteRangeConfirm),
     Submodules(SubmoduleList),
     Worktrees(WorktreeList),
     RemoveWorktree(RemoveWorktreeConfirm),
@@ -375,6 +377,79 @@ impl DeleteTagConfirm {
             "Delete tag {}? It is not deleted on any remote. (y/n)",
             self.name
         )
+    }
+}
+
+/// What a range delete acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeKind {
+    Branches,
+    Tags,
+    Remotes,
+}
+
+/// "Delete these?" over a range. Like [`DeleteBranchConfirm`], it carries
+/// the op chosen when it was asked, so a reload before the answer cannot
+/// change the targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteRangeConfirm {
+    pub kind: RangeKind,
+    /// The display names of what goes, already terminal-safe.
+    pub names: Vec<String>,
+    /// Why some rows of the range stay, and how many each.
+    pub skipped: Vec<(String, usize)>,
+    pub op: GitOp,
+}
+
+impl DeleteRangeConfirm {
+    /// How many names the question lists before `and N more`.
+    const LISTED: usize = 5;
+
+    pub fn title(&self) -> &'static str {
+        match self.kind {
+            RangeKind::Branches => "Delete branches",
+            RangeKind::Tags => "Delete tags",
+            RangeKind::Remotes => "Remove remotes",
+        }
+    }
+
+    pub fn question(&self) -> String {
+        let count = self.names.len();
+        let one = count == 1;
+        let (verb, noun) = match (self.kind, one) {
+            (RangeKind::Branches, true) => ("Delete", "branch"),
+            (RangeKind::Branches, false) => ("Delete", "branches"),
+            (RangeKind::Tags, true) => ("Delete", "tag"),
+            (RangeKind::Tags, false) => ("Delete", "tags"),
+            (RangeKind::Remotes, true) => ("Remove", "remote"),
+            (RangeKind::Remotes, false) => ("Remove", "remotes"),
+        };
+        let mut names = self.names[..count.min(Self::LISTED)].join(", ");
+        if count > Self::LISTED {
+            names.push_str(&format!(" and {} more", count - Self::LISTED));
+        }
+        let note = match (self.kind, one) {
+            (RangeKind::Branches, _) => String::new(),
+            (RangeKind::Tags, true) => " It is not deleted on any remote.".into(),
+            (RangeKind::Tags, false) => " They are not deleted on any remote.".into(),
+            (RangeKind::Remotes, true) => " Its remote-tracking branches are deleted, and \
+                branches tracking it lose their upstream."
+                .into(),
+            (RangeKind::Remotes, false) => " Their remote-tracking branches are deleted, and \
+                branches tracking them lose their upstream."
+                .into(),
+        };
+        let kept: Vec<String> = self
+            .skipped
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(why, n)| format!("{n} {why}"))
+            .collect();
+        let kept = match kept.is_empty() {
+            true => String::new(),
+            false => format!(" Kept: {}.", kept.join(", ")),
+        };
+        format!("{verb} {count} {noun} ({names})?{note}{kept} (y/n)")
     }
 }
 
@@ -1002,6 +1077,59 @@ mod tests {
             "Delete tag v1? It is not deleted on any remote. (y/n)"
         );
         assert_eq!(ask.title(), "Delete tag");
+    }
+
+    fn range(kind: RangeKind, names: &[&str], skipped: &[(&str, usize)]) -> DeleteRangeConfirm {
+        DeleteRangeConfirm {
+            kind,
+            names: names.iter().map(|n| n.to_string()).collect(),
+            skipped: skipped.iter().map(|(w, n)| (w.to_string(), *n)).collect(),
+            op: GitOp::DeleteBranches(vec![]),
+        }
+    }
+
+    #[test]
+    fn a_range_question_names_the_count_the_names_and_what_is_kept() {
+        let ask = range(
+            RangeKind::Branches,
+            &["a", "b", "c"],
+            &[("not fully merged", 1), ("current", 1)],
+        );
+        assert_eq!(
+            ask.question(),
+            "Delete 3 branches (a, b, c)? Kept: 1 not fully merged, 1 current. (y/n)"
+        );
+        assert_eq!(ask.title(), "Delete branches");
+        let ask = range(RangeKind::Branches, &["a"], &[("current", 0)]);
+        assert_eq!(ask.question(), "Delete 1 branch (a)? (y/n)");
+        assert_eq!(
+            range(RangeKind::Tags, &["v1", "v2"], &[]).question(),
+            "Delete 2 tags (v1, v2)? They are not deleted on any remote. (y/n)"
+        );
+        assert_eq!(
+            range(RangeKind::Tags, &["v1"], &[]).question(),
+            "Delete 1 tag (v1)? It is not deleted on any remote. (y/n)"
+        );
+        assert_eq!(
+            range(RangeKind::Remotes, &["a", "b"], &[]).question(),
+            "Remove 2 remotes (a, b)? Their remote-tracking branches are deleted, \
+             and branches tracking them lose their upstream. (y/n)"
+        );
+        assert_eq!(
+            range(RangeKind::Remotes, &["a"], &[("not configured", 2)]).question(),
+            "Remove 1 remote (a)? Its remote-tracking branches are deleted, \
+             and branches tracking it lose their upstream. Kept: 2 not configured. (y/n)"
+        );
+    }
+
+    #[test]
+    fn a_long_range_lists_five_names_and_counts_the_rest() {
+        let names = ["a", "b", "c", "d", "e", "f", "g"];
+        let question = range(RangeKind::Tags, &names, &[]).question();
+        assert!(
+            question.starts_with("Delete 7 tags (a, b, c, d, e and 2 more)?"),
+            "{question}"
+        );
     }
 
     #[test]

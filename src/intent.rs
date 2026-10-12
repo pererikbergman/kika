@@ -505,6 +505,9 @@ pub enum AppIntent {
     RemoveRemote,
     /// Remove the remote the open question names.
     ConfirmRemoveRemote,
+    /// Delete the branches or tags, or remove the remotes, the open range
+    /// question names.
+    ConfirmDeleteRange,
     /// Ask which remote branch the selected local branch should track.
     SetUpstream,
     /// The upstream, as `remote/branch`, typed into the `SetUpstream` prompt.
