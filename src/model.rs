@@ -20460,7 +20460,7 @@ mod tests {
                 state
                     .notice
                     .as_deref()
-                    .is_some_and(|n| n.contains("could hide todo commands")),
+                    .is_some_and(|n| n.contains("hides commands")),
                 "{:?}",
                 state.notice
             );

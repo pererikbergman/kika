@@ -19,13 +19,14 @@ const READ_ONLY: &str = "Read-only, fix with git rebase --edit-todo:";
 
 /// How a reason starts when the git config, not the list, keeps it from
 /// being edited.
-const READ_ONLY_CONFIG: &str = "Read-only, fix the comment prefix in your git config:";
+const READ_ONLY_CONFIG: &str = "Read-only, fix core.commentChar:";
 
 /// The most characters of a todo line a reason quotes.
 const QUOTED: usize = 20;
 
-/// The most characters of a config error a reason shows.
-const CONFIG_WHY: usize = 60;
+/// The most characters of a config error a reason shows, so the whole
+/// reason fits in 80 columns.
+const CONFIG_WHY: usize = 40;
 
 /// Why `todo` is shown but not edited, after how to fix it: the comment
 /// prefix git would use could not be read or could hide a command, or the
@@ -35,7 +36,7 @@ pub fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
     let prefix = match comment {
         Ok(prefix) if hides_commands(prefix) => {
             return format!(
-                "{READ_ONLY_CONFIG} \"{}\" could hide todo commands",
+                "{READ_ONLY_CONFIG} prefix {} hides commands",
                 quoted(prefix)
             );
         }
@@ -414,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_prefix_that_could_not_be_read_hides_nothing_and_names_the_error() {
-        let why = "fatal: bad config line 1\nin file .git/config";
+        let why = "fatal: bad config line 1\nin .git/config";
         for text in [
             &b"# Rebase 1..2 onto 1\npick 1234 a\n"[..],
             b"pick 1234 a\n",
@@ -422,8 +423,8 @@ mod tests {
             let todo = RebaseTodo::load(file_with(text, Err(why)));
             assert_eq!(
                 todo.editable,
-                Err("Read-only, fix the comment prefix in your git config: \
-                     fatal: bad config line 1 in file .git/config"
+                Err("Read-only, fix core.commentChar: \
+                     fatal: bad config line 1 in .git/config"
                     .to_string())
             );
             assert!(todo.entries.is_empty());
@@ -438,7 +439,7 @@ mod tests {
         let long = "e".repeat(200);
         let todo = RebaseTodo::load(file_with(b"", Err(&long)));
         let shown = todo.editable.unwrap_err();
-        let cause = shown.split("git config: ").nth(1).unwrap();
+        let cause = shown.split("core.commentChar: ").nth(1).unwrap();
         assert_eq!(cause.chars().count(), CONFIG_WHY, "{shown}");
         assert!(cause.ends_with('…'), "{shown}");
     }
@@ -453,8 +454,7 @@ mod tests {
         ] {
             let todo = RebaseTodo::load(file_with(text, Ok(prefix)));
             let why = format!(
-                "Read-only, fix the comment prefix in your git config: \"{}\" could hide \
-                 todo commands",
+                "Read-only, fix core.commentChar: prefix {} hides commands",
                 String::from_utf8_lossy(prefix)
             );
             assert_eq!(todo.editable, Err(why.clone()), "{prefix:?}");
