@@ -748,6 +748,12 @@ impl Glyph {
 /// ratatui measures all of it, so `❤` grows from one column to two when a
 /// U+FE0F joins it.
 pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
+    clip_cut(line, from, width).0
+}
+
+/// [`clip`], and whether the text ran past the right edge, so its last
+/// cell is the `…`.
+fn clip_cut(line: &str, from: usize, width: usize) -> (String, bool) {
     let mut cells = vec![Cell::Blank; width];
     let mut col: usize = 0;
     let mut last: Option<Glyph> = None;
@@ -782,13 +788,14 @@ pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
         }
         cells[0] = Cell::Glyph("…".into());
     }
-    if width > 0 && col > from + width {
+    let cut = width > 0 && col > from + width;
+    if cut {
         if let Cell::Rest = cells[width - 1] {
             cells[width - 2] = Cell::Blank;
         }
         cells[width - 1] = Cell::Glyph("…".into());
     }
-    cells
+    let text = cells
         .iter()
         .map(|cell| match cell {
             Cell::Blank => " ",
@@ -797,7 +804,8 @@ pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
         })
         .collect::<String>()
         .trim_end()
-        .to_string()
+        .to_string();
+    (text, cut)
 }
 
 /// `text` broken into rows of at most `width` columns, at a space where
@@ -1057,8 +1065,10 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             if clears || searching(state, focus) {
                 leading.push("files.escape");
             }
-            // The bar is full already; help lists ctrl-f.
-            (leading, vec!["files.filter", "files.range"])
+            (
+                leading,
+                vec!["files.filter", "files.range", "files.search_diff"],
+            )
         }
         KeyScope::Commits => {
             let panel = &state.commits;
@@ -1768,14 +1778,18 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(gutters));
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
                     if let Some(ids) = &picked_ids {
                         let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
                         let mark = if held { "●" } else { " " };
                         spans.push(Span::styled(mark, commits_view::PATCH_MARK));
                     }
-                    spans.extend(marked_spans(text, style, &marks_of(&view.search, at)));
+                    spans.extend(clipped_marked(
+                        &drawn_text(&row, emoji),
+                        width.saturating_sub(gutters),
+                        style,
+                        &marks_of(&view.search, at),
+                    ));
                     let line = Line::from(spans);
                     let mark = match view.lines {
                         Some(_) => row.line.is_some(),
@@ -1911,6 +1925,28 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
     spans.push(Span::styled(piece(at, chars.len()), style));
     spans.retain(|span| !span.content.is_empty());
     spans
+}
+
+/// `line` clipped to `width` from its start, with `marks` drawn over
+/// `style`. A cut line's `…` stays in `style`: it stands for text off
+/// screen, not for the match, and a marked `…` would read as matched.
+fn clipped_marked(
+    line: &str,
+    width: usize,
+    style: Style,
+    marks: &[(usize, usize, Style)],
+) -> Vec<Span<'static>> {
+    let (text, cut) = clip_cut(line, 0, width);
+    if !cut {
+        return marked_spans(text, style, marks);
+    }
+    let ellipsis = text.chars().count() - 1;
+    let marks: Vec<_> = marks
+        .iter()
+        .map(|&(start, end, mark)| (start, end.min(ellipsis), mark))
+        .filter(|&(start, end, _)| start < end)
+        .collect();
+    marked_spans(text, style, &marks)
 }
 
 /// The focused pane's title: the side, the path, the mode, the options
@@ -2114,7 +2150,7 @@ fn render_blame(view: &BlameView, look: &PanelLook, frame: &mut Frame, area: Rec
                     .into_iter()
                     .map(|(start, end, style)| (start + prefix, end + prefix, style))
                     .collect();
-                let line = Line::from(marked_spans(clip(&row, 0, width), Style::new(), &marks));
+                let line = Line::from(clipped_marked(&row, width, Style::new(), &marks));
                 if i == view.cursor {
                     reversed(line, width)
                 } else {
@@ -2192,7 +2228,7 @@ fn styled_diff_line(
         LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
         LineKind::Context => Style::new(),
     };
-    Line::from(marked_spans(clip(&line.text, 0, width), style, marks))
+    Line::from(clipped_marked(&line.text, width, style, marks))
 }
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`
@@ -5015,19 +5051,31 @@ mod tests {
             "bksp parent",
             "/ filter",
             "V range",
+            "ctrl-f search diff",
             "? keys",
             "q quit",
             "…",
         ];
-        for width in [110, 100, 80, 60, 40, 24] {
+        for width in [130, 128, 127, 111, 110, 100, 80, 60, 40, 24] {
             let rows = draw(&state, width, 10);
             let bar = rows[9].trim();
             assert!(bar.ends_with("? keys  q quit"), "{width}: {bar:?}");
             for hint in bar.split("  ") {
                 assert!(all.contains(&hint), "{width}: {hint:?} in {bar:?}");
             }
-            assert_eq!(bar.contains('…'), width < 106, "{width}: {bar:?}");
+            assert_eq!(bar.contains('…'), width < 128, "{width}: {bar:?}");
+            // The search hint drops first.
+            assert_eq!(bar.contains("V range"), width >= 111, "{width}: {bar:?}");
         }
+        let rows = draw(&state, 128, 10);
+        assert!(
+            rows[9]
+                .trim()
+                .ends_with("V range  ctrl-f search diff  ? keys  q quit"),
+            "{:?}",
+            rows[9]
+        );
+        assert!(!draw(&state, 80, 10)[9].contains("ctrl-f"));
         // Narrower than help and quit together: whole hints only, still.
         let rows = draw(&state, 10, 10);
         assert_eq!(rows[9].trim(), "…", "{rows:#?}");
@@ -5845,6 +5893,161 @@ mod tests {
             contains(&rows, "Commit abcdef1 · match 1 of 2"),
             "{rows:#?}"
         );
+    }
+
+    /// The Files preview of `lines`, searched for `query`.
+    fn preview_searching(lines: Vec<DiffLine>, query: &str) -> AppState {
+        let mut state = with_diff(lines);
+        state.diff.set_search(query);
+        state
+    }
+
+    /// A blame of `texts`, the cursor on the first, searched for `query`.
+    fn blame_searching(texts: &[&str], query: &str) -> AppState {
+        let lines = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| blame_line(OID, "Ann", i + 1, text))
+            .collect();
+        let mut state = blamed(lines, 0);
+        if let Focus::Blame(view) = &mut state.focus {
+            view.set_search(query);
+        }
+        state
+    }
+
+    /// A blame with its commit of `lines` open, the commit searched for `query`.
+    fn blame_commit_searching(lines: Vec<DiffLine>, query: &str) -> AppState {
+        let mut state = blamed(vec![blame_line(OID, "Ann", 1, "x")], 0);
+        if let Focus::Blame(view) = &mut state.focus {
+            let mut commit = CommitView::new(OID.into(), 1);
+            commit.loaded(Ok(lines));
+            commit.set_search(query);
+            view.commit = Some(commit);
+        }
+        state
+    }
+
+    /// Whether `style` has either match background.
+    fn match_styled(style: Style) -> bool {
+        style.bg == MATCH.bg || style.bg == CURRENT_MATCH.bg
+    }
+
+    #[test]
+    fn switching_from_files_to_commits_leaves_no_match_marked() {
+        let mut state = preview_searching(alpha_beta_gamma(), "one");
+        assert_marked(&draw_buffer(&state, 80, 24));
+        state.update(crate::intent::AppIntent::FocusPanel(Panel::Side(
+            SidePanel::Commits,
+        )));
+        let buffer = draw_buffer(&state, 80, 24);
+        for cell in buffer.content() {
+            assert!(!match_styled(cell.style()), "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn the_clipping_ellipsis_is_never_drawn_as_a_match() {
+        let long = "q".repeat(200);
+        let text = format!("abc {long} end");
+        let states = [
+            (
+                "preview",
+                preview_searching(vec![diff_line(LineKind::Added, &format!("+{text}"))], &long),
+            ),
+            ("blame", blame_searching(&["x", &text], &long)),
+            (
+                "blame commit",
+                blame_commit_searching(
+                    vec![diff_line(LineKind::Added, &format!("+{text}"))],
+                    &long,
+                ),
+            ),
+        ];
+        for (pane, state) in states {
+            let buffer = draw_buffer(&state, 80, 24);
+            let (x, y) = find(&buffer, "abc q");
+            let ellipsis = (x..buffer.area.width)
+                .find(|&x| buffer[(x, y)].symbol() == "…")
+                .unwrap_or_else(|| {
+                    panic!("{pane}: no … in {:?}", buffer_rows(&buffer)[y as usize])
+                });
+            assert!(
+                !match_styled(buffer[(ellipsis, y)].style()),
+                "{pane}: {:?}",
+                buffer[(ellipsis, y)]
+            );
+            assert_eq!(buffer[(ellipsis - 1, y)].symbol(), "q", "{pane}");
+            assert_eq!(
+                buffer[(ellipsis - 1, y)].style().bg,
+                CURRENT_MATCH.bg,
+                "{pane}: the visible part is still marked"
+            );
+            assert_eq!(buffer[(x + 4, y)].style().bg, CURRENT_MATCH.bg, "{pane}");
+            assert!(!match_styled(buffer[(x, y)].style()), "{pane}");
+        }
+    }
+
+    #[test]
+    fn a_marked_clip_drops_the_marks_from_its_ellipsis() {
+        let spans = |line: &str, width, marks: &[(usize, usize, Style)]| -> Vec<(String, Style)> {
+            clipped_marked(line, width, Style::new(), marks)
+                .into_iter()
+                .map(|span| (span.content.into_owned(), span.style))
+                .collect()
+        };
+        let plain = Style::new();
+        // A match across the cut stops before the `…`; one past it is gone.
+        assert_eq!(
+            spans("abcdefghij", 5, &[(2, 8, MATCH), (8, 9, CURRENT_MATCH)]),
+            [
+                ("ab".to_string(), plain),
+                ("cd".to_string(), MATCH),
+                ("…".to_string(), plain),
+            ]
+        );
+        // A match only on the cut cell is dropped.
+        assert_eq!(
+            spans("abcdefghij", 5, &[(4, 5, MATCH)]),
+            [("abcd…".to_string(), plain)]
+        );
+        // Uncut text keeps its marks, a `…` of its own included.
+        assert_eq!(
+            spans("abc…", 5, &[(3, 4, MATCH)]),
+            [("abc".to_string(), plain), ("…".to_string(), MATCH)]
+        );
+    }
+
+    #[test]
+    fn each_search_pane_draws_at_80_by_24_and_at_20_by_5() {
+        let states = [
+            ("preview", preview_searching(alpha_beta_gamma(), "one")),
+            (
+                "blame",
+                blame_searching(&["alpha one", "beta", "gamma one"], "one"),
+            ),
+            (
+                "blame commit",
+                blame_commit_searching(alpha_beta_gamma(), "one"),
+            ),
+        ];
+        for (pane, state) in states {
+            let buffer = draw_buffer(&state, 80, 24);
+            let (x, y) = find(&buffer, "alpha one");
+            for skip in 6..9 {
+                assert_eq!(buffer[(x + skip, y)].style().bg, CURRENT_MATCH.bg, "{pane}");
+                assert!(
+                    buffer[(x + skip, y)]
+                        .style()
+                        .add_modifier
+                        .contains(Modifier::BOLD | Modifier::UNDERLINED),
+                    "{pane}"
+                );
+            }
+            let buffer = draw_buffer(&state, 20, 5);
+            assert_eq!(buffer.area, Rect::new(0, 0, 20, 5), "{pane}");
+            assert_eq!(buffer.content().len(), 20 * 5, "{pane}");
+        }
     }
 
     #[test]
