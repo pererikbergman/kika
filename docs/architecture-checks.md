@@ -77,6 +77,52 @@ else. The audit then reports the moved Issue as not in the baseline and the old 
 resolved. Read the list in the job log. If the Issues are acceptable, save the baseline
 on purpose as above and explain the change in the PR.
 
+## Feature folders and the baseline
+
+Kika is moving to feature folders under `src/features/` (see
+`docs/adr/0001-vertical-slices.md`). Two deny rules in `dependency_rules` in
+`.noupling/settings.json` keep the shared plumbing below the features:
+
+| From | To | Message |
+|---|---|---|
+| `src/git/**` | `src/features/**` | git plumbing never imports a feature (ADR-0001) |
+| `src/forge/**` | `src/features/**` | git plumbing never imports a feature (ADR-0001) |
+
+A break of either rule is a `rule_violation:*` Issue, which is never accepted.
+
+Each slice PR that moves code into a feature folder runs:
+
+```sh
+noupling scan .
+noupling baseline save .
+```
+
+and lists the fingerprint diff of `.noupling/baseline.json` in its description. Only
+these changes are allowed:
+
+| Allowed to appear | Allowed to disappear |
+|---|---|
+| `coupling_violation:src/features -> src/git` | `coupling_violation:src/model -> src/git` |
+| `coupling_violation:src/features -> src/forge` | `coupling_violation:src/model -> src/forge` |
+| `coupling_violation:src/e2e -> src/features` | `coupling_violation:src/e2e -> src/model` |
+| `red_flag:fused_sibling:src/features -> src/git` | `red_flag:fused_sibling:src/model -> src/git` |
+| `gravity_well:*`, `zone_flag:src/features/*`, `low_cohesion:src/features/*` (noupling says these do not score) | `low_cohesion:src/model`, and the remaining `src/model` fingerprints once that directory is empty |
+
+Never allowed:
+- any `cycle:*`;
+- any `rule_violation:*`;
+- `coupling_violation:src/features/<a> -> src/features/<b>` for sibling features;
+- `coupling_violation:src/git -> src/features`;
+- `coupling_violation:src/forge -> src/features`.
+
+The health score drops as features move, because files under `src/features/` keep
+importing `src/git` and `src/forge` and noupling scores every sibling import. The gate
+is baseline-only, so the score never fails CI.
+
+`baseline.json` conflicts on almost every rebase during the move. Never merge it by
+hand: after a rebase, run `noupling scan .` and `noupling baseline save .` again and
+commit the regenerated file.
+
 ## Bumping noupling
 
 1. Pick the new release tag and set `NOUPLING_VERSION` in the `architecture` job.
