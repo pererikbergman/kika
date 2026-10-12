@@ -4466,8 +4466,9 @@ mod tests {
         );
         table.description = description.into();
         let keymap = crate::keymap::Keymap::default()
-            .with_commands(&[table])
-            .unwrap();
+            .with_commands(&[table], &Default::default())
+            .unwrap()
+            .0;
         state.update(crate::intent::AppIntent::ConfigLoaded {
             repo: state.repo.clone(),
             keymap,
@@ -4606,8 +4607,9 @@ mod tests {
         let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::Popup);
         table.description = "evil\u{202E}txt".into();
         let keymap = crate::keymap::Keymap::default()
-            .with_commands(&[table])
-            .unwrap();
+            .with_commands(&[table], &Default::default())
+            .unwrap()
+            .0;
         state.update(AppIntent::ConfigLoaded {
             repo: state.repo.clone(),
             keymap,
