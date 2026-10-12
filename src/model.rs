@@ -230,6 +230,9 @@ pub struct AppState {
     /// Sequence of the Git operation in flight. Operations run one at a
     /// time so two quick presses never race for `index.lock`.
     pub op_seq: Option<u64>,
+    /// The left-behind check in flight; one at a time, so a second press
+    /// cannot stack a second question.
+    pub left_behind_check: Option<leave_commits::LeftBehindCheck>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
@@ -381,6 +384,7 @@ impl AppState {
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
             op_seq: None,
+            left_behind_check: None,
             commit_on_terminal: false,
             commit_hooks_detached: false,
             op_error: None,
@@ -4819,7 +4823,8 @@ impl AppState {
         self.commits.set_todo(todo);
     }
 
-    /// Reset hard as the open question asked, and only if one is open.
+    /// Reset hard as the open question asked, and only if one is open and
+    /// `HEAD` has not moved since.
     fn confirm_reset_hard(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
             return vec![];
@@ -4827,6 +4832,9 @@ impl AppState {
         let Some(Popup::ResetHard(confirm)) = self.popups.pop() else {
             return vec![];
         };
+        if !self.head_still(confirm.head.as_ref()) {
+            return vec![];
+        }
         self.start_op(Ok(Some(confirm.op)))
     }
 
@@ -14452,6 +14460,7 @@ mod tests {
             [Popup::ResetHard(ResetHardConfirm {
                 short_oid: "c1".into(),
                 op: hard.clone(),
+                head: None,
             })]
         );
         assert_eq!(state.key_focus(), KeyScope::ResetHard);
@@ -14643,6 +14652,7 @@ mod tests {
             [Popup::ResetHard(ResetHardConfirm {
                 short_oid: "c1".into(),
                 op: reset_op(ResetMode::Hard),
+                head: Some(cid("c0")),
             })]
         );
     }
@@ -14658,6 +14668,8 @@ mod tests {
                 state.popups,
                 [Popup::LeaveCommits(LeaveCommitsConfirm {
                     op: planned,
+                    head: cid("c0"),
+                    head_short_oid: "c0".into(),
                     short_oid: "c1".into(),
                     left: vec!["a0".into(), "a1".into(), "a2".into()],
                 })],
@@ -14719,25 +14731,26 @@ mod tests {
 
     #[test]
     fn a_check_for_a_head_that_moved_runs_nothing() {
-        let mut state = detached_on_commit();
-        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
-        state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
         for result in [Ok(vec![]), Ok(ids(2))] {
-            state.notice = None;
+            let mut state = detached_on_commit();
+            let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+            state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
             let effects = state.update(AppIntent::LeftBehindChecked {
                 tag,
-                op: op.clone(),
+                op,
                 head: cid("c0"),
                 result,
             });
             assert_eq!(effects, vec![]);
             assert_eq!(state.popups, []);
             assert_eq!(state.notice, Some("HEAD moved; try again".into()));
+            assert_eq!(state.op_seq, None);
+            assert_eq!(state.commits.pending, None);
         }
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.commits.pending, None);
 
         // Back on a branch is a move too.
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
         state.branch = Some(on_branch("main"));
         state.update(AppIntent::LeftBehindChecked {
             tag,
@@ -14759,7 +14772,151 @@ mod tests {
             };
             assert_eq!(error.title, "Could not check for commits left behind");
             assert!(error.message.contains("fatal: bad"));
+            assert!(error.next.contains("retry"), "{}", error.next);
         }
+    }
+
+    #[test]
+    fn a_second_press_while_a_check_runs_asks_only_once() {
+        for (intent, _) in moves() {
+            let mut state = detached_on_commit();
+            let busy = state.busy;
+            let (tag, op) = check_of(&state.update(intent.clone()));
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.busy, busy + 1, "{intent:?}");
+            assert_eq!(
+                state.notice,
+                Some("Still checking for commits left behind".into()),
+                "{intent:?}"
+            );
+            state.update(AppIntent::LeftBehindChecked {
+                tag,
+                op,
+                head: cid("c0"),
+                result: Ok(ids(2)),
+            });
+            assert!(
+                matches!(state.popups.as_slice(), [Popup::LeaveCommits(_)]),
+                "{intent:?}: {:?}",
+                state.popups
+            );
+            assert_eq!(state.busy, busy, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn once_a_check_is_answered_the_next_press_checks_again() {
+        // After the question, and after the error.
+        for result in [Ok(ids(2)), Err("fatal: bad".to_string())] {
+            let (mut state, _) = checked(AppIntent::CheckoutCommit, result.clone());
+            state.popups.clear();
+            check_of(&state.update(AppIntent::CheckoutCommit));
+        }
+
+        // An answer for an older repository clears it too.
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+        state.generation += 1;
+        state.update(AppIntent::LeftBehindChecked {
+            tag,
+            op: op.clone(),
+            head: cid("c0"),
+            result: Ok(ids(2)),
+        });
+        assert_eq!(state.popups, []);
+        check_of(&state.update(AppIntent::CheckoutCommit));
+
+        // An answer to some other check does not.
+        let stale = Tag {
+            seq: tag.seq + 1000,
+            ..tag
+        };
+        state.update(AppIntent::LeftBehindChecked {
+            tag: stale,
+            op,
+            head: cid("c0"),
+            result: Ok(ids(2)),
+        });
+        assert_eq!(state.popups, []);
+        assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
+    }
+
+    #[test]
+    fn an_answer_after_focus_moved_asks_nothing() {
+        for name in ["error", "filter"] {
+            for (intent, _) in moves() {
+                for result in [Ok(ids(2)), Ok(vec![]), Err("fatal: bad".to_string())] {
+                    let mut state = detached_on_commit();
+                    let (tag, op) = check_of(&state.update(intent.clone()));
+                    if name == "error" {
+                        state.push_error(ErrorPopup::new("Elsewhere", "x", "y"));
+                    } else {
+                        press_char(&mut state, '/');
+                        assert_eq!(state.key_focus(), KeyScope::Input);
+                    }
+                    let popups = state.popups.clone();
+                    let effects = state.update(AppIntent::LeftBehindChecked {
+                        tag,
+                        op,
+                        head: cid("c0"),
+                        result,
+                    });
+                    let case = format!("{name} {intent:?}");
+                    assert_eq!(effects, vec![], "{case}");
+                    assert_eq!(state.popups, popups, "{case}");
+                    assert_eq!(state.commits.pending, None, "{case}");
+                    assert_eq!(state.op_seq, None, "{case}");
+                    assert_eq!(
+                        state.notice,
+                        Some("Not asked: focus moved; try again".into()),
+                        "{case}"
+                    );
+                    assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+                    assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+                    assert_eq!(state.op_seq, None, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn y_runs_nothing_once_head_has_moved() {
+        for (intent, planned) in moves() {
+            let (mut state, _) = checked(intent.clone(), Ok(ids(2)));
+            let mut moved = state.clone();
+            moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+            assert_eq!(
+                moved.update(AppIntent::ConfirmLeaveCommits),
+                vec![],
+                "{intent:?}"
+            );
+            assert_eq!(moved.popups, [], "{intent:?}");
+            assert_eq!(moved.op_seq, None, "{intent:?}");
+            assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
+
+            let (_, op) = op_of(&state.update(AppIntent::ConfirmLeaveCommits));
+            assert_eq!(op, planned, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn the_hard_reset_question_runs_nothing_once_head_has_moved() {
+        let (mut state, _) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
+        let mut moved = state.clone();
+        moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+        assert_eq!(moved.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(moved.popups, []);
+        assert_eq!(moved.op_seq, None);
+        assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
+
+        // Back on a branch is a move too.
+        let mut on_main = state.clone();
+        on_main.branch = Some(on_branch("main"));
+        assert_eq!(on_main.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(on_main.op_seq, None);
+
+        let (_, op) = op_of(&state.update(AppIntent::ConfirmResetHard));
+        assert_eq!(op, reset_op(ResetMode::Hard));
     }
 
     #[test]
