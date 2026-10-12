@@ -1,0 +1,8 @@
+HTTP/2.0 201 Created
+Content-Type: application/json; charset=utf-8
+Location: https://api.github.com/repos/acme/widgets/pulls/42
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4990
+X-Ratelimit-Reset: 1700003600
+
+{"url":"https://api.github.com/repos/acme/widgets/pulls/42","id":1,"html_url":"https://github.com/acme/widgets/pull/42","number":42,"state":"open","title":"Add login","head":{"ref":"topic"},"base":{"ref":"main"}}

@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
+use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::submodule_list::SubmoduleList;
@@ -102,6 +103,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
+            Popup::PickList(list) => render_pick_list(list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
                 let text = format!("{}\n(y/n)", prompt.prompt);
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
@@ -334,6 +336,61 @@ fn render_recent(state: &AppState, list: &RecentList, top: bool, frame: &mut Fra
             .block(Block::bordered().title(title)),
         popup,
     );
+}
+
+/// The rows to pick from, under the list's purpose, with the cursor row
+/// reversed while the list is on top. Long rows are cut at the end, and
+/// rows scrolled out of a short screen are marked `▲`/`▼` on the border.
+fn render_pick_list(list: &PickList, top: bool, frame: &mut Frame, area: Rect) {
+    let title = format!(" {} ", list.purpose.title());
+    let room = usize::from(area.width.saturating_sub(2));
+    let rows: Vec<String> = list
+        .rows
+        .iter()
+        .map(|row| format!(" {} ", clip(row, 0, room.saturating_sub(2).max(1))))
+        .collect();
+    let width = rows
+        .iter()
+        .map(|row| width_of(row))
+        .chain([width_of(&title)])
+        .max()
+        .unwrap_or(0)
+        .min(room);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let pad = width.saturating_sub(width_of(row));
+            let style = if top && i == list.cursor {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            Line::styled(format!("{row}{}", " ".repeat(pad)), style)
+        })
+        .collect();
+    let popup = centered(
+        area,
+        u16::try_from(width + 2).unwrap_or(u16::MAX),
+        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, popup);
+    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
+    let total = lines.len();
+    let first = if top {
+        list.cursor.saturating_sub(shown - 1)
+    } else {
+        0
+    };
+    let mut block = Block::bordered().title(title);
+    if first > 0 {
+        block = block.title(Line::raw("▲").right_aligned());
+    }
+    if first + shown < total {
+        block = block.title_bottom(Line::raw("▼").right_aligned());
+    }
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).scroll((first, 0)).block(block), popup);
 }
 
 /// A one-line box holding the typed text, and the terminal cursor when it
@@ -809,6 +866,239 @@ mod tests {
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
             "{rows:#?}"
         );
+    }
+
+    #[test]
+    fn a_pick_list_shows_its_purpose_and_rows_with_the_cursor_reversed() {
+        use crate::pick_list::{PickList, PickPurpose};
+        let mut state = workspace(&["a.rs"]);
+        let rows = vec![
+            "origin  acme/widgets".into(),
+            "upstream  org/widgets".into(),
+        ];
+        state.popups = vec![Popup::PickList(PickList::new(
+            PickPurpose::TargetRemote,
+            rows,
+            1,
+        ))];
+        let (buffer, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Target remote "), "{rows:#?}");
+        let (x, y) = find(&rows, "upstream  org/widgets");
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+            "{rows:#?}"
+        );
+        let (x, y) = find(&rows, "origin  acme/widgets");
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+        assert!(
+            rows[11].starts_with(" enter pick  esc close  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_create_question_names_where_what_and_the_title_and_offers_no_enter() {
+        use crate::forge::ForgeRepo;
+        use crate::model::pull_request::PrDraft;
+        use crate::popup::ConfirmKind;
+        let repo = |owner: &str| ForgeRepo {
+            host: "github.com".into(),
+            owner: owner.into(),
+            name: "widgets".into(),
+        };
+        let mut state = workspace(&["a.rs"]);
+        state.pr_draft = Some(PrDraft {
+            branch: "topic".into(),
+            head_remote: "origin".into(),
+            head_repo: repo("me"),
+            head: "topic".into(),
+            targets: vec![],
+            target: Some(("upstream".into(), repo("acme"))),
+            bases: vec!["main".into()],
+            base: Some("main".into()),
+            title: "Add login".into(),
+        });
+        state.popups = vec![Popup::Confirm(ConfirmKind::CreatePullRequest)];
+        let (_, rows) = draw(&state, 100, 14);
+        assert!(contains(&rows, " Create pull request "), "{rows:#?}");
+        assert!(
+            contains(&rows, "acme/widgets: me:topic → main"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "Add login"), "{rows:#?}");
+        assert!(
+            rows[13].starts_with(" y create  n cancel  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    /// A 200-character remote row and a wide-character branch row.
+    fn long_and_wide_rows() -> Vec<String> {
+        vec![
+            format!("origin  acme/{}", "w".repeat(200)),
+            "upstream  組織/日本語のリポジトリ-🦀".into(),
+        ]
+    }
+
+    /// A create draft whose names and title are far longer than a screen.
+    fn long_draft() -> crate::model::pull_request::PrDraft {
+        use crate::forge::ForgeRepo;
+        let repo = |owner: &str| ForgeRepo {
+            host: "github.com".into(),
+            owner: owner.into(),
+            name: "w".repeat(90),
+        };
+        let head = format!("feature/{}-日本語", "x".repeat(120));
+        crate::model::pull_request::PrDraft {
+            branch: head.as_str().into(),
+            head_remote: "origin".into(),
+            head_repo: repo("me"),
+            head,
+            targets: vec![],
+            target: Some(("upstream".into(), repo("acme"))),
+            bases: vec!["release/2026-10".into()],
+            base: Some("release/2026-10".into()),
+            title: format!("Add login {} 🦀 ログイン", "word ".repeat(80)),
+        }
+    }
+
+    /// Every pull request popup over `state`, one at a time, drawn at
+    /// `width` x `height`; the rows of each.
+    fn each_pull_request_popup(width: u16, height: u16) -> Vec<(&'static str, Vec<String>)> {
+        use crate::pick_list::{PickList, PickPurpose};
+        let mut state = workspace(&["a.rs"]);
+        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
+            name: format!("feature/{}-日本語", "x".repeat(120))
+                .as_str()
+                .into(),
+            head: false,
+            upstream: Some("origin/x".into()),
+            track: crate::git::branches::Track::None,
+            merged: false,
+        }]));
+        state.pr_draft = Some(long_draft());
+        let popups = [
+            (
+                "menu",
+                Popup::Menu {
+                    id: MenuId::PullRequest,
+                    cursor: 2,
+                },
+            ),
+            (
+                "pick",
+                Popup::PickList(PickList::new(
+                    PickPurpose::TargetRemote,
+                    long_and_wide_rows(),
+                    1,
+                )),
+            ),
+            (
+                "title",
+                Popup::Prompt {
+                    kind: PromptKind::PullRequestTitle,
+                    input: LineInput::with_text(&long_draft().title),
+                },
+            ),
+            ("confirm", Popup::Confirm(ConfirmKind::CreatePullRequest)),
+        ];
+        popups
+            .into_iter()
+            .map(|(name, popup)| {
+                state.popups = vec![popup];
+                (name, draw(&state, width, height).1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_pull_request_popups_draw_at_every_size_without_panicking() {
+        for (width, height) in [(80, 24), (30, 10), (24, 6), (20, 5), (3, 3), (1, 1)] {
+            for (name, rows) in each_pull_request_popup(width, height) {
+                assert_eq!(rows.len(), usize::from(height), "{name} {width}x{height}");
+            }
+        }
+    }
+
+    #[test]
+    fn at_80_by_24_each_pull_request_popup_shows_what_matters() {
+        let drawn = each_pull_request_popup(80, 24);
+        let rows = |name: &str| &drawn.iter().find(|(n, _)| *n == name).unwrap().1;
+        let menu = rows("menu");
+        for label in ["Open in browser", "Copy URL", "Create pull request…"] {
+            assert!(contains(menu, label), "{menu:#?}");
+        }
+        let pick = rows("pick");
+        assert!(contains(pick, " Target remote "), "{pick:#?}");
+        // The long row is cut with an ellipsis inside the box; the wide one
+        // is whole.
+        let long = pick.iter().find(|r| r.contains("origin  acme/")).unwrap();
+        assert!(long.contains("w… │") || long.contains("w…│"), "{long:?}");
+        assert!(
+            contains(pick, "upstream  組織/日本語のリポジトリ-🦀"),
+            "{pick:#?}"
+        );
+        assert!(
+            contains(rows("title"), " Pull request title "),
+            "{:#?}",
+            rows("title")
+        );
+        let confirm = rows("confirm");
+        assert!(contains(confirm, " Create pull request "), "{confirm:#?}");
+        assert!(
+            contains(confirm, "Press y to create it on GitHub"),
+            "{confirm:#?}"
+        );
+    }
+
+    #[test]
+    fn a_long_create_question_keeps_the_answer_keys_in_sight_on_a_short_screen() {
+        for (width, height) in [(80, 8), (40, 8), (24, 6)] {
+            let drawn = each_pull_request_popup(width, height);
+            let confirm = &drawn.iter().find(|(n, _)| *n == "confirm").unwrap().1;
+            assert!(
+                contains(confirm, "Press y"),
+                "{width}x{height}: {confirm:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_narrow_pick_list_cuts_wide_glyphs_whole() {
+        let drawn = each_pull_request_popup(20, 5);
+        let pick = &drawn.iter().find(|(n, _)| *n == "pick").unwrap().1;
+        let row = pick.iter().find(|r| r.contains("upstream")).unwrap();
+        assert!(row.contains('…'), "{pick:#?}");
+        // Every drawn char of the wide row is one of its own: none split.
+        let own = "upstream  組織/日本語のリポジトリ-🦀…│ ";
+        assert!(row.chars().all(|c| own.contains(c)), "{row:?}");
+    }
+
+    #[test]
+    fn a_long_pick_list_scrolls_to_the_cursor_and_marks_hidden_rows() {
+        use crate::pick_list::{PickList, PickPurpose};
+        let mut state = workspace(&["a.rs"]);
+        let rows: Vec<String> = (0..30).map(|i| format!("base-{i:02}")).collect();
+        state.popups = vec![Popup::PickList(PickList::new(
+            PickPurpose::BaseBranch,
+            rows.clone(),
+            25,
+        ))];
+        let (_, drawn) = draw(&state, 80, 10);
+        assert!(contains(&drawn, "base-25"), "{drawn:#?}");
+        assert!(!contains(&drawn, "base-00"), "{drawn:#?}");
+        assert!(contains(&drawn, "▲") && contains(&drawn, "▼"), "{drawn:#?}");
+        state.popups = vec![Popup::PickList(PickList::new(
+            PickPurpose::BaseBranch,
+            rows,
+            0,
+        ))];
+        let (_, drawn) = draw(&state, 80, 10);
+        assert!(
+            contains(&drawn, "base-00") && !contains(&drawn, "▲"),
+            "{drawn:#?}"
+        );
+        assert!(contains(&drawn, "▼"), "{drawn:#?}");
     }
 
     #[test]

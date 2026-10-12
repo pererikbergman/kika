@@ -41,6 +41,7 @@ mod layout;
 mod list_filter;
 mod menu;
 mod model;
+mod pick_list;
 mod popup;
 mod popup_view;
 mod rebase_todo;
@@ -138,7 +139,8 @@ fn main() -> color_eyre::Result<ExitCode> {
     let mut state = AppState::new(cli.context())
         .with_location(repo, launch)
         .with_git_version(git_version)
-        .with_forge_hosts(config.forge_hosts.clone());
+        .with_forge_hosts(config.forge_hosts.clone())
+        .with_forge_links(config.forge_gitlab_hosts.clone(), config.browser.clone());
     state.emoji_zwj = emoji_zwj;
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;

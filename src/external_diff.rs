@@ -75,14 +75,29 @@ pub fn parse_command(value: &str) -> Result<Vec<OsString>, &'static str> {
     if value.contains(SHELL_BYTES) {
         return Err("The command needs a shell, which is never used");
     }
-    let argv: Vec<OsString> = value.split_ascii_whitespace().map(OsString::from).collect();
+    check_argv(value.split_ascii_whitespace().map(String::from).collect())
+}
+
+/// A configured argv, already split, as [`parse_command`] checks one:
+/// not empty, no control character, and the program a bare name or an
+/// absolute path. No shell ever sees it, so shell syntax is only text.
+pub fn check_argv(argv: Vec<String>) -> Result<Vec<OsString>, &'static str> {
+    if argv
+        .iter()
+        .any(|arg| arg.contains(|c: char| c.is_control()))
+    {
+        return Err("The command contains a control character");
+    }
     let Some(program) = argv.first() else {
         return Err("The command is empty");
     };
-    if program.to_string_lossy().contains('/') && !Path::new(program).is_absolute() {
+    if program.is_empty() {
+        return Err("The command is empty");
+    }
+    if program.contains('/') && !Path::new(program).is_absolute() {
         return Err("The program must be a bare name or an absolute path");
     }
-    Ok(argv)
+    Ok(argv.into_iter().map(OsString::from).collect())
 }
 
 /// The renderers to offer, in cycle order: `configured` (the global Kika

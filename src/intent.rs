@@ -10,7 +10,7 @@ use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
-use crate::forge::{ForgeRepo, ForgeStatus, PrBadge};
+use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
@@ -745,6 +745,31 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
         limited_until: Option<i64>,
+    },
+    /// Open the selected branch's pull request, or its merge requests, in
+    /// the browser the global config names.
+    OpenForgeUrl,
+    /// Put the selected branch's pull request or merge request list URL
+    /// on the clipboard.
+    CopyForgeUrl,
+    /// The browser could not be started, and why.
+    OpenUrlFailed(String),
+    /// Start a pull request for the selected branch: pick the target
+    /// remote and base branch where more than one fits, then the title.
+    CreatePrStart,
+    /// Move the pick list's cursor down or up.
+    PickNext,
+    PickPrev,
+    /// Take the row under the pick list's cursor.
+    PickSelect,
+    /// The title the pull request prompt was accepted with.
+    PullRequestTitled(String),
+    /// Create the pull request the open question describes.
+    ConfirmCreatePullRequest,
+    /// GitHub answered a create: the new number and page, or why not.
+    PullRequestCreated {
+        tag: Tag,
+        result: Result<(u64, String), CreateError>,
     },
 }
 

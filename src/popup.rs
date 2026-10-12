@@ -17,6 +17,7 @@ use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
+use crate::pick_list::PickList;
 use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
 use crate::worktree_list::WorktreeList;
@@ -46,6 +47,8 @@ pub enum Popup {
     Worktrees(WorktreeList),
     RemoveWorktree(RemoveWorktreeConfirm),
     Recent(RecentList),
+    /// One row to pick, such as a pull request's target remote.
+    PickList(PickList),
     /// Git or ssh asks something for a running fetch, pull or push.
     Credential(CredentialPrompt),
     /// "Undo this?" or "Redo this?", with what would happen.
@@ -424,6 +427,9 @@ pub enum ConfirmKind {
     /// Fold every `fixup!` commit into its target. It rewrites commits
     /// the user may not be looking at, so only `y` answers.
     Autosquash,
+    /// Open the pull request `AppState::pr_draft` describes. It reaches
+    /// GitHub, so only `y` answers it: never Enter.
+    CreatePullRequest,
 }
 
 impl ConfirmKind {
@@ -439,6 +445,7 @@ impl ConfirmKind {
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
             ConfirmKind::Autosquash => "Autosquash",
+            ConfirmKind::CreatePullRequest => "Create pull request",
         }
     }
 
@@ -484,6 +491,11 @@ impl ConfirmKind {
                  create one. (y/n)"
             }
             ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
+            // `AppState::confirm_question` names the repository, branches
+            // and title; this is the fallback when it cannot.
+            ConfirmKind::CreatePullRequest => {
+                "Create the pull request on GitHub?\nPress y to create, n or Esc to cancel"
+            }
         }
     }
 
@@ -496,6 +508,7 @@ impl ConfirmKind {
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
             ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
+            ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
         }
     }
 
@@ -506,7 +519,8 @@ impl ConfirmKind {
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout
-            | ConfirmKind::Autosquash => None,
+            | ConfirmKind::Autosquash
+            | ConfirmKind::CreatePullRequest => None,
         }
     }
 }
@@ -545,6 +559,8 @@ pub enum PromptKind {
     TagMessage,
     /// The pattern to add to `.gitignore`, filled with the selected file's.
     IgnorePattern,
+    /// A new pull request's title, filled with the branch name.
+    PullRequestTitle,
 }
 
 impl PromptKind {
@@ -565,6 +581,7 @@ impl PromptKind {
             PromptKind::TagName => "New tag",
             PromptKind::TagMessage => "Tag message",
             PromptKind::IgnorePattern => "Add to .gitignore",
+            PromptKind::PullRequestTitle => "Pull request title",
         }
     }
 
@@ -585,6 +602,7 @@ impl PromptKind {
             PromptKind::TagName => AppIntent::TagNamed(text),
             PromptKind::TagMessage => AppIntent::TagMessaged(text),
             PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
+            PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
         }
     }
 }

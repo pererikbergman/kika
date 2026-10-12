@@ -13,6 +13,9 @@ use crate::keymap::{
     merge_disabled, never, no_commit_selected, reset_disabled, stage_all_disabled,
 };
 use crate::model::AppState;
+use crate::model::pull_request::{
+    commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
+};
 use crate::popup::{ConfirmKind, PromptKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,8 @@ pub enum MenuId {
     Bisect,
     /// Copy the selected commit's hash or message to the clipboard.
     Copy,
+    /// Open, copy or create the selected branch's pull request.
+    PullRequest,
 }
 
 impl MenuId {
@@ -41,6 +46,7 @@ impl MenuId {
             MenuId::Stash => "Stash",
             MenuId::Bisect => "Bisect",
             MenuId::Copy => "Copy",
+            MenuId::PullRequest => "Pull request",
         }
     }
 }
@@ -282,6 +288,29 @@ static COPY: &[MenuItem] = &[
         intent: AppIntent::CopyCommitText(CopyWhat::Message),
         disabled: no_commit_selected,
     },
+    MenuItem {
+        label: "Forge URL",
+        intent: AppIntent::CopyCommitText(CopyWhat::ForgeUrl),
+        disabled: commit_url_disabled,
+    },
+];
+
+static PULL_REQUEST: &[MenuItem] = &[
+    MenuItem {
+        label: "Open in browser",
+        intent: AppIntent::OpenForgeUrl,
+        disabled: open_url_disabled,
+    },
+    MenuItem {
+        label: "Copy URL",
+        intent: AppIntent::CopyForgeUrl,
+        disabled: copy_url_disabled,
+    },
+    MenuItem {
+        label: "Create pull request…",
+        intent: AppIntent::CreatePrStart,
+        disabled: create_disabled,
+    },
 ];
 
 pub fn items(id: MenuId) -> &'static [MenuItem] {
@@ -293,6 +322,7 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
         MenuId::Bisect => BISECT,
         MenuId::Copy => COPY,
         MenuId::Stash => STASH,
+        MenuId::PullRequest => PULL_REQUEST,
     }
 }
 
