@@ -294,6 +294,7 @@ mod tests {
             mode: StashMode::All,
             message: None,
             paths: vec![],
+            restore: vec![],
         };
         let worktree = [Scope::Files, Scope::Branch, Scope::Diff, Scope::Stash];
         let cases: [(GitOp, &[Scope]); 6] = [

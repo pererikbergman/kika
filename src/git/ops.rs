@@ -166,10 +166,14 @@ pub enum GitOp {
     MergeTool(RepoPath),
     /// Put changes aside as a new `stash@{0}`, as `mode` says, with the
     /// message given or git's own. With `paths`, only those files go.
+    /// `restore` holds the old sides of staged renames among them: git
+    /// no longer knows those paths in the index, so they are left out of
+    /// the pathspec and checked out from `HEAD` once the push is done.
     StashPush {
         mode: StashMode,
         message: Option<String>,
         paths: Vec<RepoPath>,
+        restore: Vec<RepoPath>,
     },
     /// Apply the entry to the worktree and keep it in the list.
     StashApply(StashRef),
@@ -284,6 +288,20 @@ pub const STASH_LIST_CHANGED: &str = "The stash list changed; refresh and try ag
 /// `refs/stash` already names, so the rename could only lose one copy.
 pub const STASH_COPY: &str =
     "Another stash holds the same commit as this one; drop the copy first, then rename";
+
+/// Why a stash of a staged rename is refused: something sits at its old
+/// path, which the push would leave alone and the restore overwrite.
+pub const STASH_RENAME_TAKEN: &str = "A file now sits at the renamed file's old path";
+
+/// What a selected-file stash takes: the push's mode and pathspec, and the
+/// old sides of staged renames, restored after it. See
+/// [`GitOp::stash_files_for`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashSet {
+    pub mode: StashMode,
+    pub paths: Vec<RepoPath>,
+    pub restore: Vec<RepoPath>,
+}
 
 /// How a merge records the other branch's commits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,57 +442,75 @@ impl GitOp {
         }
     }
 
-    /// What stashing only `entry` puts aside: its path, plus the old one of
-    /// a staged rename so both sides go together. An untracked file needs
-    /// `-u`, since git does not match untracked files by pathspec without
-    /// it. Conflicts cannot be stashed.
-    pub fn stash_file_for(entry: &FileEntry) -> Option<(StashMode, Vec<RepoPath>)> {
+    /// What stashing only `entry` puts aside. A staged rename goes as one
+    /// change: its new path in the pathspec and its old one restored after
+    /// the push, since git no longer knows the old path in the index and
+    /// refuses it as a pathspec. Any other entry names its paths, a copy's
+    /// source too. An untracked file needs `-u`, since git does not match
+    /// untracked files by pathspec without it. Conflicts cannot be stashed.
+    pub fn stash_file_for(entry: &FileEntry) -> Option<StashSet> {
         let mode = match entry.kind {
             EntryKind::Conflicted => return None,
             EntryKind::Untracked => StashMode::IncludeUntracked,
             _ => StashMode::All,
         };
-        let paths = entry
-            .orig_path
-            .iter()
-            .chain([&entry.path])
-            .cloned()
-            .collect();
-        Some((mode, paths))
+        let path = entry.path.clone();
+        match (&entry.orig_path, entry.index) {
+            (Some(old), 'R') => Some(StashSet {
+                mode,
+                paths: vec![path],
+                restore: vec![old.clone()],
+            }),
+            (orig, _) => Some(StashSet {
+                mode,
+                paths: orig.iter().cloned().chain([path]).collect(),
+                restore: vec![],
+            }),
+        }
     }
 
     /// What stashing the marked `entries` puts aside: every path each one
     /// takes, once, in the order first seen, with `-u` if any of them is
     /// untracked. Nothing marked, or any conflict among them, stashes
     /// nothing, so a push never runs on a set the user did not mean. Nor
-    /// does a staged rename or deletion beside an untracked file: with
-    /// `-u`, current git saves the stash and then fails to clean up a path
-    /// that is in neither the index nor the worktree, leaving the files in
-    /// place as well as in the stash.
-    pub fn stash_files_for(entries: &[&FileEntry]) -> Option<(StashMode, Vec<RepoPath>)> {
+    /// does a rename whose old path is also marked: the restore would
+    /// overwrite what the push took. Nor does a staged deletion beside an
+    /// untracked file: with `-u`, git saves the stash and then fails to
+    /// clean up a pathspec that is in neither the index nor the worktree,
+    /// leaving the files in place as well as in the stash. A rename's old
+    /// path is never in the pathspec, so a rename can go with `-u`.
+    pub fn stash_files_for(entries: &[&FileEntry]) -> Option<StashSet> {
         if entries.is_empty() {
             return None;
         }
-        let mut mode = StashMode::All;
-        let mut paths: Vec<RepoPath> = Vec::new();
-        for entry in entries {
-            let (entry_mode, entry_paths) = Self::stash_file_for(entry)?;
-            if entry_mode == StashMode::IncludeUntracked {
-                mode = StashMode::IncludeUntracked;
-            }
-            for path in entry_paths {
-                if !paths.contains(&path) {
-                    paths.push(path);
+        let mut set = StashSet {
+            mode: StashMode::All,
+            paths: Vec::new(),
+            restore: Vec::new(),
+        };
+        let add = |list: &mut Vec<RepoPath>, more: Vec<RepoPath>| {
+            for path in more {
+                if !list.contains(&path) {
+                    list.push(path);
                 }
             }
+        };
+        for entry in entries {
+            let one = Self::stash_file_for(entry)?;
+            if one.mode == StashMode::IncludeUntracked {
+                set.mode = StashMode::IncludeUntracked;
+            }
+            add(&mut set.paths, one.paths);
+            add(&mut set.restore, one.restore);
         }
-        let gone = entries
-            .iter()
-            .any(|e| e.orig_path.is_some() || e.index == 'D');
-        if gone && mode == StashMode::IncludeUntracked {
+        if set.restore.iter().any(|old| set.paths.contains(old)) {
             return None;
         }
-        Some((mode, paths))
+        let deleted = entries.iter().any(|e| e.index == 'D');
+        if deleted && set.mode == StashMode::IncludeUntracked {
+            return None;
+        }
+        Some(set)
     }
 }
 
@@ -571,10 +607,13 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // untracked files through a `:/` pathspec of git's own, which a
         // literal reading turns into a name that matches nothing, and they
         // would stay in the worktree as well as in the stash.
+        // A rename's old path is in `restore`, not here: see
+        // `GitOp::StashPush`.
         GitOp::StashPush {
             mode,
             message,
             paths,
+            ..
         } => {
             let cmd = GitCommand::new("stash").arg("push");
             let cmd = match mode {
@@ -790,6 +829,73 @@ pub fn op_command(op: &GitOp) -> GitCommand {
     cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
 }
 
+/// `cmd`, then `--` and each name from its raw bytes, read literally.
+fn with_literal_paths(cmd: GitCommand, paths: &[RepoPath]) -> GitCommand {
+    paths
+        .iter()
+        .fold(cmd.arg("--"), |cmd, p| cmd.arg(p.as_os_str()))
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("LC_ALL", "C")
+}
+
+/// Put the old sides of stashed renames back as they are at `head`, the
+/// commit the push was made on. The id is hex digits only, so it cannot be
+/// read as an option.
+fn restore_command(head: &CommitId, restore: &[RepoPath]) -> GitCommand {
+    let cmd = GitCommand::new("checkout").arg("-q").arg(head.as_str());
+    with_literal_paths(cmd, restore)
+}
+
+/// Anything git knows at the old paths, in the index or the worktree,
+/// ignored files too: the restore would overwrite it.
+fn restore_taken_command(restore: &[RepoPath]) -> GitCommand {
+    let cmd = GitCommand::new("ls-files")
+        .arg("-z")
+        .arg("--cached")
+        .arg("--others");
+    with_literal_paths(cmd, restore)
+}
+
+/// `HEAD` as a commit id, for a restore that must use the tree the push
+/// was made on.
+fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
+    let cmd = GitCommand::new("rev-parse")
+        .arg("--verify")
+        .arg("-q")
+        .arg("HEAD^{commit}")
+        .env("LC_ALL", "C");
+    let output = run_checked(runner, &cmd)?;
+    CommitId::parse(String::from_utf8_lossy(&output.stdout).trim())
+        .ok_or_else(|| "Could not read HEAD".to_string())
+}
+
+/// Stash a set with staged renames in it: the push without their old
+/// paths, then those checked out from `HEAD`, so the worktree is clean for
+/// both sides. Fails closed: nothing runs when the old paths are taken.
+fn push_with_restore(
+    runner: &dyn GitRunner,
+    op: &GitOp,
+    restore: &[RepoPath],
+) -> Result<(), String> {
+    let head = head_commit(runner)?;
+    let taken = run_checked(runner, &restore_taken_command(restore))?;
+    if !taken.stdout.is_empty() {
+        return Err(STASH_RENAME_TAKEN.into());
+    }
+    run_checked(runner, &op_command(op))?;
+    run_checked(runner, &restore_command(&head, restore))
+        .map(|_| ())
+        .map_err(|why| {
+            let names: Vec<&str> = restore.iter().map(RepoPath::display).collect();
+            format!(
+                "{why}\nThe stash was saved, but {} is still staged as deleted; \
+                 git checkout HEAD -- {} restores it.",
+                names.join(", "),
+                names.join(" ")
+            )
+        })
+}
+
 /// `git stash store`: the entry's commit again, as `stash@{0}`, under
 /// `message`. The id is hex digits only, so it cannot be read as an option.
 fn store_command(stash: &StashRef, message: &str) -> GitCommand {
@@ -934,6 +1040,9 @@ fn run_op_with(
             mode: StashMode::Staged,
             ..
         } => staged_stash_supported(runner)?,
+        GitOp::StashPush { restore, .. } if !restore.is_empty() => {
+            return push_with_restore(runner, op, restore);
+        }
         _ => {}
     }
     if let GitOp::StashRename { stash, message } = op {
@@ -3647,6 +3756,25 @@ mod tests {
             mode,
             message: message.map(Into::into),
             paths: paths.iter().map(|&p| p.into()).collect(),
+            restore: vec![],
+        }
+    }
+
+    fn set(mode: StashMode, paths: &[&str], restore: &[&str]) -> StashSet {
+        let list = |ps: &[&str]| ps.iter().map(|&p| RepoPath::from(p)).collect();
+        StashSet {
+            mode,
+            paths: list(paths),
+            restore: list(restore),
+        }
+    }
+
+    fn set_push(set: StashSet, message: Option<&str>) -> GitOp {
+        GitOp::StashPush {
+            mode: set.mode,
+            message: message.map(Into::into),
+            paths: set.paths,
+            restore: set.restore,
         }
     }
 
@@ -3705,18 +3833,11 @@ mod tests {
                 &untracked,
                 &["stash", "push", "-u", "-m", "m", "--", "new.rs"],
             ),
-            (
-                &renamed,
-                &["stash", "push", "-m", "m", "--", "old.rs", "new name.rs"],
-            ),
+            // The old side is restored after the push, never named to it.
+            (&renamed, &["stash", "push", "-m", "m", "--", "new name.rs"]),
         ];
         for (entry, expected) in cases {
-            let (mode, paths) = GitOp::stash_file_for(entry).unwrap();
-            let op = GitOp::StashPush {
-                mode,
-                message: Some("m".into()),
-                paths,
-            };
+            let op = set_push(GitOp::stash_file_for(entry).unwrap(), Some("m"));
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
             assert_eq!(
@@ -3733,37 +3854,58 @@ mod tests {
         let untracked = entry("new.rs", '?', '?', EntryKind::Untracked);
         let mut renamed = entry("new name.rs", 'R', '.', EntryKind::Renamed);
         renamed.orig_path = Some("old.rs".into());
-        let paths = |ps: &[&str]| ps.iter().map(|&p| RepoPath::from(p)).collect::<Vec<_>>();
+        let mut copied = entry("copy.rs", 'C', '.', EntryKind::Renamed);
+        copied.orig_path = Some("a.rs".into());
 
+        // A staged rename goes as one change: the new side in the
+        // pathspec, the old side restored after the push.
         assert_eq!(
-            GitOp::stash_files_for(&[&changed, &renamed]),
-            Some((StashMode::All, paths(&["a.rs", "old.rs", "new name.rs"])))
+            GitOp::stash_files_for(&[&renamed]),
+            Some(set(StashMode::All, &["new name.rs"], &["old.rs"]))
+        );
+        assert_eq!(
+            GitOp::stash_files_for(&[&changed, &renamed, &renamed]),
+            Some(set(StashMode::All, &["a.rs", "new name.rs"], &["old.rs"]))
         );
         assert_eq!(
             GitOp::stash_files_for(&[&changed, &untracked]),
-            Some((StashMode::IncludeUntracked, paths(&["a.rs", "new.rs"])))
+            Some(set(StashMode::IncludeUntracked, &["a.rs", "new.rs"], &[]))
         );
-        // A rename's old path that is also listed on its own goes once,
-        // where it was first seen.
-        let deleted_old = entry("old.rs", 'D', '.', EntryKind::Changed);
+        // Its old path is never in the pathspec, so it can go with `-u`.
         assert_eq!(
-            GitOp::stash_files_for(&[&renamed, &deleted_old, &renamed]),
-            Some((StashMode::All, paths(&["old.rs", "new name.rs"])))
+            GitOp::stash_files_for(&[&renamed, &untracked]),
+            Some(set(
+                StashMode::IncludeUntracked,
+                &["new name.rs", "new.rs"],
+                &["old.rs"]
+            ))
         );
-        // A rename beside an untracked file is refused rather than half
-        // done.
-        assert_eq!(GitOp::stash_files_for(&[&renamed, &untracked]), None);
-        // So is a staged deletion; an unstaged one is still on the index.
+        // A copy's source is still in the index, so it is named.
+        assert_eq!(
+            GitOp::stash_files_for(&[&copied]),
+            Some(set(StashMode::All, &["a.rs", "copy.rs"], &[]))
+        );
+        // A rename whose old path is also marked is refused: the restore
+        // would overwrite what the push took.
+        let at_old = entry("old.rs", '?', '?', EntryKind::Untracked);
+        assert_eq!(GitOp::stash_files_for(&[&renamed, &at_old]), None);
+        assert_eq!(GitOp::stash_files_for(&[&at_old, &renamed]), None);
+        // A staged deletion beside an untracked file is refused rather
+        // than half done; an unstaged one is still on the index.
         let staged_deleted = entry("gone.rs", 'D', '.', EntryKind::Changed);
         let unstaged_deleted = entry("gone.rs", '.', 'D', EntryKind::Changed);
         assert_eq!(GitOp::stash_files_for(&[&untracked, &staged_deleted]), None);
         assert_eq!(
             GitOp::stash_files_for(&[&unstaged_deleted, &untracked]),
-            Some((StashMode::IncludeUntracked, paths(&["gone.rs", "new.rs"])))
+            Some(set(
+                StashMode::IncludeUntracked,
+                &["gone.rs", "new.rs"],
+                &[]
+            ))
         );
         assert_eq!(
             GitOp::stash_files_for(&[&staged_deleted]),
-            Some((StashMode::All, paths(&["gone.rs"])))
+            Some(set(StashMode::All, &["gone.rs"], &[]))
         );
         // Nothing, or any conflict, stashes nothing.
         let conflicted = entry("both.rs", 'U', 'U', EntryKind::Conflicted);
@@ -3775,15 +3917,176 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_is_pushed_without_its_old_path_then_restored_from_head() {
+        let head = "ab".repeat(20);
+        let op = set_push(
+            set(
+                StashMode::IncludeUntracked,
+                &["new.rs", "u.rs"],
+                &["-old.rs"],
+            ),
+            Some("m"),
+        );
+        let push = op_command(&op);
+        assert_eq!(
+            argv(&push),
+            ["stash", "push", "-u", "-m", "m", "--", "new.rs", "u.rs"]
+        );
+        let literal = [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")];
+        assert_eq!(literal_env(&push), literal);
+        let restore = restore_command(&oid(&head), &["-old.rs".into()]);
+        assert_eq!(argv(&restore), ["checkout", "-q", &head, "--", "-old.rs"]);
+        assert_eq!(literal_env(&restore), literal);
+
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(format!("{head}\n").as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "-old.rs"],
+                ok(b""),
+            )
+            .expect(
+                &["stash", "push", "-u", "-m", "m", "--", "new.rs", "u.rs"],
+                ok(b""),
+            )
+            .expect(&["checkout", "-q", &head, "--", "-old.rs"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_rename_whose_old_path_is_taken_runs_no_push() {
+        let head = "ab".repeat(20);
+        let op = set_push(set(StashMode::All, &["new.rs"], &["old.rs"]), None);
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
+                ok(b"old.rs\0"),
+            );
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_restore_says_the_stash_was_saved_and_how_to_restore() {
+        let head = "ab".repeat(20);
+        let op = set_push(set(StashMode::All, &["new.rs"], &["old.rs"]), None);
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
+                ok(b""),
+            )
+            .expect(&["stash", "push", "--", "new.rs"], ok(b""))
+            .expect(
+                &["checkout", "-q", &head, "--", "old.rs"],
+                GitOutput {
+                    success: false,
+                    stdout: vec![],
+                    stderr: b"fatal: index.lock exists\n".to_vec(),
+                },
+            );
+        assert_eq!(
+            run_op(&runner, &op),
+            Err(
+                "fatal: index.lock exists\nThe stash was saved, but old.rs is still \
+                 staged as deleted; git checkout HEAD -- old.rs restores it."
+                    .into()
+            )
+        );
+        runner.assert_done();
+    }
+
+    /// A repo with `old.txt` committed and staged as renamed to `new.txt`,
+    /// with its content changed.
+    fn staged_rename_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::git;
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        std::fs::write(dir.join("old.txt"), "old\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "old"]);
+        git(dir, &["mv", "--", "old.txt", "new.txt"]);
+        assert_eq!(
+            git(dir, &["status", "--porcelain"]),
+            b"R  old.txt -> new.txt\n"
+        );
+        tmp
+    }
+
+    fn stash_count(dir: &Path) -> usize {
+        let list = crate::git::fake::git(dir, &["stash", "list"]);
+        list.iter().filter(|&&b| b == b'\n').count()
+    }
+
+    #[test]
+    fn a_staged_rename_is_stashed_whole_and_pops_back_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = staged_rename_repo();
+        let dir = tmp.path();
+        let renamed = FileEntry {
+            orig_path: Some("old.txt".into()),
+            ..entry("new.txt", 'R', '.', EntryKind::Renamed)
+        };
+        let op = set_push(GitOp::stash_file_for(&renamed).unwrap(), None);
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &op).unwrap();
+
+        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
+        assert_eq!(stash_count(dir), 1);
+        assert_eq!(
+            git(dir, &["stash", "show", "--name-status", "stash@{0}"]),
+            b"R100\told.txt\tnew.txt\n"
+        );
+
+        git(dir, &["stash", "pop", "-q"]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new.txt")).unwrap(),
+            "old\n"
+        );
+        assert!(!dir.join("old.txt").exists());
+        git(dir, &["add", "-A"]);
+        assert_eq!(
+            git(dir, &["diff", "HEAD", "-M", "--name-status"]),
+            b"R100\told.txt\tnew.txt\n"
+        );
+    }
+
+    #[test]
+    fn a_file_back_at_the_old_path_stops_the_stash_before_git_pushes_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = staged_rename_repo();
+        let dir = tmp.path();
+        let op = set_push(set(StashMode::All, &["new.txt"], &["old.txt"]), None);
+        // It appeared after the set was chosen.
+        std::fs::write(dir.join("old.txt"), "mine\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("old.txt")).unwrap(),
+            "mine\n"
+        );
+    }
+
+    #[test]
     fn a_stash_of_several_files_names_them_all_after_the_separator() {
         let changed = entry("-a.rs", '.', 'M', EntryKind::Changed);
         let untracked = entry("*.txt", '?', '?', EntryKind::Untracked);
-        let (mode, paths) = GitOp::stash_files_for(&[&changed, &untracked]).unwrap();
-        let cmd = op_command(&GitOp::StashPush {
-            mode,
-            message: Some("m".into()),
-            paths,
-        });
+        let set = GitOp::stash_files_for(&[&changed, &untracked]).unwrap();
+        let cmd = op_command(&set_push(set, Some("m")));
         assert_eq!(
             argv(&cmd),
             ["stash", "push", "-u", "-m", "m", "--", "-a.rs", "*.txt"]
@@ -3800,12 +4103,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let mut untracked = entry("x", '?', '?', EntryKind::Untracked);
         untracked.path = RepoPath::from_bytes(b"x\xff");
-        let (mode, paths) = GitOp::stash_file_for(&untracked).unwrap();
-        let cmd = op_command(&GitOp::StashPush {
-            mode,
-            message: None,
-            paths,
-        });
+        let cmd = op_command(&set_push(GitOp::stash_file_for(&untracked).unwrap(), None));
         let args: Vec<&[u8]> = cmd.args().iter().map(|a| a.as_bytes()).collect();
         assert_eq!(args, [&b"stash"[..], b"push", b"-u", b"--", b"x\xff"]);
     }
@@ -4207,16 +4505,8 @@ mod tests {
         std::fs::write(dir.join("b.txt"), other).unwrap();
         let runner = crate::git::CliRunner::isolated(dir);
         let a = entry("a.txt", '.', 'M', EntryKind::Changed);
-        let (mode, paths) = GitOp::stash_file_for(&a).unwrap();
-        run_op(
-            &runner,
-            &GitOp::StashPush {
-                mode,
-                message: None,
-                paths,
-            },
-        )
-        .unwrap();
+        let op = set_push(GitOp::stash_file_for(&a).unwrap(), None);
+        run_op(&runner, &op).unwrap();
         assert_eq!(read(dir, "a.txt"), "a\n");
         assert_eq!(std::fs::read(dir.join("b.txt")).unwrap(), other);
         assert_eq!(porcelain(dir), " M b.txt\n");
@@ -4224,16 +4514,8 @@ mod tests {
         // An untracked file goes too, with `-u`.
         std::fs::write(dir.join("new.txt"), "new\n").unwrap();
         let new = entry("new.txt", '?', '?', EntryKind::Untracked);
-        let (mode, paths) = GitOp::stash_file_for(&new).unwrap();
-        run_op(
-            &runner,
-            &GitOp::StashPush {
-                mode,
-                message: None,
-                paths,
-            },
-        )
-        .unwrap();
+        let op = set_push(GitOp::stash_file_for(&new).unwrap(), None);
+        run_op(&runner, &op).unwrap();
         assert!(!dir.join("new.txt").exists());
         assert_eq!(porcelain(dir), " M b.txt\n");
         assert_eq!(real_entries(dir).len(), 2);
