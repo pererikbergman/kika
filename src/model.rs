@@ -16388,6 +16388,14 @@ mod tests {
             Some("Path cannot be read safely with this Git".into())
         );
 
+        // Read with newlines, a missing worktree cannot be verified either,
+        // but being gone is the reason worth showing.
+        let mut gone_unsure = four_worktrees();
+        gone_unsure[2].unsure = true;
+        let mut state = with_worktrees(gone_unsure, 2);
+        press_char(&mut state, 'd');
+        assert_eq!(state.notice, Some("Worktree is missing".into()));
+
         let mut state = with_worktrees(four_worktrees(), 1);
         state.op_seq = Some(99);
         press_char(&mut state, 'd');

@@ -133,6 +133,9 @@ pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
         Some("Switch to another worktree first".into())
     } else if worktree.locked {
         Some("Worktree is locked".into())
+    } else if worktree.unsure && worktree.prunable {
+        // A missing directory cannot be verified; being gone is the reason.
+        Some("Worktree is missing".into())
     } else if worktree.unsure {
         Some(UNSURE.into())
     } else if state.op_seq.is_some() {
