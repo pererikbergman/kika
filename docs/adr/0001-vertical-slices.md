@@ -156,7 +156,10 @@ Expected baseline changes. Each slice PR runs `noupling scan . && noupling basel
 | `coupling_violation:src/features -> src/forge` | `coupling_violation:src/model -> src/forge` |
 | `coupling_violation:src/e2e -> src/features` | `coupling_violation:src/e2e -> src/model` |
 | `red_flag:fused_sibling:src/features -> src/git` | `red_flag:fused_sibling:src/model -> src/git` |
+| `red_flag:fused_sibling:src/features -> src/forge` | |
 | `gravity_well:*`, `zone_flag:src/features/*`, `low_cohesion:src/features/*` (noupling says these do not score) | `low_cohesion:src/model`, and the remaining `src/model` fingerprints once that directory is empty |
+
+The forge red flag comes from noupling's median threshold moving as `src/model` sheds git imports, not from new forge imports.
 
 Never allowed: any `cycle:*`; any `rule_violation:*`; `coupling_violation:src/features/<a> -> src/features/<b>` for sibling features; `coupling_violation:src/git -> src/features`; `coupling_violation:src/forge -> src/features`.
 
