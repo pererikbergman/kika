@@ -7,22 +7,21 @@ use std::sync::LazyLock;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
-use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::external_diff::NO_RENDERER;
 use crate::features::branches::{remotes, tags};
+use crate::features::commits::{Crossing, with_stacked_branches};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::{
     blame, command_log, commits, conflicts, custom_commands, operation, pull_requests, repos,
     review, submodules, sync, worktrees,
 };
-use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
-use crate::git::{branch_tips, version};
+use crate::git::version;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
@@ -1328,34 +1327,6 @@ pub(crate) fn commit_source_disabled(state: &AppState, open: &CommitFilesList) -
     merge.then_some("Cannot pick from a merge commit".into())
 }
 
-/// Why picks from `range` cannot join the custom patch: it holds another
-/// commit's.
-pub(crate) fn other_commit_disabled(state: &AppState, range: &CommitRange) -> Option<Reason> {
-    match &state.custom_patch {
-        Some(patch) if !patch.is_from(range) => Some(patch.other_commit_notice().into()),
-        _ => None,
-    }
-}
-
-/// Why the selected commit file cannot be picked whole.
-pub(crate) fn patch_file_disabled(state: &AppState) -> Option<Reason> {
-    let Some(open) = &state.commits.open else {
-        return Some("No commit open".into());
-    };
-    if let Some(reason) = list_guard(state, false)
-        .or_else(|| commit_source_disabled(state, open))
-        .or_else(|| other_commit_disabled(state, &open.range))
-    {
-        return Some(reason);
-    }
-    match open.selected_file().map(|f| f.status) {
-        None => Some("No file selected".into()),
-        Some('R') => Some(PatchError::Renamed.message().into()),
-        Some('C') => Some(PatchError::Copied.message().into()),
-        Some(_) => None,
-    }
-}
-
 fn no_file_selected(state: &AppState) -> Option<Reason> {
     let selected = state.selected.and_then(|i| state.files.get(i));
     selected.is_none().then_some("No file selected".into())
@@ -1755,7 +1726,7 @@ pub(crate) const TIPS_UNKNOWN: &str = "Reading the branches; try again in a mome
 
 /// Why a rewrite on an older git cannot go ahead: reading the branches
 /// failed, so whether one would be left behind is not known.
-fn tips_failed(error: &str) -> String {
+pub(crate) fn tips_failed(error: &str) -> String {
     let first = error.lines().next().unwrap_or_default();
     format!("Could not read the branches ({first}); press r to retry")
 }
@@ -1794,55 +1765,6 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
     with_stacked_branches(state, plan, crossings)
 }
 
-/// A log commit a plan moves, `moved`, and the rows it moves past:
-/// `len` of them from `from`. A branch on one of those would change what
-/// it holds.
-struct Crossing {
-    moved: usize,
-    from: usize,
-    len: usize,
-}
-
-/// `plan` as it will run, checked against the branches stacked on its
-/// commits. With git 2.38 or newer they move along (`--update-refs`), so
-/// only a `crossings` move that would change what one holds is refused;
-/// with an older git any stacked branch would be left behind, so the plan
-/// is refused.
-fn with_stacked_branches(
-    state: &AppState,
-    mut plan: RebasePlan,
-    crossings: &[Crossing],
-) -> Result<RebasePlan, Reason> {
-    let commits = &state.commits;
-    let rows = commits.rows.as_slice();
-    plan.update_refs = state.git_has(version::UPDATE_REFS);
-    let head = match state.branch.as_ref().map(|b| &b.head) {
-        Some(Head::Branch(name)) => Some(format!("refs/heads/{name}").into_bytes()),
-        _ => None,
-    };
-    let stacked =
-        |tips, from: usize, len| branch_tips::stacked(&rows[from..], len, tips, head.as_deref());
-    if !plan.update_refs {
-        let tips = match (&commits.tips, &commits.tips_error) {
-            (Some(tips), _) => tips,
-            (None, Some(error)) => return Err(tips_failed(error).into()),
-            (None, None) => return Err(TIPS_UNKNOWN.into()),
-        };
-        if let Some(name) = stacked(tips, 0, plan.steps.len()).first() {
-            return Err(branch_tips::left_behind(name).into());
-        }
-    } else if let Some(tips) = &commits.tips {
-        // Unknown tips are left to the sequence editor, which checks too.
-        for crossing in crossings {
-            if let Some(name) = stacked(tips, crossing.from, crossing.len).first() {
-                let oid = &rows[crossing.moved].oid;
-                return Err(rebase_plan::crossing(oid, name).into());
-            }
-        }
-    }
-    Ok(plan)
-}
-
 /// The plan that folds every `fixup!` commit in the log into its target,
 /// as it will run. Each fixup moves down past the commits between it and
 /// its target, so with `--update-refs` a branch on the fixup or on one of
@@ -1879,104 +1801,6 @@ pub(crate) fn autosquash_disabled(state: &AppState) -> Option<Reason> {
         .or_else(|| commit_action_disabled(state))
         .or_else(|| in_progress_disabled(state))
         .or_else(|| autosquash_plan(state).err())
-}
-
-/// Why the custom patch's rewrite `choice` cannot run now, the first of:
-/// nothing picked, an operation running or in progress, a tracked change
-/// (it would mix into the rewrite), a narrowed log (the plan is made from
-/// its rows), a source not loaded or not rewritable, and the plan itself,
-/// which for a move needs the cursor on another log commit.
-pub(crate) fn patch_rewrite_disabled(state: &AppState, choice: PatchChoice) -> Option<Reason> {
-    patch_state_disabled(state).or_else(|| match patch_action(state, choice) {
-        Ok(action) => patch_plan(state, &action).err(),
-        Err(reason) => Some(reason),
-    })
-}
-
-/// [`patch_rewrite_disabled`] for `action` as it was asked about, its
-/// target fixed then.
-pub(crate) fn patch_action_disabled(state: &AppState, action: &PatchAction) -> Option<Reason> {
-    patch_state_disabled(state).or_else(|| patch_plan(state, action).err())
-}
-
-/// Why the patch is empty.
-pub(crate) const PATCH_EMPTY: &str = "The custom patch is empty";
-
-fn patch_state_disabled(state: &AppState) -> Option<Reason> {
-    let Some(patch) = state.custom_patch.as_ref().filter(|p| !p.is_empty()) else {
-        return Some(PATCH_EMPTY.into());
-    };
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    if let Some(reason) = in_progress_disabled(state) {
-        return Some(reason);
-    }
-    if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
-        return Some("Commit or stash your changes first".into());
-    }
-    if state.commits.query.is_active() || !state.commits.filter.is_empty() {
-        return Some(CLEAR_LOG_FILTER.into());
-    }
-    let rows = &state.commits.rows;
-    let source = patch.source.oid.as_str();
-    match rows.iter().find(|row| row.oid == source) {
-        None => Some("The patch's commit is not loaded; move down to load more".into()),
-        Some(row) if row.parents.is_empty() => Some("Cannot rewrite the first commit".into()),
-        Some(row) if row.parents.len() > 1 => Some("Cannot rewrite a merge commit".into()),
-        Some(_) => None,
-    }
-}
-
-/// The action `choice` names now: a move goes to the commit under the
-/// cursor; a new commit's message is asked for later.
-pub(crate) fn patch_action(state: &AppState, choice: PatchChoice) -> Result<PatchAction, Reason> {
-    Ok(match choice {
-        PatchChoice::Remove => PatchAction::Remove,
-        PatchChoice::ToIndex => PatchAction::ToIndex,
-        PatchChoice::NewCommit => PatchAction::NewCommit(String::new()),
-        PatchChoice::MoveToSelected => {
-            if state.commits.todo_selected.is_some() {
-                return Err("Select a commit in the log first".into());
-            }
-            let row = state.commits.rows.get(state.commits.selected);
-            let target = row.and_then(|row| CommitId::parse(&row.oid));
-            PatchAction::MoveTo(target.ok_or("No commits")?)
-        }
-    })
-}
-
-/// Why a move cannot go to the commit the patch comes from.
-pub(crate) const TARGET_IS_SOURCE: &str =
-    "The patch comes from this commit; select the commit to move it to";
-
-/// The rebase plan for `action`, as it will run: a stop at the source,
-/// and at a move's target, every other commit picked. A move to an older
-/// commit stops at the target only: when git picks the source later, the
-/// change is there already and drops out of it. The index gets the patch
-/// checked at the last commit too, while the rebase can still be aborted.
-pub(crate) fn patch_plan(state: &AppState, action: &PatchAction) -> Result<RebasePlan, Reason> {
-    let patch = state.custom_patch.as_ref().ok_or(PATCH_EMPTY)?;
-    let rows = state.commits.rows.as_slice();
-    let row_of = |id: &CommitId| rows.iter().position(|row| row.oid == id.as_str());
-    let source = row_of(&patch.source.oid).ok_or("The patch's commit is not loaded")?;
-    let stops = match action {
-        PatchAction::Remove | PatchAction::NewCommit(_) => vec![source],
-        PatchAction::ToIndex => vec![source, 0],
-        PatchAction::MoveTo(target) => {
-            let target = row_of(target).ok_or("The target commit is not loaded")?;
-            if target == source {
-                return Err(TARGET_IS_SOURCE.into());
-            }
-            if target > source {
-                vec![target]
-            } else {
-                vec![source, target]
-            }
-        }
-    };
-    let plan = rebase_plan::plan_stops(rows, &stops)?;
-    with_stacked_branches(state, plan, &[])
 }
 
 /// Why the staged change cannot become a `fixup!` of the selected commit
@@ -2073,25 +1897,6 @@ fn move_down_disabled(state: &AppState) -> Option<Reason> {
 
 pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
-}
-
-/// Why undo and redo cannot start now: git one operation at a time, a
-/// repository to act on, and no operation half done, a bisect included,
-/// whose own state a moved `HEAD` would confuse.
-pub(crate) fn undo_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else if state.repo.is_none() {
-        Some("Not in a repository".into())
-    } else if state
-        .branch
-        .as_ref()
-        .is_some_and(|b| !b.in_progress.is_empty())
-    {
-        Some("Finish or abort the operation in progress".into())
-    } else {
-        None
-    }
 }
 
 /// The delete question on top, if one is.
@@ -2304,11 +2109,6 @@ fn log_filter_disabled(state: &AppState) -> Option<Reason> {
         .range_anchor
         .is_some()
         .then_some(CLEAR_RANGE_FIRST.into())
-}
-
-/// The reflog is not a log git can narrow.
-fn reflog_filter_disabled(_: &AppState) -> Option<Reason> {
-    Some("Filters work on the log tab".into())
 }
 
 fn files_log_disabled(state: &AppState) -> Option<Reason> {
@@ -2610,51 +2410,6 @@ static CORE_FOCUS: &[Binding] = &[
     },
 ];
 
-// Chunk 7: custom_patch
-#[rustfmt::skip]
-static CUSTOM_PATCH_WORKSPACE: &[Binding] = &[
-    // Out of the bar, which is full at 80 columns; the help menu lists it.
-    Binding {
-        id: "workspace.patch_menu",
-        keys: &[KeyPattern::exact(KeyCode::Char('p'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::OpenPatchMenu,
-        description: "Show what can be done with the custom patch: remove, move or split it off",
-        label: "patch",
-        bar: false,
-        disabled: never,
-    },
-];
-
-// Chunk 9: reflog
-static REFLOG_WORKSPACE: &[Binding] = &[
-    // Raw mode turns off the terminal's own meaning of Ctrl+Z (suspend)
-    // and Ctrl+R (reprint), so both reach Kika as keys on every platform.
-    // Redo is not Ctrl+Y: the custom-command example in the docs, and so
-    // perhaps the user's own config, binds it in the blame view, where a
-    // locked redo would make that config fail to load.
-    Binding {
-        id: "workspace.undo",
-        keys: &[KeyPattern::exact(KeyCode::Char('z'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::Undo,
-        description: "Undo the last commit, checkout, reset or rebase, saying first what moves",
-        label: "undo",
-        bar: false,
-        disabled: undo_disabled,
-    },
-    Binding {
-        id: "workspace.redo",
-        keys: &[KeyPattern::exact(KeyCode::Char('r'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::Redo,
-        description: "Redo what the last undo reversed, saying first what moves",
-        label: "redo",
-        bar: false,
-        disabled: undo_disabled,
-    },
-];
-
 // Chunk 10: files
 static FILES_NAV: &[Binding] = &[
     Binding {
@@ -2909,69 +2664,6 @@ static COMMITS_SWITCH_TAB: &[Binding] = &[
     },
 ];
 
-// Chunk 15: reflog
-static REFLOG_KEYS: &[Binding] = &[
-    Binding {
-        id: "reflog.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::ReflogNext,
-        description: "Select the next reflog entry",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "reflog.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::ReflogPrev,
-        description: "Select the previous reflog entry",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "reflog.switch_tab",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('['), NONE),
-            KeyPattern::exact(KeyCode::Char(']'), NONE),
-        ],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::SwitchCommitsTab,
-        description: "Show the log",
-        label: "log",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "reflog.filter",
-        keys: &[KeyPattern::any(KeyCode::Char('/'))],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::OpenFilter,
-        description: "Filter the reflog by typed text",
-        label: "filter",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "reflog.escape",
-        keys: &[KeyPattern::any(KeyCode::Esc)],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::ListEscape,
-        description: "Clear the filter, else quit Kika",
-        label: "clear",
-        bar: false,
-        disabled: never,
-    },
-];
-
 // Chunk 16: commits
 static COMMITS_FILES_NAV: &[Binding] = &[
     Binding {
@@ -2999,21 +2691,6 @@ static COMMITS_FILES_NAV: &[Binding] = &[
         label: "",
         bar: false,
         disabled: never,
-    },
-];
-
-// Chunk 17: custom_patch
-#[rustfmt::skip]
-static CUSTOM_PATCH_COMMIT_FILES: &[Binding] = &[
-    Binding {
-        id: "commit_files.patch",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::CommitFiles,
-        intent: AppIntent::PatchToggleFile,
-        description: "Pick the selected file's whole change for the custom patch, or drop it",
-        label: "patch",
-        bar: true,
-        disabled: patch_file_disabled,
     },
 ];
 
@@ -4291,45 +3968,6 @@ static REWRITE_AUTOSQUASH_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 63: custom_patch
-static CUSTOM_PATCH_CONFIRM: &[Binding] = &[
-    // Enter is left unbound here too: a custom patch rewrites commits the
-    // user may not be looking at.
-    Binding {
-        id: "patch_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::PatchConfirm,
-        intent: AppIntent::ConfirmYes,
-        description: "Yes, rewrite the history with the custom patch",
-        label: "rewrite",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "patch_confirm.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::PatchConfirm,
-        intent: AppIntent::ConfirmNo,
-        description: "No, leave the history as it is",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "patch_confirm.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::PatchConfirm,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 64: rewrite
 static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
     // Enter is left unbound here too: dropping a range throws away the
@@ -4361,45 +3999,6 @@ static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
         id: "drop_range_confirm.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DropRangeConfirm,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 65: reflog
-static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
-    // Enter is left unbound here too: an undo can move a branch away from
-    // commits, so only a deliberate y answers.
-    Binding {
-        id: "travel.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::Travel,
-        intent: AppIntent::ConfirmTravel,
-        description: "Yes, do what the question says",
-        label: "yes",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "travel.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::Travel,
-        intent: AppIntent::ConfirmNo,
-        description: "No, leave everything where it is",
-        label: "no",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "travel.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Travel,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -4848,30 +4447,6 @@ static COMMITS_LOG_FILTER: &[Binding] = &[
     },
 ];
 
-// Chunk 75: reflog
-static REFLOG_LOG_FILTER: &[Binding] = &[
-    Binding {
-        id: "reflog.filter_path",
-        keys: &[KeyPattern::any(KeyCode::Char('L'))],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::OpenLogFilter(LogFilterField::Path),
-        description: "Show only the commits that changed a typed path, across renames",
-        label: "log of path",
-        bar: false,
-        disabled: reflog_filter_disabled,
-    },
-    Binding {
-        id: "reflog.filter_author",
-        keys: &[KeyPattern::any(KeyCode::Char('A'))],
-        scope: KeyScope::Reflog,
-        intent: AppIntent::OpenLogFilter(LogFilterField::Author),
-        description: "Show only the commits by a typed author",
-        label: "log by author",
-        bar: false,
-        disabled: reflog_filter_disabled,
-    },
-];
-
 // Chunk 77: commits
 #[rustfmt::skip]
 static COMMITS_FILES_LOG: &[Binding] = &[
@@ -4912,17 +4487,17 @@ static CHUNKS: &[&[Binding]] = &[
     submodules::keys::SUBMODULES_WORKSPACE,
     DIFF_WORKSPACE,
     CORE_FOCUS,
-    CUSTOM_PATCH_WORKSPACE,
+    commits::custom_patch::keys::CUSTOM_PATCH_WORKSPACE,
     custom_commands::keys::CUSTOM_COMMANDS_WORKSPACE,
-    REFLOG_WORKSPACE,
+    commits::reflog::keys::REFLOG_WORKSPACE,
     FILES_NAV,
     COMMITS_KEYS,
     REWRITE_COMMITS,
     COMMITS_SWITCH_TAB,
     commits::copy::keys::COPY_COMMITS,
-    REFLOG_KEYS,
+    commits::reflog::keys::REFLOG_KEYS,
     COMMITS_FILES_NAV,
-    CUSTOM_PATCH_COMMIT_FILES,
+    commits::custom_patch::keys::CUSTOM_PATCH_COMMIT_FILES,
     COMMITS_FILES_BACK,
     STASH_KEYS,
     FILES_STAGE,
@@ -4968,9 +4543,9 @@ static CHUNKS: &[&[Binding]] = &[
     STASH_DROP_CONFIRM,
     operation::keys::OPERATION_ABORT_CONFIRM,
     REWRITE_AUTOSQUASH_CONFIRM,
-    CUSTOM_PATCH_CONFIRM,
+    commits::custom_patch::keys::CUSTOM_PATCH_CONFIRM,
     REWRITE_DROP_RANGE_CONFIRM,
-    REFLOG_TRAVEL_CONFIRM,
+    commits::reflog::keys::REFLOG_TRAVEL_CONFIRM,
     submodules::keys::SUBMODULES_KEYS,
     worktrees::keys::WORKTREES_KEYS,
     command_log::keys::COMMAND_LOG_KEYS,
@@ -4981,7 +4556,7 @@ static CHUNKS: &[&[Binding]] = &[
     CORE_FILTER_SEARCH,
     COMMITS_LOG_FILTER,
     commits::compare::keys::COMPARE_COMMITS,
-    REFLOG_LOG_FILTER,
+    commits::reflog::keys::REFLOG_LOG_FILTER,
     commits::compare::keys::COMPARE_BRANCHES,
     COMMITS_FILES_LOG,
     CORE_INPUT_QUIT,
@@ -5003,8 +4578,11 @@ pub fn registry() -> &'static [Binding] {
 mod tests {
     use super::*;
     use crate::features::commits::compare::keys::commits_mark_disabled;
+    use crate::features::commits::custom_patch::keys::patch_file_disabled;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::git::bisect::BisectMark;
+    use crate::git::branch_tips;
+    use crate::git::commit_files::{CommitId, CommitRange};
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
 
@@ -6655,37 +6233,6 @@ mod tests {
     }
 
     #[test]
-    fn the_travel_question_has_no_enter_and_n_or_esc_leave_everything() {
-        let state = AppState::new(Context::Workspace);
-        let resolve_in = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::Travel,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Unbound => None,
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let none = KeyModifiers::NONE;
-        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
-        assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmTravel));
-        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
-        assert_eq!(
-            resolve_in(key(KeyCode::Esc, none)),
-            Some(AppIntent::ConfirmNo)
-        );
-        assert_eq!(
-            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(AppIntent::Quit)
-        );
-        assert_eq!(KeyScope::Travel.parent(), None);
-        assert_eq!(KeyScope::Travel.title(), "Undo or redo");
-    }
-
-    #[test]
     fn o_opens_the_pull_request_menu_in_branches_alone_and_help_lists_it() {
         // Nothing else in Branches or the scopes around it has `o`.
         let o = KeyPattern::exact(KeyCode::Char('o'), NONE);
@@ -6950,53 +6497,6 @@ mod tests {
         assert!(!binding("workspace.undo").bar && !binding("workspace.redo").bar);
         assert_eq!(binding("workspace.undo").keys[0].label(), "ctrl-z");
         assert_eq!(binding("workspace.redo").keys[0].label(), "ctrl-r");
-    }
-
-    #[test]
-    fn brackets_switch_the_commits_panel_between_log_and_reflog() {
-        use AppIntent::*;
-        for c in ['[', ']'] {
-            assert_eq!(from(KeyScope::Commits, plain(c)), Some(SwitchCommitsTab));
-            assert_eq!(from(KeyScope::Reflog, plain(c)), Some(SwitchCommitsTab));
-        }
-        let none = KeyModifiers::NONE;
-        assert_eq!(from(KeyScope::Reflog, plain('j')), Some(ReflogNext));
-        assert_eq!(
-            from(KeyScope::Reflog, key(KeyCode::Down, none)),
-            Some(ReflogNext)
-        );
-        assert_eq!(from(KeyScope::Reflog, plain('k')), Some(ReflogPrev));
-        assert_eq!(
-            from(KeyScope::Reflog, key(KeyCode::Up, none)),
-            Some(ReflogPrev)
-        );
-        // The log's actions do not reach the reflog's rows.
-        for c in [' ', 's', 'd', 'e'] {
-            assert_eq!(from(KeyScope::Reflog, plain(c)), None, "{c:?}");
-        }
-        assert_eq!(KeyScope::Reflog.parent(), Some(KeyScope::Workspace));
-        assert_eq!(KeyScope::Reflog.title(), "Reflog");
-    }
-
-    #[test]
-    fn undo_waits_for_a_repository_an_op_and_any_operation_in_progress() {
-        let mut state = AppState::new(Context::Workspace);
-        assert_eq!(undo_disabled(&state), Some("Not in a repository".into()));
-        state.repo = Some("/repo".into());
-        assert_eq!(undo_disabled(&state), None);
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![Operation::Bisect],
-            bisect: None,
-        });
-        assert_eq!(
-            undo_disabled(&state),
-            Some("Finish or abort the operation in progress".into())
-        );
-        state.op_seq = Some(1);
-        assert_eq!(undo_disabled(&state), Some(OP_RUNNING.into()));
     }
 
     #[test]
@@ -7397,29 +6897,6 @@ mod tests {
                 assert!(build(&[(&id, &["Z"])], Trust::Repo).is_ok(), "{id}");
             }
         }
-    }
-
-    #[test]
-    fn the_reflog_filter_is_remappable_but_its_escape_is_locked() {
-        // Esc with no filter to clear quits, as tags.escape does.
-        assert!(REPO_LOCKED.contains(&"reflog.escape"));
-        assert!(build(&[("reflog.escape", &["Z"])], Trust::Repo).is_err());
-        assert!(!REPO_LOCKED.contains(&"reflog.filter"));
-        assert!(build(&[("reflog.filter", &["Z"])], Trust::Repo).is_ok());
-        assert_eq!(
-            from(KeyScope::Reflog, plain('/')),
-            Some(AppIntent::OpenFilter)
-        );
-        assert_eq!(
-            from(KeyScope::Reflog, key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(AppIntent::ListEscape)
-        );
-        // No range: nothing on a reflog row would act on one.
-        assert!(!registry().iter().any(|b| b.id == "reflog.range"));
-        assert_ne!(
-            from(KeyScope::Reflog, plain('V')),
-            Some(AppIntent::ToggleRange)
-        );
     }
 
     #[test]

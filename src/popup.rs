@@ -8,8 +8,8 @@ use std::fmt;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::commit_editor::{byte_at, char_len};
-use crate::custom_patch::PatchAction;
 use crate::features::command_log::CommandLogView;
+use crate::features::commits::custom_patch::PatchAction;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
@@ -1111,8 +1111,8 @@ mod tests {
 
     #[test]
     fn the_travel_question_is_the_preview_then_y_or_n() {
+        use crate::features::commits::reflog::{Direction, Expected, Step};
         use crate::git::commit_files::CommitId;
-        use crate::git::undo::{Direction, Expected, Step};
         let ask = TravelConfirm {
             title: "Undo",
             preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],

@@ -2,10 +2,13 @@
 //! moved it. The Reflog tab lists it, and the undo planner reads it to
 //! find the last action to reverse.
 
-use super::branches::run;
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::branches::run;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::runner::{GitCommand, GitRunner};
+use crate::op::{checkout_command, detached_checkout};
+
+use super::undo::{Direction, Step};
 
 /// How many entries are read. An action older than this cannot be undone.
 const DEPTH: &str = "1000";
@@ -266,7 +269,7 @@ pub fn read_reflog(runner: &dyn GitRunner) -> Result<Reflog, String> {
                     .arg("-n")
                     .arg(DEPTH)
                     .arg("--format=%H %T %gs")
-                    .arg(super::path::os_string(r))
+                    .arg(crate::git::path::os_string(r))
                     .arg("--"),
             )
             .ok()
@@ -330,12 +333,34 @@ pub fn parse_records(out: &[u8]) -> Vec<ReflogEntry> {
         .collect()
 }
 
+/// The argv of `GitOp::Travel`: the planned `step`, logged under
+/// `direction`'s marker.
+// `--keep` makes git itself refuse to move when a local change, or
+// an untracked file, is in the way. The marker in
+// `GIT_REFLOG_ACTION` is all `checkout` logs, and `reset` logs it as
+// `<marker>: updating HEAD`, as far back as git 2.15.
+pub(crate) fn travel_command(direction: Direction, step: &Step) -> GitCommand {
+    match step {
+        Step::MoveTo(oid) => GitCommand::new("reset")
+            .arg("-q")
+            .arg("--keep")
+            .arg(oid.as_str())
+            .arg("--"),
+        Step::CheckoutBranch(name) => checkout_command(name),
+        Step::CheckoutDetached(oid) => detached_checkout(oid),
+    }
+    .env("GIT_REFLOG_ACTION", direction.marker())
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
 
     use super::*;
+    use crate::features::commits::reflog::undo::Expected;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::op::{GitOp, HEAD_MOVED, op_command, run_op};
+    use crate::test_support::{argv, cid as oid, rev_parse, two_commit_repo};
 
     const SHOW: &[&str] = &[
         "reflog",
@@ -367,7 +392,7 @@ mod tests {
 
     #[test]
     fn the_read_runs_exactly_these_commands_without_locks_and_in_the_c_locale() {
-        let hostile = include_bytes!("fixtures/reflog/hostile.bin");
+        let hostile = include_bytes!("../../../git/fixtures/reflog/hostile.bin");
         let branch = format!("{A} {T} commit: x\0");
         let runner = FakeRunner::new()
             .expect(SHOW, ok(hostile))
@@ -391,7 +416,7 @@ mod tests {
 
     #[test]
     fn hostile_messages_draw_with_no_control_characters() {
-        let entries = parse_records(include_bytes!("fixtures/reflog/hostile.bin"));
+        let entries = parse_records(include_bytes!("../../../git/fixtures/reflog/hostile.bin"));
         for entry in &entries {
             for text in [entry.display(), entry.label()] {
                 assert!(
@@ -406,7 +431,7 @@ mod tests {
 
     #[test]
     fn a_checkout_naming_to_twice_is_other_and_a_plain_one_parses() {
-        let entries = parse_records(include_bytes!("fixtures/reflog/hostile.bin"));
+        let entries = parse_records(include_bytes!("../../../git/fixtures/reflog/hostile.bin"));
         assert_eq!(entries[3].action, Action::Other, "{:?}", entries[3]);
         assert_eq!(
             entries[4].action,
@@ -603,5 +628,254 @@ mod tests {
         assert_eq!(reflog.entries[1].display(), "commit: two words");
         assert!(reflog.entries.iter().all(|e| e.tree.is_some()));
         assert_ne!(reflog.entries[1].tree, reflog.entries[2].tree);
+    }
+
+    /// A travel op expecting a detached `HEAD` at `abc`; only its argv
+    /// is looked at.
+    fn travel(direction: Direction, step: Step) -> GitOp {
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: None,
+                oid: oid("abc"),
+            },
+        }
+    }
+
+    /// A travel op expecting `HEAD` where it is now in `runner`'s repo.
+    fn travel_here(runner: &dyn GitRunner, direction: Direction, step: Step) -> GitOp {
+        let now = super::read_head(runner);
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: now.head_ref,
+                oid: now.oid.unwrap(),
+            },
+        }
+    }
+
+    fn planned(plan: crate::features::commits::reflog::undo::Plan) -> GitOp {
+        GitOp::Travel {
+            direction: plan.direction,
+            step: plan.step,
+            expect: plan.expect,
+        }
+    }
+
+    #[test]
+    fn travel_names_only_ids_and_loaded_branches_and_marks_the_reflog() {
+        let cases: [(GitOp, &[&str], &str); 4] = [
+            (
+                travel(Direction::Undo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika redo",
+            ),
+            (
+                travel(Direction::Undo, Step::CheckoutBranch("main".into())),
+                &["checkout", "-q", "main", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::CheckoutDetached(oid("abc123"))),
+                &["checkout", "-q", "--detach", "abc123", "--"],
+                "kika redo",
+            ),
+        ];
+        for (op, expected, marker) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            let envs: Vec<_> = cmd
+                .envs()
+                .iter()
+                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                envs,
+                [
+                    ("GIT_REFLOG_ACTION", marker),
+                    ("GIT_LITERAL_PATHSPECS", "1"),
+                    ("LC_ALL", "C"),
+                ],
+                "{op:?}"
+            );
+        }
+        let checkout = op_command(&GitOp::Checkout("main".into()));
+        assert_eq!(argv(&checkout), ["checkout", "-q", "main", "--"]);
+    }
+
+    #[test]
+    fn an_undo_leaves_a_marker_the_next_plan_reads_back_in_real_git() {
+        use crate::features::commits::reflog::git::{Action, read_reflog};
+        use crate::features::commits::reflog::undo::{Context, plan};
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let second = rev_parse(dir, "HEAD");
+        let runner = crate::git::CliRunner::isolated(dir);
+        let ctx = Context {
+            branch: Some("main"),
+            branches: &[],
+            dirty: false,
+        };
+
+        let undo = plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(first.clone()));
+        run_op(&runner, &planned(undo)).unwrap();
+
+        assert_eq!(rev_parse(dir, "HEAD"), first);
+        let reflog = read_reflog(&runner).unwrap();
+        assert_eq!(reflog.entries[0].action, Action::Undo);
+        assert_eq!(reflog.entries[0].message, b"kika undo: updating HEAD");
+        let redo = plan(Direction::Redo, &reflog, &ctx).unwrap();
+        assert_eq!(redo.step, Step::MoveTo(second));
+    }
+
+    #[test]
+    fn reset_keep_refuses_to_clobber_a_local_change_or_an_untracked_file_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("a.txt"), "mine\n").unwrap();
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+        let refused = run_op(&runner, &undo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+
+        // The commit after `first` adds `b.txt`; an untracked one is in
+        // the way of going back to it.
+        git(dir, &["checkout", "-q", "--", "a.txt"]);
+        std::fs::write(dir.join("b.txt"), "theirs\n").unwrap();
+        git(dir, &["add", "b.txt"]);
+        git(dir, &["commit", "-q", "-m", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        run_op(&runner, &undo).unwrap();
+        std::fs::write(dir.join("b.txt"), "untracked\n").unwrap();
+        let redo = travel_here(&runner, Direction::Redo, Step::MoveTo(third));
+        let refused = run_op(&runner, &redo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "untracked\n"
+        );
+    }
+
+    #[test]
+    fn a_travel_whose_head_moved_since_the_question_changes_nothing_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+
+        // Another commit lands while the question is open.
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "HEAD"), third);
+
+        // Same commit, another branch: still not what was asked about.
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        git(dir, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "refs/heads/other"), third);
+    }
+
+    #[test]
+    fn undoing_a_rebase_started_from_another_branch_restores_the_rebased_branch_in_real_git() {
+        use crate::features::commits::reflog::git::read_reflog;
+        use crate::features::commits::reflog::undo::{Context, plan};
+        use crate::git::fake::git;
+
+        let (tmp, base) = two_commit_repo();
+        let dir = tmp.path();
+        let main = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "topic", base.as_str()]);
+        std::fs::write(dir.join("t.txt"), "topic\n").unwrap();
+        git(dir, &["add", "t.txt"]);
+        git(dir, &["commit", "-q", "-m", "topic"]);
+        let old_topic = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "other", main.as_str()]);
+        std::fs::write(dir.join("o.txt"), "other\n").unwrap();
+        git(dir, &["add", "o.txt"]);
+        git(dir, &["commit", "-q", "-m", "other"]);
+        let other = rev_parse(dir, "HEAD");
+        // Run from `other`: HEAD's reflog never held topic's old tip.
+        git(dir, &["rebase", "-q", main.as_str(), "topic"]);
+        let new_topic = rev_parse(dir, "HEAD");
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        let reflog = read_reflog(&runner).unwrap();
+        let branches = crate::git::branches::list_branches(&runner).unwrap();
+        let ctx = Context {
+            branch: Some("topic"),
+            branches: &branches,
+            dirty: false,
+        };
+        let undo = plan(Direction::Undo, &reflog, &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(old_topic.clone()));
+        assert_ne!(undo.step, Step::MoveTo(other.clone()));
+        run_op(&runner, &planned(undo)).unwrap();
+        assert_eq!(rev_parse(dir, "refs/heads/topic"), old_topic);
+        assert_eq!(rev_parse(dir, "refs/heads/other"), other);
+
+        // Without the branch's own reflog there is no safe target.
+        let redo = plan(Direction::Redo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        run_op(&runner, &planned(redo)).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD"), new_topic);
+        std::fs::remove_file(dir.join(".git/logs/refs/heads/topic")).unwrap();
+        assert_eq!(
+            plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx),
+            Err(
+                "Cannot undo rebase: the branch's own reflog does not say where it was before"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_head_pointing_outside_refs_heads_plans_no_undo_in_real_git() {
+        use crate::features::commits::reflog::git::read_reflog;
+        use crate::features::commits::reflog::undo::{Context, plan};
+        use crate::git::fake::git;
+
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        let head = rev_parse(dir, "HEAD");
+        git(
+            dir,
+            &["update-ref", "refs/remotes/origin/main", head.as_str()],
+        );
+        git(dir, &["symbolic-ref", "HEAD", "refs/remotes/origin/main"]);
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "on a remote ref"]);
+        let moved = rev_parse(dir, "refs/remotes/origin/main");
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        let reflog = read_reflog(&runner).unwrap();
+        let ctx = Context {
+            branch: None,
+            branches: &[],
+            dirty: false,
+        };
+        assert_eq!(
+            plan(Direction::Undo, &reflog, &ctx),
+            Err("HEAD is on refs/remotes/origin/main, not a branch; nothing is undone".into())
+        );
+        assert_eq!(rev_parse(dir, "refs/remotes/origin/main"), moved);
     }
 }

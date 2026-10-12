@@ -11,7 +11,6 @@ use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
-use crate::custom_patch::CustomPatch;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
@@ -25,6 +24,8 @@ use crate::features::branches::tags::keys::delete_tag_disabled;
 use crate::features::command_log::CommandLog;
 use crate::features::commits::compare::{MARK_CLEARED, PendingDiff};
 use crate::features::commits::copy::CopiedCommits;
+use crate::features::commits::custom_patch::CustomPatch;
+use crate::features::commits::reflog;
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
@@ -43,12 +44,10 @@ use crate::git::log::LogQuery;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan;
-use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
-use crate::git::undo;
 use crate::git::version::GitVersion;
 use crate::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::handoff::HandOff;
@@ -62,7 +61,7 @@ use crate::op::{GitOp, MergeStrategy, ResetMode, StashMode};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,
-    LineInput, Popup, PromptKind, RangeKind, TravelConfirm,
+    LineInput, Popup, PromptKind, RangeKind,
 };
 use crate::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
@@ -1180,8 +1179,8 @@ impl AppState {
             AppIntent::ReflogNext => self.commits.reflog.move_by(1),
             AppIntent::ReflogPrev => self.commits.reflog.move_by(-1),
             AppIntent::ReflogLoaded { tag, result } => return self.reflog_loaded(tag, result),
-            AppIntent::Undo => return self.travel(undo::Direction::Undo),
-            AppIntent::Redo => return self.travel(undo::Direction::Redo),
+            AppIntent::Undo => return self.travel(reflog::Direction::Undo),
+            AppIntent::Redo => return self.travel(reflog::Direction::Redo),
             AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
             AppIntent::OpenSearch if self.review_files_shown() => {
@@ -1556,7 +1555,7 @@ impl AppState {
     /// Map the rendered rows to the focused view's patch, when both are
     /// of the same file and side, then bring the selection into view.
     /// A tool's rows are never mapped: they show the files, not the patch.
-    fn remap(&mut self) {
+    pub(crate) fn remap(&mut self) {
         let display_only = self.display_only();
         let Some(rendered) = &mut self.rendered else {
             return;
@@ -2147,7 +2146,7 @@ impl AppState {
 
     /// Start loading the focused view's patch. A user effect, so the busy
     /// indicator shows and a refused key can say "Loading…".
-    fn load_patch(&mut self) -> Vec<Effect> {
+    pub(crate) fn load_patch(&mut self) -> Vec<Effect> {
         let seq = self.take_seq();
         let Focus::Diff(view) = &mut self.focus else {
             return vec![];
@@ -2726,135 +2725,6 @@ impl AppState {
         } else {
             vec![]
         }
-    }
-
-    /// `HEAD` is on a branch with no commits, so it has no reflog yet.
-    fn head_unborn(&self) -> bool {
-        self.branch
-            .as_ref()
-            .is_some_and(|b| matches!(b.head, crate::git::status::Head::Unborn(_)))
-    }
-
-    /// Start reading the reflog; `user` as for the branch list. With no
-    /// commits there is nothing to read: the tab shows an empty list.
-    fn load_reflog(&mut self, user: bool) -> Vec<Effect> {
-        if self.context != Context::Workspace {
-            return vec![];
-        }
-        if self.head_unborn() {
-            let reflog = &mut self.commits.reflog;
-            reflog.data = Some(Reflog::default());
-            reflog.error = None;
-            reflog.seq = None;
-            reflog.selected = 0;
-            return vec![];
-        }
-        let seq = self.take_seq();
-        self.commits.reflog.seq = Some(seq);
-        if user {
-            self.busy += 1;
-        }
-        vec![Effect::LoadReflog {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user,
-            },
-        }]
-    }
-
-    /// Show the reflog read, and plan the undo or redo waiting for it. A
-    /// failed read plans nothing: the list shown may be older than the
-    /// key press.
-    fn reflog_loaded(&mut self, tag: Tag, result: Result<Reflog, String>) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if tag.generation != self.generation {
-            return vec![];
-        }
-        let failed = result.is_err();
-        if !self.commits.reflog.loaded(tag.seq, result) {
-            return vec![];
-        }
-        let Some(direction) = self.commits.reflog.planning.take() else {
-            return vec![];
-        };
-        if failed {
-            self.op_error = self.commits.reflog.error.clone();
-            return vec![];
-        }
-        self.plan_travel(direction);
-        vec![]
-    }
-
-    /// Undo or redo: read the reflog afresh, then plan from it. Nothing
-    /// moves until the question that follows is answered.
-    fn travel(&mut self, direction: undo::Direction) -> Vec<Effect> {
-        if self.context != Context::Workspace {
-            return vec![];
-        }
-        if let Some(reason) = keymap::undo_disabled(self) {
-            self.notice = Some(reason);
-            return vec![];
-        }
-        if self.head_unborn() {
-            self.notice = Some(match direction {
-                undo::Direction::Undo => "Nothing to undo".into(),
-                undo::Direction::Redo => "Nothing to redo".into(),
-            });
-            return vec![];
-        }
-        self.op_error = None;
-        self.commits.reflog.planning = Some(direction);
-        self.load_reflog(true)
-    }
-
-    /// Ask about the plan for `direction` from the reflog just read, or
-    /// say why there is none. The state may have changed while it was
-    /// read, so the refusals are checked again.
-    fn plan_travel(&mut self, direction: undo::Direction) {
-        if let Some(reason) = keymap::undo_disabled(self) {
-            self.notice = Some(reason);
-            return;
-        }
-        let Some(reflog) = &self.commits.reflog.data else {
-            return;
-        };
-        // The branch as read with the reflog, not as the last status saw it.
-        let branch = reflog
-            .head_ref
-            .as_deref()
-            .and_then(|r| r.strip_prefix(b"refs/heads/"))
-            .map(String::from_utf8_lossy);
-        let ctx = undo::Context {
-            branch: branch.as_deref(),
-            branches: &self.branches.branches,
-            dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
-        };
-        match undo::plan(direction, reflog, &ctx) {
-            Ok(plan) => self.popups.push(Popup::Travel(TravelConfirm {
-                title: plan.direction.title(),
-                preview: plan.preview,
-                op: GitOp::Travel {
-                    direction: plan.direction,
-                    step: plan.step,
-                    expect: plan.expect,
-                },
-            })),
-            Err(message) => self.op_error = Some(message),
-        }
-    }
-
-    /// Undo or redo as the open question said, and only if one is open.
-    fn confirm_travel(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::Travel(_))) {
-            return vec![];
-        }
-        let Some(Popup::Travel(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
     }
 
     /// Load the next page when the cursor nears the end of the log.
@@ -4558,11 +4428,11 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::BisectMark { .. } => "Could not mark the commit",
         GitOp::BisectReset => "Could not reset the bisect",
         GitOp::Travel {
-            direction: undo::Direction::Undo,
+            direction: reflog::Direction::Undo,
             ..
         } => "Could not undo",
         GitOp::Travel {
-            direction: undo::Direction::Redo,
+            direction: reflog::Direction::Redo,
             ..
         } => "Could not redo",
     }
@@ -4570,14 +4440,13 @@ fn failure_title(op: &GitOp) -> &'static str {
 
 mod branch_lists;
 mod confirm_guard;
-mod custom_patch;
 mod fixup;
 mod leave_commits;
 mod log_query;
 mod rewrite_range;
 mod stash_actions;
 
-use custom_patch::NO_PATCH;
+use crate::features::commits::custom_patch::NO_PATCH;
 
 #[cfg(test)]
 mod tests {
@@ -8045,7 +7914,7 @@ mod tests {
 
     // --- A commit's files ---
 
-    use crate::git::commit_files::{CommitFile, CommitId};
+    use crate::git::commit_files::CommitFile;
 
     #[test]
     fn enter_opens_the_commit_against_its_first_parent_as_a_user_load() {
@@ -8234,7 +8103,7 @@ mod tests {
         );
         assert_eq!(state.focus, Focus::Commits);
         assert!(matches!(
-            custom_patch_tests::key_reason(&state, KeyScope::CommitFiles, 'l'),
+            key_reason(&state, KeyScope::CommitFiles, 'l'),
             Some(r) if r.contains("comparison")
         ));
     }
@@ -10500,434 +10369,6 @@ mod tests {
         );
     }
 
-    /// `with_commits` on branch `main`, which is loaded as a local branch.
-    fn undoable() -> AppState {
-        let mut state = with_commits(3, true);
-        state.branch = Some(on_branch("main"));
-        state.branches.branches = vec![Branch {
-            name: "main".into(),
-            head: true,
-            upstream: None,
-            track: crate::git::branches::Track::None,
-            merged: true,
-        }];
-        state
-    }
-
-    fn reflog_tag(effects: &[Effect]) -> Tag {
-        match effects {
-            [Effect::LoadReflog { tag }] => *tag,
-            other => panic!("expected one LoadReflog, got {other:?}"),
-        }
-    }
-
-    /// Two commits on `main` after the first, `HEAD` at `ccc…`.
-    fn commit_reflog(head: char) -> Reflog {
-        Reflog {
-            head: CommitId::parse(&head.to_string().repeat(40)),
-            head_ref: Some(b"refs/heads/main".to_vec()),
-            branch_entries: vec![],
-            entries: crate::git::reflog::parse_records(include_bytes!(
-                "git/fixtures/reflog/commit.bin"
-            )),
-        }
-    }
-
-    fn undo_commit_op() -> GitOp {
-        GitOp::Travel {
-            direction: undo::Direction::Undo,
-            step: undo::Step::MoveTo(cid(&"b".repeat(40))),
-            expect: undo::Expected {
-                head_ref: Some(b"refs/heads/main".to_vec()),
-                oid: cid(&"c".repeat(40)),
-            },
-        }
-    }
-
-    /// `state` after an undo whose fresh reflog read answered with
-    /// `reflog`.
-    fn undo_with(state: &mut AppState, reflog: Reflog) -> Vec<Effect> {
-        let tag = reflog_tag(&state.update(AppIntent::Undo));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(reflog),
-        })
-    }
-
-    #[test]
-    fn undo_reads_the_reflog_afresh_then_asks_with_the_plan_and_emits_nothing_else() {
-        let mut state = undoable();
-        let busy = state.busy;
-        let effects = press_with(&mut state, 'z', KeyModifiers::CONTROL);
-        let tag = reflog_tag(&effects);
-        assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
-        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
-        assert_eq!(state.popups, []);
-
-        let effects = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-
-        assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, busy);
-        assert_eq!(state.commits.reflog.planning, None);
-        assert_eq!(
-            state.popups,
-            [Popup::Travel(TravelConfirm {
-                title: "Undo",
-                preview: vec![
-                    "Undo: commit: second".into(),
-                    "Branch main moves from ccccccc to bbbbbbb.".into(),
-                    "Files change to match bbbbbbb; ignored files in the way are replaced.".into(),
-                    "Commits after bbbbbbb leave main; redo brings them back.".into(),
-                ],
-                op: undo_commit_op(),
-            })]
-        );
-        assert_eq!(state.key_focus(), KeyScope::Travel);
-        assert_eq!(state.op_seq, None);
-    }
-
-    #[test]
-    fn redo_plans_from_its_own_fresh_read() {
-        let mut state = undoable();
-        let tag = reflog_tag(&press_with(&mut state, 'r', KeyModifiers::CONTROL));
-        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Redo));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        assert_eq!(state.popups, []);
-        assert_eq!(state.op_error.as_deref(), Some("Nothing to redo"));
-    }
-
-    #[test]
-    fn only_y_runs_the_planned_step_and_n_or_esc_close_the_question() {
-        let mut state = undoable();
-        undo_with(&mut state, commit_reflog('c'));
-        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.popups.len(), 1, "Enter does not answer");
-        let (_, op) = op_of(&press_char(&mut state, 'y'));
-        assert_eq!(op, undo_commit_op());
-        assert_eq!(state.popups, []);
-
-        for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            let mut state = undoable();
-            undo_with(&mut state, commit_reflog('c'));
-            assert_eq!(press(&mut state, code), vec![], "{code:?}");
-            assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
-        }
-    }
-
-    #[test]
-    fn confirm_travel_does_nothing_without_the_question() {
-        let mut state = undoable();
-        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
-        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
-        assert_eq!(state.op_seq, None);
-    }
-
-    #[test]
-    fn undo_and_redo_wait_for_a_running_op_or_an_operation_in_progress() {
-        for intent in [AppIntent::Undo, AppIntent::Redo] {
-            let mut state = undoable();
-            state.op_seq = Some(7);
-            assert_eq!(state.update(intent.clone()), vec![]);
-            assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
-            assert_eq!(state.commits.reflog.planning, None);
-
-            for operation in [Operation::Rebase, Operation::Bisect] {
-                let mut state = undoable();
-                let mut branch = on_branch("main");
-                branch.in_progress = vec![operation];
-                state.branch = Some(branch);
-                assert_eq!(state.update(intent.clone()), vec![]);
-                assert_eq!(
-                    state.notice,
-                    Some("Finish or abort the operation in progress".into())
-                );
-            }
-
-            let mut state = AppState::new(Context::Workspace);
-            assert_eq!(state.update(intent.clone()), vec![]);
-            assert_eq!(state.notice, Some("Not in a repository".into()));
-        }
-    }
-
-    #[test]
-    fn a_refused_plan_says_why_and_asks_nothing() {
-        let mut state = undoable();
-        let effects = undo_with(&mut state, commit_reflog('d'));
-        assert_eq!(effects, vec![]);
-        assert_eq!(state.popups, []);
-        assert_eq!(
-            state.op_error.as_deref(),
-            Some("HEAD has moved since commit; nothing is undone")
-        );
-
-        let mut state = undoable();
-        state.files = vec![changed("a.rs", '.', 'M')];
-        undo_with(&mut state, commit_reflog('c'));
-        assert_eq!(
-            state.op_error.as_deref(),
-            Some("Commit or stash your changes first")
-        );
-
-        // Untracked files are left to `reset --keep`.
-        let mut state = undoable();
-        state.files = vec![untracked("new.rs")];
-        undo_with(&mut state, commit_reflog('c'));
-        assert_eq!(state.popups.len(), 1);
-    }
-
-    #[test]
-    fn a_stale_or_failed_read_plans_nothing() {
-        let mut state = undoable();
-        let tag = reflog_tag(&state.update(AppIntent::Undo));
-        let stale = Tag {
-            seq: tag.seq + 100,
-            ..tag
-        };
-        state.update(AppIntent::ReflogLoaded {
-            tag: stale,
-            result: Ok(commit_reflog('c')),
-        });
-        assert_eq!(state.popups, []);
-        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
-
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Err("fatal: broken".into()),
-        });
-        assert_eq!(state.popups, []);
-        assert_eq!(state.commits.reflog.planning, None);
-        assert_eq!(
-            state.op_error.as_deref(),
-            Some("Could not read the reflog: fatal: broken")
-        );
-    }
-
-    #[test]
-    fn brackets_switch_to_the_reflog_tab_reading_it_once() {
-        let mut state = undoable();
-        let tag = reflog_tag(&press_char(&mut state, ']'));
-        assert_eq!(state.commits.tab, CommitsTab::Reflog);
-        assert_eq!(state.key_focus(), KeyScope::Reflog);
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        press_char(&mut state, 'j');
-        press(&mut state, KeyCode::Down);
-        press(&mut state, KeyCode::Down);
-        assert_eq!(state.commits.reflog.selected, 2);
-        press_char(&mut state, 'k');
-        assert_eq!(state.commits.reflog.selected, 1);
-        assert_eq!(state.popups, [], "the tab acts on no row");
-
-        assert_eq!(press_char(&mut state, '['), vec![]);
-        assert_eq!(state.commits.tab, CommitsTab::Log);
-        assert_eq!(state.key_focus(), KeyScope::Commits);
-        assert_eq!(press_char(&mut state, ']'), vec![], "read once");
-    }
-
-    /// The Reflog tab shown, its read landed: second, first, root.
-    fn on_reflog_tab() -> AppState {
-        let mut state = undoable();
-        let tag = reflog_tag(&press_char(&mut state, ']'));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        state
-    }
-
-    #[test]
-    fn slash_in_the_reflog_tab_narrows_it_as_typed_and_enter_keeps_it() {
-        let mut state = on_reflog_tab();
-        press_char(&mut state, '/');
-        let input = state.input.as_ref().expect("the input opens");
-        assert_eq!(input.target, InputTarget::ReflogFilter);
-        assert_eq!(input.target.prompt(), "/");
-        assert_eq!(state.key_focus(), KeyScope::Input);
-        type_text(&mut state, "bbb");
-        assert_eq!(state.commits.reflog.visible(), [1], "by short id");
-        assert_eq!(state.commits.reflog.selected, 1, "the cursor follows");
-        for _ in 0..3 {
-            press(&mut state, KeyCode::Backspace);
-        }
-        type_text(&mut state, "root");
-        assert_eq!(state.commits.reflog.visible(), [2], "by message");
-        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.input, None);
-        assert_eq!(state.commits.reflog.filter, "root");
-        assert_eq!(state.key_focus(), KeyScope::Reflog);
-        // `/` again starts from the kept text.
-        press_char(&mut state, '/');
-        assert_eq!(state.input.as_ref().unwrap().line.text, "root");
-    }
-
-    #[test]
-    fn esc_in_the_reflog_tab_clears_the_filter_then_quits_and_v_sets_no_range() {
-        let mut state = on_reflog_tab();
-        assert_eq!(press_char(&mut state, 'V'), vec![]);
-        assert_eq!(state.commits.range_anchor, None);
-        assert_eq!(state.popups, []);
-        press_char(&mut state, '/');
-        type_text(&mut state, "first\n");
-        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(state.commits.reflog.filter, "");
-        assert!(!state.should_quit);
-        press(&mut state, KeyCode::Esc);
-        assert!(state.should_quit);
-    }
-
-    #[test]
-    fn the_reflog_filter_stops_at_its_limit() {
-        let mut state = on_reflog_tab();
-        press_char(&mut state, '/');
-        for _ in 0..300 {
-            press_char(&mut state, 'z');
-        }
-        assert_eq!(
-            state.commits.reflog.filter.chars().count(),
-            list_filter::MAX_INPUT
-        );
-        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
-    }
-
-    #[test]
-    fn the_log_and_the_reflog_keep_their_own_filters() {
-        let mut state = on_reflog_tab();
-        press_char(&mut state, '/');
-        type_text(&mut state, "root\n");
-        press_char(&mut state, '[');
-        assert_eq!(state.key_focus(), KeyScope::Commits);
-        press_char(&mut state, '/');
-        assert_eq!(
-            state.input.as_ref().unwrap().target,
-            InputTarget::CommitsFilter
-        );
-        assert_eq!(state.input.as_ref().unwrap().line.text, "");
-        type_text(&mut state, "c1\n");
-        assert_eq!(state.commits.filter, "c1");
-        assert_eq!(state.commits.reflog.filter, "root");
-        press_char(&mut state, ']');
-        assert_eq!(state.commits.reflog.filter, "root");
-        assert_eq!(state.commits.filter, "c1");
-        // Esc in the Reflog tab clears only its own.
-        press(&mut state, KeyCode::Esc);
-        assert_eq!(state.commits.reflog.filter, "");
-        assert_eq!(state.commits.filter, "c1");
-    }
-
-    #[test]
-    fn the_reflog_filter_never_reaches_git_nor_changes_the_undo_plan() {
-        let hostile = "--force -D x\x1b[31m";
-        let leaks = |effects: &[Effect]| {
-            let debug = format!("{effects:?}");
-            debug.contains("--force") || debug.contains("-D x") || debug.contains("[31m")
-        };
-        let mut state = on_reflog_tab();
-        let mut effects = press_char(&mut state, '/');
-        for c in hostile.chars() {
-            effects.extend(press_char(&mut state, c));
-        }
-        effects.extend(press(&mut state, KeyCode::Enter));
-        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
-        assert!(state.commits.reflog.visible().is_empty());
-        assert!(!leaks(&effects), "{effects:?}");
-
-        // A refresh asks git exactly what it asks with no filter set.
-        let refresh = press_char(&mut state, 'r');
-        assert!(!leaks(&refresh), "{refresh:?}");
-        assert_eq!(refresh, press_char(&mut on_reflog_tab(), 'r'));
-        let tag = refresh
-            .iter()
-            .find_map(|e| match e {
-                Effect::LoadReflog { tag } => Some(*tag),
-                _ => None,
-            })
-            .expect("a refresh rereads the reflog");
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-
-        // Undo plans from every entry, though the filter hides them all.
-        let undo = ctrl(&mut state, 'z');
-        assert!(!leaks(&undo), "{undo:?}");
-        let tag = reflog_tag(&undo);
-        let loaded = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        assert!(!leaks(&loaded), "{loaded:?}");
-        match state.popups.as_slice() {
-            [Popup::Travel(confirm)] => assert_eq!(confirm.op, undo_commit_op()),
-            other => panic!("expected the undo question, got {other:?}"),
-        }
-        let ran = press_char(&mut state, 'y');
-        assert!(!leaks(&ran), "{ran:?}");
-        assert_eq!(op_of(&ran).1, undo_commit_op());
-
-        state.op_seq = None;
-        let redo = ctrl(&mut state, 'r');
-        assert!(!leaks(&redo), "{redo:?}");
-        let tag = reflog_tag(&redo);
-        let loaded = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        assert!(!leaks(&loaded), "{loaded:?}");
-        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
-    }
-
-    #[test]
-    fn a_log_reload_rereads_the_reflog_only_once_it_was_read() {
-        let mut state = undoable();
-        let effects = state.update(AppIntent::RefreshStatus);
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, Effect::LoadReflog { .. })),
-            "{effects:?}"
-        );
-        let tag = reflog_tag(&state.update(AppIntent::SwitchCommitsTab));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
-        let effects = state.update(AppIntent::RefreshStatus);
-        let reloads: Vec<&Tag> = effects
-            .iter()
-            .filter_map(|e| match e {
-                Effect::LoadReflog { tag } => Some(tag),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(reloads.len(), 1, "{effects:?}");
-        assert!(!reloads[0].user);
-    }
-
-    #[test]
-    fn with_no_commits_the_reflog_is_empty_and_there_is_nothing_to_undo() {
-        let mut state = undoable();
-        state.branch = Some(BranchStatus {
-            head: Head::Unborn("main".into()),
-            ..on_branch("main")
-        });
-        assert_eq!(state.update(AppIntent::SwitchCommitsTab), vec![]);
-        assert_eq!(state.commits.reflog.data, Some(Reflog::default()));
-        assert_eq!(state.update(AppIntent::Undo), vec![]);
-        assert_eq!(state.notice, Some("Nothing to undo".into()));
-    }
-
     #[test]
     fn a_travel_failure_is_titled_by_its_direction() {
         let mut state = undoable();
@@ -11995,7 +11436,7 @@ mod tests {
         type_text(&mut state, "/zzz\n");
         assert!(open_files(&state).selected_hidden());
         assert_eq!(
-            crate::keymap::patch_file_disabled(&state).as_deref(),
+            crate::features::commits::custom_patch::keys::patch_file_disabled(&state).as_deref(),
             Some(crate::keymap::FILTER_HIDES_ROW)
         );
         assert_eq!(state.update(AppIntent::PatchToggleFile), vec![]);
@@ -14490,488 +13931,5 @@ mod tests {
         state.update(base_found(other, FixupBase::One(cid(&"c".repeat(40)))));
         assert_eq!(state.commits.selected, 1);
         assert_eq!(state.notice, None);
-    }
-
-    /// The custom patch: picking from a commit, and the menu of rewrites.
-    mod custom_patch_tests {
-        use super::*;
-        use crate::custom_patch::{FilePick, PatchAction, PatchChoice};
-        use crate::git::commit_files::{CommitFile, CommitId};
-        use crate::git::log::{CommitRow, LogPage};
-        use crate::git::patch::LineId;
-        use crate::handoff::HandOff;
-        use crate::keymap::{Resolution, registry, resolve};
-
-        /// Why `c` cannot run in `scope`, or `None` when it runs.
-        pub(crate) fn key_reason(state: &AppState, scope: KeyScope, c: char) -> Option<Reason> {
-            let key = KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE);
-            match resolve(registry(), &Keymap::default(), scope, state, key) {
-                Resolution::Disabled(reason) => Some(reason),
-                Resolution::Run(_) => None,
-                other => panic!("{c} in {scope:?}: {other:?}"),
-            }
-        }
-
-        /// Row `i`'s full id.
-        fn oid(i: usize) -> String {
-            format!("{:040x}", i + 1)
-        }
-
-        fn id(i: usize) -> CommitId {
-            CommitId::parse(&oid(i)).unwrap()
-        }
-
-        /// Four commits on `main`, row 0 `HEAD`, none of them a branch's
-        /// other than `main`; an untracked file only; the Commits panel
-        /// focused on row `selected`.
-        fn history(selected: usize) -> AppState {
-            let (mut state, _) = with_files(vec![untracked("u.txt")], 24);
-            let rows = (0..4)
-                .map(|i| CommitRow {
-                    oid: oid(i),
-                    short_oid: oid(i)[..7].to_string(),
-                    parents: vec![oid(i + 1)],
-                    author: "Ann".into(),
-                    time: 0,
-                    subject: format!("commit {i}"),
-                    subject_altered: false,
-                })
-                .collect();
-            state.commits.begin_page(900, 0);
-            state
-                .commits
-                .page_loaded(900, 0, Ok((LogPage { rows, done: true }, 1_000)));
-            state.commits.tips = Some(vec![]);
-            state.focus = Focus::Commits;
-            state.expanded = SidePanel::Commits;
-            state.commits.selected = selected;
-            state
-        }
-
-        /// Open row `row`'s files, listing `a.rs` and `b.rs`.
-        fn open_files(state: &mut AppState, row: usize) {
-            state.commits.selected = row;
-            let effects = press(state, KeyCode::Enter);
-            let tag = match effects.as_slice() {
-                [Effect::LoadCommitFiles { tag, .. }] => *tag,
-                other => panic!("{other:?}"),
-            };
-            let file = |path: &str| CommitFile {
-                status: 'M',
-                path: path.into(),
-                orig_path: None,
-            };
-            state.update(AppIntent::CommitFilesLoaded {
-                tag,
-                result: Ok(vec![file("a.rs"), file("b.rs")]),
-            });
-        }
-
-        /// Row 2's `a.rs` in the Diff pane, its patch `TWO_HUNKS`.
-        fn picking() -> AppState {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            let (tag, request) = patch_load(&press(&mut state, KeyCode::Char('l')));
-            assert_eq!(request.commit.as_ref().map(|r| r.oid.clone()), Some(id(2)));
-            state.update(AppIntent::PatchLoaded {
-                tag,
-                result: Ok(patch_of(TWO_HUNKS)),
-            });
-            state
-        }
-
-        fn lines(ids: &[LineId]) -> Option<FilePick> {
-            Some(FilePick::Lines(ids.iter().copied().collect()))
-        }
-
-        fn picked(state: &AppState, path: &str) -> Option<FilePick> {
-            state.custom_patch.as_ref()?.file_state(&path.into())
-        }
-
-        #[test]
-        fn space_in_a_commits_hunk_picks_its_lines_and_never_stages() {
-            let mut state = picking();
-            assert_eq!(state.key_focus(), KeyScope::Diff);
-
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(
-                picked(&state, "a.rs"),
-                lines(&[LineId::removed(1), LineId::added(1), LineId::added(2)])
-            );
-            assert_eq!(state.custom_patch.as_ref().unwrap().source.oid, id(2));
-            assert_eq!(state.op_seq, None);
-
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn space_in_line_mode_picks_only_the_range() {
-            let mut state = picking();
-            press(&mut state, KeyCode::Char('v'));
-            assert_eq!(state.key_focus(), KeyScope::Lines);
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(picked(&state, "a.rs"), lines(&[LineId::removed(1)]));
-            // The next line joins it; the hunk's other line stays out.
-            press(&mut state, KeyCode::Char('j'));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(
-                picked(&state, "a.rs"),
-                lines(&[LineId::removed(1), LineId::added(1)])
-            );
-            assert_eq!(state.op_seq, None);
-        }
-
-        #[test]
-        fn the_working_tree_keys_say_not_in_a_commits_change() {
-            let mut state = picking();
-            for c in ['t', 'd', 'e'] {
-                assert_eq!(
-                    key_reason(&state, KeyScope::Diff, c).as_deref(),
-                    Some(keymap::NOT_IN_COMMIT),
-                    "{c}"
-                );
-            }
-            assert_eq!(key_reason(&state, KeyScope::Diff, ' '), None);
-            press(&mut state, KeyCode::Char('v'));
-            assert_eq!(
-                key_reason(&state, KeyScope::Lines, 'd').as_deref(),
-                Some(keymap::NOT_IN_COMMIT)
-            );
-            // Sent as intents, they do nothing either.
-            for intent in [
-                AppIntent::ToggleDiffSide,
-                AppIntent::Discard,
-                AppIntent::EditHunk,
-            ] {
-                state.notice = None;
-                assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
-                assert!(state.popups.is_empty(), "{intent:?}");
-                assert_eq!(state.notice.as_deref(), Some(keymap::NOT_IN_COMMIT));
-            }
-        }
-
-        #[test]
-        fn space_in_the_commit_files_picks_the_whole_file_and_drops_it() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            assert_eq!(state.key_focus(), KeyScope::CommitFiles);
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(picked(&state, "a.rs"), Some(FilePick::Whole));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn picking_from_a_second_commit_leaves_the_patch_and_says_reset_it_first() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            let before = state.custom_patch.clone();
-            press(&mut state, KeyCode::Esc);
-            open_files(&mut state, 1);
-
-            press(&mut state, KeyCode::Char(' '));
-
-            assert_eq!(state.custom_patch, before);
-            let short = &oid(2)[..7];
-            assert_eq!(
-                state.notice.as_deref(),
-                Some(
-                    format!("The custom patch holds changes from {short}; reset it first").as_str()
-                )
-            );
-        }
-
-        #[test]
-        fn the_patch_menu_has_five_items_and_reset_drops_the_patch() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            state.update(AppIntent::Key(KeyPress::new(
-                KeyCode::Char('p'),
-                KeyModifiers::CONTROL,
-            )));
-            assert_eq!(
-                state.popups,
-                [Popup::Menu {
-                    id: MenuId::CustomPatch,
-                    cursor: 0
-                }]
-            );
-            let labels: Vec<_> = menu::items(MenuId::CustomPatch)
-                .iter()
-                .map(|item| item.label)
-                .collect();
-            assert_eq!(
-                labels,
-                [
-                    "Remove from commit",
-                    "Move to selected commit",
-                    "Move to index",
-                    "New commit after source…",
-                    "Reset patch"
-                ]
-            );
-            if let Some(Popup::Menu { cursor, .. }) = state.popups.last_mut() {
-                *cursor = 4;
-            }
-            assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
-            assert_eq!(state.custom_patch, None);
-            assert!(state.popups.is_empty());
-        }
-
-        /// Row 2's `a.rs` picked whole, files closed, the cursor on `row`.
-        fn with_patch(row: usize) -> AppState {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            press(&mut state, KeyCode::Esc);
-            state.commits.selected = row;
-            state
-        }
-
-        fn the_op(effects: &[Effect]) -> GitOp {
-            match effects {
-                [Effect::HandOff(HandOff::Attached { op, .. })] => op.clone(),
-                other => panic!("expected one attached op, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn a_rewrite_asks_and_only_y_runs_it() {
-            for (choice, action, row) in [
-                (PatchChoice::Remove, PatchAction::Remove, 0),
-                (PatchChoice::ToIndex, PatchAction::ToIndex, 0),
-                (PatchChoice::MoveToSelected, PatchAction::MoveTo(id(0)), 0),
-                (PatchChoice::MoveToSelected, PatchAction::MoveTo(id(3)), 3),
-            ] {
-                let mut state = with_patch(row);
-                state.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(
-                    state.popups,
-                    [Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))]
-                );
-                assert_eq!(state.key_focus(), KeyScope::PatchConfirm);
-                // Enter answers nothing.
-                assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-                assert_eq!(state.popups.len(), 1);
-
-                let op = the_op(&press(&mut state, KeyCode::Char('y')));
-
-                let GitOp::CustomPatch {
-                    plan,
-                    action: ran,
-                    picks,
-                    orig_head,
-                } = op
-                else {
-                    panic!("{op:?}");
-                };
-                assert_eq!(ran, action);
-                assert_eq!(orig_head, id(0));
-                assert_eq!(Some(picks), state.custom_patch.clone());
-                let edits: Vec<_> = plan
-                    .steps
-                    .iter()
-                    .filter(|s| s.action == crate::git::rebase_plan::TodoAction::Edit)
-                    .map(|s| s.commit.clone())
-                    .collect();
-                let want = match &action {
-                    PatchAction::MoveTo(target) if *target == id(3) => vec![id(3)],
-                    PatchAction::MoveTo(target) => vec![id(2), target.clone()],
-                    PatchAction::ToIndex => vec![id(2), id(0)],
-                    _ => vec![id(2)],
-                };
-                assert_eq!(edits, want, "{action:?}");
-            }
-        }
-
-        #[test]
-        fn during_a_bisect_no_patch_rewrite_asks_or_runs() {
-            for choice in [
-                PatchChoice::Remove,
-                PatchChoice::MoveToSelected,
-                PatchChoice::ToIndex,
-                PatchChoice::NewCommit,
-            ] {
-                let mut idle = with_patch(0);
-                idle.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(idle.popups.len(), 1, "{choice:?} asks without a bisect");
-
-                let mut state = with_patch(0);
-                start_bisecting(&mut state);
-                let effects = state.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(effects, vec![], "{choice:?}");
-                assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()), "{choice:?}");
-                assert_eq!(state.popups, [], "{choice:?}");
-                assert_eq!(state.op_seq, None, "{choice:?}");
-            }
-        }
-
-        #[test]
-        fn no_closes_the_question_and_keeps_the_patch() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            assert_eq!(press(&mut state, KeyCode::Char('n')), vec![]);
-            assert!(state.popups.is_empty());
-            assert!(state.custom_patch.is_some());
-        }
-
-        #[test]
-        fn a_new_commit_asks_for_its_message_first_and_refuses_an_empty_one() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::NewCommit));
-            assert!(matches!(
-                state.popups.as_slice(),
-                [Popup::Prompt {
-                    kind: PromptKind::PatchCommitMessage,
-                    ..
-                }]
-            ));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-            assert_eq!(
-                state.notice.as_deref(),
-                Some(super::super::custom_patch::MESSAGE_NEEDED)
-            );
-            assert!(matches!(
-                state.popups.as_slice(),
-                [Popup::Prompt {
-                    kind: PromptKind::PatchCommitMessage,
-                    ..
-                }]
-            ));
-
-            for c in "Split".chars() {
-                state.update(AppIntent::Key(KeyPress::new(
-                    KeyCode::Char(c),
-                    KeyModifiers::SHIFT,
-                )));
-            }
-            press(&mut state, KeyCode::Enter);
-            assert_eq!(
-                state.popups,
-                [Popup::Confirm(ConfirmKind::CustomPatch(
-                    PatchAction::NewCommit("Split".into())
-                ))]
-            );
-            let Popup::Confirm(kind) = state.popups[0].clone() else {
-                panic!("{:?}", state.popups);
-            };
-            let question = state.confirm_question(&kind);
-            assert!(question.contains("\"Split\""), "{question}");
-            let op = the_op(&press(&mut state, KeyCode::Char('y')));
-            assert!(matches!(
-                op,
-                GitOp::CustomPatch { action: PatchAction::NewCommit(ref m), .. } if m == "Split"
-            ));
-        }
-
-        #[test]
-        fn a_successful_rewrite_drops_the_patch_and_a_failed_one_keeps_it() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            let effects = press(&mut state, KeyCode::Char('y'));
-            let (tag, op) = match effects.as_slice() {
-                [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
-                other => panic!("{other:?}"),
-            };
-            state.update(AppIntent::OpFinished {
-                tag,
-                op: op.clone(),
-                result: Err("conflict".into()),
-            });
-            assert!(state.custom_patch.is_some());
-            assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
-
-            state.popups.clear();
-            let effects = state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            assert_eq!(effects, vec![]);
-            let (tag, op) = match press(&mut state, KeyCode::Char('y')).as_slice() {
-                [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
-                other => panic!("{other:?}"),
-            };
-            state.update(AppIntent::OpFinished {
-                tag,
-                op,
-                result: Ok(()),
-            });
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn a_rewrite_says_why_not_in_order() {
-            use crate::git::repo_state::Operation;
-            let why = |state: &AppState, choice| {
-                keymap::patch_rewrite_disabled(state, choice).map(|r| r.into_owned())
-            };
-            let mut state = with_patch(2);
-            let picks = state.custom_patch.take();
-            state.op_seq = Some(1);
-            state.branch.as_mut().unwrap().in_progress = vec![Operation::Rebase];
-            state.files.push(changed("t.rs", '.', 'M'));
-            state.commits.filter = "x".into();
-            state.commits.rows[2].parents = vec![oid(3), oid(9)];
-
-            let mut reasons = vec![];
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.custom_patch = picks;
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.op_seq = None;
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.branch.as_mut().unwrap().in_progress.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.files.retain(|f| f.kind == EntryKind::Untracked);
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.filter.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.rows[2].parents.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.rows[2].parents = vec![oid(3)];
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            reasons.push(why(&state, PatchChoice::Remove));
-
-            let want: Vec<Option<String>> = [
-                Some(keymap::PATCH_EMPTY),
-                Some(keymap::OP_RUNNING),
-                Some("Finish or abort the operation in progress"),
-                Some("Commit or stash your changes first"),
-                Some(keymap::CLEAR_LOG_FILTER),
-                Some("Cannot rewrite a merge commit"),
-                Some("Cannot rewrite the first commit"),
-                Some(keymap::TARGET_IS_SOURCE),
-                None,
-            ]
-            .into_iter()
-            .map(|r| r.map(String::from))
-            .collect();
-            assert_eq!(reasons, want);
-
-            // A log narrowed to a path is refused the same way.
-            state.commits.query.path = Some("a.rs".into());
-            assert_eq!(
-                why(&state, PatchChoice::Remove).as_deref(),
-                Some(keymap::CLEAR_LOG_FILTER)
-            );
-        }
-
-        #[test]
-        fn a_repository_file_cannot_rebind_the_patch_menu() {
-            use crate::keymap::{KeysTable, REPO_LOCKED, Trust};
-            assert!(REPO_LOCKED.contains(&"workspace.patch_menu"));
-            for id in [
-                "workspace.patch_menu",
-                "patch_confirm.yes",
-                "patch_confirm.no",
-            ] {
-                assert!(REPO_LOCKED.contains(&id), "{id}");
-                let table: KeysTable = [(id.to_string(), vec!["enter".to_string()])].into();
-                let repo = Keymap::build(&Keymap::default(), &table, Trust::Repo);
-                assert!(repo.is_err(), "{id}");
-                let global = Keymap::build(&Keymap::default(), &table, Trust::Global);
-                assert!(global.is_ok(), "{id}: {global:?}");
-            }
-        }
     }
 }

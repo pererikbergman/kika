@@ -2,8 +2,8 @@
 //! filter, and an undo or redo waiting for a fresh read to plan from.
 //! Pure; `AppState` turns its answers into effects.
 
-use crate::git::reflog::{Reflog, ReflogEntry};
-use crate::git::undo::Direction;
+use super::git::{Reflog, ReflogEntry};
+use super::undo::Direction;
 use crate::list_filter;
 
 /// Hex digits of an entry's id, as the tab draws it.
@@ -112,11 +112,11 @@ fn filter_text(entry: &ReflogEntry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::reflog::parse_records;
+    use crate::features::commits::reflog::git::parse_records;
 
     fn three() -> Reflog {
         Reflog {
-            entries: parse_records(include_bytes!("git/fixtures/reflog/commit.bin")),
+            entries: parse_records(include_bytes!("../../../git/fixtures/reflog/commit.bin")),
             ..Reflog::default()
         }
     }

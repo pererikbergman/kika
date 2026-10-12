@@ -14,6 +14,7 @@ use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::branches::{remotes, tags};
+use crate::features::commits::reflog;
 use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
@@ -37,7 +38,6 @@ use crate::git::log::{LogQuery, log_page, markers};
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
-use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
@@ -1279,17 +1279,7 @@ impl Runtime {
                     let _ = tx.send(AppIntent::RebaseTodoWritten { tag, result });
                 });
             }
-            Effect::LoadReflog { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or an undo would wait forever.
-                    let result = tokio::task::spawn_blocking(move || read_reflog(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(format!("git reflog crashed: {e}").as_bytes()))
-                        });
-                    let _ = tx.send(AppIntent::ReflogLoaded { tag, result });
-                });
-            }
+            Effect::LoadReflog { tag } => reflog::effects::load(runner, tx, tag),
             Effect::Fetch { tag } => sync::effects::fetch(runner, tx, tag),
             Effect::LoadConfig { repo } => {
                 let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
