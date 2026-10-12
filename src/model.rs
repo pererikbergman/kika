@@ -29,7 +29,7 @@ use crate::features::repos::ParkedRepo;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
-use crate::git::bisect::{BisectMark, BisectState};
+use crate::git::bisect::BisectMark;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{
@@ -3496,7 +3496,7 @@ impl AppState {
 
     /// The selected commit's id and short id, or why no action may run on
     /// it now, said in the bar. Only an id of hex digits reaches argv.
-    fn commit_for_action(
+    pub(crate) fn commit_for_action(
         &mut self,
         disabled: fn(&AppState) -> Option<Reason>,
     ) -> Option<(CommitId, String)> {
@@ -4761,83 +4761,6 @@ fn failure_next(op: &GitOp) -> &'static str {
             "The stash list was reloaded. Fix the cause above, then try again."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
-    }
-}
-
-/// Bisecting: marks from the Commits and Status panels, the reset, and
-/// saying what a status load found.
-impl AppState {
-    /// Mark the selected commit. With no bisect in progress the mark
-    /// starts one; git checks nothing out until it has a good and a bad.
-    fn bisect_selected(&mut self, mark: BisectMark) -> Vec<Effect> {
-        let disabled = bisect::selected_disabled(mark);
-        let Some((commit, _)) = self.commit_for_action(disabled) else {
-            return vec![];
-        };
-        let start = !bisect::bisecting(self);
-        self.start_op(Ok(Some(GitOp::BisectMark {
-            mark,
-            commit,
-            start,
-        })))
-    }
-
-    /// Mark the commit git checked out to test.
-    fn bisect_head(&mut self, mark: BisectMark) -> Vec<Effect> {
-        if self.context != Context::Workspace {
-            return vec![];
-        }
-        if let Some(reason) = (bisect::head_disabled(mark))(self) {
-            self.notice = Some(reason);
-            return vec![];
-        }
-        let Some(commit) = bisect::head_commit(self) else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(GitOp::BisectMark {
-            mark,
-            commit,
-            start: false,
-        })))
-    }
-
-    /// Ask before resetting: the marks are dropped and the files change.
-    fn ask_bisect_reset(&mut self) {
-        if self.context != Context::Workspace {
-            return;
-        }
-        match bisect::reset_disabled(self) {
-            Some(reason) => self.notice = Some(reason),
-            None => self
-                .popups
-                .push(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))),
-        }
-    }
-
-    fn bisect_reset(&mut self) -> Vec<Effect> {
-        if let Some(reason) = bisect::reset_disabled(self) {
-            self.notice = Some(reason);
-            return vec![];
-        }
-        self.start_op(Ok(Some(GitOp::BisectReset)))
-    }
-
-    /// Say so when this load is the first to show the bisect's outcome;
-    /// the same outcome loaded again says nothing.
-    fn announce_bisect(&mut self, before: Option<BisectState>) {
-        let Some(now) = bisect::bisect_state(self) else {
-            return;
-        };
-        let was_found = before.as_ref().and_then(|b| b.first_bad.as_ref());
-        let was_only_skipped = before.as_ref().is_some_and(|b| b.only_skipped);
-        if let Some(found) = &now.first_bad {
-            if was_found != Some(found) {
-                let short = self.commits.short_oid(&found.commit);
-                self.notice_text = Some(bisect::found_notice(&short, &found.subject));
-            }
-        } else if now.only_skipped && !was_only_skipped {
-            self.notice = Some(bisect::ONLY_SKIPPED.into());
-        }
     }
 }
 
@@ -11799,82 +11722,6 @@ mod tests {
 
     // --- Bisect ---
 
-    fn bisect_branch(head: Head, ops: &[Operation], bisect: Option<BisectState>) -> BranchStatus {
-        BranchStatus {
-            head,
-            in_progress: ops.to_vec(),
-            bisect,
-            ..on_branch("main")
-        }
-    }
-
-    /// `with_commits` on `main` with no bisect, `c0` selected.
-    fn ready_to_bisect() -> AppState {
-        let mut state = with_commits(3, true);
-        state.branch = Some(on_branch("main"));
-        state.files_loaded = true;
-        state
-    }
-
-    /// A bisect testing `c1`, with the Status panel focused.
-    fn testing_c1(ops: &[Operation]) -> AppState {
-        let mut state = with_commits(3, true);
-        let bisect = BisectState {
-            start: "main".into(),
-            ..BisectState::default()
-        };
-        state.branch = Some(bisect_branch(
-            Head::Detached("c1".into()),
-            ops,
-            Some(bisect),
-        ));
-        state.update(AppIntent::FocusPanel(layout::Panel::Side(
-            SidePanel::Status,
-        )));
-        assert_eq!(state.key_focus(), KeyScope::Status);
-        state
-    }
-
-    fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp {
-        GitOp::BisectMark {
-            mark,
-            commit: cid(commit),
-            start,
-        }
-    }
-
-    #[test]
-    fn shift_b_opens_the_bisect_menu_and_a_first_mark_starts_a_bisect() {
-        let mut state = ready_to_bisect();
-        assert_eq!(shift(&mut state, 'B'), vec![]);
-        assert_eq!(
-            state.popups,
-            [Popup::Menu {
-                id: MenuId::Bisect,
-                cursor: 0
-            }]
-        );
-        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
-        assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", true));
-        assert_eq!(state.popups, []);
-    }
-
-    #[test]
-    fn during_a_bisect_marks_do_not_start_another() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        let (_, op) = op_of(&press_char(&mut state, 'g'));
-        assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
-        state.op_seq = None;
-        let (_, op) = op_of(&press_char(&mut state, 'b'));
-        assert_eq!(op, bisect_mark(BisectMark::Bad, "c1", false));
-        state.op_seq = None;
-        let (_, op) = op_of(&press_char(&mut state, 's'));
-        assert_eq!(op, bisect_mark(BisectMark::Skip, "c1", false));
-        state.op_seq = None;
-        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Good)));
-        assert_eq!(op, bisect_mark(BisectMark::Good, "c0", false));
-    }
-
     #[test]
     fn c_says_to_mark_while_only_a_bisect_is_in_progress() {
         let mut state = testing_c1(&[Operation::Bisect]);
@@ -11882,79 +11729,6 @@ mod tests {
         assert_eq!(state.notice, Some(bisect::MARK_INSTEAD.into()));
         assert_eq!(state.update(AppIntent::ContinueOperation), vec![]);
         assert_eq!(state.op_seq, None);
-    }
-
-    #[test]
-    fn a_start_is_refused_with_changes_no_commits_or_an_operation() {
-        let changed = |index, worktree| FileEntry {
-            path: "a.txt".into(),
-            orig_path: None,
-            index,
-            worktree,
-            kind: EntryKind::Changed,
-        };
-        let cases = [
-            (vec![changed('M', '.')], on_branch("main"), bisect::DIRTY),
-            (vec![changed('.', 'M')], on_branch("main"), bisect::DIRTY),
-            (
-                vec![],
-                bisect_branch(Head::Unborn("main".into()), &[], None),
-                "No commits yet",
-            ),
-            (
-                vec![],
-                bisect_branch(Head::Branch("main".into()), &[Operation::Merge], None),
-                "Finish or abort the operation in progress",
-            ),
-        ];
-        for (files, branch, reason) in cases {
-            let mut state = ready_to_bisect();
-            state.files = files;
-            state.branch = Some(branch);
-            assert_eq!(
-                state.update(AppIntent::BisectSelected(BisectMark::Bad)),
-                vec![]
-            );
-            assert_eq!(state.notice, Some(reason.into()));
-            assert_eq!(state.op_seq, None);
-        }
-        let mut untracked_only = ready_to_bisect();
-        untracked_only.files = vec![untracked("new.txt")];
-        op_of(&untracked_only.update(AppIntent::BisectSelected(BisectMark::Good)));
-    }
-
-    #[test]
-    fn a_bisect_with_its_own_terms_is_not_marked() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        if let Some(bisect) = state.branch.as_mut().and_then(|b| b.bisect.as_mut()) {
-            bisect.terms = crate::git::bisect::Terms {
-                bad: "new".into(),
-                good: "old".into(),
-            };
-        }
-        for c in ['g', 'b', 's'] {
-            state.notice = None;
-            assert_eq!(press_char(&mut state, c), vec![], "{c}");
-            assert_eq!(state.notice, Some(bisect::CUSTOM_TERMS.into()), "{c}");
-        }
-        assert_eq!(
-            state.update(AppIntent::BisectSelected(BisectMark::Bad)),
-            vec![]
-        );
-        assert_eq!(state.op_seq, None);
-        press_char(&mut state, 'a');
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
-        );
-    }
-
-    #[test]
-    fn the_status_panel_marks_only_once_git_checks_out_a_commit() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        state.branch.as_mut().unwrap().head = Head::Branch("main".into());
-        assert_eq!(press_char(&mut state, 'g'), vec![]);
-        assert_eq!(state.notice, Some(bisect::NOT_TESTING.into()));
     }
 
     #[test]
@@ -11998,29 +11772,6 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Abort(Operation::Rebase));
-    }
-
-    #[test]
-    fn the_bisect_menu_reset_asks_too() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        state.update(AppIntent::OpenMenu(MenuId::Bisect));
-        for _ in 0..3 {
-            state.update(AppIntent::MenuNext);
-        }
-        assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
-        );
-
-        let mut idle = ready_to_bisect();
-        idle.update(AppIntent::OpenMenu(MenuId::Bisect));
-        for _ in 0..3 {
-            idle.update(AppIntent::MenuNext);
-        }
-        idle.update(AppIntent::MenuSelect);
-        assert_eq!(idle.notice, Some(bisect::NO_BISECT.into()));
-        assert_eq!(idle.update(AppIntent::ConfirmBisectReset), vec![]);
     }
 
     fn key(c: char) -> AppIntent {
@@ -12281,68 +12032,6 @@ mod tests {
                 "{action:?}"
             );
         }
-    }
-
-    fn status_with(tag: Tag, branch: BranchStatus) -> AppIntent {
-        AppIntent::StatusLoaded {
-            tag,
-            result: Ok(RepoStatus {
-                branch,
-                files: vec![],
-            }),
-        }
-    }
-
-    #[test]
-    fn a_load_that_brings_the_first_bad_commit_announces_it_once() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        let found = BisectState {
-            bad: 2,
-            good: 1,
-            first_bad: Some(crate::git::bisect::Found {
-                commit: cid("c1"),
-                subject: "commit 1".into(),
-            }),
-            ..BisectState::default()
-        };
-        let branch = bisect_branch(
-            Head::Detached("c1".into()),
-            &[Operation::Bisect],
-            Some(found),
-        );
-
-        let tag = refresh_tag(&mut state);
-        state.update(status_with(tag, branch.clone()));
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Bisect found c1 (a resets): commit 1")
-        );
-
-        press_char(&mut state, 'j');
-        assert_eq!(state.notice_text, None);
-        let tag = refresh_tag(&mut state);
-        state.update(status_with(tag, branch));
-        assert_eq!(state.notice_text, None);
-    }
-
-    #[test]
-    fn a_load_that_leaves_only_skipped_commits_says_so() {
-        let mut state = testing_c1(&[Operation::Bisect]);
-        let stuck = BisectState {
-            only_skipped: true,
-            ..BisectState::default()
-        };
-        let tag = refresh_tag(&mut state);
-        state.update(status_with(
-            tag,
-            bisect_branch(
-                Head::Detached("c1".into()),
-                &[Operation::Bisect],
-                Some(stuck),
-            ),
-        ));
-        assert_eq!(state.notice, Some(bisect::ONLY_SKIPPED.into()));
-        assert_eq!(state.notice_text, None);
     }
 
     // --- List filters, ranges and the diff search ---
