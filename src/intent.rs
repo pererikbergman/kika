@@ -10,6 +10,7 @@ use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
+use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
@@ -756,6 +757,39 @@ pub enum AppIntent {
     PullRequestCreated {
         tag: Tag,
         result: Result<(u64, String), CreateError>,
+    },
+    /// Leave the workspace for review mode and load its queues.
+    EnterReview,
+    /// Show the next review queue, or the previous one.
+    NextQueue,
+    PrevQueue,
+    /// Open the pull request under the cursor in the queue.
+    OpenPr,
+    /// Back from a pull request to its queue, or from the queue to the
+    /// workspace.
+    CloseReviewDetail,
+    /// Ask GitHub again for what review mode shows.
+    RefreshReview,
+    /// Open a failing check's page in the browser, picking one when
+    /// several fail.
+    OpenCheckDetails,
+    /// Move the queue's cursor, or scroll the pull request, by a line.
+    ReviewNext,
+    ReviewPrev,
+    /// The review queues, or why not; `repo` is the repository found,
+    /// when one was.
+    ReviewQueuesLoaded {
+        tag: Tag,
+        repo: Option<ForgeRepo>,
+        result: Result<Queues, ReviewError>,
+    },
+    /// Pull request `number`, `None` when GitHub has no such one, or why
+    /// it could not be read; `repo` as for the queues.
+    PrDetailLoaded {
+        tag: Tag,
+        number: u64,
+        repo: Option<ForgeRepo>,
+        result: Result<Option<PrDetail>, ReviewError>,
     },
 }
 

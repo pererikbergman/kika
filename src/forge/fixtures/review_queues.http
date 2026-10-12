@@ -1,0 +1,9 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+X-Github-Media-Type: github.v4; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4980
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: graphql
+
+{"data":{"q0":{"nodes":[{"number":12,"title":"Cache widget lookups","isDraft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"login":"octocat"}},{"number":7,"title":"Fix the widget border","isDraft":false,"updatedAt":"2023-11-10T08:30:00Z","author":{"login":"hubot"}}]},"q1":{"nodes":[{"number":15,"title":"Draft: new gadget API","isDraft":true,"updatedAt":"2023-11-14T21:00:00Z","author":{"login":"alice"}},{"number":12,"title":"Cache widget lookups","isDraft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"login":"octocat"}}]},"q2":{"nodes":[]},"q3":{"nodes":[{"number":15,"title":"Draft: new gadget API","isDraft":true,"updatedAt":"2023-11-14T21:00:00Z","author":{"login":"alice"}},{"number":12,"title":"Cache widget lookups","isDraft":false,"updatedAt":"2023-11-14T20:00:00Z","author":{"login":"octocat"}},{"number":9,"title":"Bump serde","isDraft":false,"updatedAt":"2023-11-12T10:00:00Z","author":{"login":"dependabot"}},{"number":7,"title":"Fix the widget border","isDraft":false,"updatedAt":"2023-11-10T08:30:00Z","author":{"login":"hubot"}}]}}}

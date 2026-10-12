@@ -9,6 +9,7 @@
 pub mod cache;
 pub mod github;
 pub mod remote;
+pub mod review;
 pub mod task;
 pub mod url;
 

@@ -123,6 +123,8 @@ pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
 /// for it to run.
 pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) -> Vec<HandOff> {
     let mut jobs = Vec::new();
+    // The model has no clock of its own; rate limits are judged by this.
+    state.now = crate::effect::unix_now();
     for effect in state.update(intent) {
         match effect {
             Effect::HandOff(job) => jobs.push(job),

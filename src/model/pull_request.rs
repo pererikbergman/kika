@@ -289,16 +289,18 @@ impl AppState {
     }
 
     /// Take the picked row and go on to the next step.
-    pub(super) fn pick_select(&mut self) {
+    pub(super) fn pick_select(&mut self) -> Vec<Effect> {
         let Some(Popup::PickList(list)) = self.popups.last() else {
-            return;
+            return vec![];
         };
         let (purpose, cursor) = (list.purpose, list.cursor);
         self.popups.pop();
         match purpose {
             PickPurpose::TargetRemote => self.choose_target(cursor),
             PickPurpose::BaseBranch => self.choose_base(cursor),
+            PickPurpose::CheckDetails => return self.pick_check(cursor),
         }
+        vec![]
     }
 
     /// Target `targets[i]`, then pick its base branch: `main`, else

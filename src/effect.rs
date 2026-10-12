@@ -16,6 +16,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
+use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
 use crate::forge::{CreateError, ForgeStatus};
 use crate::forge::{ForgeHost, ForgeRepo};
@@ -367,6 +368,25 @@ pub enum Effect {
         base: String,
         title: String,
     },
+    /// Read the review queues of the remote's repository: `repo` when an
+    /// earlier load found it, else the remote is read and matched against
+    /// `hosts`. A host in `limited` is not asked before its second has
+    /// passed. Always answered by one `ReviewQueuesLoaded`.
+    LoadReviewQueues {
+        tag: Tag,
+        hosts: Vec<ForgeHost>,
+        repo: Option<ForgeRepo>,
+        limited: Vec<(ForgeHost, i64)>,
+    },
+    /// Read pull request `number`, found as for `LoadReviewQueues`. Always
+    /// answered by one `PrDetailLoaded`.
+    LoadPrDetail {
+        tag: Tag,
+        hosts: Vec<ForgeHost>,
+        repo: Option<ForgeRepo>,
+        number: u64,
+        limited: Vec<(ForgeHost, i64)>,
+    },
 }
 
 /// The todo list of the rebase in progress and its `done` list, from
@@ -469,7 +489,7 @@ fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppInten
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -1288,6 +1308,70 @@ impl Runtime {
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
+            Effect::LoadReviewQueues {
+                tag,
+                hosts,
+                repo,
+                limited,
+            } => {
+                let forge = self.forge.clone();
+                tokio::spawn(async move {
+                    let answer = tokio::task::spawn_blocking(move || {
+                        let Some(forge) = forge else {
+                            // No forge client: nothing may reach the network.
+                            return (None, Err(ReviewError::NoForgeHost));
+                        };
+                        let load = ReviewLoad {
+                            hosts: &hosts,
+                            known: repo.as_ref(),
+                            limited: &limited,
+                            now: unix_now(),
+                        };
+                        review::run(runner.as_ref(), &forge, &load, |gh, repo| {
+                            gh.fetch_queues(repo)
+                        })
+                    })
+                    .await
+                    // A panic still answers, or the load would stay in flight.
+                    .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
+                    let (repo, result) = answer;
+                    let _ = tx.send(AppIntent::ReviewQueuesLoaded { tag, repo, result });
+                });
+            }
+            Effect::LoadPrDetail {
+                tag,
+                hosts,
+                repo,
+                number,
+                limited,
+            } => {
+                let forge = self.forge.clone();
+                tokio::spawn(async move {
+                    let answer = tokio::task::spawn_blocking(move || {
+                        let Some(forge) = forge else {
+                            return (None, Err(ReviewError::NoForgeHost));
+                        };
+                        let load = ReviewLoad {
+                            hosts: &hosts,
+                            known: repo.as_ref(),
+                            limited: &limited,
+                            now: unix_now(),
+                        };
+                        review::run(runner.as_ref(), &forge, &load, |gh, repo| {
+                            gh.fetch_detail(repo, number)
+                        })
+                    })
+                    .await
+                    .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
+                    let (repo, result) = answer;
+                    let _ = tx.send(AppIntent::PrDetailLoaded {
+                        tag,
+                        number,
+                        repo,
+                        result,
+                    });
+                });
+            }
             Effect::LoadPullRequests {
                 tag,
                 hosts,
@@ -1504,6 +1588,66 @@ mod tests {
         git.assert_done();
         assert_eq!(gh.calls(), []);
         assert!(!cache_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn review_loads_answer_once_and_reach_nobody_without_a_forge_client() {
+        use crate::forge::github::{FakeGh, answer};
+        use crate::forge::review::fixtures::DETAIL;
+        use crate::git::recording::CommandSink;
+
+        let github = vec![ForgeHost::parse("github.com").unwrap()];
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let git = Arc::new(FakeRunner::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bare = Runtime::new(git.clone(), tx);
+        bare.spawn(Effect::LoadReviewQueues {
+            tag: forge_tag(),
+            hosts: github.clone(),
+            repo: Some(repo.clone()),
+            limited: vec![],
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ReviewQueuesLoaded {
+                tag: forge_tag(),
+                repo: None,
+                result: Err(ReviewError::NoForgeHost),
+            })
+        );
+
+        let gh = Arc::new(FakeGh::new().reply(answer(DETAIL)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        runtime.spawn(Effect::LoadPrDetail {
+            tag: forge_tag(),
+            hosts: github,
+            repo: Some(repo.clone()),
+            number: 42,
+            limited: vec![],
+        });
+        match rx.recv().await {
+            Some(AppIntent::PrDetailLoaded {
+                number: 42,
+                repo: Some(found),
+                result: Ok(Some(detail)),
+                ..
+            }) => {
+                assert_eq!(found, repo);
+                assert_eq!(detail.number, 42);
+            }
+            other => panic!("{other:?}"),
+        }
+        git.assert_done();
+        assert_eq!(gh.calls().len(), 1);
     }
 
     #[tokio::test]

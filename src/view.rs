@@ -38,12 +38,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
 
     match state.context {
         Context::Workspace => render_workspace(state, frame, main),
-        Context::Review { number } => {
-            frame.render_widget(
-                Paragraph::new("").block(Block::bordered().title(format!(" Review #{number} "))),
-                main,
-            );
-        }
+        Context::Review { .. } => crate::review_view::render(state, frame, main),
     }
     if state.help_open {
         render_help(state, frame, main);
@@ -2368,9 +2363,10 @@ mod tests {
     }
 
     #[test]
-    fn review_bar_shows_only_global_keys() {
-        let rows = draw(&AppState::new(Context::Review { number: 1 }), 40, 5);
-        assert!(rows[4].starts_with(" ? keys  q quit "), "{rows:#?}");
+    fn review_bar_shows_review_keys_and_still_quits() {
+        let rows = draw(&AppState::new(Context::Review { number: Some(1) }), 40, 5);
+        assert!(rows[4].trim_end().ends_with("? keys  q quit"), "{rows:#?}");
+        assert!(!rows[4].contains("stage"), "{rows:#?}");
     }
 
     #[test]
@@ -2534,7 +2530,7 @@ mod tests {
         let mut state = loaded(vec![file("a.rs")]);
         state.help_open = true;
         state.notice = Some("No file selected".into());
-        for context in [Context::Workspace, Context::Review { number: 2 }] {
+        for context in [Context::Workspace, Context::Review { number: Some(2) }] {
             state.context = context;
             for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {
                 draw(&state, w, h);
@@ -2544,7 +2540,7 @@ mod tests {
 
     #[test]
     fn review_context_shows_number_in_title() {
-        let rows = draw(&AppState::new(Context::Review { number: 123 }), 30, 5);
+        let rows = draw(&AppState::new(Context::Review { number: Some(123) }), 30, 5);
         assert!(rows[0].contains("Review #123"), "{rows:#?}");
     }
 
