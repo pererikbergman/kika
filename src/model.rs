@@ -19707,6 +19707,7 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("wip".into()),
                 paths: vec!["b.rs".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.stash_draft, None);
@@ -19728,6 +19729,7 @@ mod tests {
                     mode,
                     message: None,
                     paths: vec![],
+                    restore: vec![],
                 },
                 "{index}"
             );
@@ -19746,6 +19748,7 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["c.txt".into()],
+                restore: vec![],
             }
         );
     }
@@ -19787,6 +19790,7 @@ mod tests {
             mode: StashMode::All,
             message: None,
             paths: vec![],
+            restore: vec![],
         };
         let cases = [
             (push, "Could not stash", files),
@@ -19827,6 +19831,7 @@ mod tests {
         state.stash_draft = Some(crate::stash::StashDraft {
             mode: StashMode::All,
             paths: vec![],
+            restore: vec![],
             from_range: false,
         });
         state.switch_repo();
@@ -19873,18 +19878,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_range_with_a_rename_and_an_untracked_file_is_refused_with_a_reason() {
-        let renamed = FileEntry {
-            orig_path: Some("old.rs".into()),
+    fn renamed(path: &str, old: &str) -> FileEntry {
+        FileEntry {
+            orig_path: Some(old.into()),
             kind: EntryKind::Renamed,
-            ..changed("new.rs", 'R', '.')
-        };
-        let (mut state, _) = with_files(vec![renamed, untracked("u.txt")], 24);
+            ..changed(path, 'R', '.')
+        }
+    }
+
+    #[test]
+    fn a_range_with_a_rename_and_an_untracked_file_stashes_the_rename_whole() {
+        let files = vec![renamed("new.rs", "old.rs"), untracked("u.txt")];
+        let (mut state, _) = with_files(files, 24);
         press_char(&mut state, 'V');
-        assert_eq!(crate::menu::stash_file_disabled(&state), None);
         press_char(&mut state, 'j');
-        let reason = crate::menu::STASH_APART;
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::IncludeUntracked,
+                message: None,
+                paths: vec!["new.rs".into(), "u.txt".into()],
+                restore: vec!["old.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_rename_whose_old_path_is_taken_again_is_refused_with_a_reason() {
+        // The file at the old path is listed but not marked.
+        let files = vec![renamed("new.rs", "old.rs"), untracked("old.rs")];
+        let (mut state, _) = with_files(files, 24);
+        let reason = crate::menu::STASH_RENAME_TAKEN;
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(reason.into())
+        );
+        // Marked too, it is refused for the same reason.
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
         assert_eq!(
             crate::menu::stash_file_disabled(&state),
             Some(reason.into())
@@ -19893,6 +19927,27 @@ mod tests {
         assert_eq!(state.notice, Some(reason.into()));
         assert_eq!(state.stash_draft, None);
         assert!(state.files_anchor.is_some());
+    }
+
+    #[test]
+    fn a_rename_whose_old_directory_is_now_a_file_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_RENAME_TAKEN.into());
+        for taken in ["d", "d/e"] {
+            let files = vec![renamed("new.rs", "d/e/old.rs"), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A case-insensitive filesystem would fold these onto the old path
+        // or its directory, so they are refused too.
+        for (old, taken) in [("Old.rs", "old.rs"), ("D/old.rs", "d")] {
+            let files = vec![renamed("new.rs", old), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A file beside the old path, inside its directory, is fine.
+        let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
+        let (state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
     }
 
     #[test]
@@ -19912,6 +19967,7 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("pair".into()),
                 paths: vec!["a.rs".into(), "b.rs".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.files_anchor, None, "the range is done with");
@@ -19939,6 +19995,7 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["b.rs".into(), "c.txt".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.files_anchor, None);
@@ -19984,6 +20041,7 @@ mod tests {
                 mode: StashMode::All,
                 message: None,
                 paths: vec!["b.rs".into()],
+                restore: vec![],
             }
         );
     }

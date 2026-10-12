@@ -2392,6 +2392,68 @@ async fn a_range_with_a_staged_deletion_and_an_untracked_file_stashes_nothing() 
     assert_eq!(after, before);
 }
 
+/// Open the stash menu and choose "Stash selected files…".
+async fn choose_stash_selected(app: &mut Harness) {
+    app.press(KeyCode::Char('s')).await;
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_with_a_staged_rename_and_an_untracked_file_stashes_both_whole() {
+    let repo = on_main().write("u.txt", "new\n");
+    repo.git(["mv", "--", "a.txt", "n.txt"]);
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(before, "R  a.txt -> n.txt\n?? u.txt\n");
+
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("2 selected");
+    choose_stash_selected(&mut app).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(stash_count(&repo), 1);
+    assert_eq!(repo.git(["status", "--porcelain"]), b"");
+    let tracked =
+        String::from_utf8(repo.git(["stash", "show", "--name-status", "stash@{0}"])).unwrap();
+    assert_eq!(tracked, "R100\ta.txt\tn.txt\n");
+    let untracked = String::from_utf8(repo.git(["ls-tree", "--name-only", "stash@{0}^3"])).unwrap();
+    assert_eq!(untracked, "u.txt\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
+    let repo = on_main();
+    repo.git(["mv", "--", "a.txt", "n.txt"]);
+    let repo = repo.write("a.txt", "mine\n");
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(before, "R  a.txt -> n.txt\n?? a.txt\n");
+    let at = app
+        .state()
+        .files
+        .iter()
+        .position(|f| f.path.display() == "n.txt")
+        .unwrap();
+    for _ in 0..at {
+        app.press(KeyCode::Char('j')).await;
+    }
+
+    choose_stash_selected(&mut app).await;
+    assert_eq!(
+        app.state().notice.as_deref(),
+        Some(crate::menu::STASH_RENAME_TAKEN)
+    );
+    assert_eq!(stash_count(&repo), 0);
+    let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(after, before);
+    assert_eq!(repo.read("a.txt"), "mine\n");
+}
+
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
     let rows = &app.state().commits.rows;
