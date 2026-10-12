@@ -38,7 +38,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             }
             Popup::Confirm(kind) => render_question(
                 &format!(" {} ", kind.title()),
-                &state.confirm_question(*kind),
+                &state.confirm_question(kind),
                 frame,
                 area,
             ),
@@ -690,7 +690,7 @@ mod tests {
 
         let mut state = workspace(&["a.rs"]);
         let kind = ConfirmKind::Abort(Operation::Rebase);
-        state.popups = vec![Popup::Confirm(kind)];
+        state.popups = vec![Popup::Confirm(kind.clone())];
         let (_, rows) = draw(&state, 40, 12);
         for needle in [" Abort rebase ", "Abort the rebase", "(y/n)"] {
             assert!(contains(&rows, needle), "{needle}: {rows:#?}");
@@ -749,7 +749,7 @@ mod tests {
     fn the_autosquash_question_shows_whole_and_only_y_folds() {
         let mut state = workspace(&["a.rs"]);
         let kind = ConfirmKind::Autosquash;
-        state.popups = vec![Popup::Confirm(kind)];
+        state.popups = vec![Popup::Confirm(kind.clone())];
         for (width, height) in [(80, 24), (40, 12)] {
             let (_, rows) = draw(&state, width, height);
             assert_eq!(

@@ -4,6 +4,7 @@ use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
 use crate::conflict_view;
+use crate::custom_patch::CustomPatch;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
@@ -148,9 +149,15 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
             // Short, so it fits the pane's title at 80 columns.
             let suffix = format!("{label} (unmapped)");
+            let view = HunkPane { view, picks: None };
             render_hunk_view(view, options, state.emoji_zwj, &suffix, &look, frame, area)
         }
         (Focus::Diff(view), ..) => {
+            let picks = state
+                .custom_patch
+                .as_ref()
+                .filter(|p| view.commit.as_ref().is_some_and(|c| p.is_from(c)));
+            let view = HunkPane { view, picks };
             render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
         }
         (Focus::Conflict(view), ..) => {
@@ -1487,7 +1494,7 @@ fn render_diff_pane(
 /// In line mode the picked lines are marked that way instead.
 /// `suffix`, when set, follows the title after a `·`.
 fn render_hunk_view(
-    view: &HunkView,
+    pane: HunkPane,
     options: DiffOptions,
     emoji: EmojiZwj,
     suffix: &str,
@@ -1495,9 +1502,13 @@ fn render_hunk_view(
     frame: &mut Frame,
     area: Rect,
 ) {
+    let view = pane.view;
     let block = look.block(hunk_title(view, options, suffix, look));
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    // A commit's change gives a second column to what the patch holds.
+    let picked_ids = pane.picks.map(|patch| picked_rows(view, patch));
+    let gutters = if picked_ids.is_some() { 2 } else { 1 };
     let pane = match &view.patch {
         None if view.loading() => Paragraph::new("Loading…"),
         None => Paragraph::new("Could not read the diff"),
@@ -1533,8 +1544,13 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(1));
+                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(gutters));
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
+                    if let Some(ids) = &picked_ids {
+                        let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
+                        let mark = if held { "●" } else { " " };
+                        spans.push(Span::styled(mark, Style::new().fg(Color::Magenta)));
+                    }
                     spans.extend(marked_spans(text, style, &search_marks(view, at)));
                     let line = Line::from(spans);
                     let mark = match view.lines {
@@ -1552,6 +1568,33 @@ fn render_hunk_view(
         }
     };
     frame.render_widget(pane.block(block), area);
+}
+
+/// The focused hunk view, with the custom patch when the view is of the
+/// commit it holds changes from.
+#[derive(Clone, Copy)]
+struct HunkPane<'a> {
+    view: &'a HunkView,
+    picks: Option<&'a CustomPatch>,
+}
+
+/// `(hunk, line)` of each row whose changed line the patch holds.
+fn picked_rows(view: &HunkView, patch: &CustomPatch) -> std::collections::HashSet<(usize, usize)> {
+    let Some(file) = &view.patch else {
+        return Default::default();
+    };
+    file.hunks
+        .iter()
+        .enumerate()
+        .flat_map(|(h, hunk)| {
+            hunk.line_ids()
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(l, id)| Some(((h, l), id?)))
+        })
+        .filter(|(_, id)| patch.contains_line(&view.path, *id))
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// The focused pane's title: the side, the path, the mode, the options
@@ -1638,6 +1681,7 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
 
 fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
     let side = match view.side {
+        _ if view.commit.is_some() => "Commit",
         DiffSide::Index => "Staged",
         DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
     };
@@ -3838,6 +3882,39 @@ mod tests {
             assert_eq!(buffer[(at + 2, y)].symbol(), letter);
         }
         assert_eq!(buffer[(79, y)].symbol(), "┃");
+    }
+
+    #[test]
+    fn in_a_commits_change_the_lines_the_patch_holds_carry_a_mark() {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::commit_files::{CommitId, CommitRange};
+        use crate::git::patch::LineId;
+        let range = CommitRange {
+            oid: CommitId::parse("b0b").unwrap(),
+            parent: CommitId::parse("a0a"),
+        };
+        let mut state = loaded(vec![file("a.rs")]);
+        let mut view = HunkView::for_commit("a.rs".into(), range.clone());
+        view.loaded(crate::git::patch::parse(TWO_HUNKS).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        let mut patch = CustomPatch::new(range, "b0b".into());
+        patch.toggle_lines(&"a.rs".into(), &[LineId::added(9)].into());
+        state.custom_patch = Some(patch);
+
+        let rows = draw(&state, 100, 20);
+
+        assert!(contains(&rows, " Commit a.rs "), "{rows:#?}");
+        assert!(contains(&rows, " ●+new nine"), "{rows:#?}");
+        assert!(contains(&rows, "  -old nine"), "{rows:#?}");
+        // The selected hunk keeps its own gutter.
+        assert!(contains(&rows, "▌ +new one"), "{rows:#?}");
+
+        // Another commit's view shows no marks.
+        if let Focus::Diff(view) = &mut state.focus {
+            view.commit.as_mut().unwrap().oid = CommitId::parse("c0c").unwrap();
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(!contains(&rows, "●"), "{rows:#?}");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
+use crate::custom_patch::{CustomPatch, FilePick};
 use crate::diff_mark::DiffMark;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
@@ -38,8 +39,9 @@ pub(crate) fn render_commits_panel(
 ) {
     let panel = &state.commits;
     let reflog = expanded && panel.tab == CommitsTab::Reflog;
+    let patch = state.custom_patch.as_ref();
     if let Some(open) = panel.open.as_ref().filter(|_| expanded && !reflog) {
-        return render_commit_files(open, look, frame, area);
+        return render_commit_files(open, patch, look, frame, area);
     }
     // The tab shown is in brackets. Where the whole title does not fit,
     // the copied count shortens to `+N`, then the panel's name goes, and
@@ -97,7 +99,7 @@ pub(crate) fn render_commits_panel(
         last.clone_from(&name);
     }
     let last = last.as_str();
-    let candidates = match state.copied.len() {
+    let mut candidates = match state.copied.len() {
         0 => vec![name, last.to_string()],
         n => vec![
             format!("{name} · {n} copied"),
@@ -106,6 +108,15 @@ pub(crate) fn render_commits_panel(
             last.to_string(),
         ],
     };
+    // The patch is named first, and goes before anything else does.
+    if let Some(patch) = patch {
+        let summary = patch.summary();
+        let with: Vec<String> = candidates
+            .iter()
+            .map(|text| format!("{text} · {summary}"))
+            .collect();
+        candidates.splice(0..0, with);
+    }
     let title = candidates
         .iter()
         .find(|text| look.fits(text))
@@ -153,11 +164,25 @@ pub(crate) fn render_commits_panel(
 
 /// A commit's files in place of the log: a placeholder until they load,
 /// then one row per file, scrolled so the cursor shows.
-fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Frame, area: Rect) {
+fn render_commit_files(
+    open: &CommitFilesList,
+    patch: Option<&CustomPatch>,
+    look: &PanelLook,
+    frame: &mut Frame,
+    area: Rect,
+) {
     let title = match &open.against {
         Some(against) => format!("Files · {} vs {against}", open.short_oid),
         None => format!("Commit {}", open.short_oid),
     };
+    let title = match patch {
+        Some(patch) if look.fits(&format!("{title} · {}", patch.summary())) => {
+            format!("{title} · {}", patch.summary())
+        }
+        _ => title,
+    };
+    // Picks show only on the commit they come from.
+    let picks = patch.filter(|p| open.against.is_none() && p.is_from(&open.range));
     let block = look.block(look.title(&title));
     let inner = block.inner(area);
     let (height, width) = (usize::from(inner.height), usize::from(inner.width));
@@ -180,7 +205,11 @@ fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Fra
             Paragraph::new(
                 (start..end)
                     .map(|i| {
-                        let line = commit_file_line(&open.files[i], width);
+                        let file = &open.files[i];
+                        let line = match picks {
+                            Some(patch) => picked_file_line(patch, file, width),
+                            None => commit_file_line(file, width),
+                        };
                         if i == open.selected {
                             reversed(line, width)
                         } else {
@@ -192,6 +221,22 @@ fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Fra
         }
     };
     frame.render_widget(paragraph.block(block), area);
+}
+
+/// A commit file's row behind a mark of what the custom patch holds of
+/// it: `●` the whole file, `◐` some lines, a blank nothing.
+fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Line<'static> {
+    let mark = match patch.file_state(&file.path) {
+        Some(FilePick::Whole) => "●",
+        Some(FilePick::Lines(_)) => "◐",
+        None => " ",
+    };
+    let mut line = commit_file_line(file, width.saturating_sub(2));
+    line.spans.insert(
+        0,
+        Span::styled(format!("{mark} "), Style::new().fg(Color::Magenta)),
+    );
+    line
 }
 
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
@@ -1280,6 +1325,57 @@ mod tests {
             commit_file('R', "old.rs", Some("older.rs")),
             commit_file('T', "typed", None),
         ]
+    }
+
+    /// A patch picked from `a000000`: `added.rs` whole, a line of
+    /// `modified.rs`.
+    fn with_patch(state: &mut AppState) {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::patch::LineId;
+        let range = state.commits.open.as_ref().unwrap().range.clone();
+        let mut patch = CustomPatch::new(range, "a000000".into());
+        patch.toggle_file(&"added.rs".into());
+        patch.toggle_lines(&"modified.rs".into(), &[LineId::added(3)].into());
+        state.custom_patch = Some(patch);
+    }
+
+    #[test]
+    fn picked_files_carry_a_whole_or_partial_mark_and_the_title_names_the_patch() {
+        let mut state = opened(Some(Ok(five_files())));
+        with_patch(&mut state);
+        let rows = buffer_rows(&draw(&state, 80, 20));
+
+        assert!(
+            rows[0].contains("Commit a000000 · patch a000000: 2 files"),
+            "{rows:#?}"
+        );
+        line_with(&rows, "● A added.rs");
+        line_with(&rows, "◐ M modified.rs");
+        line_with(&rows, "  D deleted.rs");
+
+        // Back on the log, the title still names it; a reset drops it.
+        state.commits.open = None;
+        let title = |state: &AppState| buffer_rows(&draw(state, 100, 20))[0].clone();
+        assert!(
+            title(&state).contains("· patch a000000: 2 files"),
+            "{}",
+            title(&state)
+        );
+        state.custom_patch = None;
+        assert!(!title(&state).contains("patch"), "{}", title(&state));
+    }
+
+    #[test]
+    fn another_commits_files_show_no_marks() {
+        let mut state = opened(Some(Ok(five_files())));
+        with_patch(&mut state);
+        state.commits.open.as_mut().unwrap().range.oid = CommitId::parse("b00000").unwrap();
+        let rows = buffer_rows(&draw(&state, 80, 20));
+        line_with(&rows, "A added.rs");
+        assert!(
+            !rows.iter().any(|r| r.contains('●') || r.contains('◐')),
+            "{rows:#?}"
+        );
     }
 
     #[test]

@@ -181,6 +181,22 @@ pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'s
     Ok(plan)
 }
 
+/// The plan that stops the rebase at each of `stops`, log row indexes in
+/// any order, so the commit there can be amended; every other commit is
+/// picked. The base is the parent of the oldest stop, so git
+/// fast-forwards up to it and nothing below it is rewritten.
+pub fn plan_stops(rows: &[CommitRow], stops: &[usize]) -> Result<RebasePlan, &'static str> {
+    let oldest = *stops.iter().max().ok_or("No commits")?;
+    if rows.get(oldest).is_some_and(|row| row.parents.is_empty()) {
+        return Err("Cannot rewrite the first commit");
+    }
+    let mut plan = picks(linear_range(rows, oldest)?)?;
+    for &stop in stops {
+        step_of(&mut plan, stop).action = TodoAction::Edit;
+    }
+    Ok(plan)
+}
+
 /// Why there is nothing to autosquash.
 pub const NO_FIXUPS: &str = "No fixup! commits to fold";
 
@@ -804,6 +820,49 @@ mod tests {
             plan(&linear(), 0, Edit::Drop),
             Ok(plan_of('b', vec![step(TodoAction::Drop, 'a')]))
         );
+    }
+
+    #[test]
+    fn plan_stops_edits_each_stop_from_the_parent_of_the_oldest() {
+        let edit = |digit| step(TodoAction::Edit, digit);
+        assert_eq!(
+            plan_stops(&linear(), &[1]),
+            Ok(plan_of('c', vec![edit('b'), pick('a')]))
+        );
+        // A newer target: the source, then the target.
+        assert_eq!(
+            plan_stops(&linear(), &[2, 0]),
+            Ok(plan_of('d', vec![edit('c'), pick('b'), edit('a')]))
+        );
+        assert_eq!(
+            plan_stops(&linear(), &[0, 2]),
+            plan_stops(&linear(), &[2, 0])
+        );
+        assert_eq!(plan_stops(&linear(), &[]), Err("No commits"));
+    }
+
+    #[test]
+    fn plan_stops_refuses_root_and_merge_commits() {
+        let ids = ['a', 'b', 'c', 'd'].map(id);
+        let root = vec![row(&ids[0], &[&ids[1]]), row(&ids[1], &[])];
+        assert_eq!(
+            plan_stops(&root, &[1]),
+            Err("Cannot rewrite the first commit")
+        );
+        let merge = vec![
+            row(&ids[0], &[&ids[1]]),
+            row(&ids[1], &[&ids[2], &ids[3]]),
+            row(&ids[2], &[&ids[3]]),
+        ];
+        assert_eq!(
+            plan_stops(&merge, &[1]),
+            Err("Cannot rewrite across a merge")
+        );
+        assert_eq!(
+            plan_stops(&merge, &[2]),
+            Err("Cannot rewrite across a merge")
+        );
+        assert_eq!(plan_stops(&linear(), &[4]), Err(LOAD_MORE));
     }
 
     #[test]

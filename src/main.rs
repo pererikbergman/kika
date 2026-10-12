@@ -21,6 +21,7 @@ mod conflict;
 mod conflict_view;
 mod copied;
 mod custom_command;
+mod custom_patch;
 mod diff_mark;
 mod diff_pane;
 mod diff_search;
