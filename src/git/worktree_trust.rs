@@ -25,9 +25,14 @@ pub fn mark_untrusted(list: &mut [Worktree], common_dir: &Path) {
 
 /// Whether `worktree` is the bare repository itself, or its `.git` is the
 /// shared git directory or a gitfile naming it or one of its worktrees.
-/// Symlinked files are never read; resolved paths are only compared.
+/// Symlinked files are never read; resolved paths are only compared. Git
+/// lists absolute paths; a relative one would be checked against Kika's
+/// own working directory but acted on from the runner's, so it is refused.
 fn points_here(worktree: &Worktree, common: &Path) -> bool {
     let path = worktree.path_buf();
+    if !path.is_absolute() {
+        return false;
+    }
     if worktree.bare && canonical(&path) == common {
         return true;
     }
@@ -224,6 +229,27 @@ mod tests {
         let other = tmp.path().join("other");
         std::fs::create_dir_all(other.join(".git")).unwrap();
         assert!(!trusted(&other, &common));
+    }
+
+    /// The process's working directory resolves relative paths, not the
+    /// directory git commands run in, so a relative record is never
+    /// trusted, even one that names a worktree of this repository.
+    #[test]
+    fn a_relative_path_is_not_trusted_even_from_inside_the_repository() {
+        let cwd = std::env::current_dir().unwrap();
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            return; // Built outside a checkout: there is nothing to forge.
+        }
+        let common = cwd.join(PathBuf::from(os_string(out.stdout.trim_ascii_end())));
+        assert!(trusted(&cwd, &common), "the setup must trust the cwd");
+        for relative in [".", "src/.."] {
+            assert!(!trusted(Path::new(relative), &common), "{relative}");
+        }
     }
 
     #[test]
