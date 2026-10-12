@@ -275,6 +275,8 @@ pub enum KeyScope {
     Reflog,
     /// "Undo this?" or "Redo this?" on top of the popup stack.
     Travel,
+    /// Typing a list filter or a diff search on the bottom bar.
+    Input,
     /// The git commands Kika ran, on top of the popup stack.
     CommandLog,
 }
@@ -324,6 +326,7 @@ impl KeyScope {
             | KeyScope::Recent
             | KeyScope::Credential
             | KeyScope::Travel
+            | KeyScope::Input
             | KeyScope::CommandLog => None,
         }
     }
@@ -371,6 +374,7 @@ impl KeyScope {
             KeyScope::Credential => "Git is asking",
             KeyScope::Reflog => "Reflog",
             KeyScope::Travel => "Undo or redo",
+            KeyScope::Input => "Filter or search",
             KeyScope::CommandLog => "Command log",
         }
     }
@@ -379,7 +383,9 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor | KeyScope::Credential => Some("q and ? are typed"),
+            KeyScope::CommitEditor | KeyScope::Credential | KeyScope::Input => {
+                Some("q and ? are typed")
+            }
             _ => None,
         }
     }
@@ -527,6 +533,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.quit",
     "command_log.quit",
     "commits.paste",
+    "files.escape",
+    "commits.escape",
+    "input.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -1512,6 +1521,159 @@ pub(crate) fn pull_push_disabled(state: &AppState) -> Option<&'static str> {
     })
 }
 
+/// Why an action on the selected row cannot run: the filter hides it.
+pub(crate) const FILTER_HIDES_ROW: &str = "No row matches the filter";
+
+/// Why an action on one row cannot run while a range is selected.
+pub(crate) const CLEAR_RANGE_FIRST: &str = "Clear the selection first (esc)";
+
+/// Why a Files or Commits action on the selected row cannot run now: the
+/// filter hides that row, or a range is selected and the action is not one
+/// that applies to a range (`range_ok`). Chained in front of the action's
+/// own reason, so these come first.
+pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<&'static str> {
+    let (hidden, range) = match state.panel_focus() {
+        KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
+        KeyScope::Commits => (
+            state.commits.selected_hidden(),
+            state.commits.range_anchor.is_some(),
+        ),
+        _ => return None,
+    };
+    if hidden {
+        Some(FILTER_HIDES_ROW)
+    } else if range && !range_ok {
+        Some(CLEAR_RANGE_FIRST)
+    } else {
+        None
+    }
+}
+
+/// Space stages a range too, so long as one of its files can be staged.
+pub(crate) fn files_stage_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| {
+        // As the action: the range counts only where it shows.
+        if state.files_anchor.is_none() || state.focus != Focus::Files {
+            return stage_disabled(state);
+        }
+        let range = state.files_range();
+        if state.op_seq.is_some() {
+            Some(OP_RUNNING)
+        } else if range
+            .iter()
+            .all(|&i| state.files[i].kind == EntryKind::Conflicted)
+        {
+            Some("Resolve the conflicts before staging these files")
+        } else {
+            None
+        }
+    })
+}
+
+fn files_discard_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| discard_disabled(state))
+}
+
+fn files_open_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| open_disabled(state))
+}
+
+fn files_blame_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| blame_disabled(state))
+}
+
+fn files_hunks_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_file_selected(state))
+}
+
+fn files_mergetool_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| mergetool_disabled(state))
+}
+
+fn commits_open_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_commit(state))
+}
+
+fn commits_checkout_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| checkout_commit_disabled(state))
+}
+
+fn commits_revert_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| revert_disabled(state))
+}
+
+fn commits_reset_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| reset_disabled(state))
+}
+
+fn commits_squash_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| squash_disabled(state))
+}
+
+fn commits_fixup_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| fixup_disabled(state))
+}
+
+fn commits_drop_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| drop_disabled(state))
+}
+
+fn commits_reword_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| reword_disabled(state))
+}
+
+/// The copy menu copies the selected commit's text: one row's action.
+fn commits_copy_menu_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false)
+}
+
+fn files_ignore_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| ignore_disabled(state))
+}
+
+/// The bisect menu marks the selected commit, so it is one row's action.
+fn commits_bisect_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false)
+}
+
+fn commits_tag_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| tag_commit_disabled(state))
+}
+
+/// `c` copies a range too, but a range of merge commits only has nothing
+/// it can copy.
+pub(crate) fn commits_copy_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| {
+        if state.commits.range_anchor.is_none() {
+            return copy_disabled(state);
+        }
+        let rows = &state.commits.rows;
+        let range = state.commits.range();
+        no_commit(state).or_else(|| {
+            range
+                .iter()
+                .all(|&i| rows[i].parents.len() > 1)
+                .then_some("Cannot cherry-pick a merge commit")
+        })
+    })
+}
+
+/// The search works on the built-in diff's hunks, outside line mode.
+fn search_disabled(state: &AppState) -> Option<&'static str> {
+    match &state.focus {
+        Focus::Diff(view) if view.lines.is_some() => Some("Leave line mode first"),
+        _ if state.rendered_shown().is_some() => Some("Search works in the built-in diff"),
+        _ => None,
+    }
+}
+
+fn search_step_disabled(state: &AppState) -> Option<&'static str> {
+    search_disabled(state).or_else(|| {
+        let searched = matches!(&state.focus, Focus::Diff(view) if view.search.is_some());
+        (!searched).then_some("Nothing searched yet (/)")
+    })
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -1857,7 +2019,7 @@ static REGISTRY: &[Binding] = &[
         description: "Show the files the selected commit changed",
         label: "files",
         bar: true,
-        disabled: no_commit,
+        disabled: commits_open_disabled,
     },
     Binding {
         id: "commits.checkout",
@@ -1867,7 +2029,7 @@ static REGISTRY: &[Binding] = &[
         description: "Check out the selected commit as a detached HEAD, asking first",
         label: "checkout",
         bar: true,
-        disabled: checkout_commit_disabled,
+        disabled: commits_checkout_disabled,
     },
     Binding {
         id: "commits.revert",
@@ -1877,7 +2039,7 @@ static REGISTRY: &[Binding] = &[
         description: "Make a commit that undoes the selected one",
         label: "revert",
         bar: true,
-        disabled: revert_disabled,
+        disabled: commits_revert_disabled,
     },
     Binding {
         id: "commits.reset",
@@ -1887,7 +2049,7 @@ static REGISTRY: &[Binding] = &[
         description: "Reset the current branch to the selected commit: soft, mixed or hard",
         label: "reset",
         bar: true,
-        disabled: reset_disabled,
+        disabled: commits_reset_disabled,
     },
     Binding {
         id: "commits.squash",
@@ -1897,7 +2059,7 @@ static REGISTRY: &[Binding] = &[
         description: "Squash the selected commit into the one below, combining their messages",
         label: "squash",
         bar: true,
-        disabled: squash_disabled,
+        disabled: commits_squash_disabled,
     },
     // `f` is fetch.
     Binding {
@@ -1908,7 +2070,7 @@ static REGISTRY: &[Binding] = &[
         description: "Fold the selected commit into the one below, keeping that one's message",
         label: "fixup",
         bar: true,
-        disabled: fixup_disabled,
+        disabled: commits_fixup_disabled,
     },
     Binding {
         id: "commits.drop",
@@ -1918,7 +2080,7 @@ static REGISTRY: &[Binding] = &[
         description: "Drop the selected commit and its change from the history",
         label: "drop",
         bar: true,
-        disabled: drop_disabled,
+        disabled: commits_drop_disabled,
     },
     // `r` is refresh.
     Binding {
@@ -1929,7 +2091,7 @@ static REGISTRY: &[Binding] = &[
         description: "Write a new message for the selected commit",
         label: "reword",
         bar: true,
-        disabled: reword_disabled,
+        disabled: commits_reword_disabled,
     },
     Binding {
         id: "commits.switch_tab",
@@ -1952,7 +2114,7 @@ static REGISTRY: &[Binding] = &[
         description: "Add the selected commit to the copied set, or take it out",
         label: "copy",
         bar: true,
-        disabled: copy_disabled,
+        disabled: commits_copy_disabled,
     },
     Binding {
         id: "commits.paste",
@@ -1983,7 +2145,7 @@ static REGISTRY: &[Binding] = &[
         label: "clipboard",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: never,
+        disabled: commits_copy_menu_disabled,
     },
     Binding {
         id: "reflog.next",
@@ -2187,7 +2349,7 @@ static REGISTRY: &[Binding] = &[
         description: "Stage the selected file, or unstage it if fully staged",
         label: "stage",
         bar: true,
-        disabled: stage_disabled,
+        disabled: files_stage_disabled,
     },
     Binding {
         id: "files.stage_all",
@@ -2228,7 +2390,7 @@ static REGISTRY: &[Binding] = &[
         description: "Discard the selected file's unstaged changes, or delete it if untracked",
         label: "discard",
         bar: true,
-        disabled: discard_disabled,
+        disabled: files_discard_disabled,
     },
     Binding {
         id: "files.open",
@@ -2239,7 +2401,7 @@ static REGISTRY: &[Binding] = &[
         label: "open in editor",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: open_disabled,
+        disabled: files_open_disabled,
     },
     Binding {
         id: "files.submodules",
@@ -2293,7 +2455,7 @@ static REGISTRY: &[Binding] = &[
         description: "Blame the selected file",
         label: "blame",
         bar: false,
-        disabled: blame_disabled,
+        disabled: files_blame_disabled,
     },
     Binding {
         id: "files.hunks",
@@ -2304,7 +2466,7 @@ static REGISTRY: &[Binding] = &[
         label: "hunks",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: no_file_selected,
+        disabled: files_hunks_disabled,
     },
     Binding {
         id: "files.mergetool",
@@ -2315,7 +2477,7 @@ static REGISTRY: &[Binding] = &[
         label: "merge tool",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: mergetool_disabled,
+        disabled: files_mergetool_disabled,
     },
     Binding {
         id: "files.ignore",
@@ -2326,7 +2488,7 @@ static REGISTRY: &[Binding] = &[
         label: "ignore",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: ignore_disabled,
+        disabled: files_ignore_disabled,
     },
     Binding {
         id: "diff.next",
@@ -2428,8 +2590,9 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "diff.back",
+        // Esc is `diff.escape`, which clears a search first and stands in
+        // for this one in the bar.
         keys: &[
-            KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
             KeyPattern::any(KeyCode::Left),
         ],
@@ -2437,7 +2600,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::FocusLeft,
         description: "Back to the side panel last focused",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -3445,7 +3608,7 @@ static REGISTRY: &[Binding] = &[
         description: "Tag the selected commit with a lightweight tag",
         label: "tag",
         bar: true,
-        disabled: tag_commit_disabled,
+        disabled: commits_tag_disabled,
     },
     Binding {
         id: "commits.tag_annotated",
@@ -3455,7 +3618,7 @@ static REGISTRY: &[Binding] = &[
         description: "Tag the selected commit with an annotated tag and a message",
         label: "annotated tag",
         bar: false,
-        disabled: tag_commit_disabled,
+        disabled: commits_tag_disabled,
     },
     Binding {
         id: "commits.bisect",
@@ -3465,7 +3628,7 @@ static REGISTRY: &[Binding] = &[
         description: "Mark the selected commit good, bad or skipped for a bisect, or reset it",
         label: "bisect",
         bar: true,
-        disabled: never,
+        disabled: commits_bisect_disabled,
     },
     Binding {
         id: "status.continue",
@@ -4066,6 +4229,137 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // List filters, ranges and the diff search.
+    Binding {
+        id: "files.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the files by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "files.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range of files from here, for stage and discard; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "files.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Files,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the loaded commits by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range of commits from here, for copy; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "diff.search",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::OpenSearch,
+        description: "Search the diff for typed text",
+        label: "search",
+        bar: false,
+        disabled: search_disabled,
+    },
+    Binding {
+        id: "diff.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the search",
+        label: "next match",
+        bar: false,
+        disabled: search_step_disabled,
+    },
+    Binding {
+        id: "diff.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the search",
+        label: "previous match",
+        bar: false,
+        disabled: search_step_disabled,
+    },
+    Binding {
+        id: "diff.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::DiffEscape,
+        description: "Clear the search, else go back to the side panel",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.accept",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Input,
+        intent: AppIntent::InputAccept,
+        description: "Keep the typed text; a search goes to its match",
+        label: "done",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Input,
+        intent: AppIntent::InputCancel,
+        description: "Clear the typed text and close",
+        label: "clear",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Input,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
 ];
 
 /// The application's keymap.
@@ -4465,7 +4759,8 @@ mod tests {
         let none = KeyModifiers::NONE;
         let shift = KeyModifiers::SHIFT;
         assert_eq!(files(plain('q')), Some(Quit));
-        assert_eq!(files(key(KeyCode::Esc, none)), Some(Quit));
+        // Esc clears a range or a filter first, and quits with neither.
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(
             files(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Quit)
@@ -4514,13 +4809,11 @@ mod tests {
         assert_eq!(diff(plain('k')), Some(PrevHunk));
         assert_eq!(diff(key(KeyCode::Up, none)), Some(PrevHunk));
         assert_eq!(diff(plain('t')), Some(ToggleDiffSide));
-        for k in [
-            key(KeyCode::Esc, none),
-            plain('h'),
-            key(KeyCode::Left, none),
-        ] {
+        for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(diff(k), Some(FocusLeft), "{k:?}");
         }
+        // Esc clears a search first, and goes back with none.
+        assert_eq!(diff(key(KeyCode::Esc, none)), Some(DiffEscape));
         // Workspace and global keys still reach through.
         assert_eq!(diff(plain('r')), Some(RefreshStatus));
         assert_eq!(diff(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
@@ -6221,6 +6514,88 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_range_and_search_keys_clash_with_nothing_their_scope_reaches() {
+        use KeyScope::*;
+        let new: &[(&str, &[KeyScope])] = &[
+            ("files.filter", &[Files, Workspace, Global]),
+            ("files.range", &[Files, Workspace, Global]),
+            ("files.escape", &[Files, Workspace, Global]),
+            ("commits.filter", &[Commits, Workspace, Global]),
+            ("commits.range", &[Commits, Workspace, Global]),
+            ("commits.escape", &[Commits, Workspace, Global]),
+            // Line mode reaches the Diff keys too.
+            ("diff.search", &[Lines, Diff, Workspace, Global]),
+            ("diff.search_next", &[Lines, Diff, Workspace, Global]),
+            ("diff.search_prev", &[Lines, Diff, Workspace, Global]),
+            ("diff.escape", &[Diff, Workspace, Global]),
+            ("input.accept", &[Input]),
+            ("input.cancel", &[Input]),
+            ("input.quit", &[Input]),
+        ];
+        for (id, reached) in new {
+            let new = binding(id);
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != *id && reached.contains(&b.scope))
+            {
+                // Esc in a list or the diff clears first and only then
+                // quits or goes back; taking it from quit is the point.
+                if id.ends_with(".escape") && other.id == "global.quit" {
+                    continue;
+                }
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_log_key_is_typed_into_the_input_and_needs_none_of_the_new_keys() {
+        let state = AppState::new(crate::model::Context::Workspace);
+        for c in ['@', 'q', '?', '/', 'V', 'n', 'N'] {
+            assert!(
+                matches!(
+                    resolve(
+                        registry(),
+                        &Keymap::default(),
+                        KeyScope::Input,
+                        &state,
+                        plain(c)
+                    ),
+                    Resolution::Unbound
+                ),
+                "{c} is typed"
+            );
+        }
+        let log = registry()
+            .iter()
+            .filter(|b| b.scope == KeyScope::CommandLog);
+        for b in log {
+            for c in ['/', 'V', 'n', 'N'] {
+                assert!(
+                    !b.keys.iter().any(|k| k.matches(plain(c))),
+                    "{} takes {c}",
+                    b.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_bindings_that_can_quit_are_locked() {
+        for id in ["files.escape", "commits.escape", "input.quit"] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
+        }
+        for id in ["files.filter", "files.range", "diff.search", "input.accept"] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
     fn paste_is_locked_and_copy_and_clear_are_not() {
         assert!(REPO_LOCKED.contains(&"commits.paste"));
         assert!(build(&[("commits.paste", &["Z"])], Trust::Repo).is_err());
@@ -6547,6 +6922,7 @@ mod tests {
             KeyScope::Credential => "credential",
             KeyScope::Reflog => "reflog",
             KeyScope::Travel => "travel",
+            KeyScope::Input => "input",
             KeyScope::CommandLog => "command_log",
         }
     }
@@ -6814,6 +7190,7 @@ mod tests {
                     | Undo
                     | Redo
                     | ConfirmTravel
+                    | ListEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }
@@ -6841,7 +7218,7 @@ mod tests {
             r#""files.stage": key "q" would hide "global.quit""#
         );
         // Keys a binding already had are not new, so the defaults pass.
-        assert!(build(&[("diff.back", &["esc", "h", "left"])], Trust::Repo).is_ok());
+        assert!(build(&[("diff.back", &["h", "left"])], Trust::Repo).is_ok());
     }
 
     #[test]

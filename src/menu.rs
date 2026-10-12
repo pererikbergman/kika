@@ -9,8 +9,8 @@ use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    OP_RUNNING, amend_disabled, commit_disabled, merge_disabled, never, no_commit_selected,
-    reset_disabled, stage_all_disabled, stage_disabled,
+    OP_RUNNING, amend_disabled, commit_disabled, files_stage_disabled, list_guard, merge_disabled,
+    never, no_commit_selected, reset_disabled, stage_all_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -115,7 +115,7 @@ static STAGE: &[MenuItem] = &[
     MenuItem {
         label: "Selected file",
         intent: AppIntent::ToggleStage,
-        disabled: stage_disabled,
+        disabled: files_stage_disabled,
     },
     MenuItem {
         label: "Everything",
@@ -195,14 +195,18 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<&'static str> {
     })
 }
 
+/// Stashing "this file" acts on the selected row, so a filter that hides it
+/// or a range selected refuses it, as other row actions are refused.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<&'static str> {
-    stash_blocked(state).or_else(|| {
-        state
-            .selected
-            .and_then(|i| state.files.get(i))
-            .is_none()
-            .then_some("No file selected")
-    })
+    list_guard(state, false)
+        .or_else(|| stash_blocked(state))
+        .or_else(|| {
+            state
+                .selected
+                .and_then(|i| state.files.get(i))
+                .is_none()
+                .then_some("No file selected")
+        })
 }
 
 static STASH: &[MenuItem] = &[

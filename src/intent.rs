@@ -648,6 +648,24 @@ pub enum AppIntent {
         keymap: Keymap,
         errors: Vec<ConfigError>,
     },
+    /// Type into the focused list's filter, which narrows it live.
+    OpenFilter,
+    /// Type a text to search the focused Diff pane for.
+    OpenSearch,
+    /// Close the text input, keeping what it typed; a search goes to its
+    /// current match.
+    InputAccept,
+    /// Close the text input and clear what it typed.
+    InputCancel,
+    /// Start a range selection at the cursor, or clear the one there is.
+    ToggleRange,
+    /// Clear the range, else the filter, else quit.
+    ListEscape,
+    /// Clear the search, else go back to the side panel.
+    DiffEscape,
+    /// Go to the next or previous match of the search.
+    SearchNext,
+    SearchPrev,
     /// The remote is on none of the forge hosts: no badges.
     ForgeRepoNone {
         tag: Tag,
