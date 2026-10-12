@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
@@ -9,10 +10,11 @@ use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
+use crate::forge::{ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
-use crate::git::branches::{Branch, LogRow};
+use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
@@ -27,6 +29,7 @@ use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
+use crate::git::stash::{StashEntry, StashFile};
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::git::tags::TagRef;
@@ -241,6 +244,48 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<Vec<CommitFile>, String>,
     },
+    /// The stash list was read; `tag` says which load.
+    StashesLoaded {
+        tag: Tag,
+        result: Result<Vec<StashEntry>, String>,
+    },
+    /// Move the stash cursor down or up.
+    StashNext,
+    StashPrev,
+    /// Show the selected stash's files in place of the list.
+    OpenStashFiles,
+    /// Back from a stash's files to the list, at the same entry.
+    CloseStashFiles,
+    /// Move the cursor in a stash's files down or up.
+    StashFileNext,
+    StashFilePrev,
+    /// A stash's files were read; `tag` says which load.
+    StashFilesLoaded {
+        tag: Tag,
+        result: Result<Vec<StashFile>, String>,
+    },
+    /// Apply the selected stash and keep it.
+    ApplyStash,
+    /// Apply the selected stash and drop it.
+    PopStash,
+    /// Ask before dropping the selected stash.
+    DropStash,
+    /// Drop the stash the question was about.
+    ConfirmDropStash,
+    /// Ask for a new message for the selected stash.
+    RenameStash,
+    /// The new message typed for the stash the prompt was about.
+    RenameStashTo(String),
+    /// Ask for a message, then stash every tracked change.
+    StashAll,
+    /// Ask for a message, then stash every change, untracked files too.
+    StashIncludingUntracked,
+    /// Ask for a message, then stash only the staged changes.
+    StashStaged,
+    /// Ask for a message, then stash only the selected file.
+    StashFile,
+    /// The message typed for the stash being made; empty for git's own.
+    StashMessageAnswered(String),
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.
@@ -602,6 +647,39 @@ pub enum AppIntent {
         repo: Option<PathBuf>,
         keymap: Keymap,
         errors: Vec<ConfigError>,
+    },
+    /// Type into the focused list's filter, which narrows it live.
+    OpenFilter,
+    /// Type a text to search the focused Diff pane for.
+    OpenSearch,
+    /// Close the text input, keeping what it typed; a search goes to its
+    /// current match.
+    InputAccept,
+    /// Close the text input and clear what it typed.
+    InputCancel,
+    /// Start a range selection at the cursor, or clear the one there is.
+    ToggleRange,
+    /// Clear the range, else the filter, else quit.
+    ListEscape,
+    /// Clear the search, else go back to the side panel.
+    DiffEscape,
+    /// Go to the next or previous match of the search.
+    SearchNext,
+    SearchPrev,
+    /// The remote is on none of the forge hosts: no badges.
+    ForgeRepoNone {
+        tag: Tag,
+    },
+    /// The forge repository found, and its cached badges; `None` is a miss.
+    PullRequestsCached {
+        tag: Tag,
+        repo: ForgeRepo,
+        badges: Option<HashMap<BranchName, PrBadge>>,
+    },
+    /// The forge answered, or why it could not.
+    PullRequestsFetched {
+        tag: Tag,
+        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
     },
 }
 

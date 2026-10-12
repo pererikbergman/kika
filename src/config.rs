@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [keys]
-//! "files.stage" = ["s", "ctrl-s"]   # replace this binding's keys
+//! "files.stage" = ["x", "ctrl-s"]   # replace this binding's keys
 //! "files.discard" = []              # disable it
 //! [watch]
 //! refs = 2        # seconds
@@ -18,13 +18,19 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! tool = "difft --color=always"    # a display-only tool, run on OLD NEW
+//! [commit]
+//! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
+//! [forge]
+//! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! ```
 //!
-//! `[watch]`, `[diff]` and `[display]` are read from the global file only,
-//! at startup. `[display] emoji_zwj_terminals` is off (empty) by default;
-//! [`emoji_zwj`] matches it against the running terminal once.
+//! `[watch]`, `[diff]`, `[commit]`, `[forge]` and `[display]` are read from
+//! the global file only, at startup. `[display] emoji_zwj_terminals` is off
+//! (empty) by default; [`emoji_zwj`] matches it against the running
+//! terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -47,6 +53,7 @@ use serde::Deserialize;
 
 use crate::custom_command::CommandTable;
 use crate::external_diff::parse_command;
+use crate::forge::ForgeHost;
 use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
@@ -111,6 +118,13 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
+    /// The global `[forge] github` hosts; empty keeps the forge off.
+    pub forge_hosts: Vec<ForgeHost>,
+    /// The global `[diff] tool` command, checked by `parse_command`.
+    pub diff_tool: Option<String>,
+    /// The global `[commit] hooks_detached`: hooks alone do not hand a
+    /// commit the terminal.
+    pub commit_hooks_detached: bool,
     /// The global `[display] emoji_zwj_terminals`: the terminals that draw
     /// an emoji ZWJ sequence as one two-column picture.
     pub emoji_zwj_terminals: Vec<String>,
@@ -123,6 +137,9 @@ struct GlobalSettings {
     keymap: Keymap,
     watch: WatchConfig,
     diff_pager: Option<String>,
+    forge_hosts: Vec<ForgeHost>,
+    diff_tool: Option<String>,
+    commit_hooks_detached: bool,
     emoji_zwj_terminals: Vec<String>,
 }
 
@@ -141,6 +158,26 @@ struct GlobalFile {
     display: DisplayTable,
     #[serde(default)]
     commands: Vec<CommandTable>,
+    #[serde(default)]
+    commit: CommitTable,
+    #[serde(default)]
+    forge: ForgeTable,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitTable {
+    hooks_detached: Option<bool>,
+}
+
+/// The hosts Kika may ask about pull requests, by forge. Only here, in
+/// the user's own file: a cloned repository can never make Kika contact
+/// a host.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForgeTable {
+    #[serde(default)]
+    github: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -153,6 +190,7 @@ struct DisplayTable {
 #[serde(deny_unknown_fields)]
 struct DiffTable {
     pager: Option<String>,
+    tool: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -163,10 +201,11 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]`, `[diff]` or `[display]`
-/// table, or `[[commands]]`, here is an unknown field, so a cloned
-/// repository can neither turn on fetching nor name or run a program, nor
-/// change how text is drawn.
+/// A repository's file: keys only. A `[watch]`, `[diff]`, `[commit]`,
+/// `[forge]` or `[display]` table, or `[[commands]]`, here is an unknown
+/// field, so a cloned repository can neither turn on fetching, name or run
+/// a program, take the terminal away from its own hooks, make Kika contact
+/// a forge, nor change how text is drawn.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -181,6 +220,9 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
         diff_pager: None,
+        forge_hosts: Vec::new(),
+        diff_tool: None,
+        commit_hooks_detached: false,
         emoji_zwj_terminals: Vec::new(),
         errors: Vec::new(),
     };
@@ -188,8 +230,20 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
     if let Some(global) = global {
-        (loaded.keymap, loaded.watch, loaded.diff_pager) =
-            (global.keymap, global.watch, global.diff_pager);
+        (
+            loaded.keymap,
+            loaded.watch,
+            loaded.diff_pager,
+            loaded.diff_tool,
+            loaded.commit_hooks_detached,
+        ) = (
+            global.keymap,
+            global.watch,
+            global.diff_pager,
+            global.diff_tool,
+            global.commit_hooks_detached,
+        );
+        loaded.forge_hosts = global.forge_hosts;
         loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
@@ -269,7 +323,8 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
         .map_err(|_| "not UTF-8 text".to_string())
 }
 
-/// `keymap` and `watch` with the global file's text applied, and its pager.
+/// `keymap` and `watch` with the global file's text applied, and its
+/// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
     let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
@@ -287,6 +342,15 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(pager) = &file.diff.pager {
         parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
     }
+    if let Some(tool) = &file.diff.tool {
+        parse_command(tool).map_err(|e| format!("diff.tool: {e}"))?;
+    }
+    let forge_hosts = file
+        .forge
+        .github
+        .iter()
+        .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.github: {e}")))
+        .collect::<Result<_, _>>()?;
     let emoji_zwj_terminals = file.display.emoji_zwj_terminals.unwrap_or_default();
     // An empty name would match a terminal that sets no name at all.
     if emoji_zwj_terminals.iter().any(String::is_empty) {
@@ -296,6 +360,9 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        diff_tool: file.diff.tool,
+        forge_hosts,
+        commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
         emoji_zwj_terminals,
     })
 }
@@ -526,6 +593,9 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                diff_tool: None,
+                forge_hosts: vec![],
+                commit_hooks_detached: false,
                 emoji_zwj_terminals: vec![],
                 errors: vec![],
             }
@@ -789,6 +859,66 @@ output = "none"
     }
 
     #[test]
+    fn the_global_file_names_the_forge_hosts_and_a_bad_one_drops_the_file() {
+        let hosts = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.forge_hosts)
+        };
+        assert_eq!(
+            hosts("[forge]\ngithub = [\"github.com\"]\n"),
+            Ok(vec![ForgeHost::parse("github.com").unwrap()])
+        );
+        assert_eq!(hosts(""), Ok(vec![]));
+        assert_eq!(hosts("[forge]\ngithub = []\n"), Ok(vec![]));
+        for bad in [
+            "GitHub.com",
+            "github.com:443",
+            "user@github.com",
+            "https://github.com",
+            "*.github.com",
+            "github.com.",
+            "gіthub.com",
+        ] {
+            let err =
+                hosts(&format!("[forge]\ngithub = [\"github.com\", \"{bad}\"]\n")).unwrap_err();
+            assert!(err.starts_with("forge.github: "), "{bad}: {err}");
+        }
+        let typo = hosts("[forge]\ngitlab = [\"gitlab.com\"]\n").unwrap_err();
+        assert!(typo.contains("unknown field `gitlab`"), "{typo}");
+
+        let files = Files::new("forge-bad");
+        files.global("[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"GitHub.com\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn only_the_global_file_turns_the_forge_on() {
+        let refused = repo("[forge]\ngithub = [\"github.com\"]\n").unwrap_err();
+        assert!(refused.contains("unknown field `forge`"), "{refused}");
+
+        let files = Files::new("forge");
+        files.repo("[forge]\ngithub = [\"github.com\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.errors.len(), 1);
+
+        files
+            .global("[forge]\ngithub = [\"github.com\", \"github.example.com\"]\n")
+            .repo("");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(
+            loaded.forge_hosts,
+            [
+                ForgeHost::parse("github.com").unwrap(),
+                ForgeHost::parse("github.example.com").unwrap()
+            ]
+        );
+    }
+
+    #[test]
     fn only_the_global_file_names_a_diff_pager() {
         let refused = repo("[diff]\npager = \"delta\"\n").unwrap_err();
         assert!(refused.contains("unknown field `diff`"), "{refused}");
@@ -801,6 +931,83 @@ output = "none"
         assert_eq!(loaded.diff_pager, Some("delta".into()));
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+    }
+
+    #[test]
+    fn the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("commit");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert!(loaded.commit_hooks_detached);
+
+        let typo = global("[commit]\nbogus = 1\n").unwrap_err();
+        assert!(typo.contains("unknown field `bogus`"), "{typo}");
+        files.global("[commit]\nhooks_detached = true\nbogus = 1\n");
+        assert!(
+            !files.load().commit_hooks_detached,
+            "a broken file is ignored"
+        );
+    }
+
+    #[test]
+    fn only_the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("repo-commit");
+        files.global("").repo("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(!loaded.commit_hooks_detached);
+        let path = files.dir.join(".kika.toml").display().to_string();
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
+        assert!(loaded.errors[0].message.contains("unknown field `commit`"));
+
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(loaded.commit_hooks_detached);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
+    }
+
+    #[test]
+    fn the_global_file_names_a_diff_tool_and_a_bad_one_is_refused() {
+        let tool =
+            |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.diff_tool);
+        assert_eq!(
+            tool("[diff]\ntool = \"difft --color=always\"\n"),
+            Ok(Some("difft --color=always".into()))
+        );
+        assert_eq!(tool(""), Ok(None));
+        assert_eq!(
+            tool("[diff]\ntool = \"difft | less\"\n"),
+            Err("diff.tool: The command needs a shell, which is never used".into())
+        );
+        let files = Files::new("tool");
+        files.global("[diff]\ntool = \"difft --color=always\"\n");
+        assert_eq!(files.load().diff_tool, Some("difft --color=always".into()));
+        files.global("[diff]\ntool = \"difft | less\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn only_the_global_file_names_a_diff_tool() {
+        let files = Files::new("repo-tool");
+        files
+            .global("[diff]\ntool = \"difft\"\n")
+            .repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, Some("difft".into()));
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+
+        files.global("").repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
     }
 
     #[test]

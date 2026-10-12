@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use crate::git::diff::DiffSide;
+use crate::diff_search::DiffSearch;
+use crate::git::diff::{DiffSide, EmojiZwj, sanitize, sanitize_body};
 use crate::git::patch::{self, FilePatch, LineId, PatchLineKind};
 use crate::git::path::RepoPath;
 use crate::intent::Scroll;
@@ -23,6 +24,12 @@ pub struct HunkView {
     pub scroll: usize,
     /// Line mode: picking changed lines inside the selected hunk.
     pub lines: Option<LineCursor>,
+    /// The text searched for and where it appears. A new view starts
+    /// without one, so leaving the pane or changing files drops it.
+    pub search: Option<DiffSearch>,
+    /// The emoji policy `search` was built with, so a reloaded patch is
+    /// searched as it is drawn.
+    search_emoji: EmojiZwj,
 }
 
 /// A range of changed lines in the selected hunk, from `anchor` to
@@ -71,6 +78,8 @@ impl HunkView {
             hunk: 0,
             scroll: 0,
             lines: None,
+            search: None,
+            search_emoji: EmojiZwj::Escape,
         }
     }
 
@@ -127,6 +136,56 @@ impl HunkView {
         }
         self.scroll_to_hunk(rows);
         self.scroll_to_cursor(rows);
+        if let Some(mut search) = self.search.take() {
+            search.refresh(&self.drawn_rows(self.search_emoji));
+            self.search = Some(search);
+        }
+    }
+
+    /// Search the rows as drawn with `emoji` for `query`, from the top row
+    /// shown; an empty query ends the search.
+    pub fn set_search(&mut self, query: &str, emoji: EmojiZwj) {
+        self.search_emoji = emoji;
+        self.search = (!query.is_empty())
+            .then(|| DiffSearch::new(query, &self.drawn_rows(emoji), self.scroll));
+    }
+
+    /// Go to the current match: its hunk becomes the selected one, and the
+    /// pane scrolls just enough to show its row.
+    pub fn jump_to_match(&mut self, rows: usize) {
+        let Some(found) = self.search.as_ref().and_then(|s| s.current_match()) else {
+            return;
+        };
+        let row = found.row;
+        if let Some(hunk) = self.rows().get(row).and_then(|r| r.hunk) {
+            self.hunk = hunk;
+        }
+        let rows = rows.max(1);
+        if row < self.scroll {
+            self.scroll = row;
+        } else if row >= self.scroll + rows {
+            self.scroll = row + 1 - rows;
+        }
+    }
+
+    /// Step the search forward, or back with `back`, and go there.
+    /// Returns whether it wrapped round the end.
+    pub fn step_search(&mut self, back: bool, rows: usize) -> bool {
+        let Some(search) = &mut self.search else {
+            return false;
+        };
+        let wrapped = if back { search.prev() } else { search.next() };
+        self.jump_to_match(rows);
+        wrapped
+    }
+
+    /// The text of each row as the pane draws it, so search finds what the
+    /// user sees.
+    pub fn drawn_rows(&self, emoji: EmojiZwj) -> Vec<String> {
+        self.rows()
+            .iter()
+            .map(|row| drawn_text(row, emoji))
+            .collect()
     }
 
     /// Start picking lines, on the selected hunk's first change.
@@ -345,6 +404,19 @@ impl HunkView {
             }
         }
         rows
+    }
+}
+
+/// A row's text as drawn: terminal-safe, header rows strictly so, file
+/// lines keeping the joiners their script needs, and emoji joiners as
+/// `emoji` says. The view and the search both use it, with the same
+/// policy, so a match is always where it shows.
+pub fn drawn_text(row: &Row, emoji: EmojiZwj) -> String {
+    match row.kind {
+        RowKind::Header | RowKind::HunkHeader => sanitize(&row.text),
+        RowKind::Context | RowKind::Added | RowKind::Removed | RowKind::NoNewline => {
+            sanitize_body(&row.text, emoji)
+        }
     }
 }
 
@@ -613,5 +685,21 @@ mod tests {
         view.prev_line(false);
         view.scroll_to_cursor(2);
         assert_eq!(view.scroll, 4);
+    }
+
+    #[test]
+    fn a_search_jumps_to_its_hunk_and_follows_reloads() {
+        let mut view = view();
+        view.set_search("+g", EmojiZwj::Escape);
+        let search = view.search.as_ref().unwrap();
+        assert_eq!(search.current_match().map(|m| m.row), Some(10));
+        view.jump_to_match(3);
+        assert_eq!(view.hunk, 1);
+        assert_eq!(view.scroll, 8, "row 10 is the last of three shown");
+        // A reload keeps the search on the same row's match.
+        view.loaded(parse(TWO).unwrap(), 3);
+        assert_eq!(view.search.as_ref().unwrap().matches.len(), 1);
+        view.set_search("", EmojiZwj::Escape);
+        assert_eq!(view.search, None);
     }
 }

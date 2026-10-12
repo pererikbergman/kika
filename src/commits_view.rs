@@ -15,7 +15,7 @@ use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
-use crate::view::{PanelLook, elide_right, reversed, width_of};
+use crate::view::{PanelLook, elide_right, filter_title, range_row, reversed, width_of};
 
 /// Authors longer than this lose their end, so the subject keeps room.
 const AUTHOR_WIDTH: usize = 16;
@@ -48,7 +48,26 @@ pub(crate) fn render_commits_panel(
     } else {
         "Commits".to_string()
     };
-    let last = if expanded { tabs } else { "Commits" };
+    let mut last = if expanded { tabs } else { "Commits" }.to_string();
+    // A filter or a range on the log names itself in place of the tabs.
+    let mut name = name;
+    let selected = match panel.range_anchor {
+        Some(_) => format!(" · {} selected", panel.range().len()),
+        None => String::new(),
+    };
+    if expanded && !reflog && !panel.filter.is_empty() {
+        let counts = format!(
+            "{} of {} loaded{selected}",
+            panel.visible().len(),
+            panel.rows.len()
+        );
+        name = filter_title(look, "Commits", &panel.filter, &counts);
+        last.clone_from(&name);
+    } else if expanded && !reflog && !selected.is_empty() {
+        name = format!("Commits{selected}");
+        last.clone_from(&name);
+    }
+    let last = last.as_str();
     let candidates = match state.copied.len() {
         0 => vec![name, last.to_string()],
         n => vec![
@@ -90,7 +109,9 @@ pub(crate) fn render_commits_panel(
         }
     } else if !expanded {
         let width = usize::from(inner.width);
-        Paragraph::new(commit_lines(panel, &state.copied, 0..1, None, width))
+        Paragraph::new(commit_lines(panel, &state.copied, &[0], None, &[], width))
+    } else if panel.visible().is_empty() {
+        Paragraph::new(Line::styled("No matches", dim))
     } else {
         Paragraph::new(window(panel, &state.copied, inner))
     };
@@ -138,7 +159,7 @@ fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Fra
 
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
-fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
+pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
     let colour = match file.status {
         'A' => Color::Green,
         'D' => Color::Red,
@@ -179,10 +200,20 @@ fn window(panel: &CommitsPanel, copied: &CopiedCommits, area: Rect) -> Vec<Line<
     } else {
         height
     };
-    let start = (panel.selected + 1).saturating_sub(room);
-    let end = (start + room).min(panel.rows.len());
-    let mut lines = commit_lines(panel, copied, start..end, Some(panel.selected), width);
-    if end == panel.rows.len() {
+    let shown = panel.visible();
+    let at = shown.iter().position(|&i| i == panel.selected).unwrap_or(0);
+    let start = (at + 1).saturating_sub(room);
+    let end = (start + room).min(shown.len());
+    let range = panel.range();
+    let mut lines = commit_lines(
+        panel,
+        copied,
+        &shown[start..end],
+        Some(panel.selected),
+        &range,
+        width,
+    );
+    if end == shown.len() {
         lines.extend(note);
     }
     lines
@@ -193,7 +224,8 @@ fn window(panel: &CommitsPanel, copied: &CopiedCommits, area: Rect) -> Vec<Line<
 /// first, then the author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Columns {
-    /// Graph lanes shown; wider rows end in `…`.
+    /// Graph lanes shown; wider rows end in `…`. Zero while a filter hides
+    /// rows, since lanes would not join across them.
     lanes: usize,
     /// Two columns before the hash for the copied mark, kept on every row
     /// while anything is copied so the hashes line up.
@@ -205,13 +237,17 @@ struct Columns {
 }
 
 impl Columns {
-    fn fit(panel: &CommitsPanel, mark: bool, range: std::ops::Range<usize>, width: usize) -> Self {
+    fn fit(panel: &CommitsPanel, mark: bool, indexes: &[usize], width: usize) -> Self {
         // The widest row loaded so far, not just on screen, so the columns
         // stay put while scrolling; never more than a third of the width.
-        let lanes = panel.lanes.max(1).min((width / 6).max(1));
-        let hash = panel.rows[range]
+        let lanes = if panel.filter.is_empty() {
+            panel.lanes.max(1).min((width / 6).max(1))
+        } else {
+            0
+        };
+        let hash = indexes
             .iter()
-            .map(|row| width_of(&row.short_oid))
+            .map(|&i| width_of(&panel.rows[i].short_oid))
             .max()
             .unwrap_or(0);
         let fixed = lanes * 2 + 2 + if mark { 2 } else { 0 } + hash + 1;
@@ -229,25 +265,22 @@ impl Columns {
     }
 }
 
-/// Lines for `rows[range]` only.
+/// Lines for the rows at `indexes` only. The `selected` row and those in
+/// `range` are drawn reversed.
 fn commit_lines(
     panel: &CommitsPanel,
     copied: &CopiedCommits,
-    range: std::ops::Range<usize>,
+    indexes: &[usize],
     selected: Option<usize>,
+    range: &[usize],
     width: usize,
 ) -> Vec<Line<'static>> {
-    let columns = Columns::fit(panel, !copied.is_empty(), range.clone(), width);
-    range
-        .clone()
-        .zip(&panel.graph[range])
-        .map(|(i, graph)| {
-            let line = commit_line(panel, copied, i, graph, columns, width);
-            if Some(i) == selected {
-                reversed(line, width)
-            } else {
-                line
-            }
+    let columns = Columns::fit(panel, !copied.is_empty(), indexes, width);
+    indexes
+        .iter()
+        .map(|&i| {
+            let line = commit_line(panel, copied, i, &panel.graph[i], columns, width);
+            range_row(line, i, selected, range, width)
         })
         .collect()
 }
@@ -272,14 +305,14 @@ fn commit_line(
         Marker::Merged => Span::styled("✓", Style::new().add_modifier(Modifier::DIM)),
         Marker::Pushed | Marker::Unknown => Span::raw(" "),
     };
-    let mut spans = vec![
-        Span::styled(
+    let mut spans = Vec::new();
+    if columns.lanes > 0 {
+        spans.push(Span::styled(
             graph_text(graph, columns.lanes),
             Style::new().fg(Color::Magenta),
-        ),
-        marker,
-        Span::raw(" "),
-    ];
+        ));
+    }
+    spans.extend([marker, Span::raw(" ")]);
     if columns.mark {
         let is_copied = CommitId::parse(&row.oid).is_some_and(|id| copied.contains(&id));
         spans.push(if is_copied {
@@ -764,7 +797,7 @@ mod tests {
         );
 
         // Narrow, the graph takes at most a third of the width and says so.
-        let lines = commit_lines(&state.commits, &state.copied, 0..1, None, 18);
+        let lines = commit_lines(&state.commits, &state.copied, &[0], None, &[], 18);
         let text: String = lines[0].spans[0].content.to_string();
         assert_eq!(text, "●─╮─╮…");
         assert!(text.ends_with('…'), "{text:?}");
@@ -985,5 +1018,34 @@ mod tests {
         assert_eq!(at(4 * 7 * 86400), "4w");
         assert_eq!(at(7 * 30 * 86400), "7mo");
         assert_eq!(at(2 * 365 * 86400), "2y");
+    }
+
+    #[test]
+    fn a_filter_shows_the_matching_rows_without_the_graph() {
+        let mut state = showing(merge_rows());
+        state.commits.filter = "work".into();
+        state.commits.selected = 1;
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        assert!(
+            line_with(&rows, "Commits · /work 2 of 4 loaded").contains("Commits"),
+            "{rows:#?}"
+        );
+        assert!(line_with(&rows, "Side work").contains("s000000"));
+        line_with(&rows, "Main work");
+        assert!(!rows.iter().any(|r| r.contains("Merge side")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains('●')), "no graph: {rows:#?}");
+
+        state.commits.filter = "zzz".into();
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "No matches");
+    }
+
+    #[test]
+    fn a_range_is_counted_in_the_title() {
+        let mut state = showing(merge_rows());
+        state.commits.range_anchor = Some("m000000aaa".into());
+        state.commits.selected = 2;
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "Commits · 3 selected");
     }
 }

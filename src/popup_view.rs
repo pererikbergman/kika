@@ -47,7 +47,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             Popup::Error(error) => render_error(error, frame, area),
             Popup::Discard(confirm) => {
                 let what = confirm.what;
-                let text = format!("{}\n{}", what.question(), confirm.path);
+                // A range has no one path to name; its counts are the question.
+                let text = if confirm.path.is_empty() {
+                    what.question().into_owned()
+                } else {
+                    format!("{}\n{}", what.question(), confirm.path)
+                };
                 render_question(&format!(" {} ", what.title()), &text, frame, area)
             }
             Popup::DeleteBranch(confirm) => render_question(
@@ -69,6 +74,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::ResetHard(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
+            Popup::DropStash(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
                 frame,
@@ -708,6 +719,34 @@ mod tests {
         );
         assert!(
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_drop_stash_question_names_the_entry_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::stash::StashRef;
+        use crate::popup::DropStashConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::DropStash(DropStashConfirm {
+            label: "stash@{1}: On main: wip".into(),
+            op: GitOp::StashDrop(StashRef {
+                index: 1,
+                oid: CommitId::parse("abc").unwrap(),
+            }),
+        })];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Drop stash "), "{rows:#?}");
+        assert!(
+            contains(
+                &rows,
+                "Drop stash@{1}: On main: wip? It cannot be recovered"
+            ),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[11].starts_with(" y drop  n keep  ctrl-c quit"),
             "{rows:#?}"
         );
     }

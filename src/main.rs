@@ -22,11 +22,14 @@ mod conflict_view;
 mod copied;
 mod custom_command;
 mod diff_pane;
+mod diff_search;
 mod diff_stream;
+mod diff_tool;
 #[cfg(test)]
 mod e2e;
 mod effect;
 mod external_diff;
+mod forge;
 mod git;
 mod gitignore;
 mod handoff;
@@ -34,6 +37,7 @@ mod hunk_view;
 mod intent;
 mod keymap;
 mod layout;
+mod list_filter;
 mod menu;
 mod model;
 mod popup;
@@ -48,6 +52,8 @@ mod remotes;
 mod remotes_view;
 mod rendered_view;
 mod sequence_editor;
+mod stash;
+mod stash_view;
 mod submodule_list;
 mod tags;
 mod tags_view;
@@ -124,7 +130,9 @@ fn main() -> color_eyre::Result<ExitCode> {
     let recording = RecordingRunner::new(Arc::new(cli_runner), sink.clone());
     // Another process holding a lock for a moment is not worth an error.
     let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
-    let mut state = AppState::new(cli.context()).with_location(repo, launch);
+    let mut state = AppState::new(cli.context())
+        .with_location(repo, launch)
+        .with_forge_hosts(config.forge_hosts.clone());
     state.emoji_zwj = emoji_zwj;
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;

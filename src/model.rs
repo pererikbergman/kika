@@ -17,7 +17,8 @@ use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
-use crate::external_diff::{self, ExternalRenderer, map_rows};
+use crate::external_diff::{self, ExternalRenderer, RendererKind, map_rows};
+use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
 use crate::git::bisect::{BisectMark, BisectState};
@@ -28,7 +29,7 @@ use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT,
     sanitize,
 };
-use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode, StashMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
@@ -50,6 +51,7 @@ use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
+use crate::list_filter::{self, InputTarget, ListInput};
 use crate::menu;
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
@@ -61,6 +63,7 @@ use crate::refresh::{self, RefreshPlan, Scope, Selection};
 use crate::remote_run::RemoteRun;
 use crate::remotes::RemotePending;
 use crate::rendered_view::RenderedDiff;
+use crate::stash::{StashDraft, StashList};
 use crate::submodule_list::SubmoduleList;
 use crate::tags::PendingTag;
 use crate::watch::{WatchEvent, WatchState};
@@ -219,6 +222,9 @@ pub struct AppState {
     pub op_seq: Option<u64>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
+    /// From the global `[commit] hooks_detached`: the user's hooks never ask
+    /// anything, so a commit that only runs hooks stays detached.
+    pub commit_hooks_detached: bool,
     /// The last operation's failure, or why one was refused.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
@@ -279,6 +285,11 @@ pub struct AppState {
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
+    /// The stash list, loaded at startup whether shown or not.
+    pub stash: StashList,
+    /// What the stash being made takes, fixed when its menu item was
+    /// chosen; taken when its message is submitted.
+    pub stash_draft: Option<StashDraft>,
     /// Every git command run this session, recorded whether shown or not.
     pub command_log: CommandLog,
     /// The commits a paste cherry-picks. Kept across checkouts, so they
@@ -287,6 +298,15 @@ pub struct AppState {
     /// A notice whose words are made at run time, such as a count. Shown
     /// and cleared like `notice`, which wins when both are set.
     pub notice_text: Option<String>,
+    /// The filter or search being typed on the bottom bar, if one is.
+    pub input: Option<ListInput>,
+    /// Narrows the Files panel as typed; empty shows every file.
+    pub files_filter: String,
+    /// The file a range selection started on. By path, so a refresh that
+    /// moves the rows keeps the range on the same files.
+    pub files_anchor: Option<RepoPath>,
+    /// Pull requests per branch; off unless the global config names hosts.
+    pub forge: ForgeState,
     /// The message read to copy it; any other answer is stale.
     pub pending_copy: Option<(Tag, CommitId)>,
     /// The pattern the open `.gitignore` prompt was filled with.
@@ -314,6 +334,7 @@ impl AppState {
             screen_mode: ScreenMode::Normal,
             op_seq: None,
             commit_on_terminal: false,
+            commit_hooks_detached: false,
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
@@ -341,11 +362,25 @@ impl AppState {
             branches: BranchesPanel::default(),
             remote: None,
             commits: CommitsPanel::default(),
+            stash: StashList::default(),
+            stash_draft: None,
             command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
             notice_text: None,
+            input: None,
+            files_filter: String::new(),
+            files_anchor: None,
+            forge: ForgeState::default(),
             pending_copy: None,
             ignore_draft: None,
+        }
+    }
+
+    /// The forge hosts the global config lets Kika contact; none is off.
+    pub fn with_forge_hosts(self, hosts: Vec<ForgeHost>) -> Self {
+        Self {
+            forge: ForgeState::new(hosts),
+            ..self
         }
     }
 
@@ -373,6 +408,18 @@ impl AppState {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
                     Resolution::Command(index) => return self.start_command(index),
                     Resolution::Disabled(reason) => self.notice = Some(reason),
+                    Resolution::Unbound if focus == KeyScope::Input => {
+                        if let Some(input) = &mut self.input {
+                            // A long paste would only slow every frame down.
+                            let full = input.line.text.chars().count() >= list_filter::MAX_INPUT;
+                            if full && matches!(key.code, crossterm::event::KeyCode::Char(_)) {
+                                self.notice = Some(list_filter::INPUT_FULL);
+                                return vec![];
+                            }
+                            input.line.edit(key);
+                        }
+                        return self.apply_input();
+                    }
                     // Only a prompt or the editor takes text; elsewhere
                     // unbound keys are dropped. A popup over the editor
                     // keeps the keys from it.
@@ -423,6 +470,7 @@ impl AppState {
                 let mut effects = self.refresh_status();
                 effects.extend(self.reload_branches());
                 effects.extend(self.reload_commits());
+                effects.extend(self.reload_stashes());
                 return effects;
             }
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
@@ -487,7 +535,13 @@ impl AppState {
                 self.follow_cursor();
             }
             AppIntent::ToggleHunkStage => return self.toggle_hunk_stage(),
-            AppIntent::EnterLineMode => self.with_lines(HunkView::enter_lines),
+            AppIntent::EnterLineMode => {
+                if self.display_only() && matches!(self.focus, Focus::Diff(_)) {
+                    self.notice = Some(keymap::DISPLAY_ONLY);
+                } else {
+                    self.with_lines(HunkView::enter_lines);
+                }
+            }
             AppIntent::ExitLineMode => self.with_lines(HunkView::exit_lines),
             AppIntent::NextLine { extend } => self.with_lines(|view| view.next_line(extend)),
             AppIntent::PrevLine { extend } => self.with_lines(|view| view.prev_line(extend)),
@@ -516,6 +570,10 @@ impl AppState {
             AppIntent::PatchLoaded { tag, result } => {
                 self.patch_loaded(tag, result);
                 self.remap();
+            }
+            // Only where the range shows; elsewhere Stage is the one file's.
+            AppIntent::ToggleStage if self.focus == Focus::Files && self.files_anchor.is_some() => {
+                return self.stage_range();
             }
             AppIntent::ToggleStage => {
                 let op = self
@@ -640,6 +698,14 @@ impl AppState {
                     ..
                 }) => self.branches.pending = None,
                 Some(Popup::Prompt {
+                    kind: PromptKind::StashMessage,
+                    ..
+                }) => self.stash_draft = None,
+                Some(Popup::Prompt {
+                    kind: PromptKind::RenameStash,
+                    ..
+                }) => self.stash.pending = None,
+                Some(Popup::Prompt {
                     kind:
                         PromptKind::TrackBranch
                         | PromptKind::RemoteName
@@ -687,6 +753,7 @@ impl AppState {
             AppIntent::CommitsLoaded { tag, skip, result } => {
                 if tag.generation == self.generation {
                     self.commits.page_loaded(tag.seq, skip, result);
+                    self.commits.reconcile();
                     return self.more_commits();
                 }
             }
@@ -707,6 +774,33 @@ impl AppState {
             AppIntent::CommitFilesLoaded { tag, result } => {
                 return self.commit_files_loaded(tag, result);
             }
+            AppIntent::StashesLoaded { tag, result } => {
+                if tag.generation == self.generation {
+                    self.stash.loaded(tag.seq, result);
+                }
+            }
+            AppIntent::StashNext => self.stash.move_by(1),
+            AppIntent::StashPrev => self.stash.move_by(-1),
+            AppIntent::OpenStashFiles => return self.open_stash_files(),
+            AppIntent::CloseStashFiles => return self.close_stash_files(),
+            AppIntent::StashFileNext => return self.move_stash_file(1),
+            AppIntent::StashFilePrev => return self.move_stash_file(-1),
+            AppIntent::StashFilesLoaded { tag, result } => {
+                return self.stash_files_loaded(tag, result);
+            }
+            AppIntent::ApplyStash => return self.stash_op(GitOp::StashApply),
+            AppIntent::PopStash => return self.stash_op(GitOp::StashPop),
+            AppIntent::DropStash => self.ask_drop_stash(),
+            AppIntent::ConfirmDropStash => return self.confirm_drop_stash(),
+            AppIntent::RenameStash => self.ask_rename_stash(),
+            AppIntent::RenameStashTo(text) => return self.rename_stash_to(&text),
+            AppIntent::StashAll => self.ask_stash_message(StashMode::All),
+            AppIntent::StashIncludingUntracked => {
+                self.ask_stash_message(StashMode::IncludeUntracked)
+            }
+            AppIntent::StashStaged => self.ask_stash_message(StashMode::Staged),
+            AppIntent::StashFile => self.ask_stash_file_message(),
+            AppIntent::StashMessageAnswered(text) => return self.stash_message_answered(&text),
             AppIntent::OpenSubmodules => return self.open_submodules(),
             AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
             AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
@@ -816,6 +910,19 @@ impl AppState {
                 return self.repo_initialised(tag, result);
             }
             AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
+            AppIntent::ForgeRepoNone { tag } => {
+                if tag.generation == self.generation {
+                    self.forge.repo_none(tag);
+                }
+            }
+            AppIntent::PullRequestsCached { tag, repo, badges } => {
+                if tag.generation == self.generation {
+                    self.forge.cached(tag, repo, badges);
+                }
+            }
+            AppIntent::PullRequestsFetched { tag, result } => {
+                return self.pull_requests_fetched(tag, result);
+            }
             AppIntent::BranchLogLoaded {
                 tag,
                 refname,
@@ -926,6 +1033,7 @@ impl AppState {
                 return self.start_op(Ok(op));
             }
             AppIntent::RevertCommit => return self.revert_commit(),
+            AppIntent::CopyCommit if self.commits.range_anchor.is_some() => self.copy_range(),
             AppIntent::CopyCommit => self.copy_commit(),
             AppIntent::ClearCopied => {
                 self.copied.clear();
@@ -960,6 +1068,33 @@ impl AppState {
             AppIntent::Undo => return self.travel(undo::Direction::Undo),
             AppIntent::Redo => return self.travel(undo::Direction::Redo),
             AppIntent::ConfirmTravel => return self.confirm_travel(),
+            AppIntent::OpenFilter => self.open_filter(),
+            AppIntent::OpenSearch => {
+                if let Focus::Diff(view) = &self.focus {
+                    let text = view.search.as_ref().map_or("", |s| s.query.as_str());
+                    self.input = Some(ListInput {
+                        target: InputTarget::DiffSearch,
+                        line: LineInput::with_text(text),
+                    });
+                }
+            }
+            AppIntent::InputAccept => self.input_accept(),
+            AppIntent::InputCancel => {
+                if let Some(input) = &mut self.input {
+                    input.line = LineInput::default();
+                    let effects = self.apply_input();
+                    self.input = None;
+                    return effects;
+                }
+            }
+            AppIntent::ToggleRange => self.toggle_range(),
+            AppIntent::ListEscape => return self.list_escape(),
+            AppIntent::DiffEscape => match &mut self.focus {
+                Focus::Diff(view) if view.search.is_some() => view.search = None,
+                _ => return self.update(AppIntent::FocusLeft),
+            },
+            AppIntent::SearchNext => self.step_search(false),
+            AppIntent::SearchPrev => self.step_search(true),
         }
         vec![]
     }
@@ -1032,7 +1167,8 @@ impl AppState {
             }
             (Context::Workspace, Focus::Commits) => KeyScope::Commits,
             (Context::Workspace, Focus::Status) => KeyScope::Status,
-            (Context::Workspace, Focus::Stash) => KeyScope::Workspace,
+            (Context::Workspace, Focus::Stash) if self.stash.open.is_some() => KeyScope::StashFiles,
+            (Context::Workspace, Focus::Stash) => KeyScope::Stash,
             (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
             (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
@@ -1058,6 +1194,7 @@ impl AppState {
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
             Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
+            Some(Popup::DropStash(_)) => return KeyScope::DropStash,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
             Some(Popup::RemoveWorktree(_)) => return KeyScope::RemoveWorktree,
@@ -1078,6 +1215,8 @@ impl AppState {
         }
         if self.help_open {
             KeyScope::Help
+        } else if self.input.is_some() {
+            KeyScope::Input
         } else {
             self.panel_focus()
         }
@@ -1120,13 +1259,22 @@ impl AppState {
         self.renderer.and_then(|i| self.renderers.get(i))
     }
 
+    /// Whether the active renderer is a tool, whose rows show no patch
+    /// lines: the Diff pane can be read but not staged from.
+    pub fn display_only(&self) -> bool {
+        self.active_renderer()
+            .is_some_and(|r| r.kind == RendererKind::Tool)
+    }
+
     /// The diff the Diff pane shows: the selected file's from the Files
     /// panel, the focused view's side with the Diff pane focused (renames
     /// off, as its patch has them), nothing behind a blame or a conflict.
-    /// A commit's file is never rendered, so it is not one of these.
+    /// A commit's or a stash's file is never rendered, so it is not one of
+    /// these.
     fn shown_request(&self) -> Option<DiffRequest> {
         match &self.focus {
             Focus::Commits if self.commits.open.is_some() => None,
+            Focus::Stash if self.stash.open.is_some() => None,
             Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
                 .selected
                 .and_then(|i| self.files.get(i))
@@ -1154,9 +1302,13 @@ impl AppState {
 
     /// The rendered diff when the Diff pane draws it. With the pane
     /// focused, only while the selection has rows: a cursor on rows the
-    /// renderer did not draw would lie, so the built-in view is drawn.
+    /// renderer did not draw would lie, so the built-in view is drawn. A
+    /// tool's rows have no cursor to lie with, so they are always drawn.
     pub fn rendered_shown(&self) -> Option<&RenderedDiff> {
         let rendered = self.rendered_for_shown()?;
+        if self.display_only() {
+            return Some(rendered);
+        }
         match &self.focus {
             Focus::Diff(view) if rendered.error.is_none() && !rendered.rendering() => {
                 let picked = view.picked();
@@ -1242,10 +1394,16 @@ impl AppState {
 
     /// Map the rendered rows to the focused view's patch, when both are
     /// of the same file and side, then bring the selection into view.
+    /// A tool's rows are never mapped: they show the files, not the patch.
     fn remap(&mut self) {
+        let display_only = self.display_only();
         let Some(rendered) = &mut self.rendered else {
             return;
         };
+        if display_only {
+            rendered.map.clear();
+            return;
+        }
         rendered.map = match &self.focus {
             Focus::Diff(view) if view.path == rendered.path && view.side == rendered.side => view
                 .patch
@@ -1310,18 +1468,26 @@ impl AppState {
                 // Ssh reads an exit of 0 with "yes" as allowed.
                 vec![Effect::AnswerCredential(yes.then(|| Secret::new("yes")))]
             }
-            Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
+            Some(Popup::Discard(confirm)) if yes => {
+                // The range was what was asked about; it is done with.
+                if matches!(confirm.what, DiscardWhat::Range { .. }) {
+                    self.files_anchor = None;
+                }
+                self.start_op(Ok(Some(confirm.op)))
+            }
             Some(Popup::Discard(_)) => vec![],
             // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
-            // resets, only `ConfirmRemoveRemote` removes and only
-            // `ConfirmDeleteTag` deletes a tag and only `ConfirmTravel`
-            // undoes or redoes; yes here keeps the question, no closes it.
+            // resets, only `ConfirmRemoveRemote` removes, only
+            // `ConfirmDeleteTag` deletes a tag, only `ConfirmTravel` undoes or
+            // redoes and only `ConfirmDropStash` drops a stash; yes here
+            // keeps the question, no closes it.
             Some(
                 Popup::DeleteBranch(_)
                 | Popup::ResetHard(_)
                 | Popup::RemoveRemote(_)
                 | Popup::DeleteTag(_)
-                | Popup::Travel(_),
+                | Popup::Travel(_)
+                | Popup::DropStash(_),
             ) if !yes => vec![],
             // Only `ConfirmRemoveWorktree` removes a worktree.
             Some(Popup::RemoveWorktree(_)) if !yes => vec![],
@@ -1338,6 +1504,9 @@ impl AppState {
     fn ask_discard(&mut self) {
         if self.context != Context::Workspace || self.op_seq.is_some() {
             return;
+        }
+        if self.focus == Focus::Files && self.files_anchor.is_some() {
+            return self.ask_discard_range();
         }
         match self.discard_confirm() {
             Ok(Some(confirm)) => self.popups.push(Popup::Discard(confirm)),
@@ -1370,6 +1539,9 @@ impl AppState {
             // Bound only in Files and the diff; nothing to discard elsewhere.
             _ => return Ok(None),
         };
+        if self.display_only() {
+            return Err(keymap::DISPLAY_ONLY);
+        }
         if self.diff_options.ignore_whitespace {
             return Err(keymap::WHITESPACE_HIDDEN);
         }
@@ -1434,6 +1606,10 @@ impl AppState {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
+        if self.display_only() {
+            self.notice = Some(keymap::DISPLAY_ONLY);
+            return vec![];
+        }
         if view.lines.is_some() {
             return vec![];
         }
@@ -1688,6 +1864,9 @@ impl AppState {
     /// The title of a prompt: a command's comes from the user's config,
     /// made one line and safe to draw.
     pub fn prompt_title(&self, kind: PromptKind) -> String {
+        if let (PromptKind::RenameStash, Some(stash)) = (kind, &self.stash.pending) {
+            return format!("Rename {}", stash.arg());
+        }
         if kind == PromptKind::WorktreePath
             && let Some(branch) = self.worktree_list().and_then(|l| l.pending_branch.as_ref())
         {
@@ -1769,13 +1948,14 @@ impl AppState {
         seq
     }
 
+    /// Move by `delta` rows among those the filter shows.
     fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
         let Some(current) = self.selected else {
             return vec![];
         };
-        let next = current
-            .saturating_add_signed(delta)
-            .min(self.files.len().saturating_sub(1));
+        let Some(next) = list_filter::step(&self.files_visible(), current, delta) else {
+            return vec![];
+        };
         if next == current {
             return vec![];
         }
@@ -1786,11 +1966,11 @@ impl AppState {
     /// focused, its patch reloads too, on the same side while the file is
     /// the same one.
     ///
-    /// While a commit's files are open the pane is theirs: the selection
-    /// moves, but nothing loads.
+    /// While a commit's or a stash's files are open the pane is theirs:
+    /// the selection moves, but nothing loads.
     fn select(&mut self, index: usize) -> Vec<Effect> {
         self.selected = Some(index);
-        if self.commits.open.is_some() {
+        if self.files_open() {
             return vec![];
         }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
@@ -1840,6 +2020,9 @@ impl AppState {
         if self.commits.open.is_some() {
             return self.commit_file_diff();
         }
+        if self.stash.open.is_some() {
+            return self.stash_file_diff();
+        }
         match self.selected {
             Some(index) if index < self.files.len() => self.select(index),
             _ => vec![],
@@ -1848,8 +2031,8 @@ impl AppState {
 
     /// Focus `panel`. A side panel expands, and closes a blame on the way.
     /// The diff keeps its hunk view when it already has focus. Leaving the
-    /// Commits panel closes a commit's files, so the pane never shows a
-    /// commit's diff under another panel.
+    /// Commits or Stash panel closes a commit's or a stash's files, so the
+    /// pane never shows their diff under another panel.
     fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
@@ -1861,6 +2044,9 @@ impl AppState {
                 } else {
                     self.close_commit_files()
                 };
+                if side != SidePanel::Stash {
+                    effects.extend(self.close_stash_files());
+                }
                 self.focus = Focus::side(side);
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
@@ -1888,9 +2074,9 @@ impl AppState {
 
     /// Focus the Diff pane on the selected file, on the side its diff
     /// shows; a conflicted file opens the conflict view instead. Not while
-    /// a commit's file is shown: it has no hunks to stage.
+    /// a commit's or a stash's file is shown: it has no hunks to stage.
     fn focus_diff(&mut self) -> Vec<Effect> {
-        if self.commits.open.is_some() {
+        if self.files_open() {
             return vec![];
         }
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
@@ -1991,6 +2177,10 @@ impl AppState {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
+        if self.display_only() {
+            self.notice = Some(keymap::DISPLAY_ONLY);
+            return vec![];
+        }
         if self.diff_options.ignore_whitespace {
             self.notice = Some(keymap::WHITESPACE_HIDDEN);
             return vec![];
@@ -2049,7 +2239,7 @@ impl AppState {
     fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
         if self.files.is_empty() {
             self.selected = None;
-            if self.commits.open.is_some() {
+            if self.files_open() {
                 return vec![];
             }
             self.diff = DiffPane::default();
@@ -2064,6 +2254,12 @@ impl AppState {
             .and_then(|path| self.files.iter().position(|f| f.path == path))
             .or_else(|| self.selected.map(|i| i.min(self.files.len() - 1)))
             .unwrap_or(0);
+        // A row the filter hides gives way to the first one it shows.
+        let visible = self.files_visible();
+        let index = match visible.first() {
+            Some(&first) if !visible.contains(&index) => first,
+            _ => index,
+        };
         self.select(index)
     }
 
@@ -2307,7 +2503,7 @@ impl AppState {
             self.end_commit(None);
             return vec![];
         }
-        if needs_terminal(&op, facts.as_ref()) {
+        if needs_terminal(&op, facts.as_ref(), self.commit_hooks_detached) {
             self.commit_on_terminal = true;
             vec![Effect::HandOff(HandOff::Commit { tag, op })]
         } else {
@@ -2461,6 +2657,9 @@ impl AppState {
         }
         if plan.scopes.contains(&Scope::Commits) {
             effects.extend(self.reload_commits());
+        }
+        if plan.scopes.contains(&Scope::Stash) {
+            effects.extend(self.reload_stashes());
         }
         effects
     }
@@ -3003,6 +3202,7 @@ impl AppState {
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
         effects.extend(self.reload_commits());
+        effects.extend(self.reload_stashes());
         effects
     }
 
@@ -3033,6 +3233,7 @@ impl AppState {
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
         effects.extend(self.reload_commits());
+        effects.extend(self.reload_stashes());
         effects
     }
 
@@ -3053,6 +3254,7 @@ impl AppState {
                 effects.extend(self.refresh_status());
                 effects.extend(self.reload_branches());
                 effects.extend(self.reload_commits());
+                effects.extend(self.reload_stashes());
                 effects
             }
             None => self.open_recent(),
@@ -3226,6 +3428,7 @@ impl AppState {
         effects.extend(self.refresh_status());
         effects.extend(self.reload_branches());
         effects.extend(self.reload_commits());
+        effects.extend(self.reload_stashes());
         // The keys follow the repository: its own file replaces the last one's.
         effects.push(Effect::LoadConfig {
             repo: self.repo.clone(),
@@ -3265,11 +3468,18 @@ impl AppState {
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
         self.commits = CommitsPanel::default();
+        self.stash = StashList::default();
+        self.stash_draft = None;
         // The ids name commits of the repository being left.
         self.copied.clear();
+        // A filter and a range were made over the old repository's rows.
+        self.input = None;
+        self.files_filter.clear();
+        self.files_anchor = None;
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
+        self.forge.reset();
     }
 
     fn refresh_status(&mut self) -> Vec<Effect> {
@@ -3317,6 +3527,11 @@ impl AppState {
                     .and_then(|i| self.files.get(i))
                     .map(|f| f.path.clone());
                 self.files = status.files;
+                if let Some(anchor) = &self.files_anchor
+                    && !self.files.iter().any(|f| &f.path == anchor)
+                {
+                    self.files_anchor = None;
+                }
                 let before = self.branch.replace(status.branch);
                 self.announce_bisect(before.and_then(|b| b.bisect));
                 self.status_error = None;
@@ -3499,6 +3714,7 @@ impl AppState {
         let mut effects = self.background_status();
         effects.extend(self.background_branches());
         effects.extend(self.reload_commits());
+        effects.extend(self.reload_stashes());
         effects
     }
 
@@ -3622,12 +3838,20 @@ impl AppState {
             return vec![];
         }
         self.branches.list_seq = None;
+        if let Ok(branches) = &result {
+            self.forge.set_branches(branches.iter().map(|b| &b.name));
+        }
+        let listed = result.is_ok();
         self.branches.loaded(result);
-        if self.branches.tab == BranchesTab::Local {
+        let mut effects = if self.branches.tab == BranchesTab::Local {
             self.load_branch_log(tag.user)
         } else {
             vec![]
+        };
+        if listed {
+            effects.extend(self.load_pull_requests());
         }
+        effects
     }
 
     /// Show the remotes, and on their tab load the selected branch's log
@@ -4628,6 +4852,10 @@ impl AppState {
             return vec![];
         }
         let reload = result.is_ok() || op == RemoteOp::Pull;
+        if result.is_ok() {
+            // The forge may know of new pull requests, or new checks.
+            self.forge.want_refresh();
+        }
         match result {
             Ok(()) => {}
             Err(RemoteFailure::Rejected(_)) => {
@@ -4891,6 +5119,233 @@ impl AppState {
 }
 
 /// The first line of a rejected edited hunk's error, above git's message.
+/// Said when a changed filter drops the range made over the old rows.
+const SELECTION_CLEARED: &str = "Selection cleared";
+
+/// List filters, range selections and the diff search.
+impl AppState {
+    /// The indexes of the files the filter shows, in order.
+    pub fn files_visible(&self) -> Vec<usize> {
+        if self.files_filter.is_empty() {
+            return (0..self.files.len()).collect();
+        }
+        let paths = self.files.iter().map(|f| f.path.display());
+        list_filter::visible(&self.files_filter, paths)
+    }
+
+    /// The filter hides the selected file, which happens only when it
+    /// hides every file.
+    pub fn files_selected_hidden(&self) -> bool {
+        let entry = self.selected.and_then(|i| self.files.get(i));
+        entry.is_some_and(|f| !list_filter::matches(&self.files_filter, f.path.display()))
+    }
+
+    /// The files the range covers, in order; empty without one.
+    pub fn files_range(&self) -> Vec<usize> {
+        let anchor = self
+            .files_anchor
+            .as_ref()
+            .and_then(|anchor| self.files.iter().position(|f| &f.path == anchor));
+        match (anchor, self.selected) {
+            (Some(anchor), Some(cursor)) => {
+                list_filter::range(&self.files_visible(), anchor, cursor)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Type into the focused list's filter, starting from its text.
+    fn open_filter(&mut self) {
+        let (target, text) = match self.panel_focus() {
+            KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
+            KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
+            _ => return,
+        };
+        self.input = Some(ListInput {
+            target,
+            line: LineInput::with_text(text),
+        });
+    }
+
+    /// Filter or search with the input's text as it is now. A changed
+    /// filter clears the range, which was made over the rows shown before,
+    /// and moves a cursor it hides to the first row it shows.
+    fn apply_input(&mut self) -> Vec<Effect> {
+        let Some(input) = &self.input else {
+            return vec![];
+        };
+        let text = input.line.text.clone();
+        match input.target {
+            InputTarget::FilesFilter => {
+                if text != self.files_filter {
+                    self.files_filter = text;
+                    if self.files_anchor.take().is_some() {
+                        self.notice = Some(SELECTION_CLEARED);
+                    }
+                }
+                if self.files_selected_hidden()
+                    && let Some(&first) = self.files_visible().first()
+                {
+                    return self.select(first);
+                }
+            }
+            InputTarget::CommitsFilter => {
+                if text != self.commits.filter {
+                    self.commits.filter = text;
+                    if self.commits.range_anchor.take().is_some() {
+                        self.notice = Some(SELECTION_CLEARED);
+                    }
+                }
+                self.commits.reconcile();
+            }
+            InputTarget::DiffSearch => {
+                if let Focus::Diff(view) = &mut self.focus {
+                    view.set_search(&text, self.emoji_zwj);
+                }
+            }
+        }
+        vec![]
+    }
+
+    /// Close the input. The filter stays as typed; a search goes to its
+    /// current match.
+    fn input_accept(&mut self) {
+        let Some(input) = self.input.take() else {
+            return;
+        };
+        let rows = self.pane_rows();
+        if input.target == InputTarget::DiffSearch
+            && let Focus::Diff(view) = &mut self.focus
+        {
+            match &view.search {
+                Some(search) if search.current.is_none() => self.notice = Some("No matches"),
+                _ => view.jump_to_match(rows),
+            }
+        }
+    }
+
+    /// `n` or `N`: the next or previous match, saying so when it wrapped.
+    fn step_search(&mut self, back: bool) {
+        let rows = self.pane_rows();
+        if let Focus::Diff(view) = &mut self.focus {
+            if view.search.as_ref().is_some_and(|s| s.current.is_none()) {
+                self.notice = Some("No matches");
+            } else if view.step_search(back, rows) {
+                self.notice = Some("Search wrapped");
+            }
+        }
+    }
+
+    /// Start a range at the cursor, or clear the one there is.
+    fn toggle_range(&mut self) {
+        match self.panel_focus() {
+            KeyScope::Files if self.files_anchor.is_some() => self.files_anchor = None,
+            KeyScope::Files if !self.files_selected_hidden() => {
+                self.files_anchor = self
+                    .selected
+                    .and_then(|i| self.files.get(i))
+                    .map(|f| f.path.clone());
+            }
+            KeyScope::Commits if self.commits.range_anchor.is_some() => {
+                self.commits.range_anchor = None;
+            }
+            KeyScope::Commits if !self.commits.selected_hidden() => {
+                let row = self.commits.rows.get(self.commits.selected);
+                self.commits.range_anchor = row.map(|r| r.oid.clone());
+            }
+            _ => {}
+        }
+    }
+
+    /// Esc in a list: clear the range, else the filter, else quit as Esc
+    /// always has.
+    fn list_escape(&mut self) -> Vec<Effect> {
+        let (cleared, filter) = match self.panel_focus() {
+            KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
+            KeyScope::Commits => (
+                self.commits.range_anchor.take().is_some(),
+                &mut self.commits.filter,
+            ),
+            _ => return self.update(AppIntent::Quit),
+        };
+        if cleared {
+            return vec![];
+        }
+        if filter.is_empty() {
+            return self.update(AppIntent::Quit);
+        }
+        filter.clear();
+        vec![]
+    }
+
+    /// Stage every file in the range, or unstage them all when none has
+    /// anything left to stage. One op, so one git call.
+    fn stage_range(&mut self) -> Vec<Effect> {
+        let entries: Vec<&FileEntry> = self.files_range().iter().map(|&i| &self.files[i]).collect();
+        let op = GitOp::toggle_many(&entries);
+        if op.is_some() {
+            self.files_anchor = None;
+        }
+        self.start_op(Ok(op))
+    }
+
+    /// Ask before discarding the range: the files it can restore and the
+    /// untracked ones it would delete, counted in the question.
+    fn ask_discard_range(&mut self) {
+        let entries: Vec<&FileEntry> = self.files_range().iter().map(|&i| &self.files[i]).collect();
+        let Some(op) = GitOp::discard_many(&entries) else {
+            self.notice = Some("No unstaged changes to discard");
+            return;
+        };
+        let (restore, delete) = match &op {
+            GitOp::DiscardWorktree(paths) => (paths.len(), 0),
+            GitOp::DeleteUntracked(paths) => (0, paths.len()),
+            GitOp::DiscardFiles { restore, delete } => (restore.len(), delete.len()),
+            _ => (0, 0),
+        };
+        self.popups.push(Popup::Discard(DiscardConfirm {
+            what: DiscardWhat::Range { restore, delete },
+            path: String::new(),
+            op,
+        }));
+    }
+
+    /// Copy the range's commits, in screen order, or take them all out
+    /// when every one is copied already. Merge commits are skipped.
+    fn copy_range(&mut self) {
+        if let Some(reason) = keymap::commits_copy_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let mut merges = 0;
+        let mut picks = Vec::new();
+        for i in self.commits.range() {
+            let row = &self.commits.rows[i];
+            if row.parents.len() > 1 {
+                merges += 1;
+            } else if let Some(id) = CommitId::parse(&row.oid) {
+                picks.push(CopiedCommit::new(id, row.subject.clone()));
+            }
+        }
+        let remove = picks.iter().all(|pick| self.copied.contains(&pick.id));
+        let count = picks.len();
+        for pick in picks {
+            if self.copied.contains(&pick.id) == remove {
+                self.copied.toggle(pick);
+            }
+        }
+        self.commits.range_anchor = None;
+        let verb = if remove { "Removed" } else { "Copied" };
+        let skipped = match merges {
+            0 => String::new(),
+            1 => "1 merge skipped, ".to_string(),
+            n => format!("{n} merges skipped, "),
+        };
+        let total = self.copied.len();
+        self.notice_text = Some(format!("{verb} {count} ({skipped}{total} copied)"));
+    }
+}
+
 pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
 Keep the @@ line as it was and start each line with a space, + or -.";
 
@@ -4924,6 +5379,13 @@ fn failure_next(op: &GitOp) -> &'static str {
         }
         GitOp::MergeTool(_) => {
             "The file list was reloaded. Check merge.tool, or resolve the file in your editor."
+        }
+        // A conflicted apply or pop leaves the entry in the list.
+        GitOp::StashApply(_) | GitOp::StashPop(_) => {
+            "The file list was reloaded. If git stopped on conflicts, resolve them in the Files panel; the stash is kept."
+        }
+        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+            "The stash list was reloaded. Fix the cause above, then try again."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
     }
@@ -5028,6 +5490,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the change",
         GitOp::DiscardWorktree(_) => "Could not discard the changes",
         GitOp::DeleteUntracked(_) => "Could not delete the file",
+        GitOp::DiscardFiles { .. } => "Could not discard the files",
         GitOp::ApplyWorktree { .. } => "Could not discard the change",
         GitOp::ApplyEdited { .. } => "Could not stage the edited hunk",
         GitOp::SubmoduleInit(_) => "Could not initialize the submodule",
@@ -5054,6 +5517,11 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Abort(Operation::Revert) => "Could not abort the revert",
         GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
         GitOp::MergeTool(_) => "The merge tool did not resolve the file",
+        GitOp::StashPush { .. } => "Could not stash",
+        GitOp::StashApply(_) => "Could not apply the stash",
+        GitOp::StashPop(_) => "Could not pop the stash",
+        GitOp::StashDrop(_) => "Could not drop the stash",
+        GitOp::StashRename { .. } => "Could not rename the stash",
         GitOp::CheckoutTracking { .. } => "Could not check out the remote branch",
         GitOp::SetUpstream { .. } => "Could not set the upstream",
         GitOp::UnsetUpstream(_) => "Could not unset the upstream",
@@ -5074,6 +5542,8 @@ fn failure_title(op: &GitOp) -> &'static str {
         } => "Could not redo",
     }
 }
+
+mod stash_actions;
 
 #[cfg(test)]
 mod tests {
@@ -5136,6 +5606,7 @@ mod tests {
                 Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
             ] => {
                 let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
                 state.update(AppIntent::BranchesLoaded {
@@ -5200,12 +5671,12 @@ mod tests {
             }
         );
         // Seq 1 went to the branch list `r` reloads too, 2 to the remotes,
-        // 3 to the tags, 4 and 5 to the commits.
+        // 3 to the tags, 4 and 5 to the commits, 6 to the stashes.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 6,
+                seq: 7,
                 user: true
             }
         );
@@ -5754,9 +6225,9 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        // The status, the branch list, the remotes, the tags, then the
-        // commits and their markers.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 6);
+        // The status, the branch list, the remotes, the tags, the commits
+        // and their markers, then the stashes.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 7);
         assert_eq!(
             state.busy, 4,
             "the status, the branch list, the remotes and the tags"
@@ -6460,6 +6931,44 @@ mod tests {
             assert_eq!(state.busy, busy, "OpFinished still settles busy");
             assert_eq!(state.op_seq, Some(tag.seq));
             assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    fn hooks_only() -> Option<PromptFacts> {
+        Some(PromptFacts {
+            signs: false,
+            hooks: vec!["pre-commit", "commit-msg", "post-commit"],
+        })
+    }
+
+    #[test]
+    fn with_hooks_detached_a_commit_that_only_runs_hooks_stays_detached() {
+        for (mut state, tag, op) in submissions() {
+            state.commit_hooks_detached = true;
+            let effects = state.update(probed(tag, &op, hooks_only()));
+            assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
+            assert!(!state.commit_on_terminal);
+        }
+    }
+
+    #[test]
+    fn without_hooks_detached_a_commit_with_hooks_is_handed_the_terminal() {
+        let (mut state, tag, op) = submitted();
+        assert!(!state.commit_hooks_detached, "off by default");
+        assert_eq!(
+            state.update(probed(tag, &op, hooks_only())),
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        );
+        assert!(state.commit_on_terminal);
+    }
+
+    #[test]
+    fn with_hooks_detached_a_commit_that_signs_is_still_handed_the_terminal() {
+        for (mut state, tag, op) in submissions() {
+            state.commit_hooks_detached = true;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(effects, vec![Effect::HandOff(HandOff::Commit { tag, op })]);
+            assert!(state.commit_on_terminal);
         }
     }
 
@@ -8358,7 +8867,7 @@ mod tests {
             assert_eq!(state.focus, focus, "{key}");
             assert_eq!(state.expanded, side, "{key}");
         }
-        // Commits has keys of its own; the newer panels not yet.
+        // Commits and Stash have keys of their own.
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Commits,
         )));
@@ -8366,7 +8875,7 @@ mod tests {
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Stash,
         )));
-        assert_eq!(state.key_focus(), KeyScope::Workspace);
+        assert_eq!(state.key_focus(), KeyScope::Stash);
     }
 
     #[test]
@@ -8989,6 +9498,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
             ] => {
                 assert_eq!(set_repo(set), [RepoPath::from("sub")]);
                 assert_eq!(tag.generation, state.generation);
@@ -9059,6 +9569,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
             ] => {
                 assert_eq!(set_repo(set), []);
                 assert_eq!(request.path, "b.rs".into());
@@ -9151,6 +9662,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
             ] => {
                 assert_eq!(path, Path::new("/r/a"));
             }
@@ -9322,6 +9834,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!((root.as_path(), nested.len()), (Path::new("/w"), 0));
@@ -9398,6 +9911,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
                 Effect::LoadConfig { repo },
             ] => {
                 assert_eq!(repo.as_deref(), Some(Path::new("/r/b")), "its own keys");
@@ -9445,7 +9959,7 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 7..],
+            effects[effects.len() - 8..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
@@ -9453,6 +9967,7 @@ mod tests {
                 Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
                 Effect::LoadConfig { .. }
             ]
         ));
@@ -10154,6 +10669,7 @@ mod tests {
                 Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
+                Effect::LoadStashes { .. },
             ] => assert!(!tag.user && !remotes.user && !tags.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
@@ -10662,6 +11178,7 @@ mod tests {
         ExternalRenderer {
             label: label.into(),
             argv: vec![label.into()],
+            kind: crate::external_diff::RendererKind::Pager,
         }
     }
 
@@ -10898,6 +11415,108 @@ mod tests {
         let expected = op_of(&press(&mut built_in, KeyCode::Char(' '))).1;
         let (_, op) = op_of(&press(&mut through, KeyCode::Char(' ')));
         assert_eq!(op, expected);
+    }
+
+    fn tool(label: &str) -> ExternalRenderer {
+        ExternalRenderer {
+            kind: crate::external_diff::RendererKind::Tool,
+            ..renderer(label)
+        }
+    }
+
+    #[test]
+    fn r_cycles_through_the_pagers_then_the_tool_then_built_in() {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![
+            renderer("delta"),
+            tool("difft"),
+        ]));
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            state.update(AppIntent::CycleRenderer);
+            seen.push(state.active_renderer().map(|r| r.label.clone()));
+        }
+        assert_eq!(seen, [Some("delta".into()), Some("difft".into()), None]);
+
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            state.update(AppIntent::CycleRenderer);
+            seen.push((
+                state.active_renderer().map(|r| r.label.clone()),
+                state.display_only(),
+            ));
+        }
+        assert_eq!(seen, [(Some("difft".into()), true), (None, false)]);
+    }
+
+    /// The first of `three_files` focused with `TWO_HUNKS` loaded, drawn
+    /// by tool `difft` as rows that match no patch line.
+    fn focused_through_tool() -> AppState {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        let effects = press(&mut state, KeyCode::Enter);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        let (tag, _, _) = render_of(&effects);
+        state.update(rendered(tag, "1 old one   1 new one\n2 same      2 same\n"));
+        state
+    }
+
+    #[test]
+    fn the_tool_view_shows_its_rows_unmapped() {
+        let state = focused_through_tool();
+        assert!(state.display_only());
+        let shown = state.rendered_shown().expect("the tool rows are shown");
+        assert_eq!(shown.rows.len(), 2);
+        assert!(shown.map.is_empty());
+    }
+
+    #[test]
+    fn the_tool_view_refuses_staging_discard_and_hunk_edits() {
+        for intent in [
+            AppIntent::ToggleHunkStage,
+            AppIntent::EnterLineMode,
+            AppIntent::Discard,
+            AppIntent::EditHunk,
+        ] {
+            let mut state = focused_through_tool();
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY), "{intent:?}");
+            assert_eq!(state.popups, [], "{intent:?}");
+            assert_eq!(view(&state).lines, None, "{intent:?}");
+        }
+        // Line mode entered before the tool, then staged by intent.
+        let mut state = focused_through(false);
+        state.update(AppIntent::EnterLineMode);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        state.notice = None;
+        assert_eq!(state.update(AppIntent::ToggleLinesStage), vec![]);
+        assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY));
+    }
+
+    #[test]
+    fn back_on_the_built_in_view_a_hunk_stages_again() {
+        let mut state = focused_through_tool();
+        assert_eq!(state.update(AppIntent::ToggleHunkStage), vec![]);
+        state.update(AppIntent::CycleRenderer);
+        assert!(!state.display_only());
+        op_of(&state.update(AppIntent::ToggleHunkStage));
+    }
+
+    #[test]
+    fn the_tool_view_leaves_whole_file_staging_alone() {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        assert!(state.display_only());
+        assert_eq!(state.focus, Focus::Files);
+        op_of(&press_char(&mut state, ' '));
     }
 
     #[test]
@@ -15183,6 +15802,369 @@ mod tests {
         );
     }
 
+    // --- List filters, ranges and the diff search ---
+
+    fn has_run_op(effects: &[Effect]) -> bool {
+        effects.iter().any(|e| matches!(e, Effect::RunOp { .. }))
+    }
+
+    #[test]
+    fn typing_a_files_filter_narrows_the_list_and_esc_clears_it_then_quits() {
+        let files = vec![
+            changed("src/model.rs", '.', 'M'),
+            changed("src/view.rs", '.', 'M'),
+            changed("docs/mode.md", '.', 'M'),
+            changed("src/main.rs", '.', 'M'),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'j');
+        assert_eq!(state.selected, Some(1));
+        type_text(&mut state, "/mod");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        assert_eq!(state.files_filter, "mod");
+        assert_eq!(state.files_visible(), [0, 2]);
+        assert_eq!(
+            state.selected,
+            Some(0),
+            "the hidden cursor moved to a shown row"
+        );
+
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.input, None);
+        assert_eq!(state.files_filter, "mod", "Enter keeps the filter");
+        press_char(&mut state, 'j');
+        assert_eq!(state.selected, Some(2), "j skips the hidden row");
+        press_char(&mut state, 'j');
+        assert_eq!(state.selected, Some(2));
+        press_char(&mut state, 'k');
+        assert_eq!(state.selected, Some(0));
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_filter, "");
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert!(
+            state.should_quit,
+            "with nothing to clear, Esc quits as before"
+        );
+    }
+
+    #[test]
+    fn esc_in_the_filter_input_clears_the_filter_and_closes_it() {
+        let (mut state, _) = with_files(three_files(), 24);
+        type_text(&mut state, "/b");
+        assert_eq!(state.files_visible(), [1]);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(state.files_filter, "");
+        assert_eq!(state.files_visible(), [0, 1, 2]);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn typing_a_commits_filter_narrows_the_loaded_rows() {
+        let mut state = with_commits(5, true);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        type_text(&mut state, "/commit 3");
+        assert_eq!(state.commits.filter, "commit 3");
+        assert_eq!(state.commits.visible(), [3]);
+        assert_eq!(state.commits.selected, 3);
+        press(&mut state, KeyCode::Enter);
+        press_char(&mut state, 'k');
+        assert_eq!(
+            state.commits.selected, 3,
+            "nothing else is shown to move to"
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.filter, "");
+        assert_eq!(state.commits.visible().len(), 5);
+    }
+
+    #[test]
+    fn q_question_mark_and_d_are_typed_into_the_filter() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, '/');
+        let mut effects = Vec::new();
+        for c in ['q', '?', 'd'] {
+            effects.extend(press_char(&mut state, c));
+        }
+        assert_eq!(state.files_filter, "q?d");
+        assert!(!state.should_quit);
+        assert!(!state.help_open);
+        assert!(state.popups.is_empty());
+        assert!(!has_run_op(&effects), "{effects:?}");
+    }
+
+    #[test]
+    fn space_stages_a_range_in_one_op_skipping_conflicts() {
+        let files = vec![
+            changed("a.rs", '.', 'M'),
+            conflicted("c.rs"),
+            untracked("d.rs"),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(state.files_range(), [0, 1, 2]);
+        let (_, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::Stage(vec!["a.rs".into(), "d.rs".into()]));
+        assert_eq!(state.files_anchor, None, "the range is done with");
+    }
+
+    #[test]
+    fn space_unstages_a_staged_range_with_each_renames_old_path() {
+        let renamed = FileEntry {
+            orig_path: Some("old.rs".into()),
+            kind: EntryKind::Renamed,
+            ..changed("new.rs", 'R', '.')
+        };
+        let files = vec![renamed, changed("b.rs", 'M', '.'), conflicted("c.rs")];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        let (_, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(
+            op,
+            GitOp::Unstage(vec!["old.rs".into(), "new.rs".into(), "b.rs".into()])
+        );
+    }
+
+    #[test]
+    fn discarding_a_mixed_range_asks_with_the_counts_and_only_y_answers() {
+        let files = vec![
+            changed("a.rs", '.', 'M'),
+            changed("b.rs", '.', 'M'),
+            untracked("n.txt"),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        let Some(Popup::Discard(confirm)) = state.popups.last() else {
+            panic!("expected the discard question, got {:?}", state.popups);
+        };
+        assert_eq!(
+            confirm.what.question(),
+            "Discard unstaged changes to 2 files and delete 1 untracked file? (y/n)"
+        );
+        assert_eq!(confirm.what.title(), "Discard 3 files");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1, "Enter does not answer");
+        assert_eq!(press_char(&mut state, 'n'), vec![]);
+        assert!(state.popups.is_empty());
+        assert!(state.files_anchor.is_some(), "no keeps the range");
+
+        press_char(&mut state, 'd');
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(
+            op,
+            GitOp::DiscardFiles {
+                restore: vec!["a.rs".into(), "b.rs".into()],
+                delete: vec!["n.txt".into()],
+            }
+        );
+        assert_eq!(state.files_anchor, None);
+    }
+
+    #[test]
+    fn a_range_with_nothing_to_discard_says_so() {
+        let files = vec![changed("a.rs", 'M', '.'), changed("b.rs", 'M', '.')];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        assert!(state.popups.is_empty());
+        assert_eq!(state.notice, Some("No unstaged changes to discard"));
+    }
+
+    #[test]
+    fn a_files_range_refuses_single_file_keys() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        for c in ['o', 'b', 'M', 'i'] {
+            press_char(&mut state, c);
+            assert_eq!(state.notice, Some(keymap::CLEAR_RANGE_FIRST), "{c}");
+        }
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.notice, Some(keymap::CLEAR_RANGE_FIRST));
+        assert_eq!(state.focus, Focus::Files);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_anchor, None);
+        assert!(!state.should_quit, "Esc cleared the range first");
+    }
+
+    #[test]
+    fn a_filter_hiding_every_row_refuses_row_keys() {
+        let (mut state, _) = with_files(three_files(), 24);
+        type_text(&mut state, "/zzz\n");
+        assert!(state.files_visible().is_empty());
+        assert_eq!(state.selected, Some(0), "nothing to move to");
+        press_char(&mut state, ' ');
+        assert_eq!(state.notice, Some(keymap::FILTER_HIDES_ROW));
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_anchor_clears_the_range() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        let tag = refresh_tag(&mut state);
+        let rest = three_files().split_off(1);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(rest)),
+        });
+        assert_eq!(state.files_anchor, None);
+    }
+
+    /// Four commits with full-length ids, the second a merge.
+    fn with_merge() -> AppState {
+        let mut state = with_commits(4, true);
+        for (i, row) in state.commits.rows.iter_mut().enumerate() {
+            row.oid = format!("{i}").repeat(40);
+        }
+        state.commits.rows[1].parents = vec!["2".repeat(40), "9".repeat(40)];
+        state
+    }
+
+    #[test]
+    fn c_copies_a_range_skipping_merges_and_again_takes_them_out() {
+        let mut state = with_merge();
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(state.commits.range(), [0, 1, 2]);
+        press_char(&mut state, 'R');
+        assert_eq!(state.notice, Some("Clear the selection first (esc)"));
+        press_char(&mut state, 'B');
+        assert_eq!(state.notice, Some("Clear the selection first (esc)"));
+        assert!(state.popups.is_empty(), "no bisect menu over a range");
+        press_char(&mut state, 'y');
+        assert_eq!(state.notice, Some("Clear the selection first (esc)"));
+        assert!(state.popups.is_empty(), "no copy menu over a range");
+
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert_eq!(
+            state.copied.ids(),
+            [cid(&"0".repeat(40)), cid(&"2".repeat(40))]
+        );
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Copied 2 (1 merge skipped, 2 copied)")
+        );
+        assert_eq!(state.commits.range_anchor, None);
+
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'k');
+        press_char(&mut state, 'k');
+        press_char(&mut state, 'c');
+        assert!(state.copied.is_empty());
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Removed 2 (1 merge skipped, 0 copied)")
+        );
+    }
+
+    #[test]
+    fn a_range_of_only_merges_cannot_be_copied() {
+        let mut state = with_merge();
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'c');
+        assert_eq!(state.notice, Some("Cannot cherry-pick a merge commit"));
+        assert!(state.copied.is_empty());
+    }
+
+    /// Two hunks; "needle" once in the first changed line of the second
+    /// and twice in the next. Rows 8 and 9 hold the matches.
+    const NEEDLES: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+        @@ -1,2 +1,2 @@\n-one\n+two\n ctx\n\
+        @@ -20,2 +20,2 @@\n-needle\n+needle needle\n end\n";
+
+    fn current(state: &AppState) -> Option<usize> {
+        view(state).search.as_ref().and_then(|s| s.current)
+    }
+
+    #[test]
+    fn a_diff_search_jumps_cycles_wraps_and_clears() {
+        let mut state = focused(three_files(), NEEDLES);
+        type_text(&mut state, "/needle");
+        assert_eq!(view(&state).search.as_ref().unwrap().matches.len(), 3);
+        assert_eq!(view(&state).hunk, 0, "typing does not jump");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.input, None);
+        assert_eq!(view(&state).hunk, 1, "Enter goes to the first match's hunk");
+        assert_eq!(current(&state), Some(0));
+
+        press_char(&mut state, 'n');
+        press_char(&mut state, 'n');
+        assert_eq!(current(&state), Some(2));
+        assert_eq!(state.notice, None);
+        press_char(&mut state, 'n');
+        assert_eq!(current(&state), Some(0));
+        assert_eq!(state.notice, Some("Search wrapped"));
+        press_char(&mut state, 'N');
+        assert_eq!(current(&state), Some(2));
+        assert_eq!(state.notice, Some("Search wrapped"));
+
+        press_char(&mut state, 'v');
+        press_char(&mut state, '/');
+        assert_eq!(state.notice, Some("Leave line mode first"));
+        assert_eq!(state.input, None);
+        press(&mut state, KeyCode::Esc);
+
+        press(&mut state, KeyCode::Esc);
+        assert!(
+            matches!(state.focus, Focus::Diff(_)),
+            "Esc only cleared the search"
+        );
+        assert_eq!(view(&state).search, None);
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("Nothing searched yet (/)"));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn the_input_stops_at_its_limit_but_still_edits() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(state.files_filter.chars().count(), list_filter::MAX_INPUT);
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL));
+        press(&mut state, KeyCode::Backspace);
+        assert_eq!(
+            state.files_filter.chars().count(),
+            list_filter::MAX_INPUT - 1
+        );
+    }
+
+    #[test]
+    fn stage_from_another_panel_stages_the_one_file_not_the_range() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Branches,
+        )));
+        let (_, op) = op_of(&state.update(AppIntent::ToggleStage));
+        assert_eq!(op, GitOp::toggle_for(&state.files[1]).unwrap());
+    }
+
+    #[test]
+    fn a_changed_filter_says_it_cleared_the_selection() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        type_text(&mut state, "/a");
+        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.notice, Some("Selection cleared"));
+    }
+
     /// The one menu open over `state`, and its title.
     fn open_menu(state: &AppState) -> MenuId {
         match state.popups.as_slice() {
@@ -15436,5 +16418,599 @@ mod tests {
         });
         assert_eq!(effects, vec![]);
         assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
+    }
+
+    // --- Stash ---
+
+    use crate::git::stash::{StashEntry, StashFile, StashRef};
+    use crate::popup::DropStashConfirm;
+
+    fn stash_entry(index: usize, oid: &str, subject: &str) -> StashEntry {
+        StashEntry {
+            index,
+            oid: cid(oid),
+            base: cid("ba5e"),
+            untracked: (oid == "a1").then(|| cid("d1")),
+            subject: subject.into(),
+        }
+    }
+
+    fn three_stashes() -> Vec<StashEntry> {
+        vec![
+            stash_entry(0, "a0", "WIP on main: 1234 zero"),
+            stash_entry(1, "a1", "On main: one"),
+            stash_entry(2, "a2", "On main: two"),
+        ]
+    }
+
+    fn stash_ref(index: usize, oid: &str) -> StashRef {
+        StashRef {
+            index,
+            oid: cid(oid),
+        }
+    }
+
+    /// Reload the stash list and answer with `entries`.
+    fn load_stashes(state: &mut AppState, entries: Vec<StashEntry>) {
+        let tag = match state.reload_stashes().as_slice() {
+            [Effect::LoadStashes { tag }] => *tag,
+            other => panic!("expected one LoadStashes, got {other:?}"),
+        };
+        state.update(AppIntent::StashesLoaded {
+            tag,
+            result: Ok(entries),
+        });
+    }
+
+    /// `three_files` in the worktree, `three_stashes` in the list, the
+    /// Stash panel focused with the cursor on `stash@{1}`.
+    fn on_stash_one() -> AppState {
+        let (mut state, _) = with_files(three_files(), 24);
+        load_stashes(&mut state, three_stashes());
+        press_char(&mut state, '5');
+        press_char(&mut state, 'j');
+        assert_eq!(state.key_focus(), KeyScope::Stash);
+        state
+    }
+
+    fn stash_files_load(effects: &[Effect]) -> (Tag, StashEntry) {
+        match effects {
+            [Effect::LoadStashFiles { tag, entry }] => (*tag, entry.clone()),
+            other => panic!("expected one LoadStashFiles, got {other:?}"),
+        }
+    }
+
+    fn tracked_and_untracked() -> Vec<StashFile> {
+        vec![
+            StashFile {
+                range: range_of("a1", "ba5e"),
+                file: commit_file('M', "src/lib.rs", None),
+            },
+            StashFile {
+                range: CommitRange {
+                    oid: cid("d1"),
+                    parent: None,
+                },
+                file: commit_file('A', "notes.txt", None),
+            },
+        ]
+    }
+
+    /// Open `stash@{1}` and answer with its two files.
+    fn stash_opened(state: &mut AppState) -> Vec<Effect> {
+        let (tag, _) = stash_files_load(&press(state, KeyCode::Enter));
+        state.update(AppIntent::StashFilesLoaded {
+            tag,
+            result: Ok(tracked_and_untracked()),
+        })
+    }
+
+    #[test]
+    fn stashes_loaded_fills_the_list_and_a_stale_or_other_repositorys_is_ignored() {
+        let (mut state, _) = with_files(three_files(), 24);
+        let first = match state.reload_stashes().as_slice() {
+            [Effect::LoadStashes { tag }] => *tag,
+            other => panic!("{other:?}"),
+        };
+        assert!(!first.user, "a background load");
+        let second = match state.reload_stashes().as_slice() {
+            [Effect::LoadStashes { tag }] => *tag,
+            other => panic!("{other:?}"),
+        };
+        let busy = state.busy;
+        state.update(AppIntent::StashesLoaded {
+            tag: first,
+            result: Ok(three_stashes()),
+        });
+        assert!(state.stash.entries.is_empty(), "a stale seq is ignored");
+        state.update(AppIntent::StashesLoaded {
+            tag: Tag {
+                generation: second.generation + 1,
+                ..second
+            },
+            result: Ok(three_stashes()),
+        });
+        assert!(state.stash.entries.is_empty(), "another repository's");
+        state.update(AppIntent::StashesLoaded {
+            tag: second,
+            result: Ok(three_stashes()),
+        });
+        assert_eq!(state.stash.entries, three_stashes());
+        assert!(state.stash.loaded);
+        assert_eq!(state.busy, busy);
+    }
+
+    #[test]
+    fn the_cursor_moves_through_the_stashes_and_stops_at_the_ends() {
+        let mut state = on_stash_one();
+        assert_eq!(state.stash.selected, 1);
+        press_char(&mut state, 'j');
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.stash.selected, 2);
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Up);
+        press(&mut state, KeyCode::Up);
+        assert_eq!(state.stash.selected, 0);
+    }
+
+    #[test]
+    fn stash_ops_and_a_stash_refresh_plan_reload_the_list() {
+        let mut state = on_stash_one();
+        let (tag, op) = op_of(&press_char(&mut state, ' '));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStashes { .. })),
+            "{effects:?}"
+        );
+        let effects = state.apply_plan(refresh::plan(&GitOp::StashDrop(stash_ref(0, "a0"))));
+        assert!(
+            matches!(effects.as_slice(), [Effect::LoadStashes { .. }]),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn enter_opens_the_stash_as_a_user_load_then_shows_its_first_files_diff() {
+        let mut state = on_stash_one();
+        let busy = state.busy;
+
+        let (tag, entry) = stash_files_load(&press(&mut state, KeyCode::Enter));
+
+        assert_eq!(entry, three_stashes()[1]);
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.key_focus(), KeyScope::StashFiles);
+        let effects = state.update(AppIntent::StashFilesLoaded {
+            tag,
+            result: Ok(tracked_and_untracked()),
+        });
+        assert_eq!(state.busy, busy);
+        let request = diff_request(&effects);
+        assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
+        assert_eq!(request.path, "src/lib.rs".into());
+
+        // The untracked file's diff is read from the untracked commit alone.
+        let request = diff_request(&press_char(&mut state, 'j'));
+        assert_eq!(
+            request.commit,
+            Some(CommitRange {
+                oid: cid("d1"),
+                parent: None
+            })
+        );
+        assert_eq!(request.path, "notes.txt".into());
+        assert_eq!(press(&mut state, KeyCode::Down), vec![]);
+        let request = diff_request(&press(&mut state, KeyCode::Up));
+        assert_eq!(request.path, "src/lib.rs".into());
+        assert_eq!(state.stash.selected, 1);
+    }
+
+    #[test]
+    fn a_stale_stash_file_list_is_dropped_and_an_empty_or_failed_one_empties_the_diff() {
+        let mut state = on_stash_one();
+        let (tag, _) = stash_files_load(&press(&mut state, KeyCode::Enter));
+        let busy = state.busy;
+        let stale = Tag {
+            seq: tag.seq + 1,
+            ..tag
+        };
+        let effects = state.update(AppIntent::StashFilesLoaded {
+            tag: stale,
+            result: Ok(tracked_and_untracked()),
+        });
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.busy, busy - 1);
+        assert!(!state.stash.open.as_ref().unwrap().loaded);
+
+        for result in [Ok(vec![]), Err("bad object".to_string())] {
+            let mut state = on_stash_one();
+            let (tag, _) = stash_files_load(&press(&mut state, KeyCode::Enter));
+            let effects = state.update(AppIntent::StashFilesLoaded { tag, result });
+            assert_eq!(effects, vec![Effect::CancelDiff]);
+            assert_eq!(state.diff, DiffPane::default());
+        }
+    }
+
+    #[test]
+    fn esc_or_backspace_closes_the_files_and_restores_the_worktree_diff() {
+        for code in [KeyCode::Esc, KeyCode::Backspace] {
+            let mut state = on_stash_one();
+            stash_opened(&mut state);
+            press_char(&mut state, 'j');
+
+            let effects = press(&mut state, code);
+
+            assert!(!state.should_quit, "{code:?}");
+            assert_eq!(state.stash.open, None, "{code:?}");
+            assert_eq!(state.stash.selected, 1, "{code:?}");
+            assert_eq!(state.key_focus(), KeyScope::Stash, "{code:?}");
+            let request = diff_request(&effects);
+            assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+        }
+    }
+
+    #[test]
+    fn while_a_stash_is_open_the_pane_stays_its_own() {
+        // The diff cannot take focus: a stash's file has no hunks to stage.
+        let mut state = on_stash_one();
+        stash_opened(&mut state);
+        assert_eq!(press_char(&mut state, 'l'), vec![]);
+        assert_eq!(state.focus, Focus::Stash);
+
+        // New diff options reload the stash's file.
+        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        assert!(request.options.ignore_whitespace);
+        assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
+
+        // A status refresh does not load the worktree diff over it.
+        let diff = state.diff.clone();
+        let tag = refresh_tag(&mut state);
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![changed("b.rs", 'M', '.')])),
+        });
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadDiff { .. } | Effect::CancelDiff)),
+            "{effects:?}"
+        );
+        assert_eq!(state.diff, diff);
+    }
+
+    #[test]
+    fn focusing_another_panel_closes_the_stash_and_shows_the_worktree_diff() {
+        let mut state = on_stash_one();
+        stash_opened(&mut state);
+        let request = diff_request(&press_char(&mut state, '2'));
+        assert_eq!(state.stash.open, None);
+        assert_eq!((request.commit, request.path), (None, "a.rs".into()));
+
+        // From itself, it stays open.
+        let mut state = on_stash_one();
+        stash_opened(&mut state);
+        assert_eq!(press_char(&mut state, '5'), vec![]);
+        assert!(state.stash.open.is_some());
+    }
+
+    #[test]
+    fn space_applies_and_g_pops_the_stash_under_the_cursor() {
+        let mut state = on_stash_one();
+        let (tag, op) = op_of(&press_char(&mut state, ' '));
+        assert_eq!(op, GitOp::StashApply(stash_ref(1, "a1")));
+        state.update(finished(tag, op, Ok(())));
+        let (_, op) = op_of(&press_char(&mut state, 'g'));
+        assert_eq!(op, GitOp::StashPop(stash_ref(1, "a1")));
+    }
+
+    #[test]
+    fn d_asks_and_only_confirm_drops_the_stash_chosen_when_asked() {
+        let mut state = on_stash_one();
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        let asked = Popup::DropStash(DropStashConfirm {
+            label: "stash@{1}: On main: one".into(),
+            op: GitOp::StashDrop(stash_ref(1, "a1")),
+        });
+        assert_eq!(state.popups, std::slice::from_ref(&asked));
+        assert_eq!(state.key_focus(), KeyScope::DropStash);
+
+        // Enter is not an answer.
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups, [asked]);
+        assert_eq!(state.op_seq, None);
+        // A reload under the question moves the list, not the answer.
+        let mut moved = three_stashes();
+        moved.insert(0, stash_entry(0, "f0", "new"));
+        load_stashes(&mut state, moved);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::StashDrop(stash_ref(1, "a1")));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn n_or_esc_keeps_the_stash_and_confirm_needs_the_question() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_stash_one();
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+        let mut state = on_stash_one();
+        assert_eq!(state.update(AppIntent::ConfirmDropStash), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn rename_starts_from_the_subject_and_renames_the_stash_chosen_then() {
+        let mut state = on_stash_one();
+        press(&mut state, KeyCode::Char('R'));
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::RenameStash);
+                assert_eq!(input.text, "On main: one");
+            }
+            other => panic!("expected the rename prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.prompt_title(PromptKind::RenameStash),
+            "Rename stash@{1}"
+        );
+        // The cursor moving under the prompt does not change the entry.
+        state.update(AppIntent::StashNext);
+
+        type_text(&mut state, "!");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashRename {
+                stash: stash_ref(1, "a1"),
+                message: "On main: one!".into()
+            }
+        );
+        assert_eq!(state.stash.pending, None);
+    }
+
+    #[test]
+    fn an_empty_rename_is_refused_and_a_cancelled_one_forgets_the_stash() {
+        let mut state = on_stash_one();
+        press(&mut state, KeyCode::Char('R'));
+        // What Enter on a blanked prompt submits.
+        state.popups.clear();
+        assert_eq!(state.update(AppIntent::RenameStashTo("   ".into())), vec![]);
+        assert_eq!(state.notice, Some("A stash message cannot be empty"));
+        assert_eq!(state.op_seq, None);
+
+        press(&mut state, KeyCode::Char('R'));
+        assert!(state.stash.pending.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.stash.pending, None);
+        assert_eq!(state.update(AppIntent::RenameStashTo("x".into())), vec![]);
+    }
+
+    #[test]
+    fn with_no_stashes_the_keys_say_so() {
+        let (mut state, _) = with_files(three_files(), 24);
+        load_stashes(&mut state, vec![]);
+        press_char(&mut state, '5');
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('g'),
+            KeyCode::Char('d'),
+            KeyCode::Char('R'),
+        ] {
+            state.notice = None;
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.notice, Some("No stashes"), "{code:?}");
+        }
+        assert_eq!(state.popups, []);
+    }
+
+    /// Choose item `index` of the Stash menu from the Files panel.
+    fn stash_menu_item(state: &mut AppState, index: usize) -> Vec<Effect> {
+        press_char(state, 's');
+        assert_eq!(
+            state.popups,
+            [Popup::Menu {
+                id: MenuId::Stash,
+                cursor: 0
+            }]
+        );
+        for _ in 0..index {
+            press_char(state, 'j');
+        }
+        press(state, KeyCode::Enter)
+    }
+
+    #[test]
+    fn stash_this_file_takes_the_file_chosen_from_the_menu_even_after_a_refresh() {
+        let (mut state, _) = with_files(three_files(), 24);
+        select_path(&mut state, "b.rs");
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::StashMessage,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state.prompt_title(PromptKind::StashMessage),
+            "Stash message (optional)"
+        );
+        // A refresh while typing moves the cursor to another file.
+        let tag = refresh_tag(&mut state);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(vec![changed("a.rs", '.', 'M')])),
+        });
+        assert_eq!(state.selected, Some(0));
+
+        type_text(&mut state, " wip ");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::All,
+                message: Some("wip".into()),
+                paths: vec!["b.rs".into()],
+            }
+        );
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn each_whole_tree_item_stashes_its_mode_and_an_empty_message_is_gits_own() {
+        for (index, mode) in [
+            (0, StashMode::All),
+            (1, StashMode::IncludeUntracked),
+            (2, StashMode::Staged),
+        ] {
+            let (mut state, _) = with_files(three_files(), 24);
+            stash_menu_item(&mut state, index);
+            let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+            assert_eq!(
+                op,
+                GitOp::StashPush {
+                    mode,
+                    message: None,
+                    paths: vec![],
+                },
+                "{index}"
+            );
+        }
+    }
+
+    #[test]
+    fn stashing_an_untracked_file_takes_untracked_files_too() {
+        let (mut state, _) = with_files(three_files(), 24);
+        select_path(&mut state, "c.txt");
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::IncludeUntracked,
+                message: None,
+                paths: vec!["c.txt".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_disabled_stash_item_says_why_and_a_cancelled_prompt_forgets_the_draft() {
+        let (mut state, _) = with_files(vec![untracked("new.txt")], 24);
+        assert_eq!(stash_menu_item(&mut state, 0), vec![]);
+        assert_eq!(state.notice, Some("No changes to stash"));
+        assert_eq!(state.stash_draft, None);
+
+        let (mut state, _) = with_files(three_files(), 24);
+        stash_menu_item(&mut state, 0);
+        assert!(state.stash_draft.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.stash_draft, None);
+        assert_eq!(state.popups, []);
+        assert_eq!(
+            state.update(AppIntent::StashMessageAnswered("x".into())),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn the_stash_key_on_a_clean_tree_says_so() {
+        let (mut state, _) = with_files(vec![], 24);
+        state.focus = Focus::Files;
+        assert_eq!(press_char(&mut state, 's'), vec![]);
+        assert_eq!(state.notice, Some("No changes to stash"));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn stash_failures_have_their_own_titles() {
+        let kept = "The file list was reloaded. If git stopped on conflicts, resolve them in the Files panel; the stash is kept.";
+        let list = "The stash list was reloaded. Fix the cause above, then try again.";
+        let files = "The file list was reloaded. Fix the cause above, then try again.";
+        let push = GitOp::StashPush {
+            mode: StashMode::All,
+            message: None,
+            paths: vec![],
+        };
+        let cases = [
+            (push, "Could not stash", files),
+            (
+                GitOp::StashApply(stash_ref(0, "a0")),
+                "Could not apply the stash",
+                kept,
+            ),
+            (
+                GitOp::StashPop(stash_ref(0, "a0")),
+                "Could not pop the stash",
+                kept,
+            ),
+            (
+                GitOp::StashDrop(stash_ref(0, "a0")),
+                "Could not drop the stash",
+                list,
+            ),
+            (
+                GitOp::StashRename {
+                    stash: stash_ref(0, "a0"),
+                    message: "m".into(),
+                },
+                "Could not rename the stash",
+                list,
+            ),
+        ];
+        for (op, title, next) in cases {
+            assert_eq!(failure_title(&op), title, "{op:?}");
+            assert_eq!(failure_next(&op), next, "{op:?}");
+        }
+    }
+
+    #[test]
+    fn switching_repository_forgets_the_stashes() {
+        let mut state = on_stash_one();
+        stash_opened(&mut state);
+        state.stash_draft = Some(crate::stash::StashDraft {
+            mode: StashMode::All,
+            paths: vec![],
+        });
+        state.switch_repo();
+        assert_eq!(state.stash, crate::stash::StashList::default());
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn stage_is_judged_on_the_one_file_outside_the_files_panel() {
+        let (mut state, _) = with_files(vec![conflicted("c.rs"), changed("a.rs", '.', 'M')], 24);
+        press_char(&mut state, 'V');
+        assert_eq!(
+            keymap::files_stage_disabled(&state),
+            Some("Resolve the conflicts before staging these files")
+        );
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Branches,
+        )));
+        assert!(state.files_anchor.is_some(), "the range stays for later");
+        assert_eq!(
+            keymap::files_stage_disabled(&state),
+            Some("Resolve the conflict before staging this file")
+        );
+    }
+
+    #[test]
+    fn stashing_this_file_is_refused_over_a_range() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(keymap::CLEAR_RANGE_FIRST)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
     }
 }

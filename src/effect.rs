@@ -13,7 +13,11 @@ use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
-use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
+use crate::diff_tool;
+use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
+use crate::forge::ForgeStatus;
+use crate::forge::task::{ForgeContext, Load, run_load};
+use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
@@ -33,6 +37,7 @@ use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::remotes::list_remotes;
 use crate::git::repo_root::init_repo;
+use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
@@ -192,10 +197,12 @@ pub enum Effect {
         oid: String,
     },
     /// Find the configured diff renderers: the global `[diff] pager`, then
-    /// git's global pagers. Answered by one `RenderersFound`.
+    /// git's global pagers, then the global `[diff] tool`. Answered by one
+    /// `RenderersFound`.
     FindRenderers,
-    /// Run `renderer` on the diff for `request` at `cols` columns; always
-    /// answered by one `DiffRendered`.
+    /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
+    /// a tool on both sides of its file. Always answered by one
+    /// `DiffRendered`.
     RenderDiff {
         tag: Tag,
         request: DiffRequest,
@@ -221,6 +228,16 @@ pub enum Effect {
     LoadCommitFiles {
         tag: Tag,
         range: CommitRange,
+    },
+    /// Read the stash list; always answered by one `StashesLoaded`.
+    LoadStashes {
+        tag: Tag,
+    },
+    /// List the files `entry` holds; always answered by one
+    /// `StashFilesLoaded`.
+    LoadStashFiles {
+        tag: Tag,
+        entry: StashEntry,
     },
     /// Read which commits are unpushed or unmerged; always answered by
     /// one `MarkersLoaded`.
@@ -261,6 +278,18 @@ pub enum Effect {
     /// Hand the answer to the question the running remote operation
     /// asked; `None` cancels it. Does nothing when no question waits.
     AnswerCredential(Option<Secret>),
+    /// Find the forge repository of the remote and send its cached badges,
+    /// then, with `refresh`, ask the forge for `branches`. Answered by
+    /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
+    /// `PullRequestsFetched`. With no `hosts` it only answers `ForgeRepoNone`.
+    /// A `known` repository is used as is, without reading the remote.
+    LoadPullRequests {
+        tag: Tag,
+        hosts: Vec<ForgeHost>,
+        branches: Vec<BranchName>,
+        refresh: bool,
+        known: Option<ForgeRepo>,
+    },
     /// Put `text` on the system clipboard. Run by the loop, between draws,
     /// never by a task; a failure comes back as `CopyFailed`.
     Clipboard(String),
@@ -302,6 +331,8 @@ pub struct Runtime {
     recent_store: Option<PathBuf>,
     /// The global config's `[diff] pager`, read once at startup.
     diff_pager: Option<String>,
+    /// The global config's `[diff] tool`, read once at startup.
+    diff_tool: Option<String>,
     /// How diff and blame body lines draw emoji ZWJ sequences, resolved
     /// once at startup for the running terminal.
     emoji_zwj: EmojiZwj,
@@ -309,6 +340,8 @@ pub struct Runtime {
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
     credential: AnswerSlot,
+    /// How to reach a forge; `None` keeps every forge load local and empty.
+    forge: Option<ForgeContext>,
     /// Where copied text goes: the terminal, unless a test records it.
     clipboard: Arc<dyn ClipboardSink>,
 }
@@ -322,11 +355,18 @@ impl Runtime {
             global_config: None,
             recent_store: None,
             diff_pager: None,
+            diff_tool: None,
             emoji_zwj: EmojiZwj::Escape,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
+            forge: None,
             clipboard: Arc::new(TerminalSink),
         }
+    }
+
+    /// The forge client, used only for hosts the global config names.
+    pub fn with_forge(self, forge: Option<ForgeContext>) -> Self {
+        Self { forge, ..self }
     }
 
     /// Send copies to `clipboard` instead of the terminal.
@@ -348,6 +388,12 @@ impl Runtime {
     /// The renderer the global config names, offered first by `FindRenderers`.
     pub fn with_diff_pager(self, diff_pager: Option<String>) -> Self {
         Self { diff_pager, ..self }
+    }
+
+    /// The display-only tool the global config names, offered last by
+    /// `FindRenderers`.
+    pub fn with_diff_tool(self, diff_tool: Option<String>) -> Self {
+        Self { diff_tool, ..self }
     }
 
     /// Draw emoji ZWJ sequences in streamed diffs, blame and blamed
@@ -624,10 +670,11 @@ impl Runtime {
             }
             Effect::FindRenderers => {
                 let pager = self.diff_pager.clone();
+                let tool = self.diff_tool.clone();
                 tokio::spawn(async move {
                     // A panic finds nothing; the built-in view still works.
                     let found =
-                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager))
+                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager, tool))
                             .await
                             .unwrap_or_default();
                     let _ = tx.send(AppIntent::RenderersFound(found));
@@ -645,8 +692,20 @@ impl Runtime {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
                     let result = tokio::task::spawn_blocking(move || {
-                        let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
-                        run_renderer(&renderer, &workdir, &diff, cols).map(|out| ansi::parse(&out))
+                        let out = match renderer.kind {
+                            RendererKind::Pager => {
+                                let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
+                                run_renderer(&renderer, &workdir, &diff, cols)?
+                            }
+                            RendererKind::Tool => diff_tool::render(
+                                runner.as_ref(),
+                                &workdir,
+                                &request,
+                                &renderer,
+                                cols,
+                            )?,
+                        };
+                        Ok(ansi::parse(&out))
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -731,6 +790,33 @@ impl Runtime {
                                 ))
                             });
                     let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
+                });
+            }
+            Effect::LoadStashes { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result = tokio::task::spawn_blocking(move || list_stashes(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git stash list crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::StashesLoaded { tag, result });
+                });
+            }
+            Effect::LoadStashFiles { tag, entry } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || stash_files(runner.as_ref(), &entry))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git diff-tree crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::StashFilesLoaded { tag, result });
                 });
             }
             Effect::LoadMarkers { tag } => {
@@ -883,6 +969,45 @@ impl Runtime {
             // The loop takes these out before spawning; without a terminal
             // there is nothing to hand over, so one that slips through is dropped.
             Effect::HandOff(_) => {}
+            Effect::LoadPullRequests {
+                tag,
+                hosts,
+                branches,
+                refresh,
+                known,
+            } => match self.forge.clone().filter(|_| !hosts.is_empty()) {
+                // Off: nothing is read, run or written.
+                None => {
+                    let _ = tx.send(AppIntent::ForgeRepoNone { tag });
+                }
+                Some(forge) => {
+                    tokio::spawn(async move {
+                        let send = tx.clone();
+                        let done = tokio::task::spawn_blocking(move || {
+                            let load = Load {
+                                tag,
+                                hosts: &hosts,
+                                branches: &branches,
+                                refresh,
+                                known: known.as_ref(),
+                                top: std::fs::canonicalize(runner.workdir()).ok(),
+                                now: unix_now(),
+                            };
+                            run_load(runner.as_ref(), &forge, &load, &|intent| {
+                                let _ = send.send(intent);
+                            });
+                        })
+                        .await;
+                        // A panic still ends the call, or no refresh would run again.
+                        if done.is_err() && refresh {
+                            let _ = tx.send(AppIntent::PullRequestsFetched {
+                                tag,
+                                result: Err(ForgeStatus::Failed),
+                            });
+                        }
+                    });
+                }
+            },
         }
     }
 
@@ -1009,6 +1134,132 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    fn forge_tag() -> Tag {
+        Tag {
+            generation: 0,
+            seq: 11,
+            user: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_load_with_no_hosts_runs_nothing_and_writes_nothing() {
+        use crate::forge::github::FakeGh;
+        use crate::git::recording::CommandSink;
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-off");
+        let cache_dir = tmp.path().join("forge");
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: Some(cache_dir.clone()),
+        }));
+        let load = |hosts| Effect::LoadPullRequests {
+            tag: forge_tag(),
+            hosts,
+            branches: vec!["main".into()],
+            refresh: true,
+            known: None,
+        };
+        runtime.spawn(load(vec![]));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+        );
+        // Without a forge client, even named hosts reach nobody.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bare = Runtime::new(git.clone(), tx);
+        bare.spawn(load(vec![ForgeHost::parse("github.com").unwrap()]));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
+        assert!(!cache_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
+        use crate::forge::github::fixtures::STATES;
+        use crate::forge::github::{FakeGh, answer};
+        use crate::git::recording::{CommandEvent, CommandSink, RecordingRunner};
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-log");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = CommandSink::new();
+        let keep = Arc::clone(&events);
+        sink.connect(move |ev| keep.lock().unwrap().push(ev));
+        let fake = Arc::new(
+            FakeRunner::new()
+                .expect(&["remote"], ok(b"origin\n"))
+                .expect(
+                    &["config", "-z", "--get", "remote.origin.url"],
+                    ok(b"git@github.com:acme/widgets.git\0"),
+                ),
+        );
+        let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
+        let gh = Arc::new(FakeGh::new().reply(answer(STATES)).reply(answer(STATES)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git, tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink,
+            cache_dir: Some(tmp.path().join("forge")),
+        }));
+        let branches: Vec<BranchName> = (0..60).map(|i| format!("b{i}").as_str().into()).collect();
+        runtime.spawn(Effect::LoadPullRequests {
+            tag: forge_tag(),
+            hosts: vec![ForgeHost::parse("github.com").unwrap()],
+            branches,
+            refresh: true,
+            known: None,
+        });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestsCached { badges: None, .. })
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestsFetched { result: Ok(_), .. })
+        ));
+        fake.assert_done();
+        assert_eq!(gh.calls().len(), 2);
+
+        let events = events.lock().unwrap();
+        let started: Vec<(u64, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                CommandEvent::Started { id, line, .. } => Some((*id, line.as_str())),
+                _ => None,
+            })
+            .collect();
+        let gh_line = "gh api graphql --hostname github.com --input -";
+        let lines: Vec<&str> = started.iter().map(|(_, line)| *line).collect();
+        assert_eq!(
+            lines,
+            [
+                "git remote",
+                "git config -z --get remote.origin.url",
+                gh_line,
+                gh_line
+            ]
+        );
+        let mut ids: Vec<u64> = started.iter().map(|(id, _)| *id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "{events:?}");
+        // One finish per start, with the same id.
+        for (id, _) in &started {
+            let finished = events
+                .iter()
+                .filter(|e| matches!(e, CommandEvent::Finished { id: f, .. } if f == id))
+                .count();
+            assert_eq!(finished, 1, "{id}");
+        }
+    }
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
@@ -2299,6 +2550,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stash_loads_report_back_with_the_same_tag_even_on_a_panic() {
+        use crate::git::commit_files::CommitId;
+        let tag = Tag {
+            generation: 3,
+            seq: 9,
+            user: true,
+        };
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["stash", "list", "-z", "--format=%H%x1f%P%x1f%gs"],
+                    ok(b"aa\x1fbb cc\x1fOn main: wip\0"),
+                )
+                .expect(
+                    &[
+                        "diff-tree",
+                        "-r",
+                        "-z",
+                        "--no-commit-id",
+                        "--name-status",
+                        "-M",
+                        "--root",
+                        "bb",
+                        "aa",
+                        "--",
+                    ],
+                    ok(b"M\0a.rs\0"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadStashes { tag });
+        let Some(AppIntent::StashesLoaded {
+            tag: got,
+            result: Ok(entries),
+        }) = rx.recv().await
+        else {
+            panic!("expected StashesLoaded");
+        };
+        assert_eq!(got, tag);
+        assert_eq!(entries[0].oid, CommitId::parse("aa").unwrap());
+
+        runtime.spawn(Effect::LoadStashFiles {
+            tag,
+            entry: entries[0].clone(),
+        });
+        let Some(AppIntent::StashFilesLoaded {
+            tag: got,
+            result: Ok(files),
+        }) = rx.recv().await
+        else {
+            panic!("expected StashFilesLoaded");
+        };
+        assert_eq!(got, tag);
+        assert_eq!(files[0].file.path, "a.rs".into());
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadStashes { tag });
+        match rx.recv().await {
+            Some(AppIntent::StashesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(
+                    message.starts_with("git stash list crashed: "),
+                    "{message:?}"
+                );
+            }
+            other => panic!("expected a failed StashesLoaded, got {other:?}"),
+        }
+        runtime.spawn(Effect::LoadStashFiles {
+            tag,
+            entry: entries[0].clone(),
+        });
+        match rx.recv().await {
+            Some(AppIntent::StashFilesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed StashFilesLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn load_commit_files_reports_back_with_the_same_tag_even_on_a_panic() {
         use crate::git::commit_files::{CommitFile, CommitId};
         let range = CommitRange {
@@ -2565,6 +2907,7 @@ mod tests {
             renderer: ExternalRenderer {
                 label: "cat".into(),
                 argv: vec!["cat".into()],
+                kind: crate::external_diff::RendererKind::Pager,
             },
             cols: 40,
         });
@@ -2581,6 +2924,86 @@ mod tests {
             other => panic!("expected rendered rows, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    /// Run `RenderDiff` with tool `argv` on `request` and take its rows.
+    #[cfg(unix)]
+    async fn tool_rows(
+        runner: Arc<dyn GitRunner>,
+        request: DiffRequest,
+        argv: &[&str],
+    ) -> Vec<String> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner, tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 3,
+            user: true,
+        };
+        runtime.spawn(Effect::RenderDiff {
+            tag,
+            request,
+            renderer: ExternalRenderer {
+                label: argv[0].into(),
+                argv: argv.iter().map(OsString::from).collect(),
+                kind: crate::external_diff::RendererKind::Tool,
+            },
+            cols: 40,
+        });
+        match rx.recv().await {
+            Some(AppIntent::DiffRendered {
+                tag: got,
+                result: Ok(rows),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(rx.try_recv().is_err(), "one answer only");
+                rows.iter().map(|r| r.text()).collect()
+            }
+            other => panic!("expected rendered rows, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn render_diff_runs_a_tool_on_both_sides_of_a_worktree_change() {
+        use crate::git::fake::{TempDir, git};
+        let tmp = TempDir::new("effect-tool");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "old \x1b]0;title\x07one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "new \x1b[2J\x08two\n").unwrap();
+        let runner: Arc<dyn GitRunner> = Arc::new(crate::git::CliRunner::isolated(dir));
+        let request = DiffRequest {
+            path: "a.txt".into(),
+            orig_path: None,
+            side: DiffSide::Worktree,
+            options: Default::default(),
+            commit: None,
+        };
+
+        let rows = tool_rows(Arc::clone(&runner), request.clone(), &["cat"]).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows[0].starts_with("old ") && rows[0].ends_with("one"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("new ") && rows[1].ends_with("two"),
+            "{rows:?}"
+        );
+        for row in &rows {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+        }
+
+        // The tool's arguments name the temp files, gone once it is done.
+        let rows = tool_rows(runner, request, &["echo"]).await;
+        let args: Vec<&str> = rows[0].split(' ').collect();
+        assert_eq!(args.len(), 3, "{rows:?}");
+        assert_eq!(args[0], "--");
+        let old = std::path::Path::new(args[1]);
+        assert_eq!(old.file_name().unwrap(), "old.txt");
+        assert!(!old.parent().unwrap().exists(), "{old:?}");
     }
 
     #[tokio::test]

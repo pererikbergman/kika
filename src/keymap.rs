@@ -212,6 +212,10 @@ pub enum KeyScope {
     Commits,
     /// The Commits panel showing one commit's files.
     CommitFiles,
+    /// The Stash panel, with a cursor on the stash list.
+    Stash,
+    /// The Stash panel showing one stash's files.
+    StashFiles,
     /// The Status panel with focus: controls for the operation in progress.
     Status,
     /// The Diff pane with focus, working on hunks.
@@ -255,6 +259,8 @@ pub enum KeyScope {
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
+    /// "Drop this stash?" on top of the popup stack.
+    DropStash,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -269,6 +275,8 @@ pub enum KeyScope {
     Reflog,
     /// "Undo this?" or "Redo this?" on top of the popup stack.
     Travel,
+    /// Typing a list filter or a diff search on the bottom bar.
+    Input,
     /// The git commands Kika ran, on top of the popup stack.
     CommandLog,
 }
@@ -286,6 +294,8 @@ impl KeyScope {
             | KeyScope::Tags
             | KeyScope::Commits
             | KeyScope::CommitFiles
+            | KeyScope::Stash
+            | KeyScope::StashFiles
             | KeyScope::Status
             | KeyScope::Diff
             | KeyScope::Blame
@@ -309,12 +319,14 @@ impl KeyScope {
             | KeyScope::RemoveRemote
             | KeyScope::DeleteTag
             | KeyScope::ResetHard
+            | KeyScope::DropStash
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
             | KeyScope::Recent
             | KeyScope::Credential
             | KeyScope::Travel
+            | KeyScope::Input
             | KeyScope::CommandLog => None,
         }
     }
@@ -330,6 +342,8 @@ impl KeyScope {
             KeyScope::Tags => "Tags",
             KeyScope::Commits => "Commits",
             KeyScope::CommitFiles => "Commit files",
+            KeyScope::Stash => "Stash",
+            KeyScope::StashFiles => "Stash files",
             KeyScope::Status => "Status",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
@@ -352,6 +366,7 @@ impl KeyScope {
             KeyScope::RemoveRemote => "Remove remote",
             KeyScope::DeleteTag => "Delete tag",
             KeyScope::ResetHard => "Reset hard",
+            KeyScope::DropStash => "Drop stash",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -359,6 +374,7 @@ impl KeyScope {
             KeyScope::Credential => "Git is asking",
             KeyScope::Reflog => "Reflog",
             KeyScope::Travel => "Undo or redo",
+            KeyScope::Input => "Filter or search",
             KeyScope::CommandLog => "Command log",
         }
     }
@@ -367,7 +383,9 @@ impl KeyScope {
     /// keys behave unlike everywhere else.
     pub fn bar_note(self) -> Option<&'static str> {
         match self {
-            KeyScope::CommitEditor | KeyScope::Credential => Some("q and ? are typed"),
+            KeyScope::CommitEditor | KeyScope::Credential | KeyScope::Input => {
+                Some("q and ? are typed")
+            }
             _ => None,
         }
     }
@@ -479,6 +497,15 @@ pub const REPO_LOCKED: &[&str] = &[
     "reset_hard.yes",
     "reset_hard.no",
     "reset_hard.quit",
+    "files.stash",
+    "stash.files",
+    "stash.apply",
+    "stash.pop",
+    "stash.drop",
+    "stash.rename",
+    "drop_stash.yes",
+    "drop_stash.no",
+    "drop_stash.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -506,6 +533,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.quit",
     "command_log.quit",
     "commits.paste",
+    "files.escape",
+    "commits.escape",
+    "input.quit",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -790,6 +820,16 @@ fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
 }
 
+/// A diff tool draws the files, not the patch, so nothing in its view can
+/// be staged, discarded or edited.
+pub const DISPLAY_ONLY: &str = "The diff tool view is display-only: press R for the built-in diff";
+
+/// The Diff pane shows a tool's rows, which hunk and line keys cannot act on.
+fn display_only(state: &AppState) -> Option<&'static str> {
+    let in_diff = matches!(state.focus, Focus::Diff(_));
+    (in_diff && state.display_only()).then_some(DISPLAY_ONLY)
+}
+
 /// The diff keys of the Workspace scope reach the blame through its
 /// parent, but the diff they would change is hidden behind it.
 const BLAME_OPEN: &str = "Close the blame first";
@@ -821,6 +861,27 @@ fn least_context(state: &AppState) -> Option<&'static str> {
 /// Enter has no commit to open before the log has rows.
 fn no_commit(state: &AppState) -> Option<&'static str> {
     state.commits.rows.is_empty().then_some("No commits")
+}
+
+/// Nothing in the Stash panel can be opened or acted on before it lists
+/// an entry.
+fn no_stash(state: &AppState) -> Option<&'static str> {
+    state.stash.entries.is_empty().then_some("No stashes")
+}
+
+/// Why the selected stash cannot be applied, popped, dropped or renamed
+/// now: git runs one operation at a time, and the list needs an entry.
+pub(crate) fn stash_action_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else {
+        no_stash(state)
+    }
+}
+
+/// The Stash menu has nothing to offer on a clean tree.
+fn stash_menu_disabled(state: &AppState) -> Option<&'static str> {
+    state.files.is_empty().then_some("No changes to stash")
 }
 
 /// Why nothing can be copied from the Commits panel.
@@ -916,7 +977,7 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.loading() {
@@ -995,7 +1056,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
     }
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     match &state.focus {
@@ -1021,7 +1082,7 @@ fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.lines.is_some() {
@@ -1460,6 +1521,159 @@ pub(crate) fn pull_push_disabled(state: &AppState) -> Option<&'static str> {
     })
 }
 
+/// Why an action on the selected row cannot run: the filter hides it.
+pub(crate) const FILTER_HIDES_ROW: &str = "No row matches the filter";
+
+/// Why an action on one row cannot run while a range is selected.
+pub(crate) const CLEAR_RANGE_FIRST: &str = "Clear the selection first (esc)";
+
+/// Why a Files or Commits action on the selected row cannot run now: the
+/// filter hides that row, or a range is selected and the action is not one
+/// that applies to a range (`range_ok`). Chained in front of the action's
+/// own reason, so these come first.
+pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<&'static str> {
+    let (hidden, range) = match state.panel_focus() {
+        KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
+        KeyScope::Commits => (
+            state.commits.selected_hidden(),
+            state.commits.range_anchor.is_some(),
+        ),
+        _ => return None,
+    };
+    if hidden {
+        Some(FILTER_HIDES_ROW)
+    } else if range && !range_ok {
+        Some(CLEAR_RANGE_FIRST)
+    } else {
+        None
+    }
+}
+
+/// Space stages a range too, so long as one of its files can be staged.
+pub(crate) fn files_stage_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| {
+        // As the action: the range counts only where it shows.
+        if state.files_anchor.is_none() || state.focus != Focus::Files {
+            return stage_disabled(state);
+        }
+        let range = state.files_range();
+        if state.op_seq.is_some() {
+            Some(OP_RUNNING)
+        } else if range
+            .iter()
+            .all(|&i| state.files[i].kind == EntryKind::Conflicted)
+        {
+            Some("Resolve the conflicts before staging these files")
+        } else {
+            None
+        }
+    })
+}
+
+fn files_discard_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| discard_disabled(state))
+}
+
+fn files_open_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| open_disabled(state))
+}
+
+fn files_blame_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| blame_disabled(state))
+}
+
+fn files_hunks_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_file_selected(state))
+}
+
+fn files_mergetool_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| mergetool_disabled(state))
+}
+
+fn commits_open_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_commit(state))
+}
+
+fn commits_checkout_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| checkout_commit_disabled(state))
+}
+
+fn commits_revert_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| revert_disabled(state))
+}
+
+fn commits_reset_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| reset_disabled(state))
+}
+
+fn commits_squash_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| squash_disabled(state))
+}
+
+fn commits_fixup_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| fixup_disabled(state))
+}
+
+fn commits_drop_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| drop_disabled(state))
+}
+
+fn commits_reword_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| reword_disabled(state))
+}
+
+/// The copy menu copies the selected commit's text: one row's action.
+fn commits_copy_menu_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false)
+}
+
+fn files_ignore_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| ignore_disabled(state))
+}
+
+/// The bisect menu marks the selected commit, so it is one row's action.
+fn commits_bisect_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false)
+}
+
+fn commits_tag_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| tag_commit_disabled(state))
+}
+
+/// `c` copies a range too, but a range of merge commits only has nothing
+/// it can copy.
+pub(crate) fn commits_copy_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, true).or_else(|| {
+        if state.commits.range_anchor.is_none() {
+            return copy_disabled(state);
+        }
+        let rows = &state.commits.rows;
+        let range = state.commits.range();
+        no_commit(state).or_else(|| {
+            range
+                .iter()
+                .all(|&i| rows[i].parents.len() > 1)
+                .then_some("Cannot cherry-pick a merge commit")
+        })
+    })
+}
+
+/// The search works on the built-in diff's hunks, outside line mode.
+fn search_disabled(state: &AppState) -> Option<&'static str> {
+    match &state.focus {
+        Focus::Diff(view) if view.lines.is_some() => Some("Leave line mode first"),
+        _ if state.rendered_shown().is_some() => Some("Search works in the built-in diff"),
+        _ => None,
+    }
+}
+
+fn search_step_disabled(state: &AppState) -> Option<&'static str> {
+    search_disabled(state).or_else(|| {
+        let searched = matches!(&state.focus, Focus::Diff(view) if view.search.is_some());
+        (!searched).then_some("Nothing searched yet (/)")
+    })
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -1805,7 +2019,7 @@ static REGISTRY: &[Binding] = &[
         description: "Show the files the selected commit changed",
         label: "files",
         bar: true,
-        disabled: no_commit,
+        disabled: commits_open_disabled,
     },
     Binding {
         id: "commits.checkout",
@@ -1815,7 +2029,7 @@ static REGISTRY: &[Binding] = &[
         description: "Check out the selected commit as a detached HEAD, asking first",
         label: "checkout",
         bar: true,
-        disabled: checkout_commit_disabled,
+        disabled: commits_checkout_disabled,
     },
     Binding {
         id: "commits.revert",
@@ -1825,7 +2039,7 @@ static REGISTRY: &[Binding] = &[
         description: "Make a commit that undoes the selected one",
         label: "revert",
         bar: true,
-        disabled: revert_disabled,
+        disabled: commits_revert_disabled,
     },
     Binding {
         id: "commits.reset",
@@ -1835,7 +2049,7 @@ static REGISTRY: &[Binding] = &[
         description: "Reset the current branch to the selected commit: soft, mixed or hard",
         label: "reset",
         bar: true,
-        disabled: reset_disabled,
+        disabled: commits_reset_disabled,
     },
     Binding {
         id: "commits.squash",
@@ -1845,7 +2059,7 @@ static REGISTRY: &[Binding] = &[
         description: "Squash the selected commit into the one below, combining their messages",
         label: "squash",
         bar: true,
-        disabled: squash_disabled,
+        disabled: commits_squash_disabled,
     },
     // `f` is fetch.
     Binding {
@@ -1856,7 +2070,7 @@ static REGISTRY: &[Binding] = &[
         description: "Fold the selected commit into the one below, keeping that one's message",
         label: "fixup",
         bar: true,
-        disabled: fixup_disabled,
+        disabled: commits_fixup_disabled,
     },
     Binding {
         id: "commits.drop",
@@ -1866,7 +2080,7 @@ static REGISTRY: &[Binding] = &[
         description: "Drop the selected commit and its change from the history",
         label: "drop",
         bar: true,
-        disabled: drop_disabled,
+        disabled: commits_drop_disabled,
     },
     // `r` is refresh.
     Binding {
@@ -1877,7 +2091,7 @@ static REGISTRY: &[Binding] = &[
         description: "Write a new message for the selected commit",
         label: "reword",
         bar: true,
-        disabled: reword_disabled,
+        disabled: commits_reword_disabled,
     },
     Binding {
         id: "commits.switch_tab",
@@ -1900,7 +2114,7 @@ static REGISTRY: &[Binding] = &[
         description: "Add the selected commit to the copied set, or take it out",
         label: "copy",
         bar: true,
-        disabled: copy_disabled,
+        disabled: commits_copy_disabled,
     },
     Binding {
         id: "commits.paste",
@@ -1931,7 +2145,7 @@ static REGISTRY: &[Binding] = &[
         label: "clipboard",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: never,
+        disabled: commits_copy_menu_disabled,
     },
     Binding {
         id: "reflog.next",
@@ -2013,6 +2227,121 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "stash.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Stash,
+        intent: AppIntent::StashNext,
+        description: "Select the next stash",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Stash,
+        intent: AppIntent::StashPrev,
+        description: "Select the previous stash",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.files",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::OpenStashFiles,
+        description: "Show the files the selected stash holds",
+        label: "files",
+        bar: true,
+        disabled: no_stash,
+    },
+    Binding {
+        id: "stash.apply",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::ApplyStash,
+        description: "Apply the selected stash to the worktree and keep it",
+        label: "apply",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.pop",
+        keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::PopStash,
+        description: "Apply the selected stash and drop it; a conflict keeps it",
+        label: "pop",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.drop",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::DropStash,
+        description: "Drop the selected stash, asking first",
+        label: "drop",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.rename",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Stash,
+        intent: AppIntent::RenameStash,
+        description: "Give the selected stash a new message; it moves to stash@{0}",
+        label: "rename",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash_files.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::StashFileNext,
+        description: "Select the next file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash_files.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::StashFilePrev,
+        description: "Select the previous file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash_files.close",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::any(KeyCode::Backspace),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::CloseStashFiles,
+        description: "Back to the stash list, at the same stash",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "files.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Files,
@@ -2020,7 +2349,7 @@ static REGISTRY: &[Binding] = &[
         description: "Stage the selected file, or unstage it if fully staged",
         label: "stage",
         bar: true,
-        disabled: stage_disabled,
+        disabled: files_stage_disabled,
     },
     Binding {
         id: "files.stage_all",
@@ -2061,7 +2390,7 @@ static REGISTRY: &[Binding] = &[
         description: "Discard the selected file's unstaged changes, or delete it if untracked",
         label: "discard",
         bar: true,
-        disabled: discard_disabled,
+        disabled: files_discard_disabled,
     },
     Binding {
         id: "files.open",
@@ -2072,7 +2401,7 @@ static REGISTRY: &[Binding] = &[
         label: "open in editor",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: open_disabled,
+        disabled: files_open_disabled,
     },
     Binding {
         id: "files.submodules",
@@ -2126,7 +2455,7 @@ static REGISTRY: &[Binding] = &[
         description: "Blame the selected file",
         label: "blame",
         bar: false,
-        disabled: blame_disabled,
+        disabled: files_blame_disabled,
     },
     Binding {
         id: "files.hunks",
@@ -2137,7 +2466,7 @@ static REGISTRY: &[Binding] = &[
         label: "hunks",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: no_file_selected,
+        disabled: files_hunks_disabled,
     },
     Binding {
         id: "files.mergetool",
@@ -2148,7 +2477,7 @@ static REGISTRY: &[Binding] = &[
         label: "merge tool",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: mergetool_disabled,
+        disabled: files_mergetool_disabled,
     },
     Binding {
         id: "files.ignore",
@@ -2159,7 +2488,7 @@ static REGISTRY: &[Binding] = &[
         label: "ignore",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
-        disabled: ignore_disabled,
+        disabled: files_ignore_disabled,
     },
     Binding {
         id: "diff.next",
@@ -2261,8 +2590,9 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "diff.back",
+        // Esc is `diff.escape`, which clears a search first and stands in
+        // for this one in the bar.
         keys: &[
-            KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
             KeyPattern::any(KeyCode::Left),
         ],
@@ -2270,7 +2600,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::FocusLeft,
         description: "Back to the side panel last focused",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -2584,6 +2914,17 @@ static REGISTRY: &[Binding] = &[
         label: "menu",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "files.stash",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenMenu(MenuId::Stash),
+        description: "Stash changes: all, with untracked files, staged only, or this file",
+        label: "stash",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: stash_menu_disabled,
     },
     Binding {
         id: "commit_confirm.stage_all",
@@ -3267,7 +3608,7 @@ static REGISTRY: &[Binding] = &[
         description: "Tag the selected commit with a lightweight tag",
         label: "tag",
         bar: true,
-        disabled: tag_commit_disabled,
+        disabled: commits_tag_disabled,
     },
     Binding {
         id: "commits.tag_annotated",
@@ -3277,7 +3618,7 @@ static REGISTRY: &[Binding] = &[
         description: "Tag the selected commit with an annotated tag and a message",
         label: "annotated tag",
         bar: false,
-        disabled: tag_commit_disabled,
+        disabled: commits_tag_disabled,
     },
     Binding {
         id: "commits.bisect",
@@ -3287,7 +3628,7 @@ static REGISTRY: &[Binding] = &[
         description: "Mark the selected commit good, bad or skipped for a bisect, or reset it",
         label: "bisect",
         bar: true,
-        disabled: never,
+        disabled: commits_bisect_disabled,
     },
     Binding {
         id: "status.continue",
@@ -3482,6 +3823,41 @@ static REGISTRY: &[Binding] = &[
         id: "reset_hard.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::ResetHard,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // As with a hard reset, Enter is left unbound: a dropped stash is gone
+    // from the list.
+    Binding {
+        id: "drop_stash.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DropStash,
+        intent: AppIntent::ConfirmDropStash,
+        description: "Yes, drop the stash",
+        label: "drop",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_stash.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DropStash,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the stash",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_stash.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DropStash,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -3853,6 +4229,137 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // List filters, ranges and the diff search.
+    Binding {
+        id: "files.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the files by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "files.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range of files from here, for stage and discard; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "files.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Files,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the loaded commits by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range of commits from here, for copy; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "commits.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "diff.search",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::OpenSearch,
+        description: "Search the diff for typed text",
+        label: "search",
+        bar: false,
+        disabled: search_disabled,
+    },
+    Binding {
+        id: "diff.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the search",
+        label: "next match",
+        bar: false,
+        disabled: search_step_disabled,
+    },
+    Binding {
+        id: "diff.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::Diff,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the search",
+        label: "previous match",
+        bar: false,
+        disabled: search_step_disabled,
+    },
+    Binding {
+        id: "diff.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Diff,
+        intent: AppIntent::DiffEscape,
+        description: "Clear the search, else go back to the side panel",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.accept",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Input,
+        intent: AppIntent::InputAccept,
+        description: "Keep the typed text; a search goes to its match",
+        label: "done",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.cancel",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Input,
+        intent: AppIntent::InputCancel,
+        description: "Clear the typed text and close",
+        label: "clear",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "input.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Input,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
 ];
 
 /// The application's keymap.
@@ -4026,8 +4533,15 @@ mod tests {
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         // Every binding is enabled on a workspace with a stageable file
-        // selected and a commit in the log.
+        // selected, a commit in the log and a stash in the list.
         let mut state = AppState::new(Context::Workspace);
+        state.stash.entries = vec![crate::git::stash::StashEntry {
+            index: 0,
+            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+            untracked: None,
+            subject: "On main: wip".into(),
+        }];
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
@@ -4048,6 +4562,120 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
+        }
+    }
+
+    #[test]
+    fn the_stash_panel_opens_applies_pops_drops_and_renames_the_selected_stash() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::Stash.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Stash.title(), "Stash");
+        let stash = |k| from(KeyScope::Stash, k);
+        let none = KeyModifiers::NONE;
+        assert_eq!(stash(key(KeyCode::Enter, none)), Some(OpenStashFiles));
+        assert_eq!(stash(plain(' ')), Some(ApplyStash));
+        assert_eq!(stash(plain('g')), Some(PopStash));
+        assert_eq!(stash(plain('d')), Some(DropStash));
+        assert_eq!(
+            stash(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(RenameStash)
+        );
+        assert_eq!(stash(plain('j')), Some(StashNext));
+        assert_eq!(stash(key(KeyCode::Down, none)), Some(StashNext));
+        assert_eq!(stash(plain('k')), Some(StashPrev));
+        assert_eq!(stash(key(KeyCode::Up, none)), Some(StashPrev));
+        assert_eq!(stash(plain('q')), Some(Quit));
+
+        assert_eq!(KeyScope::StashFiles.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::StashFiles.title(), "Stash files");
+        let files = |k| from(KeyScope::StashFiles, k);
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(CloseStashFiles));
+        assert_eq!(files(key(KeyCode::Backspace, none)), Some(CloseStashFiles));
+        assert_eq!(files(plain('j')), Some(StashFileNext));
+        assert_eq!(files(key(KeyCode::Up, none)), Some(StashFilePrev));
+        assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
+
+        assert_eq!(
+            from(KeyScope::Files, plain('s')),
+            Some(OpenMenu(MenuId::Stash))
+        );
+    }
+
+    #[test]
+    fn stash_actions_say_why_they_cannot_run() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(stash_action_disabled(&state), Some("No stashes"));
+        assert_eq!(no_stash(&state), Some("No stashes"));
+        assert_eq!(stash_menu_disabled(&state), Some("No changes to stash"));
+        state.stash.entries = vec![crate::git::stash::StashEntry {
+            index: 0,
+            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+            untracked: None,
+            subject: String::new(),
+        }];
+        assert_eq!(stash_action_disabled(&state), None);
+        state.op_seq = Some(1);
+        assert_eq!(stash_action_disabled(&state), Some(OP_RUNNING));
+        assert_eq!(no_stash(&state), None);
+    }
+
+    #[test]
+    fn the_drop_stash_question_has_no_enter_and_n_or_esc_keeps_it() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::DropStash,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmDropStash));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::DropStash.parent(), None);
+        assert_eq!(KeyScope::DropStash.title(), "Drop stash");
+    }
+
+    #[test]
+    fn the_stash_actions_and_answers_are_locked_but_moving_around_is_not() {
+        for id in [
+            "files.stash",
+            "stash.files",
+            "stash.apply",
+            "stash.pop",
+            "stash.drop",
+            "stash.rename",
+            "drop_stash.yes",
+            "drop_stash.no",
+            "drop_stash.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+        for id in [
+            "stash.next",
+            "stash.prev",
+            "stash_files.next",
+            "stash_files.prev",
+            "stash_files.close",
+        ] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_ok(), "{id}");
         }
     }
 
@@ -4131,7 +4759,8 @@ mod tests {
         let none = KeyModifiers::NONE;
         let shift = KeyModifiers::SHIFT;
         assert_eq!(files(plain('q')), Some(Quit));
-        assert_eq!(files(key(KeyCode::Esc, none)), Some(Quit));
+        // Esc clears a range or a filter first, and quits with neither.
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(
             files(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Quit)
@@ -4180,13 +4809,11 @@ mod tests {
         assert_eq!(diff(plain('k')), Some(PrevHunk));
         assert_eq!(diff(key(KeyCode::Up, none)), Some(PrevHunk));
         assert_eq!(diff(plain('t')), Some(ToggleDiffSide));
-        for k in [
-            key(KeyCode::Esc, none),
-            plain('h'),
-            key(KeyCode::Left, none),
-        ] {
+        for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(diff(k), Some(FocusLeft), "{k:?}");
         }
+        // Esc clears a search first, and goes back with none.
+        assert_eq!(diff(key(KeyCode::Esc, none)), Some(DiffEscape));
         // Workspace and global keys still reach through.
         assert_eq!(diff(plain('r')), Some(RefreshStatus));
         assert_eq!(diff(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
@@ -5887,6 +6514,88 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_range_and_search_keys_clash_with_nothing_their_scope_reaches() {
+        use KeyScope::*;
+        let new: &[(&str, &[KeyScope])] = &[
+            ("files.filter", &[Files, Workspace, Global]),
+            ("files.range", &[Files, Workspace, Global]),
+            ("files.escape", &[Files, Workspace, Global]),
+            ("commits.filter", &[Commits, Workspace, Global]),
+            ("commits.range", &[Commits, Workspace, Global]),
+            ("commits.escape", &[Commits, Workspace, Global]),
+            // Line mode reaches the Diff keys too.
+            ("diff.search", &[Lines, Diff, Workspace, Global]),
+            ("diff.search_next", &[Lines, Diff, Workspace, Global]),
+            ("diff.search_prev", &[Lines, Diff, Workspace, Global]),
+            ("diff.escape", &[Diff, Workspace, Global]),
+            ("input.accept", &[Input]),
+            ("input.cancel", &[Input]),
+            ("input.quit", &[Input]),
+        ];
+        for (id, reached) in new {
+            let new = binding(id);
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != *id && reached.contains(&b.scope))
+            {
+                // Esc in a list or the diff clears first and only then
+                // quits or goes back; taking it from quit is the point.
+                if id.ends_with(".escape") && other.id == "global.quit" {
+                    continue;
+                }
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_log_key_is_typed_into_the_input_and_needs_none_of_the_new_keys() {
+        let state = AppState::new(crate::model::Context::Workspace);
+        for c in ['@', 'q', '?', '/', 'V', 'n', 'N'] {
+            assert!(
+                matches!(
+                    resolve(
+                        registry(),
+                        &Keymap::default(),
+                        KeyScope::Input,
+                        &state,
+                        plain(c)
+                    ),
+                    Resolution::Unbound
+                ),
+                "{c} is typed"
+            );
+        }
+        let log = registry()
+            .iter()
+            .filter(|b| b.scope == KeyScope::CommandLog);
+        for b in log {
+            for c in ['/', 'V', 'n', 'N'] {
+                assert!(
+                    !b.keys.iter().any(|k| k.matches(plain(c))),
+                    "{} takes {c}",
+                    b.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_new_bindings_that_can_quit_are_locked() {
+        for id in ["files.escape", "commits.escape", "input.quit"] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
+        }
+        for id in ["files.filter", "files.range", "diff.search", "input.accept"] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
     fn paste_is_locked_and_copy_and_clear_are_not() {
         assert!(REPO_LOCKED.contains(&"commits.paste"));
         assert!(build(&[("commits.paste", &["Z"])], Trust::Repo).is_err());
@@ -6107,6 +6816,69 @@ mod tests {
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
     }
 
+    #[test]
+    fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
+        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::git::patch::parse;
+        use crate::hunk_view::{HunkView, LineCursor};
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        state.renderer = Some(0);
+        let reason = |state: &AppState, scope, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            scope,
+            state,
+            plain(c),
+        ) {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
+        };
+        // Whole-file keys are unaffected.
+        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
+        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
+
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.patch =
+            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
+        state.focus = Focus::Diff(view.clone());
+        for c in [' ', 'v', 'd', 'e'] {
+            assert_eq!(
+                reason(&state, KeyScope::Diff, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        view.lines = Some(LineCursor {
+            anchor: 0,
+            cursor: 0,
+        });
+        state.focus = Focus::Diff(view);
+        for c in [' ', 'd'] {
+            assert_eq!(
+                reason(&state, KeyScope::Lines, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        state.renderer = None;
+        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
+    }
+
     /// The `<scope>` part of a binding id.
     fn scope_name(scope: KeyScope) -> &'static str {
         match scope {
@@ -6118,6 +6890,8 @@ mod tests {
             KeyScope::Tags => "tags",
             KeyScope::Commits => "commits",
             KeyScope::CommitFiles => "commit_files",
+            KeyScope::Stash => "stash",
+            KeyScope::StashFiles => "stash_files",
             KeyScope::Status => "status",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",
@@ -6140,6 +6914,7 @@ mod tests {
             KeyScope::RemoveRemote => "remove_remote",
             KeyScope::DeleteTag => "delete_tag",
             KeyScope::ResetHard => "reset_hard",
+            KeyScope::DropStash => "drop_stash",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
@@ -6147,6 +6922,7 @@ mod tests {
             KeyScope::Credential => "credential",
             KeyScope::Reflog => "reflog",
             KeyScope::Travel => "travel",
+            KeyScope::Input => "input",
             KeyScope::CommandLog => "command_log",
         }
     }
@@ -6392,6 +7168,13 @@ mod tests {
                     | PasteCommits
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard
+                    | OpenMenu(MenuId::Stash)
+                    | OpenStashFiles
+                    | ApplyStash
+                    | PopStash
+                    | DropStash
+                    | RenameStash
+                    | ConfirmDropStash
                     | RemoveRemote
                     | ConfirmRemoveRemote
                     | DeleteTag
@@ -6407,6 +7190,7 @@ mod tests {
                     | Undo
                     | Redo
                     | ConfirmTravel
+                    | ListEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }
@@ -6434,7 +7218,7 @@ mod tests {
             r#""files.stage": key "q" would hide "global.quit""#
         );
         // Keys a binding already had are not new, so the defaults pass.
-        assert!(build(&[("diff.back", &["esc", "h", "left"])], Trust::Repo).is_ok());
+        assert!(build(&[("diff.back", &["h", "left"])], Trust::Repo).is_ok());
     }
 
     #[test]

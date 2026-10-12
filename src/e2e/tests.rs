@@ -236,7 +236,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
     let mut app = Harness::start(&repo).await;
 
     // Collapsed, the panel shows only the branch; expanded, the rest.
-    app.assert_screen_contains("│work ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("work "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
@@ -245,7 +246,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
-    app.assert_screen_contains("│main ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("main "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃no upstream ");
 }
@@ -258,7 +260,11 @@ async fn a_detached_head_shows_its_short_hash() {
 
     let mut app = Harness::start(&repo).await;
 
-    app.assert_screen_contains(&format!("│detached {} ", &head[..7]));
+    let status = app.screen()[1].clone();
+    assert!(
+        status.starts_with(&format!("detached {} ", &head[..7])),
+        "{status:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1171,6 +1177,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.use_renderers(vec![ExternalRenderer {
         label: "cat".into(),
         argv: vec!["cat".into()],
+        kind: crate::external_diff::RendererKind::Pager,
     }])
     .await;
 
@@ -1289,7 +1296,7 @@ async fn space_in_the_branches_panel_checks_out_the_selected_branch() {
     app.assert_screen_contains("* side");
     // The Status panel follows, collapsed to its branch row.
     let status = app.screen()[1].clone();
-    assert!(status.contains("│side "), "{status:?}");
+    assert!(status.starts_with("side "), "{status:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1980,7 +1987,7 @@ async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
     app.press(KeyCode::Enter).await;
     assert_eq!(app.state().repo.as_deref(), Some(wt.as_path()));
     let status = app.screen()[1].clone();
-    assert!(status.contains("│feature "), "{status:?}");
+    assert!(status.starts_with("feature "), "{status:?}");
 
     // Back in the main worktree, d then y removes the clean one.
     app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
@@ -2054,6 +2061,29 @@ async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_filtered_range_stages_exactly_the_files_it_shows() {
+    let repo = TestRepo::new()
+        .write("notes.txt", "one\n")
+        .write("src/one.rs", "one\n")
+        .write("src/two.rs", "one\n")
+        .commit("init")
+        .write("notes.txt", "changed\n")
+        .write("src/one.rs", "changed\n")
+        .write("src/two.rs", "changed\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.type_text("/rs").await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Files · /rs 2 of 3");
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+
+    assert_eq!(repo.staged(), ["src/one.rs", "src/two.rs"]);
+    assert_eq!(app.state().files_anchor, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn i_ignores_an_untracked_file_and_y_copies_the_head_hash() {
     let repo = TestRepo::new()
         .write("a.txt", "one\n")
@@ -2084,4 +2114,48 @@ async fn i_ignores_an_untracked_file_and_y_copies_the_head_hash() {
     let expected = crate::clipboard::osc52(head.trim_end()).unwrap();
     assert_eq!(app.clipboard(), [expected]);
     assert!(app.state().popups.is_empty());
+}
+
+fn stash_count(repo: &TestRepo) -> usize {
+    String::from_utf8(repo.git(["stash", "list"]))
+        .unwrap()
+        .lines()
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stashing_from_the_files_menu_then_applying_and_dropping_from_the_stash_panel() {
+    let repo = on_main().write("a.txt", "changed\n");
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+
+    app.press(KeyCode::Char('s')).await;
+    app.assert_screen_contains("Stash all changes");
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.type_text("put aside").await;
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(stash_count(&repo), 1);
+    app.press(KeyCode::Char('5')).await;
+    app.assert_screen_contains("stash@{0}  On main: put aside");
+
+    // Its file, and that file's change in the diff pane.
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("M a.txt");
+    app.assert_screen_contains("+changed");
+    app.press(KeyCode::Esc).await;
+
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(repo.read("a.txt"), "changed\n");
+    assert_eq!(stash_count(&repo), 1);
+
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Drop stash@{0}: On main: put aside?");
+    // Enter does not answer; the stash is still there.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(stash_count(&repo), 1);
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(stash_count(&repo), 0);
+    app.assert_screen_contains("No stashes");
 }

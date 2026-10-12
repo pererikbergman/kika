@@ -37,6 +37,7 @@ pub enum Popup {
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
+    DropStash(DropStashConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     DeleteTag(DeleteTagConfirm),
     Submodules(SubmoduleList),
@@ -124,26 +125,61 @@ pub enum DiscardWhat {
     Untracked,
     Hunk,
     Lines,
+    /// A range of files: `restore` lose their unstaged changes and
+    /// `delete` untracked ones are deleted.
+    Range {
+        restore: usize,
+        delete: usize,
+    },
 }
 
 impl DiscardWhat {
-    pub fn title(self) -> &'static str {
+    pub fn title(self) -> Cow<'static, str> {
         match self {
-            DiscardWhat::File => "Discard file",
-            DiscardWhat::Untracked => "Delete file",
-            DiscardWhat::Hunk => "Discard hunk",
-            DiscardWhat::Lines => "Discard lines",
+            DiscardWhat::File => "Discard file".into(),
+            DiscardWhat::Untracked => "Delete file".into(),
+            DiscardWhat::Hunk => "Discard hunk".into(),
+            DiscardWhat::Lines => "Discard lines".into(),
+            DiscardWhat::Range { restore, delete } => {
+                format!("Discard {}", files(restore + delete)).into()
+            }
         }
     }
 
-    pub fn question(self) -> &'static str {
+    pub fn question(self) -> Cow<'static, str> {
         match self {
-            DiscardWhat::File => "Discard all unstaged changes to this file? (y/n)",
-            DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)",
-            DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)",
-            DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)",
+            DiscardWhat::File => "Discard all unstaged changes to this file? (y/n)".into(),
+            DiscardWhat::Untracked => "Delete this untracked file from disk? (y/n)".into(),
+            DiscardWhat::Hunk => "Discard this hunk from the working tree? (y/n)".into(),
+            DiscardWhat::Lines => "Discard these lines from the working tree? (y/n)".into(),
+            DiscardWhat::Range { restore, delete: 0 } => {
+                format!("Discard unstaged changes to {}? (y/n)", files(restore)).into()
+            }
+            DiscardWhat::Range { restore: 0, delete } => {
+                format!("Delete {} from disk? (y/n)", untracked(delete)).into()
+            }
+            DiscardWhat::Range { restore, delete } => format!(
+                "Discard unstaged changes to {} and delete {}? (y/n)",
+                files(restore),
+                untracked(delete)
+            )
+            .into(),
         }
     }
+}
+
+/// `1 file` or `n files`.
+fn files(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{n} files")
+    }
+}
+
+/// `1 untracked file` or `n untracked files`.
+fn untracked(n: usize) -> String {
+    format!("{n} untracked {}", if n == 1 { "file" } else { "files" })
 }
 
 /// "Delete this branch?" Like [`DiscardConfirm`], it carries the op chosen
@@ -295,6 +331,29 @@ impl RemoveWorktreeConfirm {
     }
 }
 
+/// "Drop this stash?" Like [`ResetHardConfirm`], it carries the op chosen
+/// when it was asked, so a reload before the answer cannot change which
+/// entry goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropStashConfirm {
+    /// `stash@{N}: <subject>`, already terminal-safe.
+    pub label: String,
+    pub op: GitOp,
+}
+
+impl DropStashConfirm {
+    pub fn title(&self) -> &'static str {
+        "Drop stash"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Drop {}? It cannot be recovered from the stash list. (y/n)",
+            self.label
+        )
+    }
+}
+
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
@@ -405,6 +464,10 @@ pub enum PromptKind {
     NewBranch,
     /// A new name for the selected branch.
     RenameBranch,
+    /// The message of a stash being made; empty for git's own.
+    StashMessage,
+    /// A new message for the selected stash.
+    RenameStash,
     /// The name of a local branch to track the selected remote branch.
     TrackBranch,
     /// A new remote's name.
@@ -432,6 +495,8 @@ impl PromptKind {
             PromptKind::Command => "Command",
             PromptKind::NewBranch => "New branch",
             PromptKind::RenameBranch => "Rename branch",
+            PromptKind::StashMessage => "Stash message (optional)",
+            PromptKind::RenameStash => "Rename stash",
             PromptKind::TrackBranch => "Check out as",
             PromptKind::RemoteName => "New remote name",
             PromptKind::RemoteUrl => "New remote URL",
@@ -450,6 +515,8 @@ impl PromptKind {
             PromptKind::Command => AppIntent::CommandPromptAnswered(text),
             PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
             PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
+            PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
+            PromptKind::RenameStash => AppIntent::RenameStashTo(text),
             PromptKind::TrackBranch => AppIntent::TrackRemoteBranchNamed(text),
             PromptKind::RemoteName => AppIntent::AddRemoteNamed(text),
             PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
@@ -570,6 +637,38 @@ mod tests {
         assert_eq!(revert.title(), "Abort revert");
         assert!(revert.question().starts_with("Abort the revert "));
         assert_eq!(revert.yes(), AppIntent::ConfirmAbort(Operation::Revert));
+    }
+
+    #[test]
+    fn the_drop_stash_question_names_the_entry_and_says_it_is_gone_for_good() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::stash::StashRef;
+        let ask = DropStashConfirm {
+            label: "stash@{2}: On main: wip".into(),
+            op: GitOp::StashDrop(StashRef {
+                index: 2,
+                oid: CommitId::parse("abc").unwrap(),
+            }),
+        };
+        assert_eq!(ask.title(), "Drop stash");
+        assert_eq!(
+            ask.question(),
+            "Drop stash@{2}: On main: wip? It cannot be recovered from the stash list. (y/n)"
+        );
+    }
+
+    #[test]
+    fn the_stash_prompts_answer_with_their_text() {
+        assert_eq!(PromptKind::StashMessage.title(), "Stash message (optional)");
+        assert_eq!(
+            PromptKind::StashMessage.submit("wip".into()),
+            AppIntent::StashMessageAnswered("wip".into())
+        );
+        assert_eq!(PromptKind::RenameStash.title(), "Rename stash");
+        assert_eq!(
+            PromptKind::RenameStash.submit("new".into()),
+            AppIntent::RenameStashTo("new".into())
+        );
     }
 
     #[test]

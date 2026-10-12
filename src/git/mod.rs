@@ -14,6 +14,7 @@ pub(crate) mod emoji;
 #[cfg(test)]
 pub mod fake;
 pub mod fetch;
+pub mod forge_remote;
 pub mod head;
 mod joiner;
 pub mod log;
@@ -31,6 +32,7 @@ pub mod repo_root;
 pub mod repo_state;
 pub mod retry;
 pub mod runner;
+pub mod stash;
 pub mod status;
 pub mod submodule;
 pub mod tags;

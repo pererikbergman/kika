@@ -15,6 +15,9 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
+use crate::forge;
+use crate::forge::github::CliGh;
+use crate::forge::task::ForgeContext;
 use crate::git::GitRunner;
 use crate::git::recording::CommandSink;
 use crate::handoff::{self, HandOff};
@@ -41,10 +44,18 @@ pub async fn run(
     sink.connect(move |event| {
         let _ = log_tx.send(AppIntent::CommandLogged(event));
     });
+    // Only when the user named hosts; otherwise `gh` is never run.
+    let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
+        gh: Arc::new(CliGh),
+        sink: sink.clone(),
+        cache_dir: forge::cache::default_dir(|key| std::env::var_os(key)),
+    });
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
         .with_global_config(global_config)
         .with_diff_pager(config.diff_pager.clone())
+        .with_diff_tool(config.diff_tool.clone())
+        .with_forge(forge)
         // Resolved by `main` for this terminal; the view reads the same value.
         .with_emoji_zwj(state.emoji_zwj);
     let input = Arc::new(InputGate::default());
@@ -56,6 +67,7 @@ pub async fn run(
     spawn_input_listener(tx.clone(), Arc::clone(&input));
     let mut spinner = Spinner::default();
     state.watch.fetch_enabled = config.watch.fetch.is_some();
+    state.commit_hooks_detached = config.commit_hooks_detached;
     // Read by `main` for this repository, so it always applies.
     let loaded = AppIntent::ConfigLoaded {
         repo: state.repo.clone(),

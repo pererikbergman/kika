@@ -22,6 +22,8 @@ pub enum Scope {
     Branches,
     /// The Commits panel's log and markers.
     Commits,
+    /// The Stash panel's list.
+    Stash,
 }
 
 /// How the file selection survives a refresh.
@@ -52,6 +54,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::ApplyCached { .. }
         | GitOp::DiscardWorktree(_)
         | GitOp::DeleteUntracked(_)
+        | GitOp::DiscardFiles { .. }
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
         // Ahead/behind moves with a commit, and so does the log.
@@ -68,18 +71,32 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // These move HEAD, rewrite the worktree and index, and start or
         // end an operation the Status panel shows. A detached checkout
         // also changes what the Status panel says HEAD is.
-        GitOp::Merge { .. }
-        | GitOp::Rebase { .. }
-        | GitOp::InteractiveRebase(_)
-        | GitOp::CheckoutCommit(_)
+        // An undo or redo moves `HEAD` the same way.
+        GitOp::CheckoutCommit(_)
         | GitOp::Revert(_)
         | GitOp::CherryPick(_)
         | GitOp::Reset { .. }
-        | GitOp::Continue(_)
-        | GitOp::Skip(_)
-        | GitOp::Abort(_)
         | GitOp::Travel { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
+        // As above, and they may autostash: the interactive rebase always,
+        // the others under the user's `rebase.autoStash` or
+        // `merge.autoStash`. When the autostash cannot go back cleanly,
+        // or the operation ends, git keeps it in the stash list.
+        GitOp::Merge { .. }
+        | GitOp::Rebase { .. }
+        | GitOp::InteractiveRebase(_)
+        | GitOp::Continue(_)
+        | GitOp::Skip(_)
+        | GitOp::Abort(_) => (
+            &[
+                Scope::Files,
+                Scope::Branch,
+                Scope::Branches,
+                Scope::Commits,
+                Scope::Stash,
+            ][..],
             Selection::KeepPath,
         ),
         // Renaming or deleting a branch leaves HEAD's commits where they are.
@@ -108,6 +125,18 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
         }
+        // A push takes changes out of the worktree into a new entry.
+        GitOp::StashPush { .. } => (&[Scope::Files, Scope::Stash][..], Selection::KeepPath),
+        // Applying can stop on conflicts the Status panel counts, and a
+        // pop also takes the entry out of the list.
+        GitOp::StashApply(_) | GitOp::StashPop(_) => (
+            &[Scope::Files, Scope::Branch, Scope::Stash][..],
+            Selection::KeepPath,
+        ),
+        // These change only the list.
+        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+            (&[Scope::Stash][..], Selection::KeepPath)
+        }
         // A mark can check out the next commit to test, and a reset goes
         // back to where the bisect started; both change what the Status
         // panel says of the bisect.
@@ -127,7 +156,15 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
 /// changes the worktree.
 pub fn remote_plan(op: &RemoteOp) -> RefreshPlan {
     let scopes: &[Scope] = match op {
-        RemoteOp::Pull => &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits],
+        // A pull under the user's `rebase.autoStash` or `merge.autoStash`
+        // can leave its autostash in the stash list.
+        RemoteOp::Pull => &[
+            Scope::Files,
+            Scope::Branch,
+            Scope::Branches,
+            Scope::Commits,
+            Scope::Stash,
+        ],
         RemoteOp::Fetch | RemoteOp::Push { .. } | RemoteOp::PushTag { .. } => {
             &[Scope::Branch, Scope::Branches, Scope::Commits]
         }
@@ -241,7 +278,47 @@ mod tests {
     }
 
     #[test]
-    fn commit_actions_and_history_rewrites_reload_everything_head_touches() {
+    fn stash_ops_reload_the_list_and_what_they_change_in_the_worktree() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::StashMode;
+        use crate::git::stash::StashRef;
+        let at = || StashRef {
+            index: 1,
+            oid: CommitId::parse("abc").unwrap(),
+        };
+        let push = GitOp::StashPush {
+            mode: StashMode::All,
+            message: None,
+            paths: vec![],
+        };
+        let worktree = [Scope::Files, Scope::Branch, Scope::Diff, Scope::Stash];
+        let cases: [(GitOp, &[Scope]); 5] = [
+            (push, &[Scope::Files, Scope::Diff, Scope::Stash]),
+            (GitOp::StashApply(at()), &worktree),
+            (GitOp::StashPop(at()), &worktree),
+            (GitOp::StashDrop(at()), &[Scope::Stash]),
+            (
+                GitOp::StashRename {
+                    stash: at(),
+                    message: "m".into(),
+                },
+                &[Scope::Stash],
+            ),
+        ];
+        for (op, scopes) in cases {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(scopes),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_revert_and_reset_of_a_commit_reload_everything_head_touches() {
         use crate::git::commit_files::CommitId;
         use crate::git::ops::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
@@ -253,7 +330,6 @@ mod tests {
                 to: oid(),
                 mode: ResetMode::Hard,
             },
-            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
             GitOp::Travel {
                 direction: crate::git::undo::Direction::Undo,
                 step: crate::git::undo::Step::MoveTo(oid()),
@@ -290,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_rebase_and_their_controls_reload_everything_head_touches() {
+    fn merge_rebases_and_their_controls_reload_everything_head_touches_and_the_stashes() {
         use crate::git::ops::MergeStrategy;
         use crate::git::repo_state::Operation;
         let ops = [
@@ -299,10 +375,12 @@ mod tests {
                 strategy: MergeStrategy::Squash,
             },
             GitOp::Rebase { onto: "b".into() },
+            GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
             GitOp::Continue(Operation::Merge),
             GitOp::Skip(Operation::Rebase),
             GitOp::Abort(Operation::CherryPick),
         ];
+        // An autostash git could not put back is left in the stash list.
         for op in ops {
             assert_eq!(
                 plan(&op),
@@ -312,7 +390,8 @@ mod tests {
                         Scope::Branch,
                         Scope::Diff,
                         Scope::Branches,
-                        Scope::Commits
+                        Scope::Commits,
+                        Scope::Stash
                     ]),
                     selection: Selection::KeepPath,
                 },
@@ -467,7 +546,8 @@ mod tests {
                 Scope::Branch,
                 Scope::Diff,
                 Scope::Branches,
-                Scope::Commits
+                Scope::Commits,
+                Scope::Stash
             ])
         );
     }

@@ -2,14 +2,16 @@
 
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
-made outside it, choose a program to draw the Diff pane, and say which
-terminals draw emoji sequences as one picture.
+made outside it, choose a program to draw the Diff pane, keep commits whose
+hooks never ask anything in the background, show GitHub pull requests
+beside your branches, and say which terminals draw emoji sequences as one
+picture.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[display]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -22,7 +24,7 @@ A global file that uses every setting:
 
 ```toml
 [keys]
-"files.stage" = ["s", "ctrl-s"]   # replace this binding's keys
+"files.stage" = ["x", "ctrl-s"]   # replace this binding's keys
 "files.discard" = []              # disable it
 
 [watch]
@@ -32,10 +34,23 @@ fetch = 300     # leave out to keep auto-fetch off
 
 [diff]
 pager = "delta --paging=never"   # a program that draws the Diff pane
+tool = "difft --color=always"    # a display-only diff tool
+
+[commit]
+hooks_detached = true   # commits that only run hooks stay in the background
+
+[forge]
+github = ["github.com"]   # leave out to keep pull requests off
 
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
 ```
+
+Earlier versions of this example bound `files.stage` to `s`. `s` now opens
+the Stash menu in the Files panel (`files.stash`), so a file that still binds
+`s` to `files.stage` is ignored with the error `key "s" is bound to both
+"files.stash" and "files.stage"`. Pick another key, as the example does with
+`x`, or move `files.stash` off `s` in the same file.
 
 ## Layering
 
@@ -148,7 +163,116 @@ pager = "delta --paging=never"
   `cat`) and `true`/`false` values are skipped, from either source. A
   repository's own git config is never read for this.
 
+### `tool`: a display-only diff tool
+
+`tool` names a structural diff tool, such as difftastic, that compares the
+old and new file instead of reading a diff. `R` offers it after the pagers.
+
+```toml
+[diff]
+tool = "difft --color=always"
+```
+
+- Kika reads both sides of the shown file into two new temp files in a
+  private directory, runs the tool as `<tool> -- OLD NEW`, and removes the
+  directory afterwards. For unstaged changes OLD is the index and NEW the
+  working tree file; for staged changes OLD is `HEAD` and NEW the index; for
+  an untracked file OLD is empty. The temp files are named `old` and `new`,
+  plus the file's extension when it is 1 to 16 letters or digits, so your
+  file names never reach the tool's arguments.
+- The value follows the same rules as `pager`: run directly, never through a
+  shell, split on spaces, with a bare name or an absolute path.
+- The tool gets the pane's width in both `COLUMNS` and `DFT_WIDTH`, and runs
+  under the same limits: at most 10 seconds and 16 MiB of output, and at
+  most 16 MiB per side. Contents are the raw bytes, with no textconv or
+  clean filter applied.
+- Only regular files are shown. A symlink, a submodule or a conflicted file
+  says so instead.
+- **The tool's view is display-only.** Its rows cannot be matched to the
+  changes they show, so hunk and line staging, discard and hunk editing are
+  refused there, and the title says `(display only)`. Press `R` to get back
+  to the built-in view. Staging and discarding whole files from the Files
+  panel work as usual.
+- **Only Kika's global file sets `tool`.** Git's own external diff settings
+  (`diff.external`, `diff.tool`, `difftool.*` and `GIT_EXTERNAL_DIFF`) are
+  never read for it, since git runs those through a shell and a cloned
+  repository can bring them.
+
 **Changes to `[diff]` take effect after a restart.**
+
+## `[commit]` (global file only)
+
+By default a commit in a repository with an installed commit hook hands the
+terminal to git, so a hook can ask you something. The screen switches away
+and back on every such commit. If your hooks never ask anything, set
+`hooks_detached` to keep those commits in the background, like a commit with
+no hooks.
+
+```toml
+[commit]
+hooks_detached = true   # default false: any commit hook hands the terminal over
+```
+
+- Only a commit whose sole reason to hand over is a hook runs detached. A
+  commit that signs (`commit.gpgsign`) still hands the terminal over, since
+  signing may ask for a passphrase.
+- Rebase, cherry-pick, revert, a merge commit, continue and skip still run on
+  the terminal, since they may also open git's editor.
+- **Risk:** a hook that waits for input gets no terminal. It may fail, or wait
+  until you quit Kika.
+
+**Changes to `[commit]` take effect after a restart.**
+
+## `[forge]` (global file only)
+
+Kika can show each local branch's GitHub pull request in the Branches panel:
+its number, its state (`open`, `draft`, `merged` or `closed`) and its checks
+(`✓` passed, `✗` failed, `●` running, nothing when there are none), as in
+`main  origin/main  #123 open ✓`. **It is off by default.** It turns on only
+when you name the hosts Kika may ask:
+
+```toml
+[forge]
+github = ["github.com", "github.example.com"]
+```
+
+- Leave the table out, or give an empty list, and the feature is off. Kika
+  then never runs `gh`, never reads or writes the cache below, and never
+  reaches the network for it.
+- Each host is written as lower-case ASCII: letters, digits and `-`, in
+  labels joined by dots, such as `github.com`. No scheme (`https://`), port,
+  user name, path, wildcard (`*`) or trailing dot. Write an international
+  domain name in its `xn--` form. A host that breaks these rules is an
+  error, and the whole file is ignored.
+- A repository is matched by its `origin` remote, or by its only remote when
+  there is no `origin`. Its URL must be `https://host/owner/repo`,
+  `ssh://host/owner/repo` or `user@host:owner/repo` (with or without `.git`),
+  on the standard port, and the host must equal one you listed. Any other
+  repository shows nothing. A branch shows the newest pull request
+  into that repository whose head branch has the same name.
+- Opening any clone whose origin is on a listed host runs one read-only
+  `gh` query under your account, for that clone's owner/repo and branch
+  names.
+- Kika asks GitHub through the [GitHub CLI](https://cli.github.com), `gh`,
+  which must be installed and logged in for the host (`gh auth login
+  --hostname <host>`, or `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN`
+  in the environment). `gh` holds your login: Kika never reads, stores,
+  passes or shows a token. Each call shows in the Command log as
+  `gh api graphql --hostname <host> --input -`.
+- Pull requests load when the repository opens, and again after a fetch,
+  pull or push you start. There is no timer.
+- The last result is cached so it shows at once on the next start, in
+  `$XDG_CACHE_HOME/kika/forge`, else `~/Library/Caches/kika/forge` (macOS),
+  `~/.cache/kika/forge` (Linux) or `%LOCALAPPDATA%\kika\cache\forge`
+  (Windows). It holds the host, owner, repository name and path, and each
+  branch's number, state and checks, nothing else. Only you can read it.
+- When GitHub cannot be reached, a line at the bottom of the Branches panel
+  says why (`GitHub: offline`, `GitHub: not logged in`, `GitHub: gh not
+  found`, …), and the badges already shown stay, marked `· cached`. Where
+  the panel is wide enough, the line also says what to do, such as
+  `run gh auth login --hostname github.com`. Nothing else waits on it.
+
+**Changes to `[forge]` take effect after a restart.**
 
 ## `[display]` (global file only)
 
@@ -404,8 +528,14 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[display]` is allowed only in the global file.** It is off by default.
   A `[display]` table in `.kika.toml` is an error, and the whole file is
   ignored.
+- **`[commit]` is allowed only in the global file**, since it decides whether
+  hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
+  the whole file is ignored.
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
+- **`[forge]` is allowed only in the global file**, since it lets Kika contact
+  a host. A `[forge]` table in `.kika.toml` is an error, and the whole file is
+  ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an
@@ -422,7 +552,7 @@ global file.
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
 then its enclosing scopes: the status, file list, branch list, commits, commit
-files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
+files, stash, stash files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
 back to Global. Popups, menus and the commit editor do not fall back, so `q` and
 `?` do not quit or open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
@@ -504,6 +634,25 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.mergetool` | `M` | Resolve the selected conflicted file in your merge tool | locked |
 | `files.ignore` | `i` | Add to .gitignore | |
 | `files.menu` | `m` | Open the actions menu | |
+| `files.filter` | `/` | Filter the files by typed text | |
+| `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
+| `files.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+
+The filter matches each word you type, in order but not necessarily side by
+side, against the file's path; it ignores case until you type an uppercase
+letter. `V` starts a range at the selected file, and moving the cursor grows
+it. `space` then stages the whole range in one go (or unstages it, when
+nothing in it is left to stage), skipping conflicted files, and `d` asks
+once before discarding the range; only `y` answers that question. Keys that
+act on one file are refused while a range is selected.
+
+| `files.stash` | `s` | Stash changes: all, with untracked files, staged only, or this file | locked |
+
+`s` opens a menu that puts work aside without committing it: every tracked
+change, every change with the untracked files too, only the staged changes,
+or only the selected file. Each asks for an optional message. Stashing only
+the staged changes needs git 2.35 or newer; an older git is refused with a
+message and nothing changes. Nothing can be stashed while conflicts exist.
 
 `i` asks for a pattern to add to the `.gitignore` at the top of the worktree
 (or of the entered submodule), filled with one that matches exactly the
@@ -635,6 +784,9 @@ can be reset, but not marked from Kika.
 | `commits.copy` | `c` | Add the selected commit to the copied set, or take it out | |
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |
+| `commits.filter` | `/` | Filter the loaded commits by typed text | |
+| `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
+| `commits.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 | `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
 
@@ -721,6 +873,38 @@ goes back to the log.
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
 | `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
 
+### Stash
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `stash.next` | `j`, `down` | Select the next stash | |
+| `stash.prev` | `k`, `up` | Select the previous stash | |
+| `stash.files` | `enter` | Show the files the selected stash holds | locked |
+| `stash.apply` | `space` | Apply the selected stash to the worktree and keep it | locked |
+| `stash.pop` | `g` | Apply the selected stash and drop it; a conflict keeps it | locked |
+| `stash.drop` | `d` | Drop the selected stash, asking first | locked |
+| `stash.rename` | `R` | Give the selected stash a new message; it moves to stash@{0} | locked |
+
+Git has no rename for a stash, so `R` stores the entry again with the new
+message, as `stash@{0}`, and drops it from its old place. Git adds no entry
+for the commit already on top, so a stash that shares its commit with
+`stash@{0}`, or `stash@{0}` when `stash@{1}` is the same commit, cannot be
+renamed: drop the copy first, then rename. Nothing changes when it is refused. Each action checks
+the entry is still where it was when the key was pressed; if the list changed
+under Kika, it is refused and the list reloads.
+
+### Stash files (a stash opened from the Stash panel)
+
+The diff pane shows the selected file's change in that stash, against the
+commit it was made on. Untracked files the stash took show as added. Focusing
+another panel goes back to the list.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `stash_files.next` | `j`, `down` | Select the next file and show its change | |
+| `stash_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `stash_files.close` | `esc`, `bksp` | Back to the stash list, at the same stash | |
+
 ### Diff (hunks)
 
 | Binding id | Default keys | Action | Repo file |
@@ -734,7 +918,11 @@ goes back to the log.
 | `diff.open` | `o` | Open the file in your editor at the selected hunk | locked |
 | `diff.edit_hunk` | `e` | Edit the selected hunk in your editor, then stage it | locked |
 | `diff.renderer` | `R` | Cycle diff renderer | locked |
-| `diff.back` | `esc`, `h`, `left` | Back to the file list | |
+| `diff.back` | `h`, `left` | Back to the side panel last focused | |
+| `diff.search` | `/` | Search the diff for typed text | |
+| `diff.search_next` | `n` | Go to the next match of the search | |
+| `diff.search_prev` | `N` | Go to the previous match of the search | |
+| `diff.escape` | `esc` | Clear the search, else go back to the side panel | |
 
 ### Diff (lines)
 
@@ -858,6 +1046,17 @@ picked yet keep their markers. Once every block is picked, Kika offers to stage 
 | `prompt.cancel` | `esc` | Close without using the text | |
 | `prompt.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Filter or search (typing on the bottom bar)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `input.accept` | `enter` | Keep the typed text; a search goes to its match | |
+| `input.cancel` | `esc` | Clear the typed text and close | |
+| `input.quit` | `ctrl-c` | Quit Kika | locked |
+
+Every other key is typed, `q` and `?` included. The list or the search
+follows each key as you type.
+
 ### Git is asking (a credential or other question)
 
 | Binding id | Default keys | Action | Repo file |
@@ -919,6 +1118,16 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.yes` | `y` | Yes, reset and throw away every uncommitted change | locked |
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Drop stash?
+
+A dropped stash is gone from the stash list, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `drop_stash.yes` | `y` | Yes, drop the stash | locked |
+| `drop_stash.no` | `n`, `esc` | No, keep the stash | locked |
+| `drop_stash.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 
