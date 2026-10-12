@@ -4786,6 +4786,7 @@ mod tests {
     }
 
     /// Whether `worker` has ended within `within`; joined if it has.
+    #[cfg(unix)]
     fn ends_within(worker: std::thread::JoinHandle<()>, within: Duration) -> bool {
         let deadline = std::time::Instant::now() + within;
         while !worker.is_finished() {
@@ -4799,6 +4800,7 @@ mod tests {
     }
 
     /// A clipboard program's log and where its intents land.
+    #[cfg(unix)]
     fn clipboard_sink() -> (
         CommandSink,
         std::sync::mpsc::Receiver<CommandEvent>,
