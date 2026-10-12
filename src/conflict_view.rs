@@ -9,7 +9,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::conflict::{ConflictView, Row, RowKind};
-use crate::git::diff::sanitize_body;
+use crate::git::diff::{EmojiZwj, sanitize_body};
 use crate::keymap::{KeyPattern, Keymap, registry};
 use crate::view::{PanelLook, clip, reversed};
 
@@ -85,13 +85,19 @@ fn styled_row(view: &ConflictView, row: &Row<'_>, width: usize) -> Line<'static>
         }
     };
     let (text, style) = match row.kind {
-        RowKind::Text => (sanitize_body(row.line), Style::new()),
-        RowKind::Ours => (sanitize_body(row.line), Style::new().fg(Color::Green)),
+        RowKind::Text => (sanitize_body(row.line, EmojiZwj::Escape), Style::new()),
+        RowKind::Ours => (
+            sanitize_body(row.line, EmojiZwj::Escape),
+            Style::new().fg(Color::Green),
+        ),
         RowKind::Base => (
-            sanitize_body(row.line),
+            sanitize_body(row.line, EmojiZwj::Escape),
             Style::new().add_modifier(Modifier::DIM),
         ),
-        RowKind::Theirs => (sanitize_body(row.line), Style::new().fg(Color::Cyan)),
+        RowKind::Theirs => (
+            sanitize_body(row.line, EmojiZwj::Escape),
+            Style::new().fg(Color::Cyan),
+        ),
         RowKind::OursMarker => (
             label("<<<<<<<", block.map_or("", |b| &b.ours_label)),
             Style::new().add_modifier(Modifier::BOLD),

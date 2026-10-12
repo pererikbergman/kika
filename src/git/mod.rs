@@ -11,6 +11,7 @@ pub mod cherry_pick;
 pub mod command_line;
 pub mod commit_files;
 pub mod diff;
+pub(crate) mod emoji;
 #[cfg(test)]
 pub mod fake;
 pub mod fetch;

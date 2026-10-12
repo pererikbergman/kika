@@ -11,7 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{Classifier, DiffChunk, DiffRequest, diff_command, terminal_safe};
+use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command, terminal_safe};
 use crate::git::runner::ChildHandle;
 use crate::intent::AppIntent;
 
@@ -20,6 +20,8 @@ pub struct DiffStreamer {
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
     current: Mutex<Option<Active>>,
+    /// How body lines draw emoji ZWJ sequences, fixed for the session.
+    emoji: EmojiZwj,
 }
 
 /// The running stream. Dropping `demand` tells its reader it was superseded.
@@ -57,7 +59,13 @@ impl DiffStreamer {
             runner,
             tx,
             current: Mutex::new(None),
+            emoji: EmojiZwj::Escape,
         }
+    }
+
+    /// Draw emoji ZWJ sequences in every later stream as `emoji` says.
+    pub fn set_emoji_zwj(&mut self, emoji: EmojiZwj) {
+        self.emoji = emoji;
     }
 
     /// Replace the current stream with one for `request`, reading `want`
@@ -75,6 +83,7 @@ impl DiffStreamer {
         }
         let runner = Arc::clone(&self.runner);
         let tx = self.tx.clone();
+        let emoji = self.emoji;
         tokio::spawn(async move {
             let reader_tx = tx.clone();
             let reader = tokio::task::spawn_blocking(move || {
@@ -84,6 +93,7 @@ impl DiffStreamer {
                     &request,
                     demand_rx,
                     want,
+                    emoji,
                     |result| {
                         // A closed channel means the app is quitting.
                         let _ = reader_tx.send(AppIntent::DiffLoaded { tag, result });
@@ -130,6 +140,7 @@ fn stream(
     request: &DiffRequest,
     demand: Receiver<usize>,
     want: usize,
+    emoji: EmojiZwj,
     mut emit: impl FnMut(Result<DiffChunk, String>),
 ) {
     let child = match runner.spawn(&diff_command(request)) {
@@ -144,7 +155,14 @@ fn stream(
         }
         slot.child = Some(Arc::clone(&child.handle));
     }
-    pump(child.stdout, child.handle.as_ref(), demand, want, emit);
+    pump(
+        child.stdout,
+        child.handle.as_ref(),
+        demand,
+        want,
+        emoji,
+        emit,
+    );
 }
 
 /// Read and classify lines, emitting a chunk each time `want` is reached and
@@ -155,10 +173,11 @@ pub fn pump(
     child: &dyn ChildHandle,
     demand: Receiver<usize>,
     mut want: usize,
+    emoji: EmojiZwj,
     mut emit: impl FnMut(Result<DiffChunk, String>),
 ) {
     let mut reader = BufReader::new(stdout);
-    let mut classifier = Classifier::new();
+    let mut classifier = Classifier::new(emoji);
     let mut batch = Vec::new();
     let mut count = 0;
     let mut buf = Vec::new();
@@ -245,6 +264,7 @@ mod tests {
                 spawned.handle.as_ref(),
                 demand_rx,
                 want,
+                EmojiZwj::Escape,
                 |chunk| out.send(chunk).unwrap(),
             )
         });
@@ -380,9 +400,15 @@ mod tests {
         let (_demand, demand_rx) = mpsc::channel();
         let mut emitted = 0;
 
-        stream(&runner, &slot, &untracked("a"), demand_rx, 250, |_| {
-            emitted += 1
-        });
+        stream(
+            &runner,
+            &slot,
+            &untracked("a"),
+            demand_rx,
+            250,
+            EmojiZwj::Escape,
+            |_| emitted += 1,
+        );
 
         assert!(child.was_killed());
         assert_eq!(emitted, 0);
@@ -603,5 +629,36 @@ mod tests {
                 .iter()
                 .any(|(_, t)| t.contains("b.txt") || t.contains("later"))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_streamer_set_to_keep_draws_emoji_joiners_in_body_lines() {
+        use crate::git::CliRunner;
+        use crate::git::fake::{TempDir, git};
+
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let tmp = TempDir::new("emoji-diff");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a"), format!("{family}\n")).unwrap();
+        let (tx, mut rx) = tokio_mpsc::unbounded_channel();
+        let mut streamer = DiffStreamer::new(Arc::new(CliRunner::isolated(dir)), tx);
+        streamer.set_emoji_zwj(EmojiZwj::Keep);
+
+        streamer.start(tag(1), untracked("a"), 250);
+
+        let Some(AppIntent::DiffLoaded {
+            result: Ok(chunk), ..
+        }) = rx.recv().await
+        else {
+            panic!("expected a chunk");
+        };
+        let added: Vec<&str> = chunk
+            .lines
+            .iter()
+            .filter(|l| l.kind == LineKind::Added)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert_eq!(added, [format!("+{family}")]);
     }
 }
