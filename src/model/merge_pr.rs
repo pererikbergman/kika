@@ -3,9 +3,8 @@
 //! merge reaches GitHub only after a question that `y` alone answers, and
 //! only on a host the global config lists.
 
-use super::pull_request::{REFRESH_LIMITED, same_repo};
 use super::review::{NO_FORGE, ReviewScreen};
-use super::{AppState, Context};
+use super::{AppState, Context, REFRESH_LIMITED, same_repo};
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::{MergeMethod, merge_options};
 use crate::forge::remote::matches;
@@ -127,7 +126,7 @@ impl AppState {
     }
 
     /// The method picked from the "Merge method" list: ask about it.
-    pub(super) fn pick_merge_method(&mut self, row: usize) {
+    pub(crate) fn pick_merge_method(&mut self, row: usize) {
         let Some((mut confirm, methods)) = self.review.merge_pick.take() else {
             return;
         };

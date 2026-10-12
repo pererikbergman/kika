@@ -896,6 +896,15 @@ pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> boo
         .contains(ratatui::style::Modifier::REVERSED)
 }
 
+/// The tag the forge effect tests send and expect back.
+pub(crate) fn forge_tag() -> Tag {
+    Tag {
+        generation: 0,
+        seq: 11,
+        user: false,
+    }
+}
+
 /// A workspace on github.com with `branches` listed, the Branches
 /// panel shown, and no load started.
 pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
