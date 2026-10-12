@@ -1243,6 +1243,8 @@ pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn commit_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING.into())
+    } else if let Some(reason) = crate::bisect::head_move_disabled(state) {
+        Some(reason)
     } else if state.files.is_empty() {
         Some("Nothing to commit".into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
@@ -1263,6 +1265,8 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
         Some(OP_RUNNING.into())
     } else if no_commit {
         Some("No commit to amend".into())
+    } else if let Some(reason) = crate::bisect::head_move_disabled(state) {
+        Some(reason)
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
         Some("Resolve conflicts before amending".into())
     } else {
@@ -1394,6 +1398,12 @@ pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| branch_selected_disabled(state))
 }
 
+/// Why no branch can be created from the selected one now: creating it
+/// checks it out, which moves `HEAD`.
+pub(crate) fn new_branch_disabled(state: &AppState) -> Option<Reason> {
+    branch_action_disabled(state).or_else(|| crate::bisect::head_move_disabled(state))
+}
+
 /// [`branch_action_disabled`] without the filter and range guard.
 fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
@@ -1411,6 +1421,7 @@ pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
         selected
             .is_some_and(|b| b.head)
             .then_some("Already on this branch".into())
+            .or_else(|| crate::bisect::head_move_disabled(state))
     })
 }
 
@@ -1462,7 +1473,7 @@ pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
     } else if state.branches.remotes.selected_branch().is_none() {
         Some("Select a remote branch".into())
     } else {
-        None
+        crate::bisect::head_move_disabled(state)
     }
 }
 
@@ -1592,7 +1603,7 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
         } else if resumable_operation(state).is_some() {
             Some("Finish or abort the operation in progress".into())
         } else {
-            None
+            crate::bisect::head_move_disabled(state)
         }
     })
 }
@@ -1628,14 +1639,18 @@ pub(crate) fn commit_action_disabled(state: &AppState) -> Option<Reason> {
 }
 
 pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<Reason> {
-    commit_action_disabled(state)
+    commit_action_disabled(state).or_else(|| crate::bisect::head_move_disabled(state))
 }
 
-/// Another operation in progress would mix with this one's commits.
+/// Another operation in progress would mix with this one's commits, and
+/// a bisect's `HEAD` is the commit it is testing, not one to build on.
+/// The bisect is checked here, not in [`resumable_operation`], which
+/// leaves it out on purpose; the operation to finish is named first.
 fn in_progress_disabled(state: &AppState) -> Option<Reason> {
     resumable_operation(state)
         .is_some()
         .then_some("Finish or abort the operation in progress".into())
+        .or_else(|| crate::bisect::head_move_disabled(state))
 }
 
 /// Why the selected commit cannot be reverted now. A merge commit needs a
@@ -4527,7 +4542,7 @@ static REGISTRY: &[Binding] = &[
         description: "Create a branch at the selected one and check it out",
         label: "new",
         bar: true,
-        disabled: branch_action_disabled,
+        disabled: new_branch_disabled,
     },
     // Not `r`, which reloads everywhere in the workspace.
     Binding {
@@ -8220,6 +8235,76 @@ mod tests {
             commits(key(KeyCode::Char('X'), KeyModifiers::SHIFT)),
             Some(OpenMenu(MenuId::Reset))
         );
+    }
+
+    /// A workspace with a change, a commit and another branch to act on,
+    /// and a bisect in progress.
+    fn bisecting() -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: 'M',
+            worktree: '.',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc".into(),
+            short_oid: "abc".into(),
+            parents: vec!["p".into()],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+            subject_altered: false,
+        }];
+        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
+            name: "topic".into(),
+            head: false,
+            upstream: None,
+            track: crate::git::branches::Track::None,
+            merged: false,
+        }]));
+        state.branch = Some(crate::git::status::BranchStatus {
+            head: Head::Detached("abc".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+            bisect: None,
+        });
+        state
+    }
+
+    #[test]
+    fn during_a_bisect_the_bar_and_help_say_to_reset_it_first() {
+        let state = bisecting();
+        let reason = |scope, k| match resolve(registry(), &Keymap::default(), scope, &state, k) {
+            Resolution::Disabled(reason) => Some(reason),
+            other => panic!("{k:?} in {scope:?}: {other:?}"),
+        };
+        let reset_first = Some(crate::bisect::RESET_FIRST.into());
+        let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
+        for (scope, k) in [
+            (KeyScope::Commits, plain(' ')),
+            (KeyScope::Commits, shift('R')),
+            (KeyScope::Commits, shift('X')),
+            (KeyScope::Files, plain('c')),
+            (KeyScope::Files, shift('A')),
+            (KeyScope::Branches, plain(' ')),
+            (KeyScope::Branches, plain('n')),
+            (KeyScope::Branches, plain('m')),
+        ] {
+            assert_eq!(reason(scope, k), reset_first, "{k:?} in {scope:?}");
+        }
+        let help = available(registry(), &Keymap::default(), KeyScope::Branches, &state);
+        let listed = |id| {
+            help.iter()
+                .find(|(b, _)| b.id == id)
+                .map(|(_, r)| r.clone())
+        };
+        assert_eq!(listed("branches.new"), Some(reset_first.clone()));
+        // Renaming moves nothing.
+        assert_eq!(listed("branches.rename"), Some(None));
     }
 
     #[test]

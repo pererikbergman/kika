@@ -30,6 +30,16 @@ pub(crate) const START_FROM_COMMITS: &str =
 /// Why continue does nothing while only a bisect is in progress.
 pub(crate) const MARK_INSTEAD: &str = "Mark the commit good or bad";
 
+/// Why `HEAD` may not move nor a commit be made during a bisect.
+pub(crate) const RESET_FIRST: &str = "Reset the bisect first: HEAD is the commit it is testing";
+
+/// Why an action that moves `HEAD` or makes a commit cannot run: the
+/// bisect is testing the commit checked out, and a commit made on it is
+/// lost when the bisect is reset.
+pub(crate) fn head_move_disabled(state: &AppState) -> Option<Reason> {
+    bisecting(state).then(|| RESET_FIRST.into())
+}
+
 /// Whether a bisect is in progress.
 pub(crate) fn bisecting(state: &AppState) -> bool {
     state
