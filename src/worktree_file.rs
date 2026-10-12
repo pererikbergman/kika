@@ -3,7 +3,10 @@
 //! path, for git's own files. Blocking; called from tasks.
 //!
 //! The path comes from the repository, which may be hostile, so no call
-//! follows a symlink anywhere along it or leaves the worktree. A replace
+//! follows a symlink anywhere along it or leaves the worktree. Nor does
+//! a repo path with a `.git` part, or on Windows a device name or a part
+//! ending in a dot or space, reach the filesystem: those would land in
+//! git's own directory or a device instead of a file. A replace
 //! is atomic: a temp file beside the target is written, synced and renamed
 //! over it, so a crash never leaves half a file. A create links its temp
 //! file into place, which fails on anything already there.
@@ -66,8 +69,11 @@ pub fn read_file(file: &Path, max: u64) -> Result<Vec<u8>, String> {
 pub fn replace_file(file: &Path, expected: &[u8], content: &[u8]) -> Result<(), String> {
     plain_file(file)?;
     let fail = |e: std::io::Error| format!("Could not write {}: {e}", file.display());
-    if fs::read(file).map_err(fail)? != expected {
-        return Err(CHANGED_ON_DISK.to_string());
+    // One byte past `expected` tells a longer file apart, so a file that
+    // grew huge, or never ends, is not read into memory.
+    match read_capped(file, expected.len() as u64).map_err(fail)? {
+        Some(held) if held == expected => {}
+        _ => return Err(CHANGED_ON_DISK.to_string()),
     }
     let permissions = fs::symlink_metadata(file).map_err(fail)?.permissions();
     let (temp, mut handle) = create_temp(file).map_err(fail)?;
@@ -259,7 +265,7 @@ fn refusal(path: &RepoPath, why: &str) -> String {
 /// file, a symlink included, is an error.
 fn located(root: &Path, path: &RepoPath) -> Result<(PathBuf, bool), String> {
     let refuse = |why: &str| refusal(path, why);
-    let parts = components(path).ok_or_else(|| refuse("the path is not a plain repo path"))?;
+    let parts = components(path).map_err(refuse)?;
     let Some((name, dirs)) = parts.split_last() else {
         return Err(refuse("the path is empty"));
     };
@@ -304,21 +310,19 @@ fn located(root: &Path, path: &RepoPath) -> Result<(PathBuf, bool), String> {
     Ok((at, exists))
 }
 
-/// The `/`-separated parts of a relative path, from its raw bytes. `None`
-/// for an absolute path or one with an empty, `.` or `..` part, which a
-/// path from git never has. Each part must be one plain name to the
-/// platform too: on Windows a `\` separates and a `:` makes a drive
-/// prefix (`D:x`) or a stream name, either of which would leave the
-/// worktree.
-fn components(path: &RepoPath) -> Option<Vec<OsString>> {
-    let raw = raw_bytes(path)?;
+/// The `/`-separated parts of a relative path, from its raw bytes, or why
+/// it is refused. An absolute path or one with an empty, `.` or `..`
+/// part, which a path from git never has, is refused. Each part must be
+/// one plain name to the platform too: on Windows a `\` separates and a
+/// `:` makes a drive prefix (`D:x`) or a stream name, either of which
+/// would leave the worktree. A `.git` part would reach git's own
+/// directory, not a worktree file; see [`refused_name`] for the rest.
+fn components(path: &RepoPath) -> Result<Vec<OsString>, &'static str> {
+    const NOT_PLAIN: &str = "the path is not a plain repo path";
+    let raw = raw_bytes(path).ok_or(NOT_PLAIN)?;
     if cfg!(windows) && raw.iter().any(|&b| b == b'\\' || b == b':') {
-        return None;
+        return Err(NOT_PLAIN);
     }
-    let parts: Vec<OsString> = raw
-        .split(|&b| b == b'/')
-        .map(crate::git::path::os_string)
-        .collect();
     let plain = |part: &OsString| {
         let mut inside = Path::new(part).components();
         matches!(
@@ -326,7 +330,55 @@ fn components(path: &RepoPath) -> Option<Vec<OsString>> {
             (Some(std::path::Component::Normal(name)), None) if name == part.as_os_str()
         )
     };
-    parts.iter().all(plain).then_some(parts)
+    raw.split(|&b| b == b'/')
+        .map(|bytes| {
+            let part = crate::git::path::os_string(bytes);
+            if !plain(&part) {
+                return Err(NOT_PLAIN);
+            }
+            refused_name(bytes).map_or(Ok(part), Err)
+        })
+        .collect()
+}
+
+/// Why the plain name `part` is refused, if it is. `.git` in any case
+/// would reach git's own directory. On Windows, which drops a trailing
+/// dot or space and opens a device for a reserved name in any folder,
+/// these would reach another file or a device, and `GIT~1` is the short
+/// name of `.git`.
+fn refused_name(part: &[u8]) -> Option<&'static str> {
+    const DOT_GIT: &str = "a part is named .git";
+    if part.eq_ignore_ascii_case(b".git") {
+        return Some(DOT_GIT);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    if matches!(part.last(), Some(b'.' | b' ')) {
+        Some("a part ends in a dot or space")
+    } else if part.eq_ignore_ascii_case(b"git~1") {
+        Some(DOT_GIT)
+    } else if device_name(part) {
+        Some("a part is a Windows device name")
+    } else {
+        None
+    }
+}
+
+/// Whether Windows opens a device, not a file, for `part`: its base
+/// before the first `.`, less trailing spaces, is a reserved name in any
+/// case. Compiled everywhere so it is tested everywhere.
+fn device_name(part: &[u8]) -> bool {
+    let base = part.split(|&b| b == b'.').next().unwrap_or_default();
+    let end = base.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+    let base = base[..end].to_ascii_uppercase();
+    // `1`–`9`, or a UTF-8 superscript `¹`, `²` or `³`.
+    let digit = |rest: &[u8]| matches!(rest, [b'1'..=b'9'] | [0xC2, 0xB9 | 0xB2 | 0xB3]);
+    match base.as_slice() {
+        b"CON" | b"PRN" | b"AUX" | b"NUL" | b"CONIN$" | b"CONOUT$" => true,
+        [b'C', b'O', b'M', rest @ ..] | [b'L', b'P', b'T', rest @ ..] => digit(rest),
+        _ => false,
+    }
 }
 
 #[cfg(unix)]
@@ -339,6 +391,54 @@ fn raw_bytes(path: &RepoPath) -> Option<Vec<u8>> {
 #[cfg(not(unix))]
 fn raw_bytes(path: &RepoPath) -> Option<Vec<u8>> {
     path.as_os_str().to_str().map(|s| s.as_bytes().to_vec())
+}
+
+/// Name rules that need no filesystem, run on every platform.
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn a_part_named_dot_git_is_refused_in_any_case() {
+        for name in [".git", ".GIT", ".Git/config", "sub/.git/hooks/x", "a/.git"] {
+            assert_eq!(
+                components(&RepoPath::from(name)),
+                Err("a part is named .git"),
+                "{name:?}"
+            );
+        }
+        for name in [".gitignore", ".git2", "x.git", "git", "dir/.gitattributes"] {
+            assert!(components(&RepoPath::from(name)).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn device_names_match_ignoring_case_extension_and_trailing_spaces() {
+        for name in [
+            "CON",
+            "con",
+            "Prn",
+            "aux",
+            "NUL",
+            "nul.txt",
+            "COM1",
+            "com9.tar.gz",
+            "LPT1",
+            "lpt9",
+            "COM¹",
+            "LPT³",
+            "CONIN$",
+            "conout$",
+            "AUX .c",
+        ] {
+            assert!(device_name(name.as_bytes()), "{name:?}");
+        }
+        for name in [
+            "CONSOLE", "COM0", "COM10", "LPT", "xcon", "con_x", "nul-file", "a.con",
+        ] {
+            assert!(!device_name(name.as_bytes()), "{name:?}");
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -394,11 +494,24 @@ mod tests {
 
     #[test]
     fn each_part_must_be_one_plain_name() {
-        for name in ["a", "dir/a.txt", "a.", "...", "a\\b", "c:d"] {
-            assert!(components(&RepoPath::from(name)).is_some(), "{name:?}");
+        // Windows' rules for dots, spaces, devices and short names stay
+        // there: here these are ordinary names.
+        for name in [
+            "a",
+            "dir/a.txt",
+            "a.",
+            "...",
+            "a\\b",
+            "c:d",
+            "a ",
+            "CON",
+            "nul.txt",
+            "GIT~1",
+        ] {
+            assert!(components(&RepoPath::from(name)).is_ok(), "{name:?}");
         }
         for name in ["", "/a", "a/", "a//b", "./a", "a/.", "../a", "a/../b"] {
-            assert_eq!(components(&RepoPath::from(name)), None, "{name:?}");
+            assert!(components(&RepoPath::from(name)).is_err(), "{name:?}");
         }
     }
 
@@ -414,6 +527,33 @@ mod tests {
             Err(CHANGED_ON_DISK.to_string())
         );
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"edited elsewhere\n");
+        assert_eq!(temps(root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_file_that_grew_shrank_or_differs_is_changed_on_disk_and_left_untouched() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let grown = [b"old\n".to_vec(), vec![b'x'; 1024 * 1024]].concat();
+        for (name, held) in [
+            ("grown", grown),
+            ("short", b"old".to_vec()),
+            ("differs", b"odd\n".to_vec()),
+        ] {
+            let file = root.join(name);
+            fs::write(&file, &held).unwrap();
+            assert_eq!(
+                replace(root, &RepoPath::from(name), b"old\n", b"new\n"),
+                Err(CHANGED_ON_DISK.to_string()),
+                "replace {name}"
+            );
+            assert_eq!(
+                replace_file(&file, b"old\n", b"new\n"),
+                Err(CHANGED_ON_DISK.to_string()),
+                "replace_file {name}"
+            );
+            assert!(fs::read(&file).unwrap() == held, "{name} untouched");
+        }
         assert_eq!(temps(root), Vec::<String>::new());
     }
 
@@ -675,8 +815,60 @@ mod windows_tests {
             "a\\b",
             "..\\x",
         ] {
-            assert_eq!(components(&RepoPath::from(name)), None, "{name:?}");
+            assert!(components(&RepoPath::from(name)).is_err(), "{name:?}");
         }
+    }
+
+    #[test]
+    fn devices_trailing_dots_and_spaces_and_the_short_dot_git_name_are_refused() {
+        let refused = |name: &str| components(&RepoPath::from(name)).err();
+        for name in ["CON", "dir/nul.txt", "COM1/x"] {
+            assert_eq!(
+                refused(name),
+                Some("a part is a Windows device name"),
+                "{name:?}"
+            );
+        }
+        for name in ["a.", "a ", "dir./x", "x/b "] {
+            assert_eq!(
+                refused(name),
+                Some("a part ends in a dot or space"),
+                "{name:?}"
+            );
+        }
+        for name in ["GIT~1", "git~1/config", ".git."] {
+            let why = refused(name);
+            assert!(
+                matches!(
+                    why,
+                    Some("a part is named .git" | "a part ends in a dot or space")
+                ),
+                "{name:?}: {why:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_or_short_dot_git_path_is_never_read_or_written() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let add = |_: Option<&[u8]>| Some(b"pwned\n".to_vec());
+        for name in ["NUL", "GIT~1/config"] {
+            let path = RepoPath::from(name);
+            let results = [
+                read(&root, &path, 1024).map(|_| ()),
+                replace(&root, &path, b"", b"pwned\n"),
+                create(&root, &path, b"pwned\n"),
+                update(&root, &path, 1024, add).map(|_| ()),
+            ];
+            for result in results {
+                let err = result.expect_err(name);
+                assert!(err.starts_with("Kika will not touch"), "{name:?}: {err}");
+            }
+        }
+        let left: Vec<_> = fs::read_dir(&root).unwrap().collect();
+        assert_eq!(left.len(), 0);
     }
 
     #[test]
