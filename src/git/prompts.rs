@@ -209,6 +209,7 @@ mod tests {
                 message: None,
                 paths: vec![],
                 restore: vec![],
+                unstage: vec![],
             },
             GitOp::StashApply(stash()),
             GitOp::StashPop(stash()),

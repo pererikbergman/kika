@@ -169,11 +169,16 @@ pub enum GitOp {
     /// `restore` holds the old sides of staged renames among them: git
     /// no longer knows those paths in the index, so they are left out of
     /// the pathspec and checked out from `HEAD` once the push is done.
+    /// `unstage` holds staged deletions among `paths`: git refuses them as
+    /// a pathspec for the same reason, and a deletion has no other path to
+    /// carry it, so each is reset to `HEAD` in the index first, which
+    /// leaves it deleted in the worktree for the push to take.
     StashPush {
         mode: StashMode,
         message: Option<String>,
         paths: Vec<RepoPath>,
         restore: Vec<RepoPath>,
+        unstage: Vec<RepoPath>,
     },
     /// Apply the entry to the worktree and keep it in the list.
     StashApply(StashRef),
@@ -293,14 +298,20 @@ pub const STASH_COPY: &str =
 /// path, which the push would leave alone and the restore overwrite.
 pub const STASH_RENAME_TAKEN: &str = "A file now sits at the renamed file's old path";
 
-/// What a selected-file stash takes: the push's mode and pathspec, and the
-/// old sides of staged renames, restored after it. See
+/// Why a stash of a staged deletion is refused: something sits at its
+/// path, which the push's cleanup would overwrite with `HEAD`'s version.
+pub const STASH_DELETED_TAKEN: &str = "A file now sits at the deleted file's path";
+
+/// What a selected-file stash takes: the push's mode and pathspec, the
+/// old sides of staged renames, restored after it, and the staged
+/// deletions, reset to `HEAD` in the index before it. See
 /// [`GitOp::stash_files_for`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StashSet {
     pub mode: StashMode,
     pub paths: Vec<RepoPath>,
     pub restore: Vec<RepoPath>,
+    pub unstage: Vec<RepoPath>,
 }
 
 /// How a merge records the other branch's commits.
@@ -445,9 +456,11 @@ impl GitOp {
     /// What stashing only `entry` puts aside. A staged rename goes as one
     /// change: its new path in the pathspec and its old one restored after
     /// the push, since git no longer knows the old path in the index and
-    /// refuses it as a pathspec. Any other entry names its paths, a copy's
-    /// source too. An untracked file needs `-u`, since git does not match
-    /// untracked files by pathspec without it. Conflicts cannot be stashed.
+    /// refuses it as a pathspec. A staged deletion is named and also
+    /// unstaged before the push, for the same reason. Any other entry names
+    /// its paths, a copy's source too. An untracked file needs `-u`, since
+    /// git does not match untracked files by pathspec without it. Conflicts
+    /// cannot be stashed.
     pub fn stash_file_for(entry: &FileEntry) -> Option<StashSet> {
         let mode = match entry.kind {
             EntryKind::Conflicted => return None,
@@ -460,11 +473,19 @@ impl GitOp {
                 mode,
                 paths: vec![path],
                 restore: vec![old.clone()],
+                unstage: vec![],
+            }),
+            (None, 'D') => Some(StashSet {
+                mode,
+                paths: vec![path.clone()],
+                restore: vec![],
+                unstage: vec![path],
             }),
             (orig, _) => Some(StashSet {
                 mode,
                 paths: orig.iter().cloned().chain([path]).collect(),
                 restore: vec![],
+                unstage: vec![],
             }),
         }
     }
@@ -487,6 +508,7 @@ impl GitOp {
             mode: StashMode::All,
             paths: Vec::new(),
             restore: Vec::new(),
+            unstage: Vec::new(),
         };
         let add = |list: &mut Vec<RepoPath>, more: Vec<RepoPath>| {
             for path in more {
@@ -502,6 +524,7 @@ impl GitOp {
             }
             add(&mut set.paths, one.paths);
             add(&mut set.restore, one.restore);
+            add(&mut set.unstage, one.unstage);
         }
         if set.restore.iter().any(|old| set.paths.contains(old)) {
             return None;
@@ -607,8 +630,8 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // untracked files through a `:/` pathspec of git's own, which a
         // literal reading turns into a name that matches nothing, and they
         // would stay in the worktree as well as in the stash.
-        // A rename's old path is in `restore`, not here: see
-        // `GitOp::StashPush`.
+        // A rename's old path is in `restore`, not here; a staged deletion
+        // is here and in `unstage`: see `GitOp::StashPush`.
         GitOp::StashPush {
             mode,
             message,
@@ -921,35 +944,84 @@ fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
         .ok_or_else(|| "Could not read HEAD".to_string())
 }
 
-/// Stash a set with staged renames in it: the push without their old
-/// paths, then those checked out from `HEAD`, so the worktree is clean for
-/// both sides. Fails closed: nothing runs when the old paths, or the
-/// directories they need, are taken.
-fn push_with_restore(
+/// Put staged deletions back in the index as they are at `head`, so git
+/// knows their paths as a pathspec again; the worktree keeps them deleted.
+/// The id is hex digits only, so it cannot be read as an option.
+fn unstage_command(head: &CommitId, unstage: &[RepoPath]) -> GitCommand {
+    let cmd = GitCommand::new("reset").arg("-q").arg(head.as_str());
+    with_literal_paths(cmd, unstage)
+}
+
+/// Stage the deletions again after a push that failed, as they were.
+fn restage_command(unstage: &[RepoPath]) -> GitCommand {
+    let cmd = GitCommand::new("rm").arg("--cached").arg("-q");
+    with_literal_paths(cmd, unstage)
+}
+
+/// Stash a set with staged renames or deletions in it. Renames: the push
+/// without their old paths, then those checked out from `HEAD`. Deletions:
+/// reset to `HEAD` in the index first, so the push can name them, and
+/// staged again if the push fails. Either way the worktree ends clean for
+/// every path. Fails closed: nothing changes when an old or deleted path,
+/// or a directory it needs, is taken, since git would write `HEAD`'s
+/// version there.
+fn push_with_fixups(
     runner: &dyn GitRunner,
     op: &GitOp,
     restore: &[RepoPath],
+    unstage: &[RepoPath],
 ) -> Result<(), String> {
     let head = head_commit(runner)?;
-    if restore_taken(runner, restore)? {
+    if !restore.is_empty() && restore_taken(runner, restore)? {
         return Err(STASH_RENAME_TAKEN.into());
+    }
+    if !unstage.is_empty() && restore_taken(runner, unstage)? {
+        return Err(STASH_DELETED_TAKEN.into());
     }
     let top = super::repo_root::find_toplevel(runner)
         .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
     if restore_blocked_on_disk(&top, restore) {
         return Err(STASH_RENAME_TAKEN.into());
     }
-    run_checked(runner, &op_command(op))?;
+    if restore_blocked_on_disk(&top, unstage) {
+        return Err(STASH_DELETED_TAKEN.into());
+    }
+    if !unstage.is_empty() {
+        run_checked(runner, &unstage_command(&head, unstage))?;
+    }
+    if let Err(why) = run_checked(runner, &op_command(op)) {
+        if unstage.is_empty() {
+            return Err(why);
+        }
+        return match run_checked(runner, &restage_command(unstage)) {
+            Ok(_) => Err(why),
+            Err(also) => {
+                let names = listed(unstage);
+                Err(format!(
+                    "{why}\n{also}\n{names} is now an unstaged deletion; \
+                     stage it again with git rm --cached -- {names}."
+                ))
+            }
+        };
+    }
+    if restore.is_empty() {
+        return Ok(());
+    }
     run_checked(runner, &restore_command(&head, restore))
         .map(|_| ())
         .map_err(|why| {
-            let names: Vec<&str> = restore.iter().map(RepoPath::display).collect();
             format!(
                 "{why}\nThe stash was saved, but {} is still staged as deleted; \
                  check it out from HEAD to restore it.",
-                names.join(", ")
+                listed(restore)
             )
         })
+}
+
+/// `paths` for a message, comma-separated.
+fn listed(paths: &[RepoPath]) -> String {
+    let names: Vec<&str> = paths.iter().map(RepoPath::display).collect();
+    names.join(", ")
 }
 
 /// `git stash store`: the entry's commit again, as `stash@{0}`, under
@@ -1096,8 +1168,10 @@ fn run_op_with(
             mode: StashMode::Staged,
             ..
         } => staged_stash_supported(runner)?,
-        GitOp::StashPush { restore, .. } if !restore.is_empty() => {
-            return push_with_restore(runner, op, restore);
+        GitOp::StashPush {
+            restore, unstage, ..
+        } if !restore.is_empty() || !unstage.is_empty() => {
+            return push_with_fixups(runner, op, restore, unstage);
         }
         _ => {}
     }
@@ -3813,15 +3887,22 @@ mod tests {
             message: message.map(Into::into),
             paths: paths.iter().map(|&p| p.into()).collect(),
             restore: vec![],
+            unstage: vec![],
         }
     }
 
     fn set(mode: StashMode, paths: &[&str], restore: &[&str]) -> StashSet {
+        unstaging(mode, paths, restore, &[])
+    }
+
+    /// A set with staged deletions, `unstage`, in it.
+    fn unstaging(mode: StashMode, paths: &[&str], restore: &[&str], unstage: &[&str]) -> StashSet {
         let list = |ps: &[&str]| ps.iter().map(|&p| RepoPath::from(p)).collect();
         StashSet {
             mode,
             paths: list(paths),
             restore: list(restore),
+            unstage: list(unstage),
         }
     }
 
@@ -3831,6 +3912,7 @@ mod tests {
             message: message.map(Into::into),
             paths: set.paths,
             restore: set.restore,
+            unstage: set.unstage,
         }
     }
 
@@ -3959,8 +4041,23 @@ mod tests {
                 &[]
             ))
         );
+        // A staged deletion is named and unstaged before the push; an
+        // unstaged one is still in the index, so it is only named.
         assert_eq!(
             GitOp::stash_files_for(&[&staged_deleted]),
+            Some(unstaging(StashMode::All, &["gone.rs"], &[], &["gone.rs"]))
+        );
+        assert_eq!(
+            GitOp::stash_files_for(&[&staged_deleted, &changed]),
+            Some(unstaging(
+                StashMode::All,
+                &["gone.rs", "a.rs"],
+                &[],
+                &["gone.rs"]
+            ))
+        );
+        assert_eq!(
+            GitOp::stash_files_for(&[&unstaged_deleted]),
             Some(set(StashMode::All, &["gone.rs"], &[]))
         );
         // Nothing, or any conflict, stashes nothing.
@@ -4064,6 +4161,137 @@ mod tests {
             )
         );
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_staged_deletion_is_reset_to_head_then_named_to_the_push() {
+        let head = "ab".repeat(20);
+        let empty_top = EmptyTop::new();
+        let gone = entry("-gone.rs", 'D', '.', EntryKind::Changed);
+        let op = set_push(GitOp::stash_file_for(&gone).unwrap(), None);
+        let literal = [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")];
+        let reset = unstage_command(&oid(&head), &["-gone.rs".into()]);
+        assert_eq!(argv(&reset), ["reset", "-q", &head, "--", "-gone.rs"]);
+        assert_eq!(literal_env(&reset), literal);
+        assert_eq!(literal_env(&op_command(&op)), literal);
+        let guard = restore_taken_command(&["-gone.rs".into()]);
+        assert_eq!(literal_env(&guard), literal);
+
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(format!("{head}\n").as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "-gone.rs"],
+                ok(b""),
+            )
+            .expect(&["rev-parse", "--show-toplevel"], empty_top.stdout())
+            .expect(&["reset", "-q", &head, "--", "-gone.rs"], ok(b""))
+            .expect(&["stash", "push", "--", "-gone.rs"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_rename_and_a_deletion_together_unstage_before_and_restore_after() {
+        let head = "ab".repeat(20);
+        let empty_top = EmptyTop::new();
+        let op = set_push(
+            unstaging(
+                StashMode::All,
+                &["new.rs", "gone.rs"],
+                &["old.rs"],
+                &["gone.rs"],
+            ),
+            None,
+        );
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
+                ok(b""),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "gone.rs"],
+                ok(b""),
+            )
+            .expect(&["rev-parse", "--show-toplevel"], empty_top.stdout())
+            .expect(&["reset", "-q", &head, "--", "gone.rs"], ok(b""))
+            .expect(&["stash", "push", "--", "new.rs", "gone.rs"], ok(b""))
+            .expect(&["checkout", "-q", &head, "--", "old.rs"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_deletion_whose_path_is_taken_runs_no_reset_or_push() {
+        let head = "ab".repeat(20);
+        let op = set_push(
+            unstaging(StashMode::All, &["gone.rs"], &[], &["gone.rs"]),
+            None,
+        );
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                ok(head.as_bytes()),
+            )
+            .expect(
+                &["ls-files", "-z", "--cached", "--others", "--", "gone.rs"],
+                ok(b"gone.rs\0"),
+            );
+        assert_eq!(run_op(&runner, &op), Err(STASH_DELETED_TAKEN.into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_push_stages_the_deletion_again() {
+        let head = "ab".repeat(20);
+        let failed = |why: &[u8]| GitOutput {
+            success: false,
+            stdout: vec![],
+            stderr: why.to_vec(),
+        };
+        let op = set_push(
+            unstaging(StashMode::All, &["gone.rs"], &[], &["gone.rs"]),
+            None,
+        );
+        let runner = |restaged: GitOutput, top: &EmptyTop| {
+            FakeRunner::new()
+                .expect(
+                    &["rev-parse", "--verify", "-q", "HEAD^{commit}"],
+                    ok(head.as_bytes()),
+                )
+                .expect(
+                    &["ls-files", "-z", "--cached", "--others", "--", "gone.rs"],
+                    ok(b""),
+                )
+                .expect(&["rev-parse", "--show-toplevel"], top.stdout())
+                .expect(&["reset", "-q", &head, "--", "gone.rs"], ok(b""))
+                .expect(
+                    &["stash", "push", "--", "gone.rs"],
+                    failed(b"error: push failed\n"),
+                )
+                .expect(&["rm", "--cached", "-q", "--", "gone.rs"], restaged)
+        };
+        let top = EmptyTop::new();
+        let rolled_back = runner(ok(b""), &top);
+        assert_eq!(run_op(&rolled_back, &op), Err("error: push failed".into()));
+        rolled_back.assert_done();
+
+        let stuck = runner(failed(b"fatal: index.lock exists\n"), &top);
+        assert_eq!(
+            run_op(&stuck, &op),
+            Err(
+                "error: push failed\nfatal: index.lock exists\ngone.rs is now an \
+                 unstaged deletion; stage it again with git rm --cached -- gone.rs."
+                    .into()
+            )
+        );
+        stuck.assert_done();
     }
 
     /// An empty directory standing in for the worktree's top level, so the
@@ -4307,6 +4535,115 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("old.txt")).unwrap(),
             "mine\n"
+        );
+    }
+
+    /// A repo with `d/gone`, the only file in `d`, staged as deleted, and
+    /// two changes beside it that no stash here selects: ` M other` and
+    /// `A  added`.
+    fn staged_deletion_repo() -> crate::git::fake::TempDir {
+        use crate::git::fake::git;
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/gone"), "gone\n").unwrap();
+        std::fs::write(dir.join("other"), "other\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "gone"]);
+        git(dir, &["rm", "-q", "--", "d/gone"]);
+        let _ = std::fs::remove_dir(dir.join("d"));
+        std::fs::write(dir.join("other"), "other changed\n").unwrap();
+        std::fs::write(dir.join("added"), "added\n").unwrap();
+        git(dir, &["add", "--", "added"]);
+        assert_eq!(
+            git(dir, &["status", "--porcelain"]),
+            b"A  added\nD  d/gone\n M other\n"
+        );
+        tmp
+    }
+
+    #[test]
+    fn a_lone_staged_deletion_is_stashed_and_pops_back_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = staged_deletion_repo();
+        let dir = tmp.path();
+        let deleted = entry("d/gone", 'D', '.', EntryKind::Changed);
+        let op = set_push(GitOp::stash_file_for(&deleted).unwrap(), None);
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &op).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("d/gone")).unwrap(),
+            "gone\n"
+        );
+        assert_eq!(
+            git(dir, &["status", "--porcelain"]),
+            b"A  added\n M other\n"
+        );
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read("other"), "other changed\n");
+        assert_eq!(read("added"), "added\n");
+        assert_eq!(stash_count(dir), 1);
+        // The stash's trees start from the whole index, so the staged
+        // `added` shows too; only the named path is cleaned.
+        let shown = git(dir, &["stash", "show", "--name-status", "stash@{0}"]);
+        assert_eq!(shown, b"A\tadded\nD\td/gone\n");
+
+        git(dir, &["stash", "pop", "-q"]);
+        assert!(!dir.join("d/gone").exists());
+        assert_eq!(
+            git(dir, &["status", "--porcelain"]),
+            b"A  added\n D d/gone\n M other\n"
+        );
+        assert_eq!(stash_count(dir), 0);
+    }
+
+    #[test]
+    fn a_file_back_at_the_deleted_path_stops_the_stash_before_git_changes_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = staged_deletion_repo();
+        let dir = tmp.path();
+        let deleted = entry("d/gone", 'D', '.', EntryKind::Changed);
+        let op = set_push(GitOp::stash_file_for(&deleted).unwrap(), None);
+        // It appeared after the set was chosen.
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/gone"), "mine\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+        assert!(before.windows(10).any(|w| w == b"D  d/gone\n"));
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_DELETED_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("d/gone")).unwrap(),
+            "mine\n"
+        );
+    }
+
+    #[test]
+    fn a_file_at_the_deleted_path_in_another_case_stops_the_stash_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = staged_deletion_repo();
+        let dir = tmp.path();
+        if !ignores_case(dir) {
+            return;
+        }
+        let deleted = entry("d/gone", 'D', '.', EntryKind::Changed);
+        let op = set_push(GitOp::stash_file_for(&deleted).unwrap(), None);
+        // Git sees `D/Gone` as untracked; the filesystem folds it onto
+        // the deleted path.
+        std::fs::create_dir(dir.join("D")).unwrap();
+        std::fs::write(dir.join("D/Gone"), "MINE\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_DELETED_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("D/Gone")).unwrap(),
+            "MINE\n"
         );
     }
 

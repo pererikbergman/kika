@@ -238,6 +238,7 @@ impl AppState {
                 mode,
                 paths: vec![],
                 restore: vec![],
+                unstage: vec![],
                 from_range: false,
             })
         });
@@ -255,6 +256,7 @@ impl AppState {
                 mode: set.mode,
                 paths: set.paths,
                 restore: set.restore,
+                unstage: set.unstage,
                 from_range,
             })
         });
@@ -289,6 +291,7 @@ impl AppState {
             mode,
             paths,
             restore,
+            unstage,
             from_range,
         }) = self.stash_draft.take()
         else {
@@ -310,6 +313,7 @@ impl AppState {
                 mode,
                 paths: paths.clone(),
                 restore: restore.clone(),
+                unstage: unstage.clone(),
             };
             if now.as_ref() != Some(&drafted) {
                 self.notice = Some(super::STASH_SET_CHANGED.into());
@@ -325,6 +329,7 @@ impl AppState {
             message,
             paths,
             restore,
+            unstage,
         })))
     }
 }
