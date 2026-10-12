@@ -306,16 +306,18 @@ fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec
             pending_space = true;
             continue;
         };
-        let mut text = text;
+        // The word's width is measured once and lowered as pieces are
+        // cut off, so a long word costs its length, not its length squared.
+        let mut rest: &str = &text;
+        let mut w = width_of(rest);
         loop {
-            let w = width_of(&text);
             let space = usize::from(pending_space && used > prefix_width(&current));
             if used + space + w <= width {
                 if space == 1 {
                     current.push(Span::raw(" "));
                 }
                 used += space + w;
-                current.push(Span::styled(text, style));
+                current.push(Span::styled(rest.to_string(), style));
                 break;
             }
             if used > prefix_width(&current) {
@@ -325,14 +327,15 @@ fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec
                 pending_space = false;
                 continue;
             }
-            // Longer than a whole line: cut it, at least a char a line.
-            let (head, tail) = split_at_width(&text, width.saturating_sub(used).max(1));
-            current.push(Span::styled(head, style));
+            // Longer than a whole line: cut it, at least a cluster a line.
+            let (cut, cols) = cut_at_width(rest, width.saturating_sub(used).max(1));
+            current.push(Span::styled(rest[..cut].to_string(), style));
             lines.push(Line::from(std::mem::take(&mut current)));
             current = vec![Span::raw(hang.to_string())];
             used = width_of(hang);
-            text = tail;
-            if text.is_empty() {
+            rest = &rest[cut..];
+            w = w.saturating_sub(cols);
+            if rest.is_empty() {
                 break;
             }
         }
@@ -386,18 +389,34 @@ fn words(spans: Vec<Span<'static>>) -> Vec<Option<(String, Style)>> {
     out
 }
 
-/// `text` cut after at most `cols` columns (at least one char), and what
-/// is left.
-fn split_at_width(text: &str, cols: usize) -> (String, String) {
+/// Where to cut `text` so the head takes at most `cols` columns (at
+/// least one cluster), and the head's width. Text is cut only between
+/// clusters: a char with the zero-width chars after it (combining marks,
+/// variation selectors such as U+FE0F), or chars joined by U+200D. Each
+/// cluster is measured whole, as the terminal draws it, so a selector
+/// that widens its base is counted.
+fn cut_at_width(text: &str, cols: usize) -> (usize, usize) {
     let mut used = 0;
-    for (i, c) in text.char_indices() {
-        let w = width_of(c.encode_utf8(&mut [0; 4]));
-        if used + w > cols && i > 0 {
-            return (text[..i].to_string(), text[i..].to_string());
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        let mut end = start + c.len_utf8();
+        let mut joined = c == '\u{200D}';
+        while let Some(&(at, next)) = chars.peek() {
+            let zero = width_of(next.encode_utf8(&mut [0; 4])) == 0;
+            if !(zero || joined) {
+                break;
+            }
+            joined = next == '\u{200D}';
+            end = at + next.len_utf8();
+            chars.next();
+        }
+        let w = width_of(&text[start..end]);
+        if used + w > cols && start > 0 {
+            return (start, used);
         }
         used += w;
     }
-    (text.to_string(), String::new())
+    (text.len(), used)
 }
 
 /// A fenced code line, indented and dim, cut to `width` with a dim `…`
@@ -407,8 +426,11 @@ fn code_line(raw: &str, width: usize) -> Line<'static> {
     if width_of(&text) <= width {
         return Line::from(Span::styled(text, dim()));
     }
-    let (head, _) = split_at_width(&text, width.saturating_sub(1).max(1));
-    Line::from(vec![Span::styled(head, dim()), Span::styled("…", dim())])
+    let (cut, _) = cut_at_width(&text, width.saturating_sub(1).max(1));
+    Line::from(vec![
+        Span::styled(text[..cut].to_string(), dim()),
+        Span::styled("…", dim()),
+    ])
 }
 
 /// Columns of indentation before `line`'s text, a tab counting four.
@@ -592,7 +614,7 @@ mod tests {
     fn random_unicode_renders_within_the_width() {
         const ALPHABET: &[char] = &[
             '_', '*', '`', '[', ']', '(', ')', '#', '>', '-', '1', '.', ' ', ' ', '\n', '\t', 'a',
-            'é', '\u{301}', '日', '👍', '\u{200D}', '<', '!', '~', 'x', ':',
+            'é', '\u{301}', '日', '👍', '\u{200D}', '<', '!', '~', 'x', ':', '\u{FE0F}', '❤',
         ];
         let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
         let mut next = || {
@@ -601,7 +623,7 @@ mod tests {
             seed ^= seed << 17;
             seed
         };
-        for _ in 0..500 {
+        for _ in 0..3000 {
             let len = (next() % 120) as usize;
             let text: String = (0..len)
                 .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
@@ -651,5 +673,33 @@ mod tests {
                 "{unit:?} took {took:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_variation_selector_is_measured_as_drawn() {
+        let keycaps = "1\u{FE0F}".repeat(40);
+        for width in [8, 13, 40] {
+            for line in
+                render(&keycaps, width)
+                    .iter()
+                    .chain(&wrap_text(&keycaps, Style::new(), width))
+            {
+                assert!(line.width() <= width, "{width}: {line:?}");
+            }
+            let code = render(&format!("```\n{keycaps}\n```"), width);
+            assert!(code[0].width() <= width, "{width}: {:?}", code[0]);
+        }
+    }
+
+    /// One word as long as the description cap is cut in linear time,
+    /// even in the narrowest pane.
+    #[test]
+    fn a_huge_word_is_cut_in_linear_time() {
+        let word = "x".repeat(64 * 1024);
+        let start = std::time::Instant::now();
+        let lines = render(&word, 8);
+        let took = start.elapsed();
+        assert_eq!(lines.len(), 64 * 1024 / 8);
+        assert!(took < std::time::Duration::from_secs(2), "took {took:?}");
     }
 }

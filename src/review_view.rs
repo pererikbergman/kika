@@ -40,33 +40,56 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// What a problem says, in one line.
-pub fn problem_text(problem: ReviewProblem) -> String {
+/// What a problem says, and what to do about it when there is a next step.
+pub fn problem_text(problem: ReviewProblem) -> (String, Option<&'static str>) {
     match problem {
-        ReviewProblem::NoForgeHost => format!("{NO_FORGE}; add its host to [forge] github"),
-        ReviewProblem::Limited(until) => {
-            format!("GitHub is rate limited until {} UTC", clock(until))
+        ReviewProblem::NoForgeHost => (
+            NO_FORGE.to_string(),
+            Some("Add its host to [forge] github."),
+        ),
+        ReviewProblem::Limited(until) => (
+            format!("GitHub is rate limited until {} UTC", clock(until)),
+            None,
+        ),
+        ReviewProblem::Missing(number) => (format!("No pull request #{number}"), None),
+        ReviewProblem::Status(status) => {
+            let (what, next) = match status {
+                ForgeStatus::NoGh => (
+                    "The gh command is not installed",
+                    Some("Install the GitHub CLI."),
+                ),
+                ForgeStatus::NotLoggedIn => (
+                    "gh is not logged in to this host",
+                    Some("Run gh auth login."),
+                ),
+                ForgeStatus::Offline => (
+                    "GitHub could not be reached",
+                    Some("Check the network, then press r."),
+                ),
+                ForgeStatus::NoAccess => (
+                    "No access to the repository with gh's login",
+                    Some("Check gh auth status."),
+                ),
+                ForgeStatus::RateLimited => ("GitHub is rate limiting this account", None),
+                ForgeStatus::Failed => (
+                    "GitHub gave no usable answer",
+                    Some("Press r to try again."),
+                ),
+            };
+            (what.to_string(), next)
         }
-        ReviewProblem::Missing(number) => format!("No pull request #{number}"),
-        ReviewProblem::Status(status) => match status {
-            ForgeStatus::NoGh => "The gh command is not installed".into(),
-            ForgeStatus::NotLoggedIn => {
-                "gh is not logged in to this host; run gh auth login".into()
-            }
-            ForgeStatus::Offline => {
-                "GitHub could not be reached; check the network, then press r".into()
-            }
-            ForgeStatus::NoAccess => {
-                "No access to the repository with gh's login; check gh auth status".into()
-            }
-            ForgeStatus::RateLimited => "GitHub is rate limiting this account".into(),
-            ForgeStatus::Failed => "GitHub gave no usable answer".into(),
-        },
     }
 }
 
-fn problem_line(problem: ReviewProblem) -> Line<'static> {
-    Line::styled(problem_text(problem), Style::new().fg(Color::Red))
+/// The problem in red and its next step below it, each wrapped to
+/// `width` so neither is cut off.
+fn problem_lines(problem: ReviewProblem, width: usize) -> Vec<Line<'static>> {
+    let (what, next) = problem_text(problem);
+    let mut lines = markdown::wrap_text(&what, Style::new().fg(Color::Red), width);
+    if let Some(next) = next {
+        lines.extend(markdown::wrap_text(next, Style::new(), width));
+    }
+    lines
 }
 
 /// The tab line, then the rows the filter keeps, scrolled to the cursor.
@@ -99,7 +122,7 @@ fn queue_lines(review: &ReviewState, inner: Rect) -> Vec<Line<'static>> {
     }
     let mut lines = vec![Line::from(tabs)];
     if let Some(problem) = review.queues_fetch.error {
-        lines.push(problem_line(problem));
+        lines.extend(problem_lines(problem, usize::from(inner.width)));
         return lines;
     }
     if review.queues_fetch.loading && review.queues.is_none() {
@@ -178,7 +201,7 @@ fn width_of(text: &str) -> usize {
 /// The detail screen: loading, a problem, or the pull request scrolled.
 fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'static>> {
     if let Some(problem) = review.detail_fetch.error {
-        return vec![problem_line(problem)];
+        return problem_lines(problem, usize::from(inner.width));
     }
     match &review.detail {
         Some(detail) => {
@@ -550,5 +573,57 @@ mod tests {
         for line in &lines {
             assert!(line.width() <= 28, "{line:?}");
         }
+    }
+
+    #[test]
+    fn a_problem_and_its_next_step_wrap_to_a_narrow_panel() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(crate::intent::AppIntent::EnterReview);
+        let rows = draw(&state, 40, 10);
+        assert!(contains(&rows, "[forge] github"), "{rows:#?}");
+        assert!(
+            contains(&rows, "The remote is on no forge host in the"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "│global config "), "{rows:#?}");
+        let problems = [
+            ReviewProblem::NoForgeHost,
+            ReviewProblem::Limited(1_700_003_600),
+            ReviewProblem::Missing(7),
+            ReviewProblem::Status(ForgeStatus::NoGh),
+            ReviewProblem::Status(ForgeStatus::NotLoggedIn),
+            ReviewProblem::Status(ForgeStatus::Offline),
+            ReviewProblem::Status(ForgeStatus::NoAccess),
+            ReviewProblem::Status(ForgeStatus::RateLimited),
+            ReviewProblem::Status(ForgeStatus::Failed),
+        ];
+        for problem in problems {
+            let (what, next) = problem_text(problem);
+            for width in [20, 40, 60] {
+                let lines = problem_lines(problem, width);
+                let text: String = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let want: Vec<&str> = what
+                    .split_whitespace()
+                    .chain(next.into_iter().flat_map(str::split_whitespace))
+                    .collect();
+                assert_eq!(words, want, "{problem:?} at {width}");
+                for line in &lines {
+                    assert!(line.width() <= width, "{problem:?} at {width}: {line:?}");
+                }
+            }
+        }
+        // In the detail too.
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail_fetch.error = Some(ReviewProblem::Status(ForgeStatus::Offline));
+        let rows = draw(&state, 40, 10);
+        assert!(
+            contains(&rows, "Check the network, then press r."),
+            "{rows:#?}"
+        );
     }
 }
