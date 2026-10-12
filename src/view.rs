@@ -5912,8 +5912,8 @@ mod tests {
         state.files_loaded = true;
         state.focus = Focus::Commits;
         state.commits.tab = crate::commits::CommitsTab::Reflog;
-        state.commits.reflog.data = Some(crate::git::reflog::Reflog {
-            entries: crate::git::reflog::parse_records(include_bytes!(
+        state.commits.reflog.data = Some(crate::features::commits::reflog::Reflog {
+            entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
                 "git/fixtures/reflog/commit.bin"
             )),
             ..Default::default()

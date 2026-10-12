@@ -250,7 +250,7 @@ fn recent_checkouts(runner: &dyn GitRunner) -> Vec<BranchName> {
 
 /// Run a read-only query that must not take the index lock from the user,
 /// returning its stdout or git's message.
-pub(super) fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<Vec<u8>, String> {
+pub(crate) fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<Vec<u8>, String> {
     let cmd = cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
     let GitOutput {
         success,

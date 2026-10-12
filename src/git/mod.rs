@@ -24,7 +24,6 @@ pub mod patch;
 pub mod path;
 pub mod rebase_plan;
 pub mod recording;
-pub mod reflog;
 pub mod refs;
 pub mod remote;
 pub mod remotes;
@@ -36,7 +35,6 @@ pub mod stash;
 pub mod status;
 pub mod submodule;
 pub mod tags;
-pub mod undo;
 pub mod version;
 
 pub use runner::{CliRunner, GitRunner};
