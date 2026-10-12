@@ -1,7 +1,8 @@
 # Architecture checks
 
 CI runs [noupling](https://github.com/pererikbergman/noupling) over Kika's Rust sources
-in the `architecture` job of `.github/workflows/ci.yml`. It runs only in CI and on a
+in the `architecture` job of `.github/workflows/ci.yml`. CI runs it on the self-hosted
+Apple-silicon Mac runner (labels `self-hosted`, `mac`). It runs only in CI and on a
 developer's machine; Kika's binary and `Cargo.toml` do not depend on it.
 
 ## What is checked
@@ -79,7 +80,8 @@ on purpose as above and explain the change in the PR.
 ## Bumping noupling
 
 1. Pick the new release tag and set `NOUPLING_VERSION` in the `architecture` job.
-2. Get the SHA-256 of that release's `noupling-linux-x86_64` asset, for example with
+2. Get the SHA-256 of that release's `noupling-macos-aarch64` asset (the binary the
+   Mac runner uses), for example with
    `gh release view <tag> -R pererikbergman/noupling --json assets` (the `digest`
    field), and check it against a local download with `shasum -a 256`.
 3. Set `NOUPLING_SHA256` to that digest. Do not make the workflow fetch the release's
