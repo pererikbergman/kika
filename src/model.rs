@@ -958,8 +958,12 @@ impl AppState {
                     self.forge.cached(tag, repo, badges);
                 }
             }
-            AppIntent::PullRequestsFetched { tag, result } => {
-                return self.pull_requests_fetched(tag, result);
+            AppIntent::PullRequestsFetched {
+                tag,
+                result,
+                limited_until,
+            } => {
+                return self.pull_requests_fetched(tag, result, limited_until);
             }
             AppIntent::BranchLogLoaded {
                 tag,

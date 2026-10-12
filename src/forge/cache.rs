@@ -1,7 +1,8 @@
 //! The last pull requests seen per repository, on disk, so the badges show
 //! at once on startup. Machine-written state in the user's cache
-//! directory, private to them. It holds badges and the key they belong
-//! to: no token, title, URL userinfo or anything `gh` printed.
+//! directory, private to them. It holds badges, the branches asked about,
+//! the probe's validated ETag and the key they belong to: no token, title,
+//! URL userinfo or anything else `gh` printed.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -11,12 +12,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::github::MAX_BRANCHES;
+use super::github::{MAX_BRANCHES, valid_etag};
 use super::{CiState, ForgeRepo, PrBadge, PrState};
 use crate::git::branches::BranchName;
 
 /// The file format; another version is a miss.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Far more than 500 badges take; anything larger is not ours.
 const MAX_FILE: u64 = 1024 * 1024;
 
@@ -100,7 +101,24 @@ struct CacheFile {
     version: u32,
     key: CacheKey,
     fetched_at: i64,
+    /// The pull-request list's ETag, for the next conditional probe.
+    etag: Option<String>,
+    /// The branches the badges were asked for; another set needs a new ask.
+    queried: Vec<String>,
     prs: HashMap<String, StoredBadge>,
+}
+
+/// What one cache file holds for a repository.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Cached {
+    pub badges: HashMap<BranchName, PrBadge>,
+    /// Validated on read and write; an invalid one is dropped.
+    pub etag: Option<String>,
+    pub queried: Vec<BranchName>,
+    /// When GitHub last answered with these badges, in seconds since the
+    /// epoch. A 304 does not move it, so its age bounds how long a
+    /// probe alone may vouch for them.
+    pub fetched_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -166,9 +184,10 @@ impl From<&StoredBadge> for PrBadge {
     }
 }
 
-/// The badges stored for `key` in `dir`, or `None` for a miss: no file,
-/// a link, a file too large or malformed, or one written for another key.
-pub fn read(dir: &Path, key: &CacheKey) -> Option<HashMap<BranchName, PrBadge>> {
+/// What is stored for `key` in `dir`, or `None` for a miss: no file, a
+/// link, a file too large or malformed, of another version, or one
+/// written for another key.
+pub fn read(dir: &Path, key: &CacheKey) -> Option<Cached> {
     if is_link(dir) {
         return None;
     }
@@ -188,42 +207,50 @@ pub fn read(dir: &Path, key: &CacheKey) -> Option<HashMap<BranchName, PrBadge>> 
         return None;
     }
     let stored: CacheFile = serde_json::from_slice(&bytes).ok()?;
-    if stored.version != VERSION || stored.key != *key || stored.prs.len() > MAX_BRANCHES {
+    if stored.version != VERSION
+        || stored.key != *key
+        || stored.prs.len() > MAX_BRANCHES
+        || stored.queried.len() > MAX_BRANCHES
+    {
         return None;
     }
-    Some(
-        stored
+    Some(Cached {
+        badges: stored
             .prs
             .iter()
             .map(|(name, badge)| (BranchName::from(name.as_str()), PrBadge::from(badge)))
             .collect(),
-    )
+        etag: stored.etag.as_deref().and_then(valid_etag),
+        queried: stored
+            .queried
+            .iter()
+            .map(|name| BranchName::from(name.as_str()))
+            .collect(),
+        fetched_at: stored.fetched_at,
+    })
 }
 
-/// Store `badges` for `key` in `dir`, replacing the file in one rename.
-/// Names that are not UTF-8 are left out; they are never fetched.
-pub fn write(
-    dir: &Path,
-    key: &CacheKey,
-    badges: &HashMap<BranchName, PrBadge>,
-    fetched_at: i64,
-) -> io::Result<()> {
+/// Store `cached` for `key` in `dir`, replacing the file in one rename.
+/// Names that are not UTF-8 are left out; they are never fetched. An
+/// invalid ETag is not stored.
+pub fn write(dir: &Path, key: &CacheKey, cached: &Cached) -> io::Result<()> {
     ensure_dir(dir)?;
     let path = dir.join(key.file_name());
     if is_link(&path) {
         return Err(io::Error::other("the cache file is a symbolic link"));
     }
-    let prs = badges
+    let utf8 = |name: &BranchName| std::str::from_utf8(&name.0).ok().map(str::to_string);
+    let prs = cached
+        .badges
         .iter()
-        .filter_map(|(name, badge)| {
-            let name = std::str::from_utf8(&name.0).ok()?;
-            Some((name.to_string(), StoredBadge::from(*badge)))
-        })
+        .filter_map(|(name, badge)| Some((utf8(name)?, StoredBadge::from(*badge))))
         .collect();
     let file = CacheFile {
         version: VERSION,
         key: key.clone(),
-        fetched_at,
+        fetched_at: cached.fetched_at,
+        etag: cached.etag.as_deref().and_then(valid_etag),
+        queried: cached.queried.iter().filter_map(utf8).collect(),
         prs,
     };
     let bytes = serde_json::to_vec(&file).map_err(io::Error::other)?;
@@ -333,6 +360,15 @@ mod tests {
         ])
     }
 
+    fn cached() -> Cached {
+        Cached {
+            badges: badges(),
+            etag: Some("W/\"abc\"".into()),
+            queried: vec!["main".into(), "feature/x".into(), "no-pr".into()],
+            fetched_at: 1_700_000_000,
+        }
+    }
+
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |key| {
             vars.iter()
@@ -346,8 +382,8 @@ mod tests {
         let tmp = TempDir::new("forge-cache");
         let dir = tmp.path().join("kika").join("forge");
         assert_eq!(read(&dir, &key("/r")), None);
-        write(&dir, &key("/r"), &badges(), 1_700_000_000).unwrap();
-        assert_eq!(read(&dir, &key("/r")), Some(badges()));
+        write(&dir, &key("/r"), &cached()).unwrap();
+        assert_eq!(read(&dir, &key("/r")), Some(cached()));
         // Only the file is left, no temp.
         let names: Vec<_> = fs::read_dir(&dir)
             .unwrap()
@@ -371,14 +407,14 @@ mod tests {
         assert_ne!(key("/a").file_name(), shifted.file_name());
         assert_eq!(key("/a").file_name().len(), 16 + ".json".len());
 
-        write(tmp.path(), &key("/a"), &badges(), 0).unwrap();
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
         assert_eq!(read(tmp.path(), &key("/b")), None);
     }
 
     #[test]
     fn a_stored_key_that_differs_is_a_miss() {
         let tmp = TempDir::new("forge-cache");
-        write(tmp.path(), &key("/a"), &badges(), 0).unwrap();
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
         // Another repository's entry planted under this one's name.
         fs::rename(
             tmp.path().join(key("/a").file_name()),
@@ -394,7 +430,7 @@ mod tests {
         let path = tmp.path().join(key("/a").file_name());
         let valid = |extra: &str| {
             format!(
-                r#"{{"version":1,"key":{{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"}},"fetched_at":0,"prs":{{"main":{{"number":1,"state":"open","ci":null}}}}{extra}}}"#
+                r#"{{"version":2,"key":{{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"}},"fetched_at":0,"etag":null,"queried":["main"],"prs":{{"main":{{"number":1,"state":"open","ci":null}}}}{extra}}}"#
             )
         };
         fs::write(&path, valid("")).unwrap();
@@ -402,7 +438,7 @@ mod tests {
         for bad in [
             "{".to_string(),
             valid(r#","token":"x""#),
-            valid("").replace("\"version\":1", "\"version\":2"),
+            valid("").replace("\"version\":2", "\"version\":3"),
             valid("").replace("\"open\"", "\"weird\""),
             valid("").replace("\"number\":1", "\"number\":-1"),
         ] {
@@ -413,6 +449,43 @@ mod tests {
         big.extend(std::iter::repeat_n(b' ', 1024 * 1024));
         fs::write(&path, big).unwrap();
         assert_eq!(read(tmp.path(), &key("/a")), None);
+    }
+
+    #[test]
+    fn a_version_1_file_is_a_miss() {
+        let tmp = TempDir::new("forge-cache");
+        let v1 = r#"{"version":1,"key":{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"},"fetched_at":0,"prs":{"main":{"number":1,"state":"open","ci":null}}}"#;
+        fs::write(tmp.path().join(key("/a").file_name()), v1).unwrap();
+        assert_eq!(read(tmp.path(), &key("/a")), None);
+    }
+
+    #[test]
+    fn the_etag_and_queried_branches_round_trip_and_a_bad_etag_is_dropped() {
+        let tmp = TempDir::new("forge-cache");
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
+        let back = read(tmp.path(), &key("/a")).unwrap();
+        assert_eq!(back.etag.as_deref(), Some("W/\"abc\""));
+        assert_eq!(back.queried, cached().queried);
+
+        let long = format!("\"{}\"", "a".repeat(300));
+        for bad in ["\"a\u{1b}b\"", long.as_str(), "abc"] {
+            let with_bad = Cached {
+                etag: Some(bad.into()),
+                ..cached()
+            };
+            write(tmp.path(), &key("/a"), &with_bad).unwrap();
+            let text = fs::read_to_string(tmp.path().join(key("/a").file_name())).unwrap();
+            assert!(text.contains("\"etag\":null"), "{text}");
+            assert_eq!(read(tmp.path(), &key("/a")).unwrap().etag, None);
+        }
+        // One planted in the file is not handed back either.
+        let path = tmp.path().join(key("/a").file_name());
+        let planted = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"etag\":null", "\"etag\":\"abc\"");
+        fs::write(&path, planted).unwrap();
+        let back = read(tmp.path(), &key("/a")).unwrap();
+        assert_eq!((back.etag, back.badges), (None, badges()));
     }
 
     #[cfg(unix)]
@@ -428,14 +501,14 @@ mod tests {
 
         let tmp = TempDir::new("forge-cache");
         let dir = tmp.path().join("forge");
-        write(&dir, &key("/a"), &badges(), 0).unwrap();
+        write(&dir, &key("/a"), &cached()).unwrap();
         let file = dir.join(key("/a").file_name());
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&file), 0o600);
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
-        write(&dir, &key("/a"), &badges(), 0).unwrap();
+        write(&dir, &key("/a"), &cached()).unwrap();
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&file), 0o600);
     }
@@ -445,13 +518,13 @@ mod tests {
     fn symlinked_files_and_dirs_are_refused() {
         let tmp = TempDir::new("forge-cache");
         let real = tmp.path().join("real");
-        write(&real, &key("/a"), &badges(), 0).unwrap();
+        write(&real, &key("/a"), &cached()).unwrap();
 
         // A linked directory is neither read nor written.
         let linked = tmp.path().join("linked");
         std::os::unix::fs::symlink(&real, &linked).unwrap();
         assert_eq!(read(&linked, &key("/a")), None);
-        assert!(write(&linked, &key("/a"), &badges(), 0).is_err());
+        assert!(write(&linked, &key("/a"), &cached()).is_err());
 
         // A linked file is a miss, and is never written through.
         let dir = tmp.path().join("dir");
@@ -459,8 +532,8 @@ mod tests {
         let file = dir.join(key("/a").file_name());
         std::os::unix::fs::symlink(real.join(key("/a").file_name()), &file).unwrap();
         assert_eq!(read(&dir, &key("/a")), None);
-        assert!(write(&dir, &key("/a"), &HashMap::new(), 0).is_err());
-        assert_eq!(read(&real, &key("/a")), Some(badges()));
+        assert!(write(&dir, &key("/a"), &Cached::default()).is_err());
+        assert_eq!(read(&real, &key("/a")), Some(cached()));
     }
 
     #[cfg(unix)]

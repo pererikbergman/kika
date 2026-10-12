@@ -250,8 +250,17 @@ fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
         ForgeStatus::Offline => ("GitHub: offline", None),
         ForgeStatus::NoAccess => ("GitHub: repository not found or no access", None),
         ForgeStatus::Failed => ("GitHub: could not load pull requests", None),
+        ForgeStatus::RateLimited => (
+            "GitHub: rate limited",
+            forge
+                .limited_until
+                .map(|until| format!("until {} UTC", clock(until))),
+        ),
     };
-    let cached = (!forge.badges.is_empty()).then_some("cached");
+    // A rate limit leaves no room for `cached`: when it ends matters more,
+    // and the line says no new answer came anyway.
+    let cached =
+        (!forge.badges.is_empty() && problem != ForgeStatus::RateLimited).then_some("cached");
     let join = |parts: &[Option<&str>]| {
         std::iter::once(what)
             .chain(parts.iter().flatten().copied())
@@ -267,6 +276,13 @@ fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
     ];
     let fitting = ladder.iter().find(|line| width_of(line) <= width);
     Some(fitting.cloned().unwrap_or_else(|| elide_right(what, width)))
+}
+
+/// `HH:MM` of the UTC day `secs` (since the epoch) falls in, by plain
+/// arithmetic: no clock is read and no time zone is known.
+fn clock(secs: i64) -> String {
+    let of_day = secs.rem_euclid(86_400);
+    format!("{:02}:{:02}", of_day / 3600, of_day % 3600 / 60)
 }
 
 /// The selected branch's newest commits, one per row, scrolled by the
@@ -475,11 +491,17 @@ pub(crate) mod tests {
                 "GitHub: repository not found or no access",
             ),
             (ForgeStatus::Failed, "GitHub: could not load pull requests"),
+            // With no reset known, no time is given.
+            (ForgeStatus::RateLimited, "GitHub: rate limited"),
         ];
-        // With old badges still drawn, every problem says they are cached.
+        // With old badges still drawn, every problem but a rate limit says
+        // they are cached.
         for (problem, want) in cases {
             state.forge.status = ForgeView::Problem(problem);
-            let cached = format!("{want} · cached");
+            let cached = match problem {
+                ForgeStatus::RateLimited => want.to_string(),
+                _ => format!("{want} · cached"),
+            };
             assert_eq!(
                 line(&state).as_deref(),
                 Some(cached.as_str()),
@@ -544,6 +566,49 @@ pub(crate) mod tests {
             let line = forge_line(&state.forge, width).unwrap();
             assert!(crate::view::width_of(&line) <= width, "{width}: {line:?}");
         }
+    }
+
+    #[test]
+    fn a_rate_limit_says_until_when_in_utc() {
+        let mut state = with_badges(&[("main", Some(pr(1, PrState::Open, None)))]);
+        state.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
+        // 2023-11-14 22:13:20 UTC.
+        state.forge.limited_until = Some(1_700_000_000);
+        // Badges are drawn, but the line gives its room to the time.
+        assert!(!state.forge.badges.is_empty());
+        let full = "GitHub: rate limited · until 22:13 UTC";
+        assert_eq!(forge_line(&state.forge, 80).as_deref(), Some(full));
+        assert_eq!(forge_line(&state.forge, 38).as_deref(), Some(full));
+        assert_eq!(
+            forge_line(&state.forge, 37).as_deref(),
+            Some("GitHub: rate limited")
+        );
+        assert_eq!(
+            forge_line(&state.forge, 22).as_deref(),
+            Some("GitHub: rate limited")
+        );
+        // Drawn: whole where the panel is wide, what is wrong first in the
+        // default 80 x 24 side panel. No popup and no error.
+        assert_eq!(forge_line_at(&state, 240).as_deref(), Some(full));
+        assert_eq!(
+            forge_line_at(&state, 80).as_deref(),
+            Some("GitHub: rate limited")
+        );
+        assert!(state.popups.is_empty());
+        assert_eq!(state.op_error, None);
+        // Midnight and the last minute of a day.
+        state.forge.limited_until = Some(1_699_920_000);
+        assert!(
+            forge_line(&state.forge, 80)
+                .unwrap()
+                .contains("until 00:00 UTC")
+        );
+        state.forge.limited_until = Some(1_699_920_000 + 86_399);
+        assert!(
+            forge_line(&state.forge, 80)
+                .unwrap()
+                .contains("until 23:59 UTC")
+        );
     }
 
     #[test]

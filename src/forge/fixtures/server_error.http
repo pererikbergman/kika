@@ -1,0 +1,4 @@
+HTTP/2.0 502 Bad Gateway
+Content-Type: application/json
+
+{"message":"Server Error"}
