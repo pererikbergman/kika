@@ -15,7 +15,6 @@ mod config_docs;
 mod diff_mark;
 mod diff_pane;
 mod diff_search;
-mod diff_stream;
 #[cfg(test)]
 mod e2e;
 mod effect;

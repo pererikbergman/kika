@@ -9,7 +9,7 @@ pub const DIFF_PREFETCH: usize = 200;
 
 /// What the Diff pane shows: the lines streamed so far for the selected file,
 /// plus where the user has scrolled to. Pure state; the streaming lives in
-/// `diff_stream`.
+/// `diff::stream`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffPane {
     /// The request whose chunks are accepted; older ones are dropped.
