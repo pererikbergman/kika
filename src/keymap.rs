@@ -1,7 +1,7 @@
 //! Every key Kika understands, declared once. The same records drive
 //! dispatch, the help menu and the bottom bar, so they cannot drift apart.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -657,6 +657,7 @@ pub struct Keymap {
 }
 
 /// Who a key belongs to, for messages.
+#[derive(Clone, Copy)]
 enum Owner<'a> {
     Binding(&'a Binding),
     Command(usize),
@@ -677,11 +678,20 @@ impl Keymap {
         self.overrides.get(b.id).map_or(b.keys, Vec::as_slice)
     }
 
-    /// `base` with `layer` applied on top. Fails, leaving nothing applied,
-    /// on an unknown id or key, a key bound twice in one scope, quit left
-    /// without keys, or a repository layer reaching past its trust.
-    pub fn build(base: &Keymap, layer: &KeysTable, trust: Trust) -> Result<Keymap, String> {
+    /// `base` with `layer` applied on top, and one message per entry of
+    /// `layer` dropped for a key clash. A dropped entry's binding keeps its
+    /// keys from `base`; the rest of `layer` still applies, so one stale
+    /// line does not cost the user every other key. Fails, leaving nothing
+    /// applied, on an unknown id or key, quit left without keys, or a
+    /// repository layer reaching past its trust. Those checks run on the
+    /// keymap after the drops, so no drop can get past them.
+    pub fn build(
+        base: &Keymap,
+        layer: &KeysTable,
+        trust: Trust,
+    ) -> Result<(Keymap, Vec<String>), String> {
         let mut keymap = base.clone();
+        let mut layer_ids = BTreeSet::new();
         for (id, texts) in layer {
             let binding = REGISTRY
                 .iter()
@@ -697,8 +707,9 @@ impl Keymap {
                 .map(|text| parse_key(text).map_err(|e| format!("\"{id}\": {e}")))
                 .collect::<Result<Vec<_>, _>>()?;
             keymap.overrides.insert(binding.id, keys);
+            layer_ids.insert(binding.id);
         }
-        keymap.check_scopes()?;
+        let dropped = keymap.drop_clashes(base, &mut layer_ids)?;
         if trust == Trust::Repo {
             keymap.check_locked_not_hidden(base)?;
         }
@@ -706,7 +717,46 @@ impl Keymap {
         if quit.is_some_and(|b| keymap.keys(b).is_empty()) {
             return Err("\"global.quit\" needs at least one key".to_string());
         }
-        Ok(keymap)
+        Ok((keymap, dropped))
+    }
+
+    /// Undo the overrides in `layer_ids`, the ones the layer being built
+    /// made, that take part in a key clash, until none is left; each goes
+    /// back to its keys in `base`. A side the layer did not set is never
+    /// touched. Every pass drops at least one override, and with none left
+    /// the keymap is `base`, which has no clash, so this ends. A clash with
+    /// no side in `layer_ids` means `base` was not clash-free: fail closed.
+    fn drop_clashes(
+        &mut self,
+        base: &Keymap,
+        layer_ids: &mut BTreeSet<&'static str>,
+    ) -> Result<Vec<String>, String> {
+        let mut messages = Vec::new();
+        loop {
+            let mut dropping = BTreeSet::new();
+            for (a, b, key) in self.clashes() {
+                for side in [a, b] {
+                    let Owner::Binding(binding) = side else {
+                        continue;
+                    };
+                    if layer_ids.contains(binding.id) && dropping.insert(binding.id) {
+                        let clash = clash_message(a, b, key);
+                        messages.push(format!("{clash}; the change to {side} was dropped"));
+                    }
+                }
+            }
+            if dropping.is_empty() {
+                // No clash left, or one `base` itself had: refuse that.
+                return self.check_scopes().map(|()| messages);
+            }
+            for id in dropping {
+                layer_ids.remove(id);
+                match base.overrides.get(id) {
+                    Some(keys) => self.overrides.insert(id, keys.clone()),
+                    None => self.overrides.remove(id),
+                };
+            }
+        }
     }
 
     /// `self` with the global file's `[[commands]]`, in place of any it
@@ -759,18 +809,25 @@ impl Keymap {
 
     /// No key press may match two bindings or commands of one scope.
     fn check_scopes(&self) -> Result<(), String> {
+        match self.clashes().first() {
+            Some(&(a, b, key)) => Err(clash_message(a, b, key)),
+            None => Ok(()),
+        }
+    }
+
+    /// Every pair of owners whose keys overlap in one scope, with the
+    /// later owner's key.
+    fn clashes(&self) -> Vec<(Owner<'_>, Owner<'_>, KeyPattern)> {
         let patterns = self.owned_keys();
+        let mut clashes = Vec::new();
         for (i, (a, scope_a, ka)) in patterns.iter().enumerate() {
             for (b, scope_b, kb) in &patterns[i + 1..] {
                 if scope_a == scope_b && ka.overlaps(kb) {
-                    return Err(format!(
-                        "key \"{}\" is bound to both {a} and {b}",
-                        kb.label(),
-                    ));
+                    clashes.push((*a, *b, **kb));
                 }
             }
         }
-        Ok(())
+        clashes
     }
 
     /// A key a repository file adds in a nearer scope would take a locked
@@ -801,6 +858,11 @@ impl Keymap {
     }
 }
 
+/// What a clash is called in the error popup.
+fn clash_message(a: Owner<'_>, b: Owner<'_>, key: KeyPattern) -> String {
+    format!("key \"{}\" is bound to both {a} and {b}", key.label())
+}
+
 /// A keymap from one global `[keys]` table, for tests elsewhere.
 #[cfg(test)]
 pub(crate) fn remap(entries: &[(&str, &[&str])]) -> Keymap {
@@ -808,7 +870,10 @@ pub(crate) fn remap(entries: &[(&str, &[&str])]) -> Keymap {
         .iter()
         .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
         .collect();
-    Keymap::build(&Keymap::default(), &table, Trust::Global).expect("a valid layer")
+    let (keymap, dropped) =
+        Keymap::build(&Keymap::default(), &table, Trust::Global).expect("a valid layer");
+    assert_eq!(dropped, Vec::<String>::new(), "a layer without clashes");
+    keymap
 }
 
 /// What a key press does from a given focus.
@@ -10023,7 +10088,7 @@ mod tests {
             .collect()
     }
 
-    fn build(entries: &[(&str, &[&str])], trust: Trust) -> Result<Keymap, String> {
+    fn build(entries: &[(&str, &[&str])], trust: Trust) -> Result<(Keymap, Vec<String>), String> {
         Keymap::build(&Keymap::default(), &layer(entries), trust)
     }
 
@@ -10037,7 +10102,8 @@ mod tests {
             &[("files.stage", &["x", "ctrl-x"]), ("files.discard", &[])],
             Trust::Global,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let none = KeyModifiers::NONE;
         assert_eq!(
             keymap.keys(binding("files.stage")),
@@ -10072,11 +10138,184 @@ mod tests {
             &[("files.stage", &["x"]), ("files.commit", &["C"])],
             Trust::Global,
         )
-        .unwrap();
-        let merged =
+        .unwrap()
+        .0;
+        let (merged, dropped) =
             Keymap::build(&global, &layer(&[("files.stage", &["y"])]), Trust::Repo).unwrap();
+        assert_eq!(dropped, Vec::<String>::new());
         assert_eq!(merged.keys(binding("files.stage")), [char_pattern('y')]);
         assert_eq!(merged.keys(binding("files.commit")), [char_pattern('C')]);
+    }
+
+    #[test]
+    fn a_clashing_entry_is_dropped_alone_and_keeps_its_base_keys() {
+        let (keymap, dropped) = build(
+            &[("files.stage", &["c"]), ("files.blame", &["Z"])],
+            Trust::Global,
+        )
+        .unwrap();
+        assert_eq!(
+            dropped,
+            [
+                r#"key "c" is bound to both "files.stage" and "files.commit"; the change to "files.stage" was dropped"#
+            ]
+        );
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            binding("files.stage").keys
+        );
+        assert_eq!(keymap.keys(binding("files.commit")), [char_pattern('c')]);
+        assert_eq!(keymap.keys(binding("files.blame")), [char_pattern('Z')]);
+
+        // A key listed twice clashes with itself.
+        let (keymap, dropped) = build(&[("files.stage", &["x", "x"])], Trust::Global).unwrap();
+        assert_eq!(
+            dropped,
+            [
+                r#"key "x" is bound to both "files.stage" and "files.stage"; the change to "files.stage" was dropped"#
+            ]
+        );
+        assert_eq!(keymap, Keymap::default());
+    }
+
+    #[test]
+    fn two_entries_moved_onto_one_key_are_both_dropped() {
+        let (keymap, dropped) = build(
+            &[("files.stage", &["Z"]), ("files.blame", &["Z"])],
+            Trust::Repo,
+        )
+        .unwrap();
+        let message = |id: &str| {
+            format!(
+                r#"key "Z" is bound to both "files.stage" and "files.blame"; the change to "{id}" was dropped"#
+            )
+        };
+        assert_eq!(dropped, [message("files.stage"), message("files.blame")]);
+        assert_eq!(keymap, Keymap::default());
+    }
+
+    #[test]
+    fn a_dropped_entry_back_on_its_base_keys_drops_the_entry_now_on_them() {
+        // Stage leaves space for `c`, which commit holds, and blame takes
+        // space. Stage goes back to space, so blame must go too.
+        let (keymap, dropped) = build(
+            &[
+                ("files.stage", &["c"]),
+                ("files.blame", &["space"]),
+                ("files.hunks", &["Z"]),
+            ],
+            Trust::Repo,
+        )
+        .unwrap();
+        assert_eq!(dropped.len(), 2, "{dropped:?}");
+        assert!(dropped[0].ends_with(r#"the change to "files.stage" was dropped"#));
+        assert!(
+            dropped[1].starts_with(r#"key "space" is bound to both"#),
+            "{dropped:?}"
+        );
+        assert!(dropped[1].ends_with(r#"the change to "files.blame" was dropped"#));
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            binding("files.stage").keys
+        );
+        assert_eq!(
+            keymap.keys(binding("files.blame")),
+            binding("files.blame").keys
+        );
+        assert_eq!(keymap.keys(binding("files.hunks")), [char_pattern('Z')]);
+        assert!(keymap.clashes().is_empty());
+    }
+
+    #[test]
+    fn a_repository_entry_falls_back_to_the_global_keys_and_never_drops_them() {
+        let global = build(&[("files.stage", &["x"])], Trust::Global).unwrap().0;
+        // The repository moves commit onto the global stage key.
+        let (keymap, dropped) =
+            Keymap::build(&global, &layer(&[("files.commit", &["x"])]), Trust::Repo).unwrap();
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert!(dropped[0].ends_with(r#"the change to "files.commit" was dropped"#));
+        assert_eq!(keymap, global);
+        // Its own stage entry clashing goes back to the global `x`.
+        let (keymap, _) =
+            Keymap::build(&global, &layer(&[("files.stage", &["c"])]), Trust::Repo).unwrap();
+        assert_eq!(keymap.keys(binding("files.stage")), [char_pattern('x')]);
+    }
+
+    #[test]
+    fn the_quit_and_locked_checks_run_after_the_drops() {
+        // A droppable clash does not save a file that hides quit.
+        assert_eq!(
+            build(
+                &[("files.blame", &["c"]), ("files.stage", &["q"])],
+                Trust::Repo
+            )
+            .unwrap_err(),
+            r#""files.stage": key "q" would hide "global.quit""#
+        );
+        assert!(
+            build(
+                &[("files.blame", &["c"]), ("files.open", &["x"])],
+                Trust::Repo
+            )
+            .is_err()
+        );
+        assert_eq!(
+            build(
+                &[("files.blame", &["c"]), ("global.quit", &[])],
+                Trust::Global
+            )
+            .unwrap_err(),
+            r#""global.quit" needs at least one key"#
+        );
+        // A clash the layer did not make is never dropped: it fails closed.
+        let clashing = Keymap {
+            overrides: [("files.stage", vec![char_pattern('c')])].into(),
+            ..Keymap::default()
+        };
+        assert_eq!(
+            Keymap::build(&clashing, &layer(&[("files.blame", &["Z"])]), Trust::Repo).unwrap_err(),
+            r#"key "c" is bound to both "files.stage" and "files.commit""#
+        );
+        // Quit moved onto a taken key goes back to its own, never to none.
+        let (keymap, dropped) = build(&[("global.quit", &["?"])], Trust::Global).unwrap();
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert_eq!(
+            keymap.keys(binding("global.quit")),
+            binding("global.quit").keys
+        );
+    }
+
+    /// Every unlocked binding moved onto each key a locked binding or a
+    /// neighbour holds, with the next binding moved there too so drops
+    /// cascade: whatever is kept has no clash, quit still has keys, and a
+    /// repository layer leaves every locked binding its keys and in sight.
+    #[test]
+    fn no_run_of_drops_unbinds_quit_or_uncovers_a_locked_key() {
+        let quit = binding("global.quit");
+        let ids: Vec<&str> = registry().iter().map(|b| b.id).collect();
+        let mut drops = 0;
+        for (i, id) in ids.iter().enumerate() {
+            let next = ids[(i + 1) % ids.len()];
+            for key in ["q", "esc", "enter", "space", "c"] {
+                for trust in [Trust::Global, Trust::Repo] {
+                    let entries: &[(&str, &[&str])] = &[(id, &[key]), (next, &[key])];
+                    let Ok((keymap, dropped)) = build(entries, trust) else {
+                        continue;
+                    };
+                    drops += dropped.len();
+                    assert!(keymap.clashes().is_empty(), "{entries:?}");
+                    assert!(!keymap.keys(quit).is_empty(), "{entries:?}");
+                    if trust == Trust::Repo {
+                        let base = Keymap::default();
+                        assert_eq!(keymap.check_locked_not_hidden(&base), Ok(()), "{entries:?}");
+                        for locked in registry().iter().filter(|b| REPO_LOCKED.contains(&b.id)) {
+                            assert_eq!(keymap.keys(locked), locked.keys, "{entries:?}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(drops > 1000, "the sweep drops entries: {drops}");
     }
 
     #[test]
@@ -10090,14 +10329,6 @@ mod tests {
         assert!(
             bad.starts_with(r#""files.stage": bad key "shift-s": use one character, or space"#),
             "{bad}"
-        );
-        assert_eq!(
-            err(&[("files.stage", &["c"])]),
-            r#"key "c" is bound to both "files.stage" and "files.commit""#
-        );
-        assert_eq!(
-            err(&[("files.stage", &["x", "x"])]),
-            r#"key "x" is bound to both "files.stage" and "files.stage""#
         );
         assert_eq!(
             err(&[("global.quit", &[])]),
@@ -10361,14 +10592,28 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_layer_keeps_the_commands_and_cannot_move_a_key_onto_one() {
+    fn a_repository_layer_keeps_the_commands_and_drops_a_key_moved_onto_one() {
         let global = commands(&[files_command(&["X"])]).unwrap();
         let repo = Keymap::build(&global, &layer(&[("files.commit", &["C"])]), Trust::Repo);
-        assert_eq!(repo.unwrap().commands, global.commands);
+        assert_eq!(repo.unwrap().0.commands, global.commands);
+        let (keymap, dropped) = Keymap::build(
+            &global,
+            &layer(&[("files.stage", &["X"]), ("files.commit", &["C"])]),
+            Trust::Repo,
+        )
+        .unwrap();
         assert_eq!(
-            Keymap::build(&global, &layer(&[("files.stage", &["X"])]), Trust::Repo).unwrap_err(),
-            r#"key "X" is bound to both "files.stage" and command 1"#
+            dropped,
+            [
+                r#"key "X" is bound to both "files.stage" and command 1; the change to "files.stage" was dropped"#
+            ]
         );
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            binding("files.stage").keys
+        );
+        assert_eq!(keymap.keys(binding("files.commit")), [char_pattern('C')]);
+        assert_eq!(keymap.commands, global.commands);
     }
 
     #[test]
