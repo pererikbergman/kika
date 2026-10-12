@@ -38,6 +38,8 @@ pub enum Popup {
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
+    /// Moving a detached `HEAD` would leave commits only the reflog has.
+    LeaveCommits(LeaveCommitsConfirm),
     DropStash(DropStashConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     DeleteTag(DeleteTagConfirm),
@@ -242,6 +244,56 @@ impl ResetHardConfirm {
             "Reset to {} and throw away every uncommitted change, staged and \
              unstaged? Commits after it leave the branch. (y/n)",
             self.short_oid
+        )
+    }
+}
+
+/// "Leave these commits behind?" Asked before a detached `HEAD` moves off
+/// commits that no branch, tag or remote-tracking branch reaches. Like
+/// [`ResetHardConfirm`], it carries the op planned when it was asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaveCommitsConfirm {
+    pub op: GitOp,
+    /// The target's short id, as the log shows it.
+    pub short_oid: String,
+    /// The short ids of the commits left behind, newest first.
+    pub left: Vec<String>,
+}
+
+impl LeaveCommitsConfirm {
+    /// How many of the left-behind ids the question names.
+    const LISTED: usize = 5;
+
+    pub fn title(&self) -> &'static str {
+        "Leave commits behind"
+    }
+
+    pub fn question(&self) -> String {
+        use crate::git::ops::ResetMode;
+        let action = match &self.op {
+            GitOp::CheckoutCommit(_) => format!("Check out {}", self.short_oid),
+            GitOp::Reset {
+                mode: ResetMode::Hard,
+                ..
+            } => format!("Reset hard to {}", self.short_oid),
+            _ => format!("Reset to {}", self.short_oid),
+        };
+        let count = self.left.len();
+        let noun = if count == 1 { "commit" } else { "commits" };
+        let mut ids = self.left[..count.min(Self::LISTED)].join(", ");
+        if count > Self::LISTED {
+            ids.push_str(&format!(" and {} more", count - Self::LISTED));
+        }
+        let hard = match self.op {
+            GitOp::Reset {
+                mode: ResetMode::Hard,
+                ..
+            } => " Every uncommitted change, staged and unstaged, is thrown away too.",
+            _ => "",
+        };
+        format!(
+            "{action} and leave {count} {noun} that no branch or tag reaches behind \
+             ({ids})? Afterwards only the reflog has them.{hard} (y/n)"
         )
     }
 }
@@ -715,6 +767,64 @@ mod tests {
             "Reset to abc1234 and throw away every uncommitted change, staged and \
              unstaged? Commits after it leave the branch. (y/n)"
         );
+    }
+
+    fn leave(op: GitOp, count: usize) -> LeaveCommitsConfirm {
+        LeaveCommitsConfirm {
+            op,
+            short_oid: "abc1234".into(),
+            left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
+        }
+    }
+
+    fn reset(mode: crate::git::ops::ResetMode) -> GitOp {
+        GitOp::Reset {
+            to: crate::git::commit_files::CommitId::parse("abc1234").unwrap(),
+            mode,
+        }
+    }
+
+    #[test]
+    fn the_leave_commits_question_names_the_action_count_and_ids() {
+        use crate::git::commit_files::CommitId;
+        let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
+        let ask = leave(checkout.clone(), 3);
+        assert_eq!(ask.title(), "Leave commits behind");
+        assert_eq!(
+            ask.question(),
+            "Check out abc1234 and leave 3 commits that no branch or tag reaches behind \
+             (000, 111, 222)? Afterwards only the reflog has them. (y/n)"
+        );
+        assert!(
+            leave(checkout, 1)
+                .question()
+                .contains("leave 1 commit that no branch")
+        );
+    }
+
+    #[test]
+    fn the_leave_commits_question_lists_five_then_how_many_more() {
+        use crate::git::ops::ResetMode;
+        let q = leave(reset(ResetMode::Soft), 7).question();
+        assert!(q.starts_with("Reset to abc1234 and leave 7 commits"), "{q}");
+        assert!(q.contains("(000, 111, 222, 333, 444 and 2 more)"), "{q}");
+        assert!(!q.contains("555"), "{q}");
+        assert!(!q.contains("uncommitted"), "{q}");
+    }
+
+    #[test]
+    fn the_hard_reset_version_also_says_the_changes_go() {
+        use crate::git::ops::ResetMode;
+        let q = leave(reset(ResetMode::Hard), 2).question();
+        assert!(
+            q.starts_with("Reset hard to abc1234 and leave 2 commits"),
+            "{q}"
+        );
+        assert!(
+            q.contains("Every uncommitted change, staged and unstaged, is thrown away too."),
+            "{q}"
+        );
+        assert!(q.ends_with("(y/n)"), "{q}");
     }
 
     #[test]
