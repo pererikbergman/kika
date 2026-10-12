@@ -1643,6 +1643,16 @@ mod tests {
     }
 
     #[test]
+    fn a_password_popup_on_a_tiny_screen_still_hides_what_was_typed() {
+        let typed = "ΩΨЖ";
+        let state = asked("Password for 'https://u@h':", typed);
+        let (_, rows) = draw(&state, 20, 6);
+        for c in typed.chars() {
+            assert!(!contains(&rows, &c.to_string()), "{c} shown: {rows:#?}");
+        }
+    }
+
+    #[test]
     fn the_answer_line_keeps_the_cursor_after_the_last_dot() {
         let state = asked("Passphrase:", "secret");
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();

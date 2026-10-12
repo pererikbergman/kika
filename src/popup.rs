@@ -73,10 +73,12 @@ pub struct CredentialPrompt {
 impl CredentialPrompt {
     /// Only git's username question and ssh's new-host-key question are
     /// shown as typed, matched on their exact words, so a prompt a server
-    /// chose cannot ask for a secret with the text in sight.
+    /// chose cannot ask for a secret with the text in sight. Ssh puts
+    /// `(user@host) ` before a server's own prompts, so one starting with
+    /// `(` stays masked however it ends. A bare `Username:` is not git's
+    /// question and stays masked on purpose.
     pub fn new(prompt: String, confirm: bool) -> Self {
-        let in_clear = prompt.starts_with("Username for '")
-            || prompt.contains("want to continue connecting (yes/no");
+        let in_clear = prompt.starts_with("Username for '") || is_host_key_question(&prompt);
         let masked = !in_clear;
         Self {
             prompt,
@@ -85,6 +87,14 @@ impl CredentialPrompt {
             input: SecretInput::default(),
         }
     }
+}
+
+/// Ssh's new-host-key question: it ends with the choice, after which
+/// nothing more can be asked, and is not a server prompt.
+fn is_host_key_question(prompt: &str) -> bool {
+    let prompt = prompt.trim_end();
+    !prompt.starts_with('(')
+        && (prompt.ends_with("(yes/no)?") || prompt.ends_with("(yes/no/[fingerprint])?"))
 }
 
 /// A [`LineInput`] that may hold a password, so its `Debug` hides the text.
@@ -1038,6 +1048,34 @@ mod tests {
         // A server's own prompt that only looks like one stays masked.
         assert!(masked("Username and token:"));
         assert!(masked("Token (yes/no is fine):"));
+    }
+
+    #[test]
+    fn only_a_prompt_ending_in_the_host_key_choice_is_shown_in_clear() {
+        let masked = |prompt: &str| CredentialPrompt::new(prompt.into(), false).masked;
+        // Ssh's own question, with the trailing space it sends.
+        assert!(!masked(
+            "The authenticity of host 'h' can't be established.\n\
+             ED25519 key fingerprint is SHA256:abc.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        ));
+        assert!(!masked(
+            "Are you sure you want to continue connecting (yes/no)?"
+        ));
+        assert!(!masked("Username for 'https://h':"));
+        // A server's prompt, which ssh opens with `(user@host) `.
+        assert!(masked(
+            "(git@host) Are you sure you want to continue connecting (yes/no)?"
+        ));
+        // The phrase with a secret asked for after it.
+        assert!(masked(
+            "Are you sure you want to continue connecting (yes/no)? Password:"
+        ));
+        assert!(masked(
+            "want to continue connecting (yes/no/[fingerprint])? token:"
+        ));
+        // Not git's username question, so masked on purpose.
+        assert!(masked("Username:"));
     }
 
     #[test]
