@@ -30,7 +30,7 @@ use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
-use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
+use crate::git::diff::{DiffRequest, EmojiZwj, sanitize, terminal_safe};
 use crate::git::head::read_head_message;
 use crate::git::log::{LogQuery, log_page, markers};
 use crate::git::path::RepoPath;
@@ -943,16 +943,7 @@ impl Runtime {
             }
             Effect::InitRepo { tag } => repos::effects::init(runner, tx, tag),
             Effect::LoadPatch { tag, request } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || load_patch(runner.as_ref(), &request))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git diff crashed: {e}").as_bytes()))
-                            });
-                    let _ = tx.send(AppIntent::PatchLoaded { tag, result });
-                });
+                diff::effects::load_patch(runner, tx, tag, request)
             }
             Effect::LoadBlame { tag, path } => {
                 blame::effects::load(runner, tx, tag, path, self.emoji_zwj)
@@ -2028,88 +2019,6 @@ mod tests {
             other => panic!("expected a loaded commit, got {other:?}"),
         }
         runner.assert_done();
-    }
-
-    fn patch_request() -> DiffRequest {
-        DiffRequest {
-            path: "a.rs".into(),
-            orig_path: None,
-            side: DiffSide::Index,
-            options: Default::default(),
-            commit: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn load_patch_reports_back_with_the_same_tag() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &[
-                "diff",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--no-renames",
-                "-U3",
-                "--src-prefix=a/",
-                "--dst-prefix=b/",
-                "--cached",
-                "--",
-                "a.rs",
-            ],
-            ok(b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+b\n"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 6,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadPatch {
-            tag,
-            request: patch_request(),
-        });
-
-        match rx.recv().await {
-            Some(AppIntent::PatchLoaded {
-                tag: got,
-                result: Ok(patch),
-            }) => {
-                assert_eq!(got, tag);
-                assert_eq!(patch.hunks.len(), 1);
-            }
-            other => panic!("expected a loaded patch, got {other:?}"),
-        }
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_panicking_patch_load_still_reports_back() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-        let tag = Tag {
-            generation: 0,
-            seq: 7,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadPatch {
-            tag,
-            request: patch_request(),
-        });
-
-        match rx.recv().await {
-            Some(AppIntent::PatchLoaded {
-                tag: got,
-                result: Err(message),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(message.starts_with("git diff crashed: "), "{message:?}");
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed PatchLoaded, got {other:?}"),
-        }
     }
 
     #[tokio::test]
