@@ -5612,6 +5612,10 @@ impl AppState {
             KeyScope::Remotes => (InputTarget::RemotesFilter, &self.branches.remotes.filter),
             KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
             KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.filter),
+            KeyScope::CommitFiles => match &self.commits.open {
+                Some(open) => (InputTarget::CommitFilesFilter, &open.filter),
+                None => return,
+            },
             KeyScope::Stash => (InputTarget::StashFilter, &self.stash.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
@@ -5660,6 +5664,18 @@ impl AppState {
             }
             // A reflog row drives nothing, so a moved cursor loads nothing.
             InputTarget::ReflogFilter => self.commits.reflog.set_filter(text),
+            // Only matched; the file the cursor moved to is loaded by its
+            // own path, as a step would.
+            InputTarget::CommitFilesFilter => {
+                let moved = self
+                    .commits
+                    .open
+                    .as_mut()
+                    .is_some_and(|open| open.set_filter(text));
+                if moved {
+                    return self.commit_file_diff();
+                }
+            }
             // A stash row drives nothing, so a moved cursor loads nothing.
             InputTarget::StashFilter => {
                 if self.stash.set_filter(text) {
@@ -5812,9 +5828,18 @@ impl AppState {
     }
 
     /// Esc in the blame, its commit, or a commit's or a stash's files:
-    /// clear that pane's search, else close the pane as Esc did before.
+    /// clear that pane's search, else close the pane as Esc did before. A
+    /// commit's files clear their filter before the search.
     fn pane_escape(&mut self) -> Vec<Effect> {
         let scope = self.panel_focus();
+        // The cursor stays: the filter showed it, or there were no rows.
+        if scope == KeyScope::CommitFiles
+            && let Some(open) = &mut self.commits.open
+            && !open.filter.is_empty()
+        {
+            open.filter.clear();
+            return vec![];
+        }
         let cleared = match (scope, &mut self.focus) {
             (
                 KeyScope::BlameCommit,
@@ -17810,6 +17835,210 @@ mod tests {
         assert_eq!(state.commits.open, None);
         assert_eq!(state.key_focus(), KeyScope::Commits);
         assert!(!state.should_quit);
+    }
+
+    /// A file, a rename and another file.
+    fn three_commit_files() -> Vec<CommitFile> {
+        vec![
+            commit_file('M', "src/lib.rs", None),
+            commit_file('R', "src/new.rs", Some("legacy/old.rs")),
+            commit_file('A', "docs/guide.md", None),
+        ]
+    }
+
+    /// `c5` open with `three_commit_files`, the first one's diff streaming.
+    fn commit_files_open() -> AppState {
+        let mut state = on_commit_five();
+        opened(&mut state, three_commit_files());
+        state
+    }
+
+    fn open_files(state: &AppState) -> &CommitFilesList {
+        state.commits.open.as_ref().expect("a commit is open")
+    }
+
+    /// Each char pressed in turn; every effect in order.
+    fn typed(state: &mut AppState, text: &str) -> Vec<Effect> {
+        text.chars().flat_map(|c| press_char(state, c)).collect()
+    }
+
+    #[test]
+    fn slash_in_a_commits_files_narrows_them_by_drawn_path_and_enter_keeps_it() {
+        let mut state = commit_files_open();
+        assert_eq!(press_char(&mut state, '/'), vec![]);
+        let input = state.input.as_ref().expect("the input opens");
+        assert_eq!(input.target, InputTarget::CommitFilesFilter);
+        assert_eq!(input.target.prompt(), "/");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        type_text(&mut state, "src");
+        assert_eq!(open_files(&state).visible(), [0, 1]);
+        for _ in 0..3 {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "legacy");
+        assert_eq!(open_files(&state).visible(), [1], "a rename's old name");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.input, None);
+        assert_eq!(open_files(&state).filter, "legacy");
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        // `/` again starts from the kept text.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "legacy");
+    }
+
+    #[test]
+    fn a_filter_that_hides_the_cursor_loads_the_first_shown_files_diff() {
+        let mut state = commit_files_open();
+        press_char(&mut state, '/');
+        // No other path has an m.
+        let effects = typed(&mut state, "md");
+        assert_eq!(open_files(&state).selected, 2);
+        let request = diff_request(&effects);
+        assert_eq!(request.path, "docs/guide.md".into());
+        assert_eq!(request.commit, Some(range_of("c5", "c6")));
+        // Typing on with the cursor still shown loads nothing more.
+        assert_eq!(typed(&mut state, " guide"), vec![]);
+        // Hiding every row leaves the cursor and loads nothing.
+        assert_eq!(typed(&mut state, "zzz"), vec![]);
+        assert_eq!(open_files(&state).selected, 2);
+        assert!(open_files(&state).visible().is_empty());
+    }
+
+    #[test]
+    fn j_and_k_in_a_commits_files_step_over_hidden_rows() {
+        let mut state = commit_files_open();
+        type_text(&mut state, "/rs\n"); // lib.rs and the rename
+        assert_eq!(open_files(&state).visible(), [0, 1]);
+        let request = diff_request(&press_char(&mut state, 'j'));
+        assert_eq!(request.path, "src/new.rs".into());
+        assert_eq!(
+            press_char(&mut state, 'j'),
+            vec![],
+            "stops at the last shown"
+        );
+        assert_eq!(open_files(&state).selected, 1);
+        press_char(&mut state, 'k');
+        assert_eq!(open_files(&state).selected, 0);
+
+        // `/` starts from `rs`: `d` in its place shows the rename and the doc.
+        press_char(&mut state, '/');
+        press(&mut state, KeyCode::Backspace);
+        press(&mut state, KeyCode::Backspace);
+        type_text(&mut state, "d\n");
+        assert_eq!(open_files(&state).visible(), [1, 2]);
+        assert_eq!(open_files(&state).selected, 1);
+        press_char(&mut state, 'j');
+        assert_eq!(open_files(&state).selected, 2);
+        press_char(&mut state, 'k');
+        press_char(&mut state, 'k');
+        assert_eq!(open_files(&state).selected, 1, "row 0 is hidden");
+    }
+
+    #[test]
+    fn esc_in_a_commits_files_clears_the_filter_then_the_search_then_goes_back() {
+        let mut state = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
+        preview_loaded(&mut state, tag);
+        search_the_preview_for_foo(&mut state);
+        type_text(&mut state, "/lib\n");
+        assert_eq!(open_files(&state).filter, "lib");
+
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(open_files(&state).filter, "", "the filter goes first");
+        assert!(state.diff.search.is_some(), "the search stays");
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None, "then the search");
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.open, None, "then back to the log");
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        assert_eq!(state.commits.selected, 5, "on the same commit");
+        assert!(!state.should_quit);
+
+        // With neither set, one Esc goes back.
+        let mut state = commit_files_open();
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.commits.selected, 5);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn the_commit_files_filter_stops_at_its_limit() {
+        let mut state = commit_files_open();
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(
+            open_files(&state).filter.chars().count(),
+            list_filter::MAX_INPUT
+        );
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+    }
+
+    #[test]
+    fn each_open_of_a_commits_files_starts_with_no_filter() {
+        let mut state = commit_files_open();
+        type_text(&mut state, "/lib\n");
+        press_char(&mut state, 'h');
+        assert_eq!(state.commits.open, None);
+        press_char(&mut state, 'j');
+        let (_, range) = files_load(&press(&mut state, KeyCode::Enter));
+        assert_eq!(range, range_of("c6", "c7"));
+        assert_eq!(open_files(&state).filter, "");
+    }
+
+    #[test]
+    fn a_hidden_commit_file_is_neither_picked_nor_focused() {
+        let mut state = commit_files_open();
+        type_text(&mut state, "/zzz\n");
+        assert!(open_files(&state).selected_hidden());
+        assert_eq!(
+            crate::keymap::patch_file_disabled(&state).as_deref(),
+            Some(crate::keymap::FILTER_HIDES_ROW)
+        );
+        assert_eq!(state.update(AppIntent::PatchToggleFile), vec![]);
+        assert_eq!(state.custom_patch, None);
+        assert_eq!(state.notice, Some(crate::keymap::FILTER_HIDES_ROW.into()));
+        state.notice = None;
+        assert_eq!(press_char(&mut state, 'l'), vec![]);
+        assert_eq!(state.focus, Focus::Commits);
+        assert_eq!(state.notice, Some(crate::keymap::FILTER_HIDES_ROW.into()));
+    }
+
+    #[test]
+    fn the_commit_files_filter_never_reaches_git() {
+        let hostile = "--output=x -- \x1b[31m\u{202e}";
+        let leaks = |effects: &[Effect]| {
+            let debug = format!("{effects:?}");
+            debug.contains("--output=x") || debug.contains("[31m") || debug.contains('\u{202e}')
+        };
+        let mut state = commit_files_open();
+        let twin = commit_files_open();
+        let mut effects = press_char(&mut state, '/');
+        for c in hostile.chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        let kept = open_files(&state).filter.clone();
+        assert!(kept.starts_with("--output=x -- "), "{kept:?}");
+        assert!(kept.ends_with('\u{202e}'), "{kept:?}");
+        for key in ['j', 'k', 'l'] {
+            effects.extend(press_char(&mut state, key));
+        }
+        effects.extend(state.update(AppIntent::ToggleWhitespace));
+        let refresh = press_char(&mut state, 'r');
+        assert!(!leaks(&effects), "{effects:?}");
+        assert!(!leaks(&refresh), "{refresh:?}");
+        assert!(!format!("{effects:?}{refresh:?}").contains(&kept));
+        // The list git was asked for is the same as without a filter.
+        assert_eq!(open_files(&state).range, open_files(&twin).range);
+        let mut twin = twin;
+        twin.update(AppIntent::ToggleWhitespace);
+        assert_eq!(refresh, press_char(&mut twin, 'r'));
     }
 
     #[test]
