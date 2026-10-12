@@ -1,0 +1,7 @@
+HTTP/2.0 422 Unprocessable Entity
+Content-Type: application/json; charset=utf-8
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4989
+X-Ratelimit-Reset: 1700003600
+
+{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for acme:topic."}],"documentation_url":"https://docs.github.com/rest/pulls/pulls#create-a-pull-request","status":"422"}
