@@ -37,6 +37,8 @@ pub enum InputTarget {
     ReviewFilter,
     /// Narrows the Worktrees popup's list.
     WorktreesFilter,
+    /// Narrows the Command log popup.
+    CommandLogFilter,
 }
 
 impl InputTarget {
@@ -54,7 +56,8 @@ impl InputTarget {
             | InputTarget::BlameSearch
             | InputTarget::BlameCommitSearch
             | InputTarget::ReviewFilter
-            | InputTarget::WorktreesFilter => "/",
+            | InputTarget::WorktreesFilter
+            | InputTarget::CommandLogFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }
