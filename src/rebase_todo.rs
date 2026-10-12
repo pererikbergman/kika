@@ -17,6 +17,10 @@ pub const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";
 /// fix it first, so a narrow bar still shows them.
 const READ_ONLY: &str = "Read-only, fix with git rebase --edit-todo:";
 
+/// How a reason starts when the git config, not the list, keeps it from
+/// being edited.
+const READ_ONLY_CONFIG: &str = "Read-only, fix the comment prefix in your git config:";
+
 /// The most characters of a todo line a reason quotes.
 const QUOTED: usize = 20;
 
@@ -24,15 +28,21 @@ const QUOTED: usize = 20;
 const CONFIG_WHY: usize = 60;
 
 /// Why `todo` is shown but not edited, after how to fix it: the comment
-/// prefix git would use could not be read, or the line that stops it, by
-/// number, as the user can find it in the file. `comment` is the prefix
-/// read through `git config`.
+/// prefix git would use could not be read or could hide a command, or the
+/// line that stops it, by number, as the user can find it in the file.
+/// `comment` is the prefix read through `git config`.
 pub fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
     let prefix = match comment {
+        Ok(prefix) if hides_commands(prefix) => {
+            return format!(
+                "{READ_ONLY_CONFIG} \"{}\" could hide todo commands",
+                quoted(prefix)
+            );
+        }
         Ok(prefix) => prefix.as_slice(),
         Err(why) => {
             let why = cut(why.replace('\n', " "), CONFIG_WHY);
-            return format!("{READ_ONLY} core.commentChar: {why}");
+            return format!("{READ_ONLY_CONFIG} {why}");
         }
     };
     match unreadable(todo, prefix) {
@@ -50,6 +60,14 @@ pub fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
         }
         None => format!("{READ_ONLY} {NOT_EDITABLE}"),
     }
+}
+
+/// Whether lines git reads as commands could start with `prefix`: every
+/// todo command starts with a letter, so a letter-led prefix (`b` hides
+/// `break`, `p` hides `pick`) could turn a line Kika writes into a comment.
+/// Such a list is never edited.
+fn hides_commands(prefix: &[u8]) -> bool {
+    prefix.first().is_some_and(u8::is_ascii_alphabetic)
 }
 
 /// `text`, safe to print and cut to [`QUOTED`] characters.
@@ -112,8 +130,8 @@ impl RebaseTodo {
     pub fn load(file: TodoFile) -> Self {
         let comment = file.comment.clone().unwrap_or_default();
         let parsed = match &file.comment {
-            Ok(_) => parse_todo(&file.todo, &comment).ok(),
-            Err(_) => None,
+            Ok(prefix) if !hides_commands(prefix) => parse_todo(&file.todo, &comment).ok(),
+            _ => None,
         };
         let (entries, editable) = match parsed {
             Some(entries) => (entries, Ok(())),
@@ -404,11 +422,9 @@ mod tests {
             let todo = RebaseTodo::load(file_with(text, Err(why)));
             assert_eq!(
                 todo.editable,
-                Err(
-                    "Read-only, fix with git rebase --edit-todo: core.commentChar: \
+                Err("Read-only, fix the comment prefix in your git config: \
                      fatal: bad config line 1 in file .git/config"
-                        .to_string()
-                )
+                    .to_string())
             );
             assert!(todo.entries.is_empty());
             assert!(todo.comment.is_empty());
@@ -422,9 +438,29 @@ mod tests {
         let long = "e".repeat(200);
         let todo = RebaseTodo::load(file_with(b"", Err(&long)));
         let shown = todo.editable.unwrap_err();
-        let cause = shown.split("core.commentChar: ").nth(1).unwrap();
+        let cause = shown.split("git config: ").nth(1).unwrap();
         assert_eq!(cause.chars().count(), CONFIG_WHY, "{shown}");
         assert!(cause.ends_with('…'), "{shown}");
+    }
+
+    #[test]
+    fn a_prefix_that_could_hide_a_command_keeps_the_list_read_only() {
+        for (prefix, text) in [
+            (&b"b"[..], &b"b Rebase 1..2 onto 1\npick 1111 one\n"[..]),
+            (b"p", b"pick 1111 one\nbreak\n"),
+            (b"break", b"pick 1111 one\n"),
+            (b"X", b"pick 1111 one\n"),
+        ] {
+            let todo = RebaseTodo::load(file_with(text, Ok(prefix)));
+            let why = format!(
+                "Read-only, fix the comment prefix in your git config: \"{}\" could hide \
+                 todo commands",
+                String::from_utf8_lossy(prefix)
+            );
+            assert_eq!(todo.editable, Err(why.clone()), "{prefix:?}");
+            assert!(todo.entries.is_empty());
+            assert_eq!(todo.edit(0, Rewrite::Break), Err(why));
+        }
     }
 
     #[test]

@@ -927,9 +927,24 @@ mod tests {
     /// The bottom bar's text at `width` columns, after an edit key on the
     /// read-only todo.
     fn read_only_notice(width: u16) -> String {
+        read_only_notice_with(
+            width,
+            b"#",
+            b"pick 1111111 one\nexec make test-everything --verbose\n",
+        )
+    }
+
+    /// [`read_only_notice`] for `todo` read with comment prefix `comment`.
+    fn read_only_notice_with(width: u16, comment: &[u8], todo: &[u8]) -> String {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut state = showing(merge_rows());
-        read_only_rebase(&mut state);
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: todo.to_vec(),
+            done: None,
+            comment: Ok(comment.to_vec()),
+        })));
         state.commits.todo_selected = Some(0);
         state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
             KeyCode::Char('d'),
@@ -948,6 +963,13 @@ mod tests {
         let narrow = read_only_notice(40);
         assert!(narrow.ends_with('…'), "{narrow:?}");
         assert!(narrow.starts_with(" Read-only"), "{narrow:?}");
+        // A `#` line under a `;` prefix names both and keeps the fix hint.
+        let todo = b"pick 1111111 one\n# Rebase 1111111..2222222 onto 1111111 (2 commands)\n";
+        let wide = read_only_notice_with(80, b";", todo);
+        assert!(wide.contains("--edit-todo"), "{wide:?}");
+        assert!(wide.contains("line 2, comment not using ;"), "{wide:?}");
+        let narrow = read_only_notice_with(40, b";", todo);
+        assert!(narrow.ends_with('…'), "{narrow:?}");
     }
 
     /// Every size the panel might get, from a full screen to one cell.

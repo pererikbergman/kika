@@ -20445,6 +20445,29 @@ mod tests {
     }
 
     #[test]
+    fn a_todo_read_with_a_letter_prefix_writes_nothing() {
+        for prefix in [&b"b"[..], b"p"] {
+            let mut state = stopped(TODO, 0);
+            state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+                path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+                todo: b"pick 1111 one\npick 2222 two\n".to_vec(),
+                done: Some(b"pick 0000 x\n".to_vec()),
+                comment: Ok(prefix.to_vec()),
+            })));
+            state.commits.todo_selected = Some(0);
+            assert_eq!(press_char(&mut state, 'd'), vec![], "{prefix:?}");
+            assert!(
+                state
+                    .notice
+                    .as_deref()
+                    .is_some_and(|n| n.contains("could hide todo commands")),
+                "{:?}",
+                state.notice
+            );
+        }
+    }
+
+    #[test]
     fn a_written_todo_is_reloaded_and_a_changed_one_says_so() {
         for (result, notice, error) in [
             (Ok(()), None, None),

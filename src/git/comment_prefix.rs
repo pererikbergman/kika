@@ -33,14 +33,13 @@ pub fn parse_comment_config(stdout: &[u8], string_too: bool) -> Result<Vec<u8>, 
             Some(at) => (&entry[..at], Some(&entry[at + 1..])),
             None => (entry, None),
         };
-        let key_name = terminal_safe(key);
-        match key {
-            b"core.commentchar" => {}
-            b"core.commentstring" if string_too => {}
+        let key_name = match key {
+            b"core.commentchar" => "core.commentChar",
+            b"core.commentstring" if string_too => "core.commentString",
             // An older git does not know the key and skips it.
             b"core.commentstring" => continue,
-            _ => return Err(format!("unexpected config key {key_name}")),
-        }
+            _ => return Err(format!("unexpected config key {}", terminal_safe(key))),
+        };
         let Some(value) = value else {
             return Err(format!("{key_name} has no value"));
         };
@@ -49,7 +48,9 @@ pub fn parse_comment_config(stdout: &[u8], string_too: bool) -> Result<Vec<u8>, 
         } else if value.is_empty() {
             return Err(format!("{key_name} is empty"));
         } else if !string_too && value.len() != 1 {
-            return Err(format!("{key_name} should be one character"));
+            return Err(format!(
+                "{key_name} should be one character before git 2.45"
+            ));
         } else if value.contains(&b'\n') {
             return Err(format!("{key_name} has a newline"));
         } else {

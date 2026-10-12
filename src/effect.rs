@@ -55,7 +55,7 @@ use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
-use crate::rebase_todo::{TodoFile, nothing_done};
+use crate::rebase_todo::{TodoFile, nothing_done, serialize};
 use crate::recent;
 use crate::sequence_editor::MAX_TODO;
 use crate::worktree_file;
@@ -481,6 +481,11 @@ fn write_rebase_todo(
     }
     let before = parse_todo(expected, comment)?;
     let after = parse_todo(content, comment)?;
+    // Kika writes no comments or blank lines, so every line of `content`
+    // must be a command git runs; one the prefix hides would be skipped.
+    if serialize(&after) != content {
+        return Err("A line of the edit would be read as a comment".into());
+    }
     let done_empty = dir
         .and_then(|dir| worktree_file::read_file(&dir.join("done"), MAX_TODO).ok())
         .is_some_and(|done| nothing_done(&done, comment));
@@ -4365,6 +4370,22 @@ mod tests {
         assert_eq!(file.todo, TODO);
         assert_eq!(file.comment, Err("fatal: bad config line 1".into()));
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_todo_write_refuses_a_line_the_prefix_would_hide() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let todo = b"b Rebase 1..2 onto 1\npick 1111 one\npick 2222 two\n";
+        let path = rebase_dir(&tmp, todo, b"pick 0000 z\n");
+        // The break would read as a comment, and git would not stop.
+        let stop = b"pick 1111 one\nbreak\npick 2222 two\n";
+        assert!(write_rebase_todo(&path, todo, stop, b"b").is_err());
+        let moved = b"pick 2222 two\npick 1111 one\n";
+        assert!(write_rebase_todo(&path, todo, moved, b"p").is_err());
+        // Anything but what Kika serialises is refused, blank lines too.
+        let blank = b"pick 2222 two\n\npick 1111 one\n";
+        assert!(write_rebase_todo(&path, todo, blank, b"b").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), todo);
     }
 
     #[test]
