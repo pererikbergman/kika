@@ -380,6 +380,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         };
         let mut panel = CommitsPanel::default();
         panel.begin_page(1, 0);

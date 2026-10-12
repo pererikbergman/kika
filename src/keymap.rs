@@ -5184,6 +5184,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }];
         match resolve(registry(), &Keymap::default(), focus, &state, key) {
             Resolution::Run(binding) => Some(binding.intent.clone()),
@@ -6661,6 +6662,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         };
         let mut state = AppState::new(Context::Workspace);
         let resolve_in = |state: &AppState, key| {
@@ -6824,6 +6826,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         };
         let mut state = AppState::new(Context::Workspace);
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
@@ -6874,6 +6877,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: "s".into(),
+                subject_altered: false,
             })
             .collect();
         state.commits.tips = Some(vec![]);
@@ -6984,6 +6988,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         };
         let all = [
             squash_disabled,
@@ -7289,6 +7294,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }];
         state.copied.toggle(crate::copied::CopiedCommit {
             id: CommitId::parse(&oid).unwrap(),
@@ -7414,6 +7420,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: "s".into(),
+                subject_altered: false,
             })
             .collect();
         state.commits.tips = Some(vec![]);
@@ -7469,6 +7476,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }];
         assert_eq!(log_filter_disabled(&state), None);
         assert_eq!(commits_mark_disabled(&state), None);
@@ -8451,6 +8459,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: "s".into(),
+                subject_altered: false,
             }];
             state.branch = branch(head, &ops, bisect);
             states.push(state.clone());
@@ -8570,6 +8579,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: subject.into(),
+            subject_altered: false,
         };
         let mut state = AppState::new(Context::Workspace);
         state.commits.rows = vec![

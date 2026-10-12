@@ -191,6 +191,12 @@ pub const NO_TARGET: &str = "No target loaded for a fixup!; move down to load mo
 /// Why a `fixup!` commit cannot be folded: its target is below a merge.
 pub const ACROSS_MERGE: &str = "Cannot rewrite across a merge";
 
+/// Why a `fixup!` commit cannot be folded: its subject, or its target's,
+/// was changed to be drawn safely, so matching it could pick the wrong
+/// commit.
+pub const INEXACT_SUBJECT: &str =
+    "A fixup! commit or its target has a subject with control characters; fold it by hand";
+
 /// What git writes in front of the subject of a fixup commit.
 const FIXUP_PREFIX: &str = "fixup! ";
 
@@ -199,7 +205,8 @@ const FIXUP_PREFIX: &str = "fixup! ";
 /// first. The chain ends at the first merge or the last loaded row. A
 /// fixup's target is the nearest older commit in the chain whose subject
 /// is the fixup's, every leading `fixup! ` stripped, and that is not a
-/// fixup itself.
+/// fixup itself. Subjects are compared as drawn, so any fixup or matched
+/// target whose subject drawing changed is refused rather than guessed.
 pub fn fixup_targets(rows: &[CommitRow]) -> Result<Vec<(usize, usize)>, &'static str> {
     let merge = rows.iter().position(|row| row.parents.len() > 1);
     let chain = &rows[..merge.unwrap_or(rows.len())];
@@ -208,6 +215,9 @@ pub fn fixup_targets(rows: &[CommitRow]) -> Result<Vec<(usize, usize)>, &'static
         let Some(mut subject) = row.subject.strip_prefix(FIXUP_PREFIX) else {
             continue;
         };
+        if row.subject_altered {
+            return Err(INEXACT_SUBJECT);
+        }
         while let Some(rest) = subject.strip_prefix(FIXUP_PREFIX) {
             subject = rest;
         }
@@ -216,6 +226,7 @@ pub fn fixup_targets(rows: &[CommitRow]) -> Result<Vec<(usize, usize)>, &'static
             .position(|older| older.subject == subject && !older.subject.starts_with(FIXUP_PREFIX))
             .map(|at| i + 1 + at);
         match target {
+            Some(target) if chain[target].subject_altered => return Err(INEXACT_SUBJECT),
             Some(target) => pairs.push((i, target)),
             None if merge.is_some() => return Err(ACROSS_MERGE),
             None => return Err(NO_TARGET),
@@ -739,6 +750,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }
     }
 
@@ -1557,6 +1569,26 @@ mod tests {
         assert_eq!(
             plan_autosquash(&rows),
             Ok(plan_of('c', vec![pick('b'), fixup('d')]))
+        );
+    }
+
+    #[test]
+    fn autosquash_refuses_a_fixup_or_target_whose_subject_was_made_safe() {
+        // ` fixup! A` reads as `fixup! A` once trimmed, though git would
+        // not take it for a fixup.
+        let mut padded = titled(&[('d', "fixup! A"), ('b', "B"), ('a', "A")]);
+        padded[0].subject_altered = true;
+        assert_eq!(plan_autosquash(&padded), Err(INEXACT_SUBJECT));
+        // `A\x01` and `A\x02` both read as `A\u{FFFD}`.
+        let mut target = titled(&[('d', "fixup! A\u{FFFD}"), ('b', "B"), ('a', "A\u{FFFD}")]);
+        target[2].subject_altered = true;
+        assert_eq!(plan_autosquash(&target), Err(INEXACT_SUBJECT));
+        // A commit in between with an altered subject plays no part.
+        let mut between = titled(&[('d', "fixup! A"), ('b', "B"), ('a', "A")]);
+        between[1].subject_altered = true;
+        assert_eq!(
+            plan_autosquash(&between),
+            Ok(plan_of('9', vec![pick('a'), fixup('d'), pick('b')]))
         );
     }
 

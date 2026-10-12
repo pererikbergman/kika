@@ -913,8 +913,9 @@ would leave another branch behind is refused and names the branch.
 
 To fix an older commit, stage the fix and press `ctrl-b`: Kika blames the
 lines the staged change touches in `HEAD` and moves the cursor to the commit
-that last changed them. When they come from several commits it lists them
-and leaves the cursor; newly added files have no such commit. `ctrl-f` then
+that last changed them. When they come from several commits it names the
+newest three, counts the rest, and leaves the cursor; newly added files have
+no such commit. `ctrl-f` then
 commits the staged change as `fixup! <subject>` of the selected commit, with
 `git commit --fixup`, so hooks and signing work as for any commit. `S` asks
 first (only `y` answers, not Enter), then folds every `fixup!` commit into the
@@ -923,7 +924,9 @@ fixups first, and becomes a fixup. The target is the nearest older commit
 whose subject is the fixup's, without its `fixup! ` prefixes. Only the line
 of history from `HEAD` down to the first merge is searched; if a fixup's
 target is not loaded yet, the whole autosquash is refused, and moving down
-to the end of the log loads more. Kika orders the fixups itself and passes
+to the end of the log loads more. A fixup or target whose subject holds
+control characters, or starts or ends with spaces, is refused rather than
+matched, since Kika shows such subjects changed. Kika orders the fixups itself and passes
 `--no-autosquash`, so `rebase.autoSquash` has no effect, and `squash!` and
 `amend!` commits stay as they are. With `--update-refs`, a branch on a fixup
 or on a commit a fixup moves past is refused, like a move.

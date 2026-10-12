@@ -166,6 +166,7 @@ mod tests {
             author: String::new(),
             time: 0,
             subject: String::new(),
+            subject_altered: false,
         }
     }
 

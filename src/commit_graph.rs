@@ -122,6 +122,7 @@ mod tests {
             author: "a".into(),
             time: 0,
             subject: oid.into(),
+            subject_altered: false,
         }
     }
 

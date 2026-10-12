@@ -233,6 +233,25 @@ pub fn suggest(files: &[(Vec<OldRange>, Vec<CommitId>)]) -> FixupBase {
     }
 }
 
+/// The most short ids [`candidates_notice`] lists, so that the notice fits
+/// an 80-column bar whole rather than being cut mid-list.
+pub const MAX_LISTED: usize = 3;
+
+/// What the bar says when the staged lines come from several commits:
+/// how many, then the first few of `shorts` (the caller orders them newest
+/// first), and how many more there are.
+pub fn candidates_notice(shorts: &[String]) -> String {
+    let listed = shorts[..shorts.len().min(MAX_LISTED)].join(", ");
+    let more = match shorts.len().saturating_sub(MAX_LISTED) {
+        0 => String::new(),
+        n => format!(" +{n} more"),
+    };
+    format!(
+        "Staged lines come from {} commits: {listed}{more}",
+        shorts.len()
+    )
+}
+
 /// Find the commits the staged change fixes: one diff, then one blame
 /// per file `HEAD` has. Errors are made safe to draw, since git's message
 /// can quote repo-controlled names.
@@ -280,6 +299,26 @@ mod tests {
     /// A file of `HEAD` whose lines were last changed by these commits.
     fn blamed(digits: &str) -> Vec<CommitId> {
         digits.chars().map(cid).collect()
+    }
+
+    #[test]
+    fn the_candidates_notice_lists_a_few_and_counts_the_rest() {
+        let shorts = |n: usize| (0..n).map(|i| format!("abcdef{i}")).collect::<Vec<_>>();
+        assert_eq!(
+            candidates_notice(&shorts(2)),
+            "Staged lines come from 2 commits: abcdef0, abcdef1"
+        );
+        assert_eq!(
+            candidates_notice(&shorts(MAX_LISTED)),
+            "Staged lines come from 3 commits: abcdef0, abcdef1, abcdef2"
+        );
+        let many = candidates_notice(&shorts(20));
+        assert_eq!(
+            many,
+            "Staged lines come from 20 commits: abcdef0, abcdef1, abcdef2 +17 more"
+        );
+        // With room for the bar's padding at 80 columns.
+        assert!(many.chars().count() <= 76, "{many}");
     }
 
     #[test]

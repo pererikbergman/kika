@@ -10356,6 +10356,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: format!("commit {i}"),
+                subject_altered: false,
             })
             .collect();
         LogPage { rows, done }
@@ -18329,7 +18330,9 @@ mod tests {
         assert_eq!(state.commits.selected, 2);
         assert_eq!(
             state.notice,
-            Some("Fixup base: eeeeeee (not loaded)".into())
+            Some(
+                "Fixup base: eeeeeee (not loaded; move down to load more, then look again)".into()
+            )
         );
     }
 

@@ -5,7 +5,7 @@
 use super::{AppState, Context};
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
-use crate::git::fixup_base::FixupBase;
+use crate::git::fixup_base::{FixupBase, candidates_notice};
 use crate::git::ops::GitOp;
 use crate::keymap;
 use crate::popup::{ConfirmKind, ErrorPopup, Popup};
@@ -120,11 +120,7 @@ impl AppState {
                     .iter()
                     .map(|id| self.commits.short_oid(id))
                     .collect();
-                format!(
-                    "Staged lines come from {} commits: {}",
-                    shorts.len(),
-                    shorts.join(", ")
-                )
+                candidates_notice(&shorts)
             }
         };
         self.notice = Some(notice.into());
@@ -136,7 +132,9 @@ impl AppState {
         let commits = &mut self.commits;
         let short = commits.short_oid(id);
         let Some(at) = commits.rows.iter().position(|row| row.oid == id.as_str()) else {
-            return format!("Fixup base: {short} (not loaded)");
+            return format!(
+                "Fixup base: {short} (not loaded; move down to load more, then look again)"
+            );
         };
         let subject = commits.rows[at].subject.clone();
         if !commits.visible().contains(&at) {
