@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::effect::Tag;
+use crate::features::commit::git::{MessageSource, commit_command};
 use crate::features::commits::copy::git::ordered;
 use crate::features::commits::custom_patch;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
@@ -18,7 +19,7 @@ use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
-use crate::op::{GitOp, MessageSource, commit_command, op_command, run_op};
+use crate::op::{GitOp, op_command, run_op};
 use crate::sequence_editor::editor_value;
 
 /// Something to run with the terminal handed over.
