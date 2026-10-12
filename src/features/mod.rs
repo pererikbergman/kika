@@ -39,6 +39,7 @@
 pub(crate) mod blame;
 pub(crate) mod branches;
 pub(crate) mod command_log;
+pub(crate) mod commit;
 pub(crate) mod commits;
 pub(crate) mod conflicts;
 pub(crate) mod custom_commands;
