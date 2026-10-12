@@ -65,6 +65,8 @@ mod stash_view;
 mod submodule_list;
 mod tags;
 mod tags_view;
+#[cfg(test)]
+mod test_support;
 mod view;
 mod watch;
 mod worktree_file;
