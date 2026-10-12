@@ -1036,6 +1036,7 @@ mod tests {
                 to: CommitId::parse("abc1234").unwrap(),
                 mode: ResetMode::Hard,
             },
+            head: None,
         })];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Reset hard "), "{rows:#?}");
@@ -1289,6 +1290,7 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
             op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
+            head: CommitId::parse("fedcba9").unwrap(),
             short_oid: "abc1234".into(),
             left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
         })];
@@ -1302,6 +1304,39 @@ mod tests {
             rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
             "{rows:#?}"
         );
+    }
+
+    /// The hard-reset form of the leave-commits question, with eight ids.
+    fn hard_reset_leaving_eight() -> AppState {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        use crate::popup::LeaveCommitsConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
+            op: GitOp::Reset {
+                to: CommitId::parse("abc1234").unwrap(),
+                mode: ResetMode::Hard,
+            },
+            head: CommitId::parse("fedcba9").unwrap(),
+            short_oid: "abc1234".into(),
+            left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
+        })];
+        state
+    }
+
+    #[test]
+    fn the_hard_reset_leave_commits_question_fits_a_normal_terminal() {
+        let (_, rows) = draw(&hard_reset_leaving_eight(), 80, 24);
+        assert!(contains(&rows, "thrown away"), "{rows:#?}");
+        assert!(contains(&rows, "and 3 more"), "{rows:#?}");
+        assert!(contains(&rows, "(y/n)"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_tiny_terminal_still_shows_the_hard_reset_warning() {
+        let (_, rows) = draw(&hard_reset_leaving_eight(), 24, 8);
+        assert!(contains(&rows, "uncommitted"), "{rows:#?}");
+        assert!(contains(&rows, "thrown away"), "{rows:#?}");
     }
 
     #[test]

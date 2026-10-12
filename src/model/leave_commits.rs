@@ -7,7 +7,18 @@ use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
 use crate::git::ops::{GitOp, ResetMode};
 use crate::git::status::Head;
+use crate::keymap::KeyScope;
 use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHardConfirm};
+
+/// The left-behind check in flight, and where the user was when it
+/// started. Its answer only asks if they are still there, so a key meant
+/// for something else cannot answer the question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftBehindCheck {
+    pub seq: u64,
+    pub popups: Vec<Popup>,
+    pub focus: KeyScope,
+}
 
 impl AppState {
     /// `HEAD`'s commit when it is detached on an id git can use.
@@ -20,13 +31,23 @@ impl AppState {
 
     /// Plan `op`, which moves `HEAD` to `target`. On a detached `HEAD`,
     /// first look for the commits it would leave behind; anywhere else, go
-    /// on as without the check.
+    /// on as without the check. One check runs at a time, so two quick
+    /// presses never stack two questions.
     pub(super) fn move_head(&mut self, op: GitOp, target: CommitId) -> Vec<Effect> {
         let Some(head) = self.detached_head() else {
-            return self.move_head_now(op);
+            return self.move_head_now(op, None);
         };
+        if self.left_behind_check.is_some() {
+            self.notice = Some("Still checking for commits left behind".into());
+            return vec![];
+        }
         let seq = self.take_seq();
         let tag = self.user_tag(seq);
+        self.left_behind_check = Some(LeftBehindCheck {
+            seq,
+            popups: self.popups.clone(),
+            focus: self.key_focus(),
+        });
         vec![Effect::CheckLeftBehind {
             tag,
             op,
@@ -36,8 +57,9 @@ impl AppState {
     }
 
     /// What `op` does once nothing would be left behind: a checkout and a
-    /// hard reset still ask their own question, soft and mixed run.
-    fn move_head_now(&mut self, op: GitOp) -> Vec<Effect> {
+    /// hard reset still ask their own question, soft and mixed run. `head`
+    /// is the detached `HEAD` the hard reset is asked from.
+    fn move_head_now(&mut self, op: GitOp, head: Option<CommitId>) -> Vec<Effect> {
         match op {
             GitOp::CheckoutCommit(id) => {
                 self.commits.pending = Some(id);
@@ -50,8 +72,11 @@ impl AppState {
                 mode: ResetMode::Hard,
             } => {
                 let short_oid = self.commits.short_oid(to);
-                self.popups
-                    .push(Popup::ResetHard(ResetHardConfirm { short_oid, op }));
+                self.popups.push(Popup::ResetHard(ResetHardConfirm {
+                    short_oid,
+                    op,
+                    head,
+                }));
                 vec![]
             }
             op => self.start_op(Ok(Some(op))),
@@ -59,8 +84,8 @@ impl AppState {
     }
 
     /// Ask before leaving commits behind, or go on if there are none. A
-    /// result for a `HEAD` that has since moved, or a failed read, runs
-    /// nothing.
+    /// result for a `HEAD` that has since moved, for a user who has since
+    /// moved to another popup or input, or a failed read, runs nothing.
     pub(super) fn left_behind_checked(
         &mut self,
         tag: Tag,
@@ -71,11 +96,19 @@ impl AppState {
         if tag.user {
             self.busy = self.busy.saturating_sub(1);
         }
+        // Taken before the generation check, so a stale answer cannot
+        // leave the guard stuck.
+        let Some(check) = self.left_behind_check.take_if(|check| check.seq == tag.seq) else {
+            return vec![];
+        };
         if tag.generation != self.generation {
             return vec![];
         }
-        if self.detached_head() != Some(head) {
-            self.notice = Some("HEAD moved; try again".into());
+        if !self.head_still(Some(&head)) {
+            return vec![];
+        }
+        if self.popups != check.popups || self.key_focus() != check.focus {
+            self.notice = Some("Not asked: focus moved; try again".into());
             return vec![];
         }
         let left = match result {
@@ -84,13 +117,13 @@ impl AppState {
                 self.push_error(ErrorPopup::new(
                     "Could not check for commits left behind",
                     &message,
-                    "Close this; HEAD did not move.",
+                    "Close this and press the key again to retry; HEAD did not move.",
                 ));
                 return vec![];
             }
         };
         if left.is_empty() {
-            return self.move_head_now(op);
+            return self.move_head_now(op, Some(head));
         }
         let target = match &op {
             GitOp::CheckoutCommit(id) | GitOp::Reset { to: id, .. } => id,
@@ -100,13 +133,15 @@ impl AppState {
         let left = left.iter().map(|id| self.commits.short_oid(id)).collect();
         self.popups.push(Popup::LeaveCommits(LeaveCommitsConfirm {
             op,
+            head,
             short_oid,
             left,
         }));
         vec![]
     }
 
-    /// Run the op the open question carries, and only if one is open.
+    /// Run the op the open question carries, and only if one is open and
+    /// `HEAD` is still where it was asked from.
     pub(super) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::LeaveCommits(_))) {
             return vec![];
@@ -114,6 +149,22 @@ impl AppState {
         let Some(Popup::LeaveCommits(confirm)) = self.popups.pop() else {
             return vec![];
         };
+        if !self.head_still(Some(&confirm.head)) {
+            return vec![];
+        }
         self.start_op(Ok(Some(confirm.op)))
+    }
+
+    /// Whether `HEAD` is still the detached `head` a question was asked
+    /// from; `None` asks nothing. Says so when it has moved.
+    pub(super) fn head_still(&mut self, head: Option<&CommitId>) -> bool {
+        let Some(head) = head else {
+            return true;
+        };
+        if self.detached_head().as_ref() == Some(head) {
+            return true;
+        }
+        self.notice = Some("HEAD moved; try again".into());
+        false
     }
 }
