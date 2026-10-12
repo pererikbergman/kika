@@ -6,6 +6,7 @@
 use super::review_files::PrFiles;
 use super::{AppState, Context};
 use crate::effect::{Effect, Tag};
+use crate::forge::merge::MergeMethod;
 use crate::forge::remote::matches;
 use crate::forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
 use crate::forge::{ForgeHost, ForgeRepo, ForgeStatus};
@@ -14,7 +15,7 @@ use crate::intent::AppIntent;
 use crate::keymap::Reason;
 use crate::list_filter;
 use crate::pick_list::{PickList, PickPurpose};
-use crate::popup::Popup;
+use crate::popup::{MergePrConfirm, Popup};
 use ratatui::text::Line;
 
 pub const NO_FORGE: &str =
@@ -93,6 +94,9 @@ pub struct ReviewState {
     pub body: Option<RenderedBody>,
     /// The files screen, while it is shown.
     pub files: Option<PrFiles>,
+    /// The merge question waiting for its method, and the methods the
+    /// open "Merge method" list offers, by row.
+    pub merge_pick: Option<(MergePrConfirm, Vec<MergeMethod>)>,
     /// Each pull request head fetched this session, so none is fetched
     /// twice. Kept when review mode is left and entered again.
     pub fetched_heads: Vec<(u64, CommitId)>,
@@ -121,6 +125,7 @@ impl Default for ReviewState {
             check_urls: Vec::new(),
             body: None,
             files: None,
+            merge_pick: None,
             fetched_heads: Vec::new(),
         }
     }

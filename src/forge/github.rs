@@ -39,7 +39,7 @@ const MAX_ETAG: usize = 256;
 /// The probe's media type header.
 const ACCEPT: &str = "Accept: application/vnd.github+json";
 /// The most of GitHub's refusal shown, in characters.
-const MAX_REFUSAL: usize = 400;
+pub(super) const MAX_REFUSAL: usize = 400;
 /// The longest page URL taken from an answer.
 pub(super) const MAX_URL: usize = 2048;
 
@@ -72,6 +72,9 @@ pub enum GhCall {
     /// A REST `POST` to `path`; `body` is the JSON for stdin, so nothing
     /// the user typed or a branch is called reaches argv.
     Create { path: String, body: Vec<u8> },
+    /// A REST `PUT` to a pull request's merge `path`; `body` is the JSON
+    /// for stdin, holding the method and the head commit it must merge.
+    Merge { path: String, body: Vec<u8> },
 }
 
 /// One `gh api` call: the host, and what it asks.
@@ -119,6 +122,19 @@ impl GhCommand {
             ]
             .map(String::from)
             .into(),
+            GhCall::Merge { path, .. } => [
+                "api",
+                "--include",
+                "--hostname",
+                host,
+                "--method",
+                "PUT",
+                path,
+                "--input",
+                "-",
+            ]
+            .map(String::from)
+            .into(),
         };
         args.into_iter().map(OsString::from).collect()
     }
@@ -147,13 +163,19 @@ impl GhCommand {
                 "gh api --include --hostname {} --method POST {path} --input -",
                 self.host
             ),
+            GhCall::Merge { path, .. } => format!(
+                "gh api --include --hostname {} --method PUT {path} --input -",
+                self.host
+            ),
         }
     }
 
     /// What goes on stdin: the JSON body, or nothing.
     pub fn stdin(&self) -> Vec<u8> {
         match &self.kind {
-            GhCall::Graphql { body } | GhCall::Create { body, .. } => body.clone(),
+            GhCall::Graphql { body } | GhCall::Create { body, .. } | GhCall::Merge { body, .. } => {
+                body.clone()
+            }
             GhCall::Probe { .. } => Vec::new(),
         }
     }
@@ -487,7 +509,7 @@ struct RestErrorDetail {
 
 /// GitHub's reason for refusing a call, from a REST error body: its
 /// message and each detail, terminal-safe and cut to [`MAX_REFUSAL`].
-fn refusal(body: &[u8]) -> Option<String> {
+pub(super) fn refusal(body: &[u8]) -> Option<String> {
     let error: RestError = serde_json::from_slice(body).ok()?;
     let details = error.errors.into_iter().filter_map(|detail| {
         detail.message.or_else(|| {

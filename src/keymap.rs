@@ -319,6 +319,8 @@ pub enum KeyScope {
     PickList,
     /// "Create this pull request?" on top of the popup stack.
     CreatePullRequest,
+    /// "Merge this pull request?" on top of the popup stack.
+    MergePullRequest,
 }
 
 impl KeyScope {
@@ -377,7 +379,8 @@ impl KeyScope {
             | KeyScope::Input
             | KeyScope::CommandLog
             | KeyScope::PickList
-            | KeyScope::CreatePullRequest => None,
+            | KeyScope::CreatePullRequest
+            | KeyScope::MergePullRequest => None,
         }
     }
 
@@ -436,6 +439,7 @@ impl KeyScope {
             KeyScope::CommandLog => "Command log",
             KeyScope::PickList => "Pick one",
             KeyScope::CreatePullRequest => "Create pull request",
+            KeyScope::MergePullRequest => "Merge pull request",
         }
     }
 
@@ -631,6 +635,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
+    "review.merge",
+    "merge_pr.yes",
+    "merge_pr.no",
+    "merge_pr.quit",
     "command_log.quit",
     "command_log.escape",
     "commits.paste",
@@ -3730,6 +3738,16 @@ static REGISTRY: &[Binding] = &[
         disabled: crate::model::review::open_check_disabled,
     },
     Binding {
+        id: "review.merge",
+        keys: &[KeyPattern::any(KeyCode::Char('M'))],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenMergePr,
+        description: "Merge the open pull request on GitHub, after a question only y answers",
+        label: "merge",
+        bar: true,
+        disabled: crate::model::merge_pr::merge_disabled,
+    },
+    Binding {
         id: "review.back",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Review,
@@ -5980,6 +5998,41 @@ static REGISTRY: &[Binding] = &[
         id: "create_pull_request.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::CreatePullRequest,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Merging a pull request reaches GitHub and cannot be undone, so
+    // Enter is left unbound.
+    Binding {
+        id: "merge_pr.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::MergePullRequest,
+        intent: AppIntent::ConfirmMergePr,
+        description: "Yes, merge the pull request on GitHub",
+        label: "merge",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "merge_pr.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::MergePullRequest,
+        intent: AppIntent::ConfirmNo,
+        description: "No, merge nothing",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "merge_pr.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::MergePullRequest,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -9053,6 +9106,51 @@ mod tests {
     }
 
     #[test]
+    fn only_y_answers_the_merge_question_and_its_keys_are_locked() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::MergePullRequest;
+        assert_eq!(resolve_in(ask, plain('y')), Some(AppIntent::ConfirmMergePr));
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(resolve_in(ask, plain('Y')), None);
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(ask.parent(), None);
+        let merge = registry().iter().find(|b| b.id == "review.merge").unwrap();
+        assert_eq!(merge.scope, KeyScope::Review);
+        assert_eq!(merge.intent, AppIntent::OpenMergePr);
+        assert!(merge.matches(key(KeyCode::Char('M'), KeyModifiers::SHIFT)));
+        for id in [
+            "review.merge",
+            "merge_pr.yes",
+            "merge_pr.no",
+            "merge_pr.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            let expected = format!("{id:?} can only be changed in the global config file");
+            assert_eq!(
+                build(&[(id, &["enter"])], Trust::Repo).unwrap_err(),
+                expected
+            );
+        }
+        assert!(build(&[("merge_pr.yes", &["Y"])], Trust::Global).is_ok());
+    }
+
+    #[test]
     fn undo_redo_and_the_travel_answers_are_locked() {
         for id in [
             "workspace.undo",
@@ -10272,6 +10370,7 @@ mod tests {
             KeyScope::CommandLog => "command_log",
             KeyScope::PickList => "pick_list",
             KeyScope::CreatePullRequest => "create_pull_request",
+            KeyScope::MergePullRequest => "merge_pr",
         }
     }
 
@@ -10766,6 +10865,9 @@ mod tests {
                     | OpenPr
                     | RefreshReview
                     | OpenCheckDetails
+                    // A merge reaches GitHub and cannot be undone.
+                    | OpenMergePr
+                    | ConfirmMergePr
                     // It may fetch the pull request's commits.
                     | OpenReviewFiles
                     | PickSelect

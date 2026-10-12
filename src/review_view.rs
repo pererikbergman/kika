@@ -9,6 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::branches_view::clock;
+use crate::forge::merge::{MergeBlock, merge_options};
 use crate::forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
 };
@@ -428,6 +429,7 @@ pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> 
         Span::styled(" · ", dim()),
         Span::styled(word, Style::new().fg(color)),
     ]));
+    lines.extend(merge_line(detail, width));
     let branches = format!("{} ← {}", detail.base, detail.head);
     lines.extend(markdown::wrap_text(&branches, Style::new(), width));
     if !detail.checks.is_empty() {
@@ -463,6 +465,26 @@ pub fn detail_lines(detail: &PrDetail, body: &[Line<'static>], width: usize) -> 
         lines.extend(body.iter().cloned());
     }
     lines
+}
+
+/// How the pull request may be merged, or why it may not, in fixed words.
+fn merge_line(detail: &PrDetail, width: usize) -> Vec<Line<'static>> {
+    let (text, style) = match merge_options(detail) {
+        Ok(methods) => {
+            let labels: Vec<&str> = methods.iter().map(|m| m.label()).collect();
+            (format!("Merge: {}", labels.join(" · ")), Style::new())
+        }
+        // Already merged is done, not a problem: it is not drawn as one.
+        Err(MergeBlock::Merged) => (
+            format!("Cannot merge: {}", MergeBlock::Merged.message()),
+            dim(),
+        ),
+        Err(block) => (
+            format!("Cannot merge: {}", block.message()),
+            Style::new().fg(Color::Red),
+        ),
+    };
+    markdown::wrap_text(&text, style, width)
 }
 
 /// `items` after `label`, comma separated, as many to a line as fit in
@@ -576,6 +598,76 @@ mod tests {
             assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
         }
         assert!(!contains(&rows, "## Summary"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_detail_says_how_it_may_merge_or_why_not() {
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Merge: merge commit · squash"), "{rows:#?}");
+        assert!(!contains(&rows, "Cannot merge"), "{rows:#?}");
+
+        let mut detail = fixture_detail();
+        detail.merge_state = crate::forge::review::MergeState::Behind;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(
+            contains(
+                &rows,
+                "Cannot merge: the base moved on; the branch must be updated first"
+            ),
+            "{rows:#?}"
+        );
+        assert!(!contains(&rows, "Merge: "), "{rows:#?}");
+
+        let mut detail = fixture_detail();
+        detail.state = PrState::Merged;
+        state.review.detail = Some(detail);
+        let rows = draw(&state, 80, 30);
+        assert!(contains(&rows, "Cannot merge: already merged"), "{rows:#?}");
+    }
+
+    /// The style of the first cell of the row holding `text`.
+    fn style_at(state: &AppState, text: &str) -> Style {
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(state, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = buffer_rows(&buffer);
+        let y = rows.iter().position(|r| r.contains(text)).unwrap();
+        let row = &rows[y];
+        let col = row[..row.find(text).unwrap()].chars().count();
+        buffer[(col as u16, y as u16)].style()
+    }
+
+    #[test]
+    fn already_merged_is_dim_and_a_real_block_is_red() {
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        let mut detail = fixture_detail();
+        detail.state = PrState::Merged;
+        state.review.detail = Some(detail);
+        let merged = style_at(&state, "Cannot merge: already merged");
+        assert_ne!(merged.fg, Some(Color::Red));
+        assert!(merged.add_modifier.contains(Modifier::DIM), "{merged:?}");
+
+        let mut detail = fixture_detail();
+        detail.merge_state = crate::forge::review::MergeState::Blocked;
+        state.review.detail = Some(detail);
+        let blocked = style_at(&state, "Cannot merge: a required review");
+        assert_eq!(blocked.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn the_merge_key_shows_in_the_bar_at_80_columns() {
+        let mut state = reviewing(ReviewScreen::Detail(42));
+        state.review.detail = Some(fixture_detail());
+        for height in [24, 30] {
+            let rows = draw(&state, 80, height);
+            let bar = rows.last().unwrap();
+            assert!(bar.contains("M merge"), "{bar:?}");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod allow;
 pub mod cache;
 pub mod github;
 pub mod head;
+pub mod merge;
 pub mod remote;
 pub mod review;
 pub mod task;
@@ -165,6 +166,19 @@ impl CreateError {
             }
             CreateError::Status(ForgeStatus::Failed) => "GitHub gave no usable answer.".into(),
             CreateError::Refused(message) => message.clone(),
+        }
+    }
+
+    /// What the error popup says when a merge failed. A timeout may hide
+    /// a merge that went through, so it says how to find out.
+    pub fn merge_message(&self) -> String {
+        match self {
+            CreateError::Status(ForgeStatus::Offline) => {
+                "GitHub could not be reached, or did not answer in time. If it timed out, \
+                 the merge may still have happened: refresh with r."
+                    .into()
+            }
+            other => other.message(),
         }
     }
 }
@@ -390,6 +404,19 @@ pub(crate) mod tests {
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
+    }
+
+    #[test]
+    fn a_merge_timeout_says_the_merge_may_have_happened() {
+        let offline = CreateError::Status(ForgeStatus::Offline);
+        assert!(
+            offline
+                .merge_message()
+                .contains("merge may still have happened")
+        );
+        assert!(offline.merge_message().contains("refresh with r"));
+        let refused = CreateError::Refused("Head branch was modified".into());
+        assert_eq!(refused.merge_message(), "Head branch was modified");
     }
 
     #[test]
