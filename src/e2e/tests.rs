@@ -236,7 +236,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
     let mut app = Harness::start(&repo).await;
 
     // Collapsed, the panel shows only the branch; expanded, the rest.
-    app.assert_screen_contains("│work ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("work "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
@@ -245,7 +246,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
-    app.assert_screen_contains("│main ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("main "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃no upstream ");
 }
@@ -258,7 +260,11 @@ async fn a_detached_head_shows_its_short_hash() {
 
     let mut app = Harness::start(&repo).await;
 
-    app.assert_screen_contains(&format!("│detached {} ", &head[..7]));
+    let status = app.screen()[1].clone();
+    assert!(
+        status.starts_with(&format!("detached {} ", &head[..7])),
+        "{status:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1290,7 +1296,7 @@ async fn space_in_the_branches_panel_checks_out_the_selected_branch() {
     app.assert_screen_contains("* side");
     // The Status panel follows, collapsed to its branch row.
     let status = app.screen()[1].clone();
-    assert!(status.contains("│side "), "{status:?}");
+    assert!(status.starts_with("side "), "{status:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1981,7 +1987,7 @@ async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
     app.press(KeyCode::Enter).await;
     assert_eq!(app.state().repo.as_deref(), Some(wt.as_path()));
     let status = app.screen()[1].clone();
-    assert!(status.contains("│feature "), "{status:?}");
+    assert!(status.starts_with("feature "), "{status:?}");
 
     // Back in the main worktree, d then y removes the clean one.
     app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)

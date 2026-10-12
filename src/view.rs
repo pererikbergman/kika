@@ -1876,7 +1876,7 @@ mod tests {
     fn the_launch_repository_has_a_plain_status_title() {
         let state = on(branch(Head::Branch("main".into())));
         let rows = draw(&state, 80, 24);
-        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
     }
 
     /// The Files panel's title row and the row below it.
@@ -1893,13 +1893,22 @@ mod tests {
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
         state.selected = Some(0);
 
-        // 80x24: the others keep a border and a line each.
+        // 80x24: the others drop to a title and a line each, so Files
+        // keeps 13 rows inside its border.
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[0].starts_with("┌ [1] Status "), "{rows:#?}");
-        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        assert!(rows[1].starts_with("main "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
-        assert_eq!(title, 3, "{rows:#?}");
+        assert_eq!(title, 2, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
+        for row in &rows[3..16] {
+            assert!(row.starts_with('│'), "{rows:#?}");
+        }
+        assert!(rows[16].starts_with('└'), "{rows:#?}");
+        for (row, name) in [(17, "[3] Branches"), (19, "[4] Commits"), (21, "[5] Stash")] {
+            assert!(rows[row].starts_with(&format!(" {name} ─")), "{rows:#?}");
+            assert!(!rows[row + 1].starts_with('│'), "{rows:#?}");
+        }
 
         // 80x12: only their titles, on a top border.
         // A title row carries the branch, the panel's one line.
@@ -1931,7 +1940,7 @@ mod tests {
         let mut state = on(main);
         state.files = vec![file("a.rs")];
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(rows[1].starts_with("main "), "{rows:#?}");
         assert!(!contains(&rows, "origin/main"), "{rows:#?}");
 
         // Height 10: 9 rows over the bar; four title rows leave Status five.
@@ -1947,12 +1956,14 @@ mod tests {
     fn a_collapsed_files_panel_counts_the_files() {
         let mut state = status_focused(&loaded(vec![file("a.rs"), file("b.rs")]));
         let rows = draw(&state, 80, 24);
-        assert!(contains(&rows, "│2 files "), "{rows:#?}");
+        assert!(files_rows(&rows).1.starts_with("2 files "), "{rows:#?}");
         assert!(!contains(&rows, " M a.rs"), "{rows:#?}");
         state.files.pop();
-        assert!(contains(&draw(&state, 80, 24), "│1 file "));
+        let rows = draw(&state, 80, 24);
+        assert!(files_rows(&rows).1.starts_with("1 file "), "{rows:#?}");
         state.files.clear();
-        assert!(contains(&draw(&state, 80, 24), "│No changes "));
+        let rows = draw(&state, 80, 24);
+        assert!(files_rows(&rows).1.starts_with("No changes "), "{rows:#?}");
     }
 
     #[test]
@@ -3500,7 +3511,7 @@ mod tests {
         // Without colour too: the focused frame is thick, the others thin.
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "┏ [2] Files ━"), "{rows:#?}");
-        assert!(contains(&rows, "┌ [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
         assert!(contains(&rows, "┌ [0] Diff "), "{rows:#?}");
         for other in ["[1] Status", "[3] Branches", "[5] Stash", "[0] Diff"] {
             let (border, title) = frame_style(&buffer, other);
@@ -3893,7 +3904,7 @@ mod tests {
         let state = on(main);
         let buffer = draw_buffer(&state, 80, 24);
         let rows = buffer_rows(&buffer);
-        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
+        assert!(rows[1].starts_with("main rebasing "), "{rows:#?}");
         let (x, y) = find(&buffer, "rebasing");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
