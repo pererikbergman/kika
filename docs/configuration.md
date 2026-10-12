@@ -1163,7 +1163,8 @@ it, and git's message. The list is read-only; `ctrl-z` and `ctrl-r` undo and
 redo from it, whatever the filter hides. `/` narrows the rows as you type,
 matching each row's short id and message as drawn; `enter` keeps the filter
 and `esc` clears it, then quits as everywhere else. The filter only narrows
-what is shown and never reaches git.
+what is shown and never reaches git. `L` and `A` do not filter the reflog:
+they only tell you that path and author filters work on the log tab.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1172,8 +1173,8 @@ what is shown and never reaches git.
 | `reflog.switch_tab` | `[`, `]` | Show the log | |
 | `reflog.filter` | `/` | Filter the reflog by typed text | |
 | `reflog.escape` | `esc` | Clear the filter, else quit Kika | locked |
-| `reflog.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |
-| `reflog.filter_author` | `A` | Show only the commits by a typed author | |
+| `reflog.filter_path` | `L` | Does not filter here; only says that path filters work on the log tab | |
+| `reflog.filter_author` | `A` | Does not filter here; only says that author filters work on the log tab | |
 
 ### Commit files (a commit opened from the Commits panel)
 
