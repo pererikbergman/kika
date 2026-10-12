@@ -2,7 +2,6 @@
 //! can swap the real `git` binary for a fake.
 
 pub mod askpass;
-pub mod attr;
 pub mod bisect;
 pub mod blame;
 pub mod branch_tips;

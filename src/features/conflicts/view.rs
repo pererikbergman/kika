@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::conflict::{ConflictView, Row, RowKind};
+use super::state::{ConflictView, Row, RowKind};
 use crate::git::diff::{EmojiZwj, sanitize_body};
 use crate::keymap::{KeyPattern, Keymap, registry};
 use crate::view::{PanelLook, clip, reversed};
@@ -129,7 +129,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use crate::conflict::{Choice, ConflictView};
+    use super::super::state::{Choice, ConflictView};
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};
 

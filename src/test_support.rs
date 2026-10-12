@@ -316,7 +316,7 @@ pub(crate) fn blamed(n: usize, height: u16) -> AppState {
     state
 }
 
-pub(crate) fn blame(state: &AppState) -> &crate::blame_view::BlameView {
+pub(crate) fn blame(state: &AppState) -> &crate::features::blame::BlameView {
     match &state.focus {
         Focus::Blame(view) => view,
         other => panic!("expected the blame focused, got {other:?}"),
@@ -1000,5 +1000,138 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         Resolution::Run(binding) => Some(binding.intent.clone()),
         Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
         Resolution::Unbound | Resolution::Command(_) => None,
+    }
+}
+
+/// Screen helpers for view tests: draw a state into a test terminal and
+/// find text in it, plus the states the view tests draw. Apart from the
+/// model-test builders above, as some share their names.
+#[cfg(test)]
+pub(crate) mod screen {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use crate::features::blame::BlameView;
+    use crate::git::FileEntry;
+    use crate::git::blame::BlameLine;
+    use crate::git::diff::{DiffLine, LineKind};
+    use crate::git::status::{BranchStatus, EntryKind, Head};
+    use crate::model::{AppState, Context, Focus};
+    use crate::view::{buffer_rows, render};
+
+    /// Draw into a `width` x `height` buffer and return its rows as text.
+    pub(crate) fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        buffer_rows(terminal.backend().buffer())
+    }
+
+    pub(crate) fn contains(rows: &[String], needle: &str) -> bool {
+        rows.iter().any(|row| row.contains(needle))
+    }
+
+    pub(crate) fn file(path: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }
+    }
+
+    /// A workspace after a status load of `files` on branch `main`.
+    pub(crate) fn loaded(files: Vec<FileEntry>) -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.files = files;
+        state.branch = Some(branch(Head::Branch("main".into())));
+        state
+    }
+
+    pub(crate) fn branch(head: Head) -> BranchStatus {
+        BranchStatus {
+            head,
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![],
+            bisect: None,
+        }
+    }
+
+    pub(crate) fn draw_buffer(
+        state: &AppState,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    pub(crate) fn diff_line(kind: LineKind, text: &str) -> DiffLine {
+        DiffLine {
+            kind,
+            text: text.into(),
+        }
+    }
+
+    /// Where `needle` starts on screen, by cell.
+    pub(crate) fn find(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
+        let first = needle.chars().next().unwrap().to_string();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let rest: String = (x..buffer.area.width)
+                    .take(needle.chars().count())
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if buffer[(x, y)].symbol() == first && rest == needle {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("{needle:?} not on screen");
+    }
+
+    /// No cell holds part of an emoji sequence: each holds all of `family`
+    /// or none of it, and no cell starts with a joiner or a virama.
+    pub(crate) fn assert_no_split_cluster(
+        buffer: &ratatui::buffer::Buffer,
+        family: &str,
+        at: &str,
+    ) {
+        let parts: Vec<char> = family.chars().filter(|&c| c != '\u{200D}').collect();
+        for cell in buffer.content() {
+            let symbol = cell.symbol();
+            let lead = symbol.chars().next();
+            assert!(
+                !matches!(lead, Some('\u{200C}' | '\u{200D}' | '\u{094D}')),
+                "{at}: a cell starts with {lead:?}"
+            );
+            if symbol.chars().any(|c| parts.contains(&c)) {
+                assert_eq!(symbol, family, "{at}: a split sequence");
+            }
+        }
+    }
+
+    pub(crate) fn blame_line(oid: &str, author: &str, line_no: usize, text: &str) -> BlameLine {
+        BlameLine {
+            oid: oid.into(),
+            author: author.into(),
+            date: "2024-01-02".into(),
+            line_no,
+            text: text.into(),
+        }
+    }
+
+    /// A workspace showing a loaded blame of `a.rs` with `lines`.
+    pub(crate) fn blamed(lines: Vec<BlameLine>, cursor: usize) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut view = BlameView::new("a.rs".into(), 0);
+        view.loaded(Ok(lines));
+        view.cursor = cursor;
+        state.focus = Focus::Blame(view);
+        state
     }
 }

@@ -1,9 +1,9 @@
 //! Git attributes Kika reads for one file.
 
-use super::diff::terminal_safe;
-use super::path::RepoPath;
-use super::runner::{GitCommand, GitRunner};
-use crate::conflict::DEFAULT_MARKER_SIZE;
+use super::state::DEFAULT_MARKER_SIZE;
+use crate::git::diff::terminal_safe;
+use crate::git::path::RepoPath;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// `git check-attr -z conflict-marker-size -- <path>`. The path is read
 /// literally, never as a pattern.

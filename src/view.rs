@@ -1,16 +1,15 @@
-use crate::blame_view::{BlameView, CommitView};
 use crate::branches::BranchesTab;
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
-use crate::conflict_view;
 use crate::custom_patch::CustomPatch;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
+use crate::features::blame;
+use crate::features::conflicts;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
-use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, EmojiZwj, LineKind, sanitize};
 use crate::git::emoji;
 use crate::git::patch::{FileKind, PatchError};
@@ -159,11 +158,11 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
         }
         (Focus::Conflict(view), ..) => {
-            conflict_view::render(view, &state.keymap, &look, frame, area)
+            conflicts::view::render(view, &state.keymap, &look, frame, area)
         }
         (Focus::Blame(view), ..) => match &view.commit {
-            Some(commit) => render_commit_view(commit, &look, frame, area),
-            None => render_blame(view, &look, frame, area),
+            Some(commit) => blame::view::render_commit_view(commit, &look, frame, area),
+            None => blame::view::render_blame(view, &look, frame, area),
         },
         (_, Some(rendered), Some(label)) if state.display_only() => {
             let (path, tail) = (rendered.path.display(), options_note(options));
@@ -476,7 +475,7 @@ pub(crate) fn elide_right(text: &str, max: usize) -> String {
 /// Commit ids are shown at this length; enough to recognise one.
 const SHORT_HASH: usize = 7;
 
-fn short_hash(oid: &str) -> &str {
+pub(crate) fn short_hash(oid: &str) -> &str {
     oid.char_indices()
         .nth(SHORT_HASH)
         .map_or(oid, |(end, _)| &oid[..end])
@@ -1837,7 +1836,7 @@ fn picked_rows(view: &HunkView, patch: &CustomPatch) -> std::collections::HashSe
 }
 
 /// [`search_marks`] of a pane's search, if it has one.
-fn marks_of(search: &Option<DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
+pub(crate) fn marks_of(search: &Option<DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
     search
         .as_ref()
         .map_or_else(Vec::new, |s| search_marks(s, at))
@@ -1931,7 +1930,7 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
 /// `line` clipped to `width` from its start, with `marks` drawn over
 /// `style`. A cut line's `…` stays in `style`: it stands for text off
 /// screen, not for the match, and a marked `…` would read as matched.
-fn clipped_marked(
+pub(crate) fn clipped_marked(
     line: &str,
     width: usize,
     style: Style,
@@ -2111,113 +2110,15 @@ fn elide_runs(runs: &[(Style, String)], max: usize) -> Vec<Span<'_>> {
     spans
 }
 
-/// Columns the author takes in a blame row; longer names are elided.
-const BLAME_AUTHOR: usize = 16;
-
-/// The blame in the Diff pane's place: per line its commit, author, day
-/// and number, then the text. The cursor row is reversed, so it reads
-/// without colour. A search marks its matches in the text.
-fn render_blame(view: &BlameView, look: &PanelLook, frame: &mut Frame, area: Rect) {
-    let found = found_note(view.search.as_ref(), false);
-    let block = look.block(look.path_title("Blame", view.path.display(), &found));
-    let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    let pane = if let Some(error) = &view.error {
-        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if !view.loaded {
-        Paragraph::new("Loading…")
-    } else if view.lines.is_empty() {
-        Paragraph::new("Empty file")
-    } else {
-        let number_width = view
-            .lines
-            .iter()
-            .map(|l| l.line_no)
-            .max()
-            .unwrap_or(0)
-            .to_string()
-            .len();
-        let lines = view
-            .lines
-            .iter()
-            .enumerate()
-            .skip(view.scroll)
-            .take(rows)
-            .map(|(i, line)| {
-                let row = blame_row(line, number_width);
-                // Matches are in the text, after the drawn columns.
-                let prefix = row.chars().count() - line.text.chars().count();
-                let marks: Vec<_> = marks_of(&view.search, i)
-                    .into_iter()
-                    .map(|(start, end, style)| (start + prefix, end + prefix, style))
-                    .collect();
-                let line = Line::from(clipped_marked(&row, width, Style::new(), &marks));
-                if i == view.cursor {
-                    reversed(line, width)
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>();
-        Paragraph::new(lines)
-    };
-    frame.render_widget(pane.block(block), area);
-}
-
-/// `<oid> <author> <date> <line no> <text>`, columns aligned. A line not
-/// committed yet has no author or day, so it says so across both.
-fn blame_row(line: &BlameLine, number_width: usize) -> String {
-    let who = if line.is_uncommitted() {
-        pad("Not committed yet", BLAME_AUTHOR + 1 + "YYYY-MM-DD".len())
-    } else {
-        format!(
-            "{} {}",
-            pad(&elide_right(&line.author, BLAME_AUTHOR), BLAME_AUTHOR),
-            line.date
-        )
-    };
-    format!(
-        "{} {who} {:>number_width$} {}",
-        short_hash(&line.oid),
-        line.line_no,
-        line.text
-    )
-}
-
 /// `text` followed by spaces up to `width` columns.
 pub(crate) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(width_of(text))))
 }
 
-/// A commit opened from the blame, in the same place: its message and
-/// diff, coloured as the Diff pane colours them.
-fn render_commit_view(view: &CommitView, look: &PanelLook, frame: &mut Frame, area: Rect) {
-    let found = found_note(view.search.as_ref(), false);
-    let block = look.block(look.title(&format!("Commit {}{found}", short_hash(&view.oid))));
-    let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    let pane = if let Some(error) = &view.error {
-        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if !view.loaded {
-        Paragraph::new("Loading…")
-    } else {
-        let start = view.scroll.min(view.lines.len());
-        let end = start.saturating_add(rows).min(view.lines.len());
-        Paragraph::new(
-            view.lines[start..end]
-                .iter()
-                .zip(start..)
-                .map(|(line, at)| styled_diff_line(line, width, &marks_of(&view.search, at)))
-                .collect::<Vec<_>>(),
-        )
-    };
-    frame.render_widget(pane.block(block), area);
-}
-
 /// Colour by kind; `---`/`+++` arrive as headers, so they are never red or
 /// green. A line wider than `width` ends in `…`, so a cut is never silent.
 /// `marks` are search matches, drawn over the colour.
-fn styled_diff_line(
+pub(crate) fn styled_diff_line(
     line: &DiffLine,
     width: usize,
     marks: &[(usize, usize, Style)],
@@ -2329,16 +2230,15 @@ mod tests {
 
     use super::*;
     use crate::commit_editor::{CommitEditor, Field};
+    use crate::features::blame::CommitView;
     use crate::git::diff::{DiffLine, LineKind};
     use crate::git::status::{BranchStatus, EntryKind};
     use crate::model::CommitFlow;
-
-    /// Draw into a `width` x `height` buffer and return its rows as text.
-    fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(state, frame)).unwrap();
-        buffer_rows(terminal.backend().buffer())
-    }
+    use crate::test_support::OID;
+    use crate::test_support::screen::{
+        assert_no_split_cluster, blame_line, blamed, branch, contains, diff_line, draw,
+        draw_buffer, file, find, loaded,
+    };
 
     /// Draw a workspace whose Files panel is exactly `panel` columns wide and
     /// return only that panel's columns of each row.
@@ -2385,20 +2285,6 @@ mod tests {
             .collect()
     }
 
-    fn contains(rows: &[String], needle: &str) -> bool {
-        rows.iter().any(|row| row.contains(needle))
-    }
-
-    fn file(path: &str) -> FileEntry {
-        FileEntry {
-            path: path.into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }
-    }
-
     fn renamed(orig: &str, path: &str) -> FileEntry {
         FileEntry {
             path: path.into(),
@@ -2406,25 +2292,6 @@ mod tests {
             index: 'R',
             worktree: '.',
             kind: EntryKind::Renamed,
-        }
-    }
-
-    /// A workspace after a status load of `files` on branch `main`.
-    fn loaded(files: Vec<FileEntry>) -> AppState {
-        let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
-        state.files = files;
-        state.branch = Some(branch(Head::Branch("main".into())));
-        state
-    }
-
-    fn branch(head: Head) -> BranchStatus {
-        BranchStatus {
-            head,
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![],
-            bisect: None,
         }
     }
 
@@ -3168,19 +3035,6 @@ mod tests {
         }
     }
 
-    fn draw_buffer(state: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(state, frame)).unwrap();
-        terminal.backend().buffer().clone()
-    }
-
-    fn diff_line(kind: LineKind, text: &str) -> DiffLine {
-        DiffLine {
-            kind,
-            text: text.into(),
-        }
-    }
-
     /// A workspace with one file selected and `lines` fully loaded.
     fn with_diff(lines: Vec<DiffLine>) -> AppState {
         let mut state = loaded(vec![file("a.rs")]);
@@ -3190,23 +3044,6 @@ mod tests {
         state.diff.lines = lines;
         state.diff.done = true;
         state
-    }
-
-    /// Where `needle` starts on screen, by cell.
-    fn find(buffer: &ratatui::buffer::Buffer, needle: &str) -> (u16, u16) {
-        let first = needle.chars().next().unwrap().to_string();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let rest: String = (x..buffer.area.width)
-                    .take(needle.chars().count())
-                    .map(|x| buffer[(x, y)].symbol().to_string())
-                    .collect();
-                if buffer[(x, y)].symbol() == first && rest == needle {
-                    return (x, y);
-                }
-            }
-        }
-        panic!("{needle:?} not on screen");
     }
 
     #[test]
@@ -4002,23 +3839,6 @@ mod tests {
         let mut state = hunks(DiffSide::Worktree, diff.as_bytes());
         state.emoji_zwj = EmojiZwj::Keep;
         state
-    }
-
-    /// No cell holds part of an emoji sequence: each holds all of `family`
-    /// or none of it, and no cell starts with a joiner or a virama.
-    fn assert_no_split_cluster(buffer: &ratatui::buffer::Buffer, family: &str, at: &str) {
-        let parts: Vec<char> = family.chars().filter(|&c| c != '\u{200D}').collect();
-        for cell in buffer.content() {
-            let symbol = cell.symbol();
-            let lead = symbol.chars().next();
-            assert!(
-                !matches!(lead, Some('\u{200C}' | '\u{200D}' | '\u{094D}')),
-                "{at}: a cell starts with {lead:?}"
-            );
-            if symbol.chars().any(|c| parts.contains(&c)) {
-                assert_eq!(symbol, family, "{at}: a split sequence");
-            }
-        }
     }
 
     #[test]
@@ -5237,209 +5057,6 @@ mod tests {
         assert!(contains(&rows, "Quit Kika"), "{rows:#?}");
         assert!(contains(&rows, "▲"), "{rows:#?}");
         assert!(!contains(&rows, "more ▼"), "{rows:#?}");
-    }
-
-    const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
-
-    fn blame_line(oid: &str, author: &str, line_no: usize, text: &str) -> BlameLine {
-        BlameLine {
-            oid: oid.into(),
-            author: author.into(),
-            date: "2024-01-02".into(),
-            line_no,
-            text: text.into(),
-        }
-    }
-
-    /// A workspace showing a loaded blame of `a.rs` with `lines`.
-    fn blamed(lines: Vec<BlameLine>, cursor: usize) -> AppState {
-        let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
-        let mut view = BlameView::new("a.rs".into(), 0);
-        view.loaded(Ok(lines));
-        view.cursor = cursor;
-        state.focus = Focus::Blame(view);
-        state
-    }
-
-    fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
-        let (x, y) = find(buffer, needle);
-        buffer[(x, y)]
-            .style()
-            .add_modifier
-            .contains(Modifier::REVERSED)
-    }
-
-    #[test]
-    fn a_loaded_blame_shows_each_lines_commit_author_date_and_text() {
-        let zero = "0".repeat(40);
-        let mut lines: Vec<BlameLine> = (1..=9)
-            .map(|i| blame_line(OID, "Ann", i, &format!("text {i}")))
-            .collect();
-        lines.push(blame_line(&zero, "Not Committed Yet", 10, "edited"));
-        lines[1].author = "Bartholomew Longname-Smith".into();
-        let state = blamed(lines, 1);
-        let buffer = draw_buffer(&state, 120, 20);
-        let rows = buffer_rows(&buffer);
-        assert!(contains(&rows, " Blame a.rs "), "{rows:#?}");
-        assert!(
-            contains(&rows, "abcdef1 Ann              2024-01-02  1 text 1"),
-            "{rows:#?}"
-        );
-        assert!(
-            contains(&rows, "abcdef1 Bartholomew Lon… 2024-01-02  2 text 2"),
-            "{rows:#?}"
-        );
-        assert!(
-            contains(&rows, "0000000 Not committed yet           10 edited"),
-            "{rows:#?}"
-        );
-        assert!(reversed_at(&buffer, "abcdef1 Bartholomew"));
-        assert!(!reversed_at(
-            &buffer,
-            "abcdef1 Ann              2024-01-02  1"
-        ));
-        // The whole cursor row is highlighted, past its text.
-        let (x, y) = find(&buffer, "abcdef1 Bartholomew");
-        assert!(
-            buffer[(x + 60, y)]
-                .style()
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        );
-    }
-
-    #[test]
-    fn a_blamed_word_keeps_its_zwnj() {
-        let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهمX\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
-        let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
-        let rows = buffer_rows(&buffer);
-        assert!(contains(&rows, "می\u{200C}خواهمX"), "{rows:#?}");
-        assert!(!contains(&rows, "<U+200C>"), "{rows:#?}");
-        // Seven letters, one column each; the ZWNJ takes none.
-        let (x, y) = find(&buffer, "م");
-        assert_eq!(buffer[(x + 7, y)].symbol(), "X");
-    }
-
-    #[test]
-    fn with_keep_a_blamed_emoji_sequence_is_one_cell_and_the_border_holds() {
-        let family = "👨\u{200D}👩\u{200D}👧";
-        let out = format!("{OID} 1 1 1\nauthor Ann\n\t{family}X\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
-        let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
-        let area = buffer.area;
-        let (x, y) = (0..area.height)
-            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
-            .find(|&(x, y)| buffer[(x, y)].symbol() == family)
-            .expect("the sequence in one cell");
-        assert_eq!(buffer[(x + 2, y)].symbol(), "X");
-        assert_eq!(buffer[(119, y)].symbol(), "┃");
-
-        let long = format!("می\u{200C}خواهم क्\u{200D}ष {family} ").repeat(8);
-        let out = format!("{OID} 1 1 1\nauthor Ann\n\t{long}\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
-        let state = blamed(lines, 0);
-        for width in 30..=60 {
-            let buffer = draw_buffer(&state, width, 12);
-            let (_, y) = find(&buffer, "abcdef1 Ann");
-            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{width}");
-            assert_no_split_cluster(&buffer, family, &width.to_string());
-        }
-    }
-
-    #[test]
-    fn only_the_scrolled_window_of_a_blame_is_drawn() {
-        let lines = (1..=30)
-            .map(|i| blame_line(OID, "Ann", i, &format!("text {i}")))
-            .collect();
-        let mut state = blamed(lines, 25);
-        if let Focus::Blame(view) = &mut state.focus {
-            view.scroll = 20;
-        }
-        let rows = draw(&state, 100, 10);
-        assert!(contains(&rows, "21 text 21"), "{rows:#?}");
-        assert!(!contains(&rows, "20 text 20"), "{rows:#?}");
-    }
-
-    #[test]
-    fn a_loading_or_failed_blame_says_so() {
-        let mut state = loaded(vec![file("a.rs")]);
-        state.focus = Focus::Blame(BlameView::new("a.rs".into(), 0));
-        let rows = draw(&state, 100, 10);
-        assert!(contains(&rows, " Blame a.rs "), "{rows:#?}");
-        assert!(contains(&rows, "Loading…"), "{rows:#?}");
-
-        let mut view = BlameView::new("a.rs".into(), 0);
-        view.loaded(Err("fatal: no such path 'a.rs' in HEAD".into()));
-        state.focus = Focus::Blame(view);
-        let rows = draw(&state, 100, 10);
-        assert!(contains(&rows, "fatal: no such path"), "{rows:#?}");
-    }
-
-    #[test]
-    fn the_commit_view_shows_its_header_and_coloured_diff() {
-        use LineKind::*;
-        let mut state = blamed(vec![blame_line(OID, "Ann", 1, "x")], 0);
-        let mut commit = CommitView::new(OID.into(), 1);
-        commit.loaded(Ok(vec![
-            diff_line(Header, &format!("commit {OID}")),
-            diff_line(Header, "Author: Ann <ann@a>"),
-            diff_line(Header, "    Why it changed"),
-            diff_line(Header, "diff --git a/a.rs b/a.rs"),
-            diff_line(Hunk, "@@ -1 +1 @@"),
-            diff_line(Removed, "-old"),
-            diff_line(Added, "+new"),
-        ]));
-        if let Focus::Blame(view) = &mut state.focus {
-            view.commit = Some(commit);
-        }
-        let buffer = draw_buffer(&state, 100, 14);
-        let rows = buffer_rows(&buffer);
-        assert!(contains(&rows, " Commit abcdef1 "), "{rows:#?}");
-        assert!(!contains(&rows, " Blame "), "{rows:#?}");
-        assert!(contains(&rows, "Author: Ann <ann@a>"), "{rows:#?}");
-        assert!(contains(&rows, "    Why it changed"), "{rows:#?}");
-        let style = |needle| {
-            let (x, y) = find(&buffer, needle);
-            buffer[(x, y)].style()
-        };
-        assert_eq!(style("-old").fg, Some(Color::Red));
-        assert_eq!(style("+new").fg, Some(Color::Green));
-        assert!(style("Author:").add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn a_loading_or_failed_commit_says_so() {
-        let mut state = blamed(vec![blame_line(OID, "Ann", 1, "x")], 0);
-        if let Focus::Blame(view) = &mut state.focus {
-            view.commit = Some(CommitView::new(OID.into(), 1));
-        }
-        let rows = draw(&state, 100, 10);
-        assert!(contains(&rows, "Loading…"), "{rows:#?}");
-
-        let mut commit = CommitView::new(OID.into(), 1);
-        commit.loaded(Err("fatal: bad object".into()));
-        if let Focus::Blame(view) = &mut state.focus {
-            view.commit = Some(commit);
-        }
-        let rows = draw(&state, 100, 10);
-        assert!(contains(&rows, "fatal: bad object"), "{rows:#?}");
-    }
-
-    #[test]
-    fn tiny_terminals_do_not_panic_with_a_blame_or_commit() {
-        let lines = vec![blame_line(OID, "Ann", 1, "x")];
-        let mut state = blamed(lines, 0);
-        for (w, h) in [(0, 0), (1, 1), (5, 3), (20, 4)] {
-            draw(&state, w, h);
-        }
-        if let Focus::Blame(view) = &mut state.focus {
-            view.commit = Some(CommitView::new(OID.into(), 1));
-        }
-        for (w, h) in [(0, 0), (1, 1), (5, 3), (20, 4)] {
-            draw(&state, w, h);
-        }
     }
 
     /// Show `text` as renderer `delta` drew the shown diff, mapped to the
