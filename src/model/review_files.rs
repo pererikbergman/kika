@@ -334,22 +334,20 @@ impl AppState {
             // Git has gone; a question still open has nobody to answer.
             self.close_credential();
         }
-        let next = self.files_tag();
         let Some(files) = self.files_for(tag) else {
             return vec![];
         };
-        match result {
-            Ok(()) => {
-                files.stage = FilesStage::Checking;
-                files.seq = Some(next.seq);
-                self.check_review_commits(next)
-            }
-            Err(message) => {
-                files.stage = FilesStage::Failed(message);
-                files.seq = None;
-                vec![]
-            }
+        if let Err(message) = result {
+            files.stage = FilesStage::Failed(message);
+            files.seq = None;
+            return vec![];
         }
+        let next = self.files_tag();
+        if let Some(files) = &mut self.review.files {
+            files.stage = FilesStage::Checking;
+            files.seq = Some(next.seq);
+        }
+        self.check_review_commits(next)
     }
 
     pub(super) fn review_files_loaded(

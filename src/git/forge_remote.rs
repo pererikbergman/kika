@@ -7,12 +7,34 @@ use super::runner::{GitCommand, GitRunner};
 
 /// The raw URL bytes, or `None` when no remote qualifies or git fails.
 pub fn read_remote_url(runner: &dyn GitRunner) -> Option<Vec<u8>> {
-    read_remote(runner).map(|(_, url)| url)
+    let name = remote_name(runner)?;
+    let output = runner.run(&url_command(&name, "--get")).ok()?;
+    if !output.success {
+        return None;
+    }
+    let url = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
+    (!url.is_empty()).then(|| url.to_vec())
 }
 
-/// The remote's name and raw URL bytes: the name is what a fetch from
-/// the repository the URL names must go to.
-pub fn read_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)> {
+/// The remote's name and its one URL, for a fetch that must reach exactly
+/// the repository the URL names. `None` when the remote has several URLs:
+/// `--get` reads the last while a fetch uses the first.
+pub fn read_fetch_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)> {
+    let name = remote_name(runner)?;
+    let output = runner.run(&url_command(&name, "--get-all")).ok()?;
+    if !output.success {
+        return None;
+    }
+    let body = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
+    let mut urls = body.split(|&b| b == 0);
+    match (urls.next(), urls.next()) {
+        (Some(url), None) if !url.is_empty() => Some((RemoteName::from_bytes(&name), url.to_vec())),
+        _ => None,
+    }
+}
+
+/// `origin`, or the only remote there is.
+fn remote_name(runner: &dyn GitRunner) -> Option<Vec<u8>> {
     let listed = runner.run(&GitCommand::new("remote")).ok()?;
     if !listed.success {
         return None;
@@ -22,24 +44,22 @@ pub fn read_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)> {
         .split(|&b| b == b'\n')
         .filter(|name| !name.is_empty())
         .collect();
-    let name = match names.as_slice() {
-        _ if names.contains(&&b"origin"[..]) => &b"origin"[..],
-        [only] => only,
-        _ => return None,
-    };
+    match names.as_slice() {
+        _ if names.contains(&&b"origin"[..]) => Some(b"origin".to_vec()),
+        [only] => Some(only.to_vec()),
+        _ => None,
+    }
+}
+
+/// `git config -z <get> remote.<name>.url`.
+fn url_command(name: &[u8], get: &str) -> GitCommand {
     let mut key = b"remote.".to_vec();
     key.extend_from_slice(name);
     key.extend_from_slice(b".url");
-    let cmd = GitCommand::new("config")
+    GitCommand::new("config")
         .arg("-z")
-        .arg("--get")
-        .arg(os_string(&key));
-    let output = runner.run(&cmd).ok()?;
-    if !output.success {
-        return None;
-    }
-    let url = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
-    (!url.is_empty()).then(|| (RemoteName::from_bytes(name), url.to_vec()))
+        .arg(get)
+        .arg(os_string(&key))
 }
 
 #[cfg(test)]
@@ -63,20 +83,30 @@ mod tests {
     }
 
     #[test]
-    fn the_name_comes_with_the_url() {
+    fn a_fetch_remote_comes_with_its_name_and_only_one_url() {
+        let get_all = ["config", "-z", "--get-all", "remote.upstream.url"];
         let fake = FakeRunner::new()
             .expect(&["remote"], ok(b"upstream\n"))
-            .expect(
-                &["config", "-z", "--get", "remote.upstream.url"],
-                ok(b"https://github.com/o/r\0"),
-            );
+            .expect(&get_all, ok(b"https://github.com/o/r\0"));
         assert_eq!(
-            read_remote(&fake),
+            read_fetch_remote(&fake),
             Some((
                 RemoteName::from("upstream"),
                 b"https://github.com/o/r".to_vec()
             ))
         );
+        // Two URLs: the one checked need not be the one fetched from.
+        let fake = FakeRunner::new()
+            .expect(&["remote"], ok(b"upstream\n"))
+            .expect(
+                &get_all,
+                ok(b"https://github.com/o/r\0https://evil.example/o/r\0"),
+            );
+        assert_eq!(read_fetch_remote(&fake), None);
+        let fake = FakeRunner::new()
+            .expect(&["remote"], ok(b"upstream\n"))
+            .expect(&get_all, fail(""));
+        assert_eq!(read_fetch_remote(&fake), None);
     }
 
     #[test]

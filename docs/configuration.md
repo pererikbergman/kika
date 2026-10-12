@@ -377,10 +377,11 @@ pull request, then to the queue, then to the workspace.
   read.
 - When the head or base commit is not in the repository, `f` fetches the
   missing ones once, by commit id only:
-  `git -c fetch.writeFetchHEAD=false fetch --quiet --no-tags --no-recurse-submodules <remote> <id>…`.
+  `git -c fetch.writeFetchHEAD=false fetch --quiet --no-tags --no-recurse-submodules -- <remote> <id>…`.
   No ref and no tag is written. It goes only to the remote (`origin`, or
-  the only remote) whose URL names the reviewed repository on a
-  `github` host; with none, Kika says so and fetches nothing. A head is
+  the only remote) whose one URL names the reviewed repository on a
+  `github` host; with none, or with a remote that has several URLs, Kika
+  says so and fetches nothing. A head is
   fetched at most once a session, so if it is still missing after that,
   Kika says so and leaves it to you. A password or passphrase is asked as
   for a fetch from the workspace.

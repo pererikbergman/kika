@@ -4,7 +4,9 @@
 //! as [`CommitId`]s, hex digits, so nothing in it reads as an option; no
 //! ref name from the server ever does, and no ref is written.
 
-use super::commit_files::{CommitFile, CommitId, CommitRange, commit_files, numstat};
+use std::collections::HashMap;
+
+use super::commit_files::{CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat};
 use super::diff::terminal_safe;
 use super::remote::{AskpassEnv, askpass_for, safe, with_prompts};
 use super::remotes::RemoteName;
@@ -73,7 +75,7 @@ pub fn merge_base_command(base: &CommitId, head: &CommitId) -> GitCommand {
 /// moves; `fetch.writeFetchHEAD=false` keeps `FETCH_HEAD` as it is on git
 /// 2.29 and later, and older git ignores it (`--no-write-fetch-head`
 /// would fail there). No tags and no submodules: only the forge's host is
-/// reached.
+/// reached. `--` ends the options, as git 2.15's fetch already allows.
 pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitCommand {
     let cmd = GitCommand::new("-c")
         .arg("fetch.writeFetchHEAD=false")
@@ -81,6 +83,8 @@ pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitComma
         .arg("--quiet")
         .arg("--no-tags")
         .arg("--no-recurse-submodules")
+        // Options end here, so even a remote named like one is only a name.
+        .arg("--")
         .arg(remote.as_os_string());
     oids.iter()
         .fold(cmd, |cmd, oid| cmd.arg(oid.as_str()))
@@ -168,16 +172,20 @@ pub fn pr_files(
         parent: Some(merge_base(runner, base, head)?),
     };
     let files = commit_files(runner, &range)?;
-    let stats = numstat(runner, &range)?;
+    // By name, so a pull request of thousands of files is no slower to match.
+    let stats: HashMap<Vec<u8>, LineCounts> = numstat(runner, &range)?
+        .into_iter()
+        .map(|(path, counts)| (path.as_bytes().to_vec(), counts))
+        .collect();
     let rows = files
         .into_iter()
         .map(|file| {
-            let counts = match stats.iter().find(|(path, _)| *path == file.path) {
-                Some((_, Some((added, removed)))) => FileCounts::Lines {
+            let counts = match stats.get(file.path.as_bytes()) {
+                Some(Some((added, removed))) => FileCounts::Lines {
                     added: *added,
                     removed: *removed,
                 },
-                Some((_, None)) => FileCounts::Binary,
+                Some(None) => FileCounts::Binary,
                 None => FileCounts::Unknown,
             };
             PrFileRow { file, counts }
@@ -228,6 +236,7 @@ mod tests {
                 "--quiet",
                 "--no-tags",
                 "--no-recurse-submodules",
+                "--",
                 "origin",
                 "a1",
                 "b0",
@@ -272,6 +281,7 @@ mod tests {
                     "--quiet",
                     "--no-tags",
                     "--no-recurse-submodules",
+                    "--",
                     "origin",
                     "a1",
                 ],
@@ -308,6 +318,7 @@ mod tests {
                 "--quiet",
                 "--no-tags",
                 "--no-recurse-submodules",
+                "--",
                 "origin",
                 "a1",
             ],

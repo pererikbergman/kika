@@ -14,7 +14,7 @@ use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::{EmojiZwj, sanitize, sanitize_body};
-use crate::git::forge_remote::{read_remote, read_remote_url};
+use crate::git::forge_remote::{read_fetch_remote, read_remote_url};
 use crate::git::recording::CommandOutcome;
 use crate::git::remotes::RemoteName;
 
@@ -728,7 +728,7 @@ pub fn fetch_remote(
     repo: &ForgeRepo,
 ) -> Option<RemoteName> {
     matches(repo, hosts)?;
-    let (name, url) = read_remote(git)?;
+    let (name, url) = read_fetch_remote(git)?;
     let named = parse_remote(&url)?;
     let same = named.host.eq_ignore_ascii_case(&repo.host)
         && named.owner == repo.owner
@@ -1300,7 +1300,7 @@ pub(crate) mod tests {
                 crate::git::fake::ok(format!("{name}\n").as_bytes()),
             )
             .expect(
-                &["config", "-z", "--get", &format!("remote.{name}.url")],
+                &["config", "-z", "--get-all", &format!("remote.{name}.url")],
                 crate::git::fake::ok(&out),
             )
     }
