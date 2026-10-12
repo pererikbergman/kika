@@ -282,6 +282,7 @@ impl TempFiles {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = fs::DirBuilder::new();
             #[cfg(unix)]
             std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -320,11 +321,14 @@ impl Drop for TempFiles {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::time::Duration;
 
     use super::*;
     use crate::external_diff::RendererKind;
-    use crate::git::fake::{FakeRunner, TempDir, fail, ok};
+    #[cfg(unix)]
+    use crate::git::fake::fail;
+    use crate::git::fake::{FakeRunner, TempDir, ok};
 
     fn tool(argv: &[&str]) -> ExternalRenderer {
         ExternalRenderer {
@@ -345,6 +349,7 @@ mod tests {
     }
 
     const OID: &str = "1111111111111111111111111111111111111111";
+    #[cfg(unix)]
     const HEAD_OID: &str = "2222222222222222222222222222222222222222";
 
     fn ls_files(path: &str) -> Vec<&str> {
