@@ -2,13 +2,14 @@
 
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
-made outside it, and choose a program to draw the Diff pane.
+made outside it, choose a program to draw the Diff pane, and keep commits
+whose hooks never ask anything in the background.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -32,6 +33,9 @@ fetch = 300     # leave out to keep auto-fetch off
 [diff]
 pager = "delta --paging=never"   # a program that draws the Diff pane
 tool = "difft --color=always"    # a display-only diff tool
+
+[commit]
+hooks_detached = true   # commits that only run hooks stay in the background
 ```
 
 ## Layering
@@ -181,6 +185,29 @@ tool = "difft --color=always"
   repository can bring them.
 
 **Changes to `[diff]` take effect after a restart.**
+
+## `[commit]` (global file only)
+
+By default a commit in a repository with an installed commit hook hands the
+terminal to git, so a hook can ask you something. The screen switches away
+and back on every such commit. If your hooks never ask anything, set
+`hooks_detached` to keep those commits in the background, like a commit with
+no hooks.
+
+```toml
+[commit]
+hooks_detached = true   # default false: any commit hook hands the terminal over
+```
+
+- Only a commit whose sole reason to hand over is a hook runs detached. A
+  commit that signs (`commit.gpgsign`) still hands the terminal over, since
+  signing may ask for a passphrase.
+- Rebase, cherry-pick, revert, a merge commit, continue and skip still run on
+  the terminal, since they may also open git's editor.
+- **Risk:** a hook that waits for input gets no terminal. It may fail, or wait
+  until you quit Kika.
+
+**Changes to `[commit]` take effect after a restart.**
 
 ## Custom commands
 
@@ -398,6 +425,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
+- **`[commit]` is allowed only in the global file**, since it decides whether
+  hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
+  the whole file is ignored.
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
