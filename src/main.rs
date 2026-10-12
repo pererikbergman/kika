@@ -1,4 +1,3 @@
-mod ansi;
 mod app;
 mod bisect;
 mod branches;
@@ -17,11 +16,9 @@ mod diff_mark;
 mod diff_pane;
 mod diff_search;
 mod diff_stream;
-mod diff_tool;
 #[cfg(test)]
 mod e2e;
 mod effect;
-mod external_diff;
 mod features;
 mod forge;
 mod git;
@@ -43,7 +40,6 @@ mod prompts;
 mod rebase_todo;
 mod refresh;
 mod remote_run;
-mod rendered_view;
 mod rows;
 mod sequence_editor;
 #[cfg(test)]

@@ -3,15 +3,15 @@ use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
-use crate::ansi::StyledRow;
 use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::effect::Tag;
-use crate::external_diff::ExternalRenderer;
 use crate::features::commits::custom_patch::{PatchAction, PatchChoice};
 use crate::features::commits::reflog::Reflog;
 use crate::features::conflicts::Choice;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
+use crate::features::diff::renderers::ExternalRenderer;
+use crate::features::diff::renderers::StyledRow;
 use crate::features::review::{CommitsHere, PrFileRow};
 use crate::features::worktrees::Worktree;
 use crate::forge::review::{PrDetail, Queues, ReviewError};

@@ -5,18 +5,16 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::ansi;
 use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
-use crate::diff_tool;
-use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::branches::{remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
+use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::{
     blame, conflicts, custom_commands, pull_requests, repos, review, stash, submodules, sync,
     worktrees,
@@ -607,7 +605,7 @@ fn run_clipboard_command(
                 match child.try_wait() {
                     Ok(status) => exited = status,
                     Err(e) => {
-                        crate::external_diff::kill_group(&mut child);
+                        crate::features::diff::renderers::external_diff::kill_group(&mut child);
                         break Err(format!("Could not wait for {name}: {e}"));
                     }
                 }
@@ -632,7 +630,7 @@ fn run_clipboard_command(
                     break Ok(status);
                 }
                 None => {
-                    crate::external_diff::kill_group(&mut child);
+                    crate::features::diff::renderers::external_diff::kill_group(&mut child);
                     break Err(format!(
                         "{name} did not finish within {}s",
                         timeout.as_secs_f32()
@@ -1058,18 +1056,12 @@ impl Runtime {
             Effect::LoadCommit { tag, oid } => {
                 blame::effects::load_commit(runner, tx, tag, oid, self.emoji_zwj)
             }
-            Effect::FindRenderers => {
-                let pager = self.diff_pager.clone();
-                let tool = self.diff_tool.clone();
-                tokio::spawn(async move {
-                    // A panic finds nothing; the built-in view still works.
-                    let found =
-                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager, tool))
-                            .await
-                            .unwrap_or_default();
-                    let _ = tx.send(AppIntent::RenderersFound(found));
-                });
-            }
+            Effect::FindRenderers => renderers::effects::find(
+                runner,
+                tx,
+                self.diff_pager.clone(),
+                self.diff_tool.clone(),
+            ),
             Effect::RenderDiff {
                 tag,
                 request,
@@ -1078,31 +1070,7 @@ impl Runtime {
             } => {
                 // Where git runs now, inside an entered submodule too.
                 let workdir = self.runner.workdir();
-                let label = renderer.label.clone();
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        let out = match renderer.kind {
-                            RendererKind::Pager => {
-                                let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
-                                run_renderer(&renderer, &workdir, &diff, cols)?
-                            }
-                            RendererKind::Tool => diff_tool::render(
-                                runner.as_ref(),
-                                &workdir,
-                                &request,
-                                &renderer,
-                                cols,
-                            )?,
-                        };
-                        Ok(ansi::parse(&out))
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(format!("{label} crashed: {e}").as_bytes()))
-                    });
-                    let _ = tx.send(AppIntent::DiffRendered { tag, result });
-                });
+                renderers::effects::render(runner, tx, workdir, tag, request, renderer, cols)
             }
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
             Effect::DiffDemand { seq, want } => self.diff.demand(seq, want),
@@ -3193,157 +3161,6 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn render_diff_feeds_the_plain_diff_to_the_renderer_and_parses_it() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &["diff", "--no-color", "--no-ext-diff", "-U3", "--", "a.rs"],
-            ok(b"\x1b[31m-a\x1b[0m\n+b\n"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 8,
-            user: true,
-        };
-
-        runtime.spawn(Effect::RenderDiff {
-            tag,
-            request: DiffRequest {
-                path: "a.rs".into(),
-                orig_path: None,
-                side: DiffSide::Worktree,
-                options: Default::default(),
-                commit: None,
-            },
-            renderer: ExternalRenderer {
-                label: "cat".into(),
-                argv: vec!["cat".into()],
-                kind: crate::external_diff::RendererKind::Pager,
-            },
-            cols: 40,
-        });
-
-        match rx.recv().await {
-            Some(AppIntent::DiffRendered {
-                tag: got,
-                result: Ok(rows),
-            }) => {
-                assert_eq!(got, tag);
-                let texts: Vec<String> = rows.iter().map(|r| r.text()).collect();
-                assert_eq!(texts, ["-a", "+b"]);
-            }
-            other => panic!("expected rendered rows, got {other:?}"),
-        }
-        runner.assert_done();
-    }
-
-    /// Run `RenderDiff` with tool `argv` on `request` and take its rows.
-    #[cfg(unix)]
-    async fn tool_rows(
-        runner: Arc<dyn GitRunner>,
-        request: DiffRequest,
-        argv: &[&str],
-    ) -> Vec<String> {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner, tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 3,
-            user: true,
-        };
-        runtime.spawn(Effect::RenderDiff {
-            tag,
-            request,
-            renderer: ExternalRenderer {
-                label: argv[0].into(),
-                argv: argv.iter().map(OsString::from).collect(),
-                kind: crate::external_diff::RendererKind::Tool,
-            },
-            cols: 40,
-        });
-        match rx.recv().await {
-            Some(AppIntent::DiffRendered {
-                tag: got,
-                result: Ok(rows),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(rx.try_recv().is_err(), "one answer only");
-                rows.iter().map(|r| r.text()).collect()
-            }
-            other => panic!("expected rendered rows, got {other:?}"),
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn render_diff_runs_a_tool_on_both_sides_of_a_worktree_change() {
-        use crate::git::fake::{TempDir, git};
-        let tmp = TempDir::new("effect-tool");
-        let dir = tmp.path();
-        git(dir, &["init", "-q"]);
-        std::fs::write(dir.join("a.txt"), "old \x1b]0;title\x07one\n").unwrap();
-        git(dir, &["add", "a.txt"]);
-        std::fs::write(dir.join("a.txt"), "new \x1b[2J\x08two\n").unwrap();
-        let runner: Arc<dyn GitRunner> = Arc::new(crate::git::CliRunner::isolated(dir));
-        let request = DiffRequest {
-            path: "a.txt".into(),
-            orig_path: None,
-            side: DiffSide::Worktree,
-            options: Default::default(),
-            commit: None,
-        };
-
-        let rows = tool_rows(Arc::clone(&runner), request.clone(), &["cat"]).await;
-        assert_eq!(rows.len(), 2, "{rows:?}");
-        assert!(
-            rows[0].starts_with("old ") && rows[0].ends_with("one"),
-            "{rows:?}"
-        );
-        assert!(
-            rows[1].starts_with("new ") && rows[1].ends_with("two"),
-            "{rows:?}"
-        );
-        for row in &rows {
-            assert!(!row.chars().any(char::is_control), "{row:?}");
-        }
-
-        // The tool's arguments name the temp files, gone once it is done.
-        let rows = tool_rows(runner, request, &["echo"]).await;
-        let args: Vec<&str> = rows[0].split(' ').collect();
-        assert_eq!(args.len(), 3, "{rows:?}");
-        assert_eq!(args[0], "--");
-        let old = std::path::Path::new(args[1]);
-        assert_eq!(old.file_name().unwrap(), "old.txt");
-        assert!(!old.parent().unwrap().exists(), "{old:?}");
-    }
-
-    #[tokio::test]
-    async fn find_renderers_offers_the_configured_pager_then_the_global_git_ones() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &["config", "--global", "--get", "pager.diff"],
-                    ok(b"delta\n"),
-                )
-                .expect(&["config", "--global", "--get", "core.pager"], ok(b"")),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx).with_diff_pager(Some("riff".into()));
-
-        runtime.spawn(Effect::FindRenderers);
-
-        match rx.recv().await {
-            Some(AppIntent::RenderersFound(found)) => {
-                let labels: Vec<&str> = found.iter().map(|r| r.label.as_str()).collect();
-                assert_eq!(labels, ["riff", "delta"]);
-            }
-            other => panic!("expected renderers, got {other:?}"),
-        }
-        runner.assert_done();
-    }
-
     #[tokio::test]
     async fn the_emoji_policy_reaches_blame_and_the_blamed_commit() {
         let family = "👨\u{200D}👩";
@@ -4041,7 +3858,7 @@ mod tests {
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = command.spawn().unwrap();
         let pid = libc::pid_t::try_from(child.id()).unwrap();
-        crate::external_diff::kill_group(&mut child);
+        crate::features::diff::renderers::external_diff::kill_group(&mut child);
         assert!(gone(pid), "{pid} is neither running nor a zombie");
     }
 
