@@ -52,6 +52,17 @@ pub(crate) fn untracked(path: &str) -> FileEntry {
     }
 }
 
+/// A Files entry at `path` with these status letters and kind.
+pub(crate) fn file_entry(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
+    FileEntry {
+        path: path.into(),
+        orig_path: None,
+        index,
+        worktree,
+        kind,
+    }
+}
+
 pub(crate) fn on_branch(name: &str) -> BranchStatus {
     BranchStatus {
         head: Head::Branch(name.into()),

@@ -33,7 +33,7 @@ use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::ParkedRepo;
 use crate::features::review::{self, PrMerging};
 use crate::features::stash::keys::drop_stash_disabled;
-use crate::features::stash::{StashDraft, StashList};
+use crate::features::stash::{StashDraft, StashList, StashMode};
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -60,7 +60,7 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
 use crate::menu;
-use crate::op::{GitOp, MergeStrategy, ResetMode, StashMode};
+use crate::op::{GitOp, MergeStrategy, ResetMode};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,

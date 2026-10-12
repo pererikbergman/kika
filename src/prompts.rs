@@ -205,7 +205,7 @@ mod tests {
             GitOp::StageAll,
             // A stash makes commits, but no hooks run for them.
             GitOp::StashPush {
-                mode: crate::op::StashMode::All,
+                mode: crate::features::stash::StashMode::All,
                 message: None,
                 paths: vec![],
                 restore: vec![],
