@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::bisect;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandTable, CustomCommand};
+use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::CommitId;
@@ -21,6 +22,7 @@ use crate::git::submodule::SubmoduleState;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
+use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
@@ -1422,6 +1424,9 @@ pub(crate) fn paste_disabled(state: &AppState) -> Option<&'static str> {
 pub(crate) fn rewrite_disabled(state: &AppState, edit: Edit) -> Option<&'static str> {
     commit_action_disabled(state)
         .or_else(|| in_progress_disabled(state))
+        // A narrowed log skips commits, so the row below need not be the
+        // parent, and a plan made from its rows would leave commits out.
+        .or_else(|| state.commits.query.is_active().then_some(CLEAR_LOG_FILTER))
         .or_else(|| rebase_plan::plan(&state.commits.rows, state.commits.selected, edit).err())
 }
 
@@ -1655,6 +1660,52 @@ pub(crate) fn commits_copy_disabled(state: &AppState) -> Option<&'static str> {
                 .all(|&i| rows[i].parents.len() > 1)
                 .then_some("Cannot cherry-pick a merge commit")
         })
+    })
+}
+
+/// Why a rewrite cannot run on a log narrowed to a path or an author.
+pub(crate) const CLEAR_LOG_FILTER: &str = "Clear the log filter first";
+
+/// A new path or author reloads the log, which a range was made over.
+fn log_filter_disabled(state: &AppState) -> Option<&'static str> {
+    state
+        .commits
+        .range_anchor
+        .is_some()
+        .then_some(CLEAR_RANGE_FIRST)
+}
+
+/// The reflog is not a log git can narrow.
+fn reflog_filter_disabled(_: &AppState) -> Option<&'static str> {
+    Some("Filters work on the log tab")
+}
+
+fn commits_mark_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_commit_selected(state))
+}
+
+fn files_log_disabled(state: &AppState) -> Option<&'static str> {
+    list_guard(state, false).or_else(|| no_file_selected(state))
+}
+
+fn no_branch_selected(state: &AppState) -> Option<&'static str> {
+    let selected = state.branches.selected_branch();
+    selected.is_none().then_some("No branch selected")
+}
+
+/// A comparison needs a mark, and another branch or commit than it.
+pub(crate) fn branches_diff_disabled(state: &AppState) -> Option<&'static str> {
+    no_branch_selected(state).or_else(|| match &state.diff_mark {
+        None => Some("Mark a commit or branch first (M)"),
+        Some(DiffMark::Branch(name))
+            if state
+                .branches
+                .selected_branch()
+                .is_some_and(|b| b.name == *name) =>
+        {
+            Some("Pick another branch or commit to diff against")
+        }
+        Some(_) => None,
     })
 }
 
@@ -2016,7 +2067,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Commits,
         intent: AppIntent::OpenCommitFiles,
-        description: "Show the files the selected commit changed",
+        description: "Show the files the selected commit changed, or those changed from the diff mark to it",
         label: "files",
         bar: true,
         disabled: commits_open_disabled,
@@ -4285,7 +4336,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Commits,
         intent: AppIntent::ListEscape,
-        description: "Clear the selection, else the filter, else quit Kika",
+        description: "Clear the selection, else the filter, else the diff mark, else the log filter, else quit Kika",
         label: "clear",
         bar: false,
         disabled: never,
@@ -4349,6 +4400,87 @@ static REGISTRY: &[Binding] = &[
         label: "clear",
         bar: true,
         disabled: never,
+    },
+    // The log query and the diff mark.
+    Binding {
+        id: "commits.filter_path",
+        keys: &[KeyPattern::any(KeyCode::Char('L'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenLogFilter(LogFilterField::Path),
+        description: "Show only the commits that changed a typed path, across renames",
+        label: "log of path",
+        bar: false,
+        disabled: log_filter_disabled,
+    },
+    Binding {
+        id: "commits.filter_author",
+        keys: &[KeyPattern::any(KeyCode::Char('A'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenLogFilter(LogFilterField::Author),
+        description: "Show only the commits by a typed author",
+        label: "log by author",
+        bar: false,
+        disabled: log_filter_disabled,
+    },
+    Binding {
+        id: "commits.mark",
+        keys: &[KeyPattern::any(KeyCode::Char('M'))],
+        scope: KeyScope::Commits,
+        intent: AppIntent::ToggleDiffMark,
+        description: "Mark the selected commit to diff against (enter on another); again to clear",
+        label: "mark for diff",
+        bar: false,
+        disabled: commits_mark_disabled,
+    },
+    Binding {
+        id: "reflog.filter_path",
+        keys: &[KeyPattern::any(KeyCode::Char('L'))],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::OpenLogFilter(LogFilterField::Path),
+        description: "Show only the commits that changed a typed path, across renames",
+        label: "log of path",
+        bar: false,
+        disabled: reflog_filter_disabled,
+    },
+    Binding {
+        id: "reflog.filter_author",
+        keys: &[KeyPattern::any(KeyCode::Char('A'))],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::OpenLogFilter(LogFilterField::Author),
+        description: "Show only the commits by a typed author",
+        label: "log by author",
+        bar: false,
+        disabled: reflog_filter_disabled,
+    },
+    Binding {
+        id: "branches.mark",
+        keys: &[KeyPattern::any(KeyCode::Char('M'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::ToggleDiffMark,
+        description: "Mark the selected branch to diff against (enter on another); again to clear",
+        label: "mark for diff",
+        bar: false,
+        disabled: no_branch_selected,
+    },
+    Binding {
+        id: "branches.diff",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::OpenDiff,
+        description: "Show what changed from the diff mark to the selected branch",
+        label: "diff with mark",
+        bar: false,
+        disabled: branches_diff_disabled,
+    },
+    Binding {
+        id: "files.log",
+        keys: &[KeyPattern::any(KeyCode::Char('L'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::LogOfFile,
+        description: "Show the selected file's history in the Commits panel",
+        label: "log of file",
+        bar: false,
+        disabled: files_log_disabled,
     },
     Binding {
         id: "input.quit",
@@ -6550,6 +6682,96 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_log_query_and_diff_mark_keys_clash_with_nothing_their_scope_reaches() {
+        use KeyScope::*;
+        let new: &[(&str, &[KeyScope])] = &[
+            ("commits.filter_path", &[Commits, Workspace, Global]),
+            ("commits.filter_author", &[Commits, Workspace, Global]),
+            ("commits.mark", &[Commits, Workspace, Global]),
+            ("reflog.filter_path", &[Reflog, Workspace, Global]),
+            ("reflog.filter_author", &[Reflog, Workspace, Global]),
+            ("branches.mark", &[Branches, Workspace, Global]),
+            ("branches.diff", &[Branches, Workspace, Global]),
+            ("files.log", &[Files, Workspace, Global]),
+        ];
+        for (id, reached) in new {
+            let new = binding(id);
+            assert!(!REPO_LOCKED.contains(id), "{id} quits nothing");
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != *id && reached.contains(&b.scope))
+            {
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rewrites_wait_for_the_log_filter_and_the_reflog_has_none() {
+        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
+        let mut state = AppState::new(Context::Workspace);
+        state.commits.rows = (0..2)
+            .map(|i| crate::git::log::CommitRow {
+                oid: ids[i].clone(),
+                short_oid: "x".into(),
+                parents: vec![ids[i + 1].clone()],
+                author: "Ann".into(),
+                time: 0,
+                subject: "s".into(),
+            })
+            .collect();
+        let all = [
+            commits_squash_disabled,
+            commits_fixup_disabled,
+            commits_drop_disabled,
+            commits_reword_disabled,
+        ];
+        for disabled in all {
+            assert_eq!(disabled(&state), None);
+        }
+        state.commits.query.author = Some("ann".into());
+        for disabled in all {
+            assert_eq!(disabled(&state), Some(CLEAR_LOG_FILTER));
+        }
+
+        state.focus = Focus::Commits;
+        state.commits.tab = crate::commits::CommitsTab::Reflog;
+        let reflog = |c| resolve(registry(), &Keymap::default(), KeyScope::Reflog, &state, c);
+        for c in ['L', 'A'] {
+            assert!(
+                matches!(
+                    reflog(key(KeyCode::Char(c), KeyModifiers::SHIFT)),
+                    Resolution::Disabled("Filters work on the log tab")
+                ),
+                "{c}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_keeps_the_new_commits_keys_from_running() {
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "a".repeat(40),
+            short_oid: "a".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        }];
+        assert_eq!(log_filter_disabled(&state), None);
+        assert_eq!(commits_mark_disabled(&state), None);
+        state.commits.range_anchor = Some("a".repeat(40));
+        assert_eq!(log_filter_disabled(&state), Some(CLEAR_RANGE_FIRST));
+        assert_eq!(commits_mark_disabled(&state), Some(CLEAR_RANGE_FIRST));
     }
 
     #[test]

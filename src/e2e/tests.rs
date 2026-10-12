@@ -2159,3 +2159,82 @@ async fn stashing_from_the_files_menu_then_applying_and_dropping_from_the_stash_
     assert_eq!(stash_count(&repo), 0);
     app.assert_screen_contains("No stashes");
 }
+
+/// The subjects of the commits the log has loaded, newest first.
+fn log_subjects(app: &Harness) -> Vec<String> {
+    let rows = &app.state().commits.rows;
+    rows.iter().map(|row| row.subject.clone()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_narrows_to_a_renamed_file_or_an_author_and_two_commits_compare() {
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    let bob = ["--author=Bob Bee <bob@example.com>"];
+    let repo = TestRepo::new()
+        .write("old.txt", &body)
+        .commit("add old.txt")
+        .write("old.txt", &format!("{body}more\n"));
+    repo.git(["add", "-A"]);
+    repo.git(["commit", "-q", bob[0], "-m", "edit old.txt"]);
+    repo.git(["mv", "old.txt", "new.txt"]);
+    repo.git(["commit", "-q", "-m", "rename old.txt -> new.txt"]);
+    let repo = repo.write("new.txt", &format!("{body}more\nagain\n"));
+    repo.git(["add", "-A"]);
+    repo.git(["commit", "-q", bob[0], "-m", "edit new.txt"]);
+    let repo = repo.write("other.txt", "x\n").commit("touch other.txt");
+    let first = String::from_utf8(repo.git(["rev-list", "--max-parents=0", "HEAD"])).unwrap();
+    let last = repo.head();
+    let mut app = Harness::start(&repo).await;
+    app.press(KeyCode::Char('4')).await;
+
+    app.type_text("Lnew.txt\n").await;
+    assert_eq!(
+        log_subjects(&app),
+        [
+            "edit new.txt",
+            "rename old.txt -> new.txt",
+            "edit old.txt",
+            "add old.txt"
+        ]
+    );
+    app.assert_screen_contains("[4] path: new.txt");
+
+    // Esc clears the path; an author narrows the whole log.
+    app.press(KeyCode::Esc).await;
+    assert_eq!(log_subjects(&app).len(), 5);
+    app.type_text("Abob\n").await;
+    assert_eq!(log_subjects(&app), ["edit new.txt", "edit old.txt"]);
+    app.press(KeyCode::Esc).await;
+
+    // Mark the first commit, then Enter on the last.
+    app.type_text("jjjjM").await;
+    app.type_text("kkkk").await;
+    app.press(KeyCode::Enter).await;
+
+    let open = app
+        .state()
+        .commits
+        .open
+        .as_ref()
+        .expect("the comparison opens");
+    assert_eq!(open.range.oid.as_str(), last.trim());
+    assert_eq!(open.range.parent.as_ref().unwrap().as_str(), first.trim());
+    let shown: Vec<(char, String)> = open
+        .files
+        .iter()
+        .map(|f| (f.status, f.path.display().to_string()))
+        .collect();
+    let listed =
+        String::from_utf8(repo.git(["diff", "--name-status", "-M", first.trim(), last.trim()]))
+            .unwrap();
+    let expected: Vec<(char, String)> = listed
+        .lines()
+        .map(|line| {
+            let status = line.chars().next().unwrap();
+            (status, line.rsplit('\t').next().unwrap().to_string())
+        })
+        .collect();
+    assert_eq!(shown, expected);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    app.assert_screen_contains(" vs ");
+}

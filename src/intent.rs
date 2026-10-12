@@ -15,7 +15,7 @@ use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::{CommitFile, CommitId};
+use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
@@ -37,6 +37,7 @@ use crate::git::worktrees::Worktree;
 use crate::gitignore::IgnoreAdded;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
+use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::watch::WatchEvent;
@@ -666,6 +667,20 @@ pub enum AppIntent {
     /// Go to the next or previous match of the search.
     SearchNext,
     SearchPrev,
+    /// Type the path or the author git narrows the log to.
+    OpenLogFilter(LogFilterField),
+    /// Show the selected file's history in the Commits panel.
+    LogOfFile,
+    /// Mark the selected commit or local branch to diff against, or clear
+    /// the mark when it is already there.
+    ToggleDiffMark,
+    /// Compare the diff mark with the selected local branch.
+    OpenDiff,
+    /// Both ends of a comparison were read as commits; `tag` says which.
+    DiffResolved {
+        tag: Tag,
+        result: Result<CommitRange, String>,
+    },
     /// The remote is on none of the forge hosts: no badges.
     ForgeRepoNone {
         tag: Tag,

@@ -15,6 +15,7 @@ use crate::config::ConfigError;
 use crate::conflict::{Choice, ConflictView, PendingPick};
 use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
+use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, RendererKind, map_rows};
@@ -28,6 +29,7 @@ use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{
     DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
+use crate::git::log::LogQuery;
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode, StashMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
@@ -307,6 +309,20 @@ pub struct AppState {
     pub pending_copy: Option<(Tag, CommitId)>,
     /// The pattern the open `.gitignore` prompt was filled with.
     pub ignore_draft: Option<IgnoreDraft>,
+    /// The commit or local branch a comparison starts from.
+    pub diff_mark: Option<DiffMark>,
+    /// The comparison whose ends are being read; any other answer is stale.
+    pub pending_diff: Option<PendingDiff>,
+}
+
+/// A comparison asked for, kept until its ends are read as commits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDiff {
+    pub seq: u64,
+    /// The mark's label, for the title.
+    pub against: String,
+    /// The compared commit's or branch's label, for the title.
+    pub target: String,
 }
 
 impl AppState {
@@ -363,6 +379,8 @@ impl AppState {
             copied: CopiedCommits::default(),
             notice_text: None,
             input: None,
+            diff_mark: None,
+            pending_diff: None,
             files_filter: String::new(),
             files_anchor: None,
             forge: ForgeState::default(),
@@ -1073,7 +1091,7 @@ impl AppState {
                     });
                 }
             }
-            AppIntent::InputAccept => self.input_accept(),
+            AppIntent::InputAccept => return self.input_accept(),
             AppIntent::InputCancel => {
                 if let Some(input) = &mut self.input {
                     input.line = LineInput::default();
@@ -1090,6 +1108,11 @@ impl AppState {
             },
             AppIntent::SearchNext => self.step_search(false),
             AppIntent::SearchPrev => self.step_search(true),
+            AppIntent::OpenLogFilter(field) => self.open_log_filter(field),
+            AppIntent::LogOfFile => return self.log_of_file(),
+            AppIntent::ToggleDiffMark => self.toggle_diff_mark(),
+            AppIntent::OpenDiff => return self.open_branch_diff(),
+            AppIntent::DiffResolved { tag, result } => return self.diff_resolved(tag, result),
         }
         vec![]
     }
@@ -2665,24 +2688,29 @@ impl AppState {
         if self.context != Context::Workspace {
             return vec![];
         }
-        let page = self.background_tag();
+        let page = self.first_commits_page();
         let markers = self.background_tag();
-        self.commits.begin_page(page.seq, 0);
         self.commits.markers_seq = Some(markers.seq);
-        let mut effects = vec![
-            Effect::LoadCommits {
-                tag: page,
-                tip: None,
-                skip: 0,
-            },
-            Effect::LoadMarkers { tag: markers },
-        ];
+        let mut effects = vec![page, Effect::LoadMarkers { tag: markers }];
         // The reflog moves with the log, once it has been read at all.
         let reflog = &self.commits.reflog;
         if reflog.data.is_some() || reflog.error.is_some() {
             effects.extend(self.load_reflog(false));
         }
         effects
+    }
+
+    /// Load page 0 of the log under the current query, superseding any
+    /// page in flight.
+    fn first_commits_page(&mut self) -> Effect {
+        let tag = self.background_tag();
+        self.commits.begin_page(tag.seq, 0);
+        Effect::LoadCommits {
+            tag,
+            tip: None,
+            skip: 0,
+            query: self.commits.query.clone(),
+        }
     }
 
     /// Show the Commits panel's other tab, reading the reflog the first
@@ -2841,6 +2869,7 @@ impl AppState {
             tag,
             tip: self.commits.tip.clone(),
             skip,
+            query: self.commits.query.clone(),
         }]
     }
 
@@ -3471,6 +3500,9 @@ impl AppState {
         self.input = None;
         self.files_filter.clear();
         self.files_anchor = None;
+        // A mark names a commit or branch of the repository being left.
+        self.diff_mark = None;
+        self.pending_diff = None;
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -3562,6 +3594,13 @@ impl AppState {
         let Some(row) = self.commits.rows.get(self.commits.selected) else {
             return vec![];
         };
+        if let Some(mark) = &self.diff_mark
+            && let Some(id) = CommitId::parse(&row.oid)
+            && !matches!(mark, DiffMark::Commit { id: marked, .. } if *marked == id)
+        {
+            let target = row.short_oid.clone();
+            return self.open_comparison(DiffEnd::Commit(id), target);
+        }
         let range = match CommitRange::of(row) {
             Ok(range) => range,
             Err(message) => {
@@ -5198,16 +5237,22 @@ impl AppState {
                     view.set_search(&text);
                 }
             }
+            // Git runs the query on Enter, not on every key.
+            InputTarget::LogPath | InputTarget::LogAuthor => {}
         }
         vec![]
     }
 
     /// Close the input. The filter stays as typed; a search goes to its
-    /// current match.
-    fn input_accept(&mut self) {
+    /// current match; a log query is read and run, or stays open saying
+    /// why it cannot be.
+    fn input_accept(&mut self) -> Vec<Effect> {
         let Some(input) = self.input.take() else {
-            return;
+            return vec![];
         };
+        if input.target.is_log_query() {
+            return self.accept_log_query(input);
+        }
         let rows = self.pane_rows();
         if input.target == InputTarget::DiffSearch
             && let Focus::Diff(view) = &mut self.focus
@@ -5217,6 +5262,7 @@ impl AppState {
                 _ => view.jump_to_match(rows),
             }
         }
+        vec![]
     }
 
     /// `n` or `N`: the next or previous match, saying so when it wrapped.
@@ -5252,8 +5298,8 @@ impl AppState {
         }
     }
 
-    /// Esc in a list: clear the range, else the filter, else quit as Esc
-    /// always has.
+    /// Esc in a list: clear the range, else the filter, else (in Commits)
+    /// the diff mark, else the log query, else quit as Esc always has.
     fn list_escape(&mut self) -> Vec<Effect> {
         let (cleared, filter) = match self.panel_focus() {
             KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
@@ -5266,11 +5312,21 @@ impl AppState {
         if cleared {
             return vec![];
         }
-        if filter.is_empty() {
-            return self.update(AppIntent::Quit);
+        if !filter.is_empty() {
+            filter.clear();
+            return vec![];
         }
-        filter.clear();
-        vec![]
+        if self.panel_focus() == KeyScope::Commits {
+            if self.diff_mark.take().is_some() {
+                self.notice = Some(MARK_CLEARED);
+                return vec![];
+            }
+            if self.commits.query.is_active() {
+                self.notice = Some("Log filter cleared");
+                return self.set_log_query(LogQuery::default());
+            }
+        }
+        self.update(AppIntent::Quit)
     }
 
     /// Stage every file in the range, or unstage them all when none has
@@ -5538,7 +5594,10 @@ fn failure_title(op: &GitOp) -> &'static str {
     }
 }
 
+mod log_query;
 mod stash_actions;
+
+use log_query::MARK_CLEARED;
 
 #[cfg(test)]
 mod tests {
@@ -10100,7 +10159,7 @@ mod tests {
         let loads: Vec<_> = effects
             .iter()
             .filter_map(|e| match e {
-                Effect::LoadCommits { tag, tip, skip } => Some((*tag, tip.clone(), *skip)),
+                Effect::LoadCommits { tag, tip, skip, .. } => Some((*tag, tip.clone(), *skip)),
                 _ => None,
             })
             .collect();

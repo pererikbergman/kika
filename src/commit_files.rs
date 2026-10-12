@@ -6,8 +6,12 @@ use crate::git::commit_files::{CommitFile, CommitRange};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitFilesList {
     pub range: CommitRange,
-    /// For the panel title.
+    /// For the panel title: the commit's short id, or the label of the
+    /// commit or branch compared.
     pub short_oid: String,
+    /// The diff mark's label when this compares against it rather than
+    /// showing one commit; for the title.
+    pub against: Option<String>,
     pub files: Vec<CommitFile>,
     pub selected: usize,
     /// The load in flight; only its result is applied.
@@ -23,6 +27,7 @@ impl CommitFilesList {
         Self {
             range,
             short_oid,
+            against: None,
             files: Vec::new(),
             selected: 0,
             seq: Some(seq),

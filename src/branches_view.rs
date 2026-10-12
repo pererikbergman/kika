@@ -3,10 +3,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::commits_view::{DIFF_MARK, diff_mark_style};
 use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::remotes_view;
@@ -26,15 +27,37 @@ pub fn render_panel(
     forge: &ForgeState,
     look: &PanelLook,
     expanded: bool,
-    spinner: Option<(&BranchName, &str)>,
+    marks: RowMarks,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let row = |branch: &Branch, width| {
-        let frame = spinner
+    let row = |branch: &Branch, width: usize| {
+        let frame = marks
+            .spinner
             .filter(|(name, _)| **name == branch.name)
             .map(|(_, frame)| frame);
-        branch_row(branch, frame, forge.badges.get(&branch.name), width)
+        // While a branch is marked, every row keeps a column for it, so
+        // the names line up.
+        let Some(marked) = marks.diff else {
+            return Line::from(branch_row(
+                branch,
+                frame,
+                forge.badges.get(&branch.name),
+                width,
+            ));
+        };
+        let mark = if *marked == branch.name {
+            Span::styled(DIFF_MARK, diff_mark_style())
+        } else {
+            Span::raw("  ")
+        };
+        let rest = branch_row(
+            branch,
+            frame,
+            forge.badges.get(&branch.name),
+            width.saturating_sub(2),
+        );
+        Line::from(vec![mark, Span::raw(rest)])
     };
     let current = panel.current();
     let title = match current {
@@ -76,7 +99,7 @@ pub fn render_panel(
             .skip(first)
             .take(rows)
             .map(|(i, branch)| {
-                let line = Line::from(row(branch, width));
+                let line = row(branch, width);
                 if Some(i) == panel.selected {
                     reversed(line, width)
                 } else {
@@ -87,6 +110,15 @@ pub fn render_panel(
         Paragraph::new(lines)
     };
     frame.render_widget(body.block(block), area);
+}
+
+/// What marks a branch row besides its own state.
+#[derive(Clone, Copy, Default)]
+pub struct RowMarks<'a> {
+    /// The branch a fetch, pull or push runs on, and the spinner's frame.
+    pub spinner: Option<(&'a BranchName, &'a str)>,
+    /// The branch marked for diffing.
+    pub diff: Option<&'a BranchName>,
 }
 
 /// The tabs, the one shown in brackets. Where the whole title does not
@@ -600,6 +632,18 @@ pub(crate) mod tests {
         assert!(contains(&rows, "  local "), "{rows:#?}");
         assert!(contains(&rows, "  synced  origin/synced "), "{rows:#?}");
         assert!(!contains(&rows, "↑0"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_branch_marked_for_diffing_draws_a_star_before_its_row() {
+        let mut state = focused(vec![
+            branch("main", true, None, Track::None),
+            branch("topic", false, None, Track::None),
+        ]);
+        state.diff_mark = Some(crate::diff_mark::DiffMark::Branch("topic".into()));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "  * main"), "{rows:#?}");
+        assert!(contains(&rows, "*   topic"), "{rows:#?}");
     }
 
     #[test]

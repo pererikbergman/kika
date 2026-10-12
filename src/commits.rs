@@ -5,7 +5,7 @@
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
 use crate::git::commit_files::CommitId;
-use crate::git::log::{CommitRow, LogPage, Markers};
+use crate::git::log::{CommitRow, LogPage, LogQuery, Markers};
 use crate::list_filter;
 use crate::reflog::ReflogList;
 
@@ -69,6 +69,9 @@ pub struct CommitsPanel {
     /// The full id of the commit a range selection started on, so a reload
     /// keeps the range on the same commits.
     pub range_anchor: Option<String>,
+    /// What git narrows the log to. Unlike `filter`, it changes which
+    /// commits are loaded, not which loaded rows show.
+    pub query: LogQuery,
 }
 
 /// The Commits panel's two lists.
@@ -122,6 +125,25 @@ impl CommitsPanel {
                 || id.as_str().chars().take(7).collect(),
                 |row| row.short_oid.clone(),
             )
+    }
+
+    /// Narrow the log to `query`. Everything loaded under the old one is
+    /// dropped, cursor and range included, since none of it need be in the
+    /// new history; the fuzzy filter stays and applies to the new rows.
+    /// The caller loads page 0.
+    pub fn set_query(&mut self, query: LogQuery) {
+        self.query = query;
+        self.rows.clear();
+        self.graph.clear();
+        self.builder = GraphBuilder::default();
+        self.lanes = 0;
+        self.tip = None;
+        self.done = false;
+        self.loaded = false;
+        self.error = None;
+        self.selected = 0;
+        self.range_anchor = None;
+        self.open = None;
     }
 
     /// Page `skip` was asked for under `seq`.
@@ -278,6 +300,49 @@ mod tests {
             },
             ..CommitsPanel::default()
         }
+    }
+
+    #[test]
+    fn a_new_query_drops_what_was_loaded_but_keeps_the_fuzzy_filter() {
+        let row = CommitRow {
+            oid: "a1".into(),
+            short_oid: "a1".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        };
+        let mut panel = CommitsPanel::default();
+        panel.begin_page(1, 0);
+        panel.page_loaded(
+            1,
+            0,
+            Ok((
+                LogPage {
+                    rows: vec![row.clone(), row],
+                    done: true,
+                },
+                5,
+            )),
+        );
+        panel.selected = 1;
+        panel.range_anchor = Some("a1".into());
+        panel.filter = "s".into();
+        panel.tab = CommitsTab::Reflog;
+        let query = LogQuery {
+            path: None,
+            author: Some("ann".into()),
+        };
+
+        panel.set_query(query.clone());
+
+        assert_eq!(panel.query, query);
+        assert!(panel.rows.is_empty() && panel.graph.is_empty());
+        assert_eq!((panel.selected, panel.lanes), (0, 0));
+        assert!(!panel.loaded && !panel.done && panel.tip.is_none());
+        assert!(panel.range_anchor.is_none() && panel.open.is_none());
+        assert_eq!(panel.filter, "s");
+        assert_eq!(panel.tab, CommitsTab::Reflog);
     }
 
     #[test]
