@@ -1005,6 +1005,14 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
     }
 }
 
+/// The arguments of `cmd`, as strings, to compare with an expected argv.
+pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
+    cmd.args()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
 // --- Tags ---
 
 pub(crate) fn tag_ref(name: &str, oid: char) -> TagRef {
@@ -1041,14 +1049,6 @@ pub(crate) fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect
 /// `v2` then `v1`, newest first.
 pub(crate) fn two_tags() -> Vec<TagRef> {
     vec![tag_ref("v2", 'b'), tag_ref("v1", 'a')]
-}
-
-/// The arguments of `cmd`, as strings, to compare with an expected argv.
-pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
-    cmd.args()
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect()
 }
 
 /// Screen helpers for view tests: draw a state into a test terminal and
