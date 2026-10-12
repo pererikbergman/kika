@@ -6,17 +6,16 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ansi;
-use crate::captured_command::run_captured;
 use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
-use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
-use crate::features::{repos, submodules};
+use crate::features::custom_commands::OutputMode;
+use crate::features::{custom_commands, repos, submodules};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
@@ -1508,38 +1507,15 @@ impl Runtime {
                 output,
             } => {
                 // Taken now: a `SetRepo` after this must not move the command.
-                let workdir = self.runner.workdir();
-                let task = tokio::spawn(run_captured(argv, workdir));
-                *lock(&self.command) = Some(task.abort_handle());
-                tokio::spawn(async move {
-                    // A panic or a cancel still reports back, or
-                    // `command_running` would stay set.
-                    let result = task.await.unwrap_or_else(|e| {
-                        Err(if e.is_cancelled() {
-                            CommandFailure::Cancelled
-                        } else {
-                            CommandFailure::Launch(terminal_safe(
-                                format!("The command crashed: {e}").as_bytes(),
-                            ))
-                        })
-                    });
-                    let result = match output {
-                        OutputMode::Popup => result,
-                        OutputMode::Terminal | OutputMode::None => result.map(|_| String::new()),
-                    };
-                    let _ = tx.send(AppIntent::CommandFinished {
-                        title,
-                        output,
-                        result,
-                    });
-                });
+                *lock(&self.command) = Some(custom_commands::effects::run(
+                    self.runner.workdir(),
+                    tx,
+                    title,
+                    argv,
+                    output,
+                ));
             }
-            Effect::CancelCommand => {
-                // Dropping the aborted future kills the program.
-                if let Some(task) = lock(&self.command).take() {
-                    task.abort();
-                }
-            }
+            Effect::CancelCommand => custom_commands::effects::cancel(lock(&self.command).take()),
             Effect::Remote { tag, op } => {
                 let slot = Arc::clone(&self.credential);
                 tokio::spawn(async move {
@@ -1976,6 +1952,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    #[cfg(unix)]
+    use crate::features::custom_commands::CommandFailure;
 
     fn forge_tag() -> Tag {
         Tag {
