@@ -56,8 +56,6 @@ mod rows;
 mod sequence_editor;
 mod stash;
 mod stash_view;
-mod tags;
-mod tags_view;
 #[cfg(test)]
 mod test_support;
 mod view;
