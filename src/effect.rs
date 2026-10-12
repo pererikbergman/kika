@@ -1483,8 +1483,10 @@ impl Runtime {
                 base,
                 title,
             } => {
-                let Some(forge) = self.forge.clone() else {
-                    // No forge client: nothing may reach the network.
+                // No forge client, or a repository `[forge.allow]` leaves
+                // out (the model never asks for one): nothing may reach
+                // the network.
+                let Some(forge) = self.forge.clone().filter(|_| host.allows(&repo)) else {
                     let _ = tx.send(AppIntent::PullRequestCreated {
                         tag,
                         result: Err(CreateError::Status(ForgeStatus::Failed)),
@@ -1978,6 +1980,45 @@ mod tests {
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_create_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
+        use crate::forge::allow::AllowRule;
+        use crate::forge::github::FakeGh;
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        let other = AllowRule::parse("other").unwrap();
+        runtime.spawn(Effect::CreatePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![other]),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            head: "me:topic".into(),
+            base: "main".into(),
+            title: "Add login".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestCreated {
+                tag: forge_tag(),
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
     }
 
     #[tokio::test]

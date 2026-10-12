@@ -52,6 +52,7 @@ pub struct Load<'a> {
 /// A fork skips the probe: its own list says nothing of its parent's pull
 /// requests. A rate-limited host gets no call at all until its limit
 /// resets. Each branch is asked about by its head, read from local git.
+/// A repository its host's allow-list leaves out answers `ForgeRepoNone`.
 pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(AppIntent)) {
     let tag = load.tag;
     // Defence in depth: with no hosts nothing is read, run or written.
@@ -63,7 +64,10 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         Some(repo) => Some(repo.clone()),
         None => read_remote_url(git).and_then(|url| parse_remote(&url)),
     }
-    .and_then(|repo| Some((matches(&repo, load.hosts)?, repo)));
+    .and_then(|repo| Some((matches(&repo, load.hosts)?, repo)))
+    // A repository `[forge.allow]` leaves out is as if on no host: its
+    // cache is not read either, so nothing about it is shown.
+    .filter(|(host, repo)| host.allows(repo));
     let Some((host, repo)) = found else {
         send(AppIntent::ForgeRepoNone { tag });
         return;
@@ -93,7 +97,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     let until = load
         .limited
         .iter()
-        .find(|(limited, _)| limited == host)
+        .find(|(limited, _)| limited.as_str() == host.as_str())
         .map(|(_, until)| *until);
     if let Some(until) = until.filter(|until| *until > load.now) {
         return limited(until);
@@ -370,6 +374,80 @@ mod tests {
             [AppIntent::ForgeRepoNone { tag: tag() }]
         );
         assert_eq!(gh.calls(), []);
+    }
+
+    /// github.com, narrowed by `[forge.allow]` to the owner `acme`.
+    fn acme_only() -> Vec<ForgeHost> {
+        let rule = crate::forge::allow::AllowRule::parse("acme").unwrap();
+        vec![
+            ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![rule]),
+        ]
+    }
+
+    #[test]
+    fn a_clone_the_allow_list_leaves_out_reads_and_asks_nothing() {
+        let tmp = TempDir::new("forge-unlisted");
+        let other = ForgeRepo {
+            owner: "other".into(),
+            name: "repo".into(),
+            ..repo()
+        };
+        let dir = tmp.path().join("forge");
+        let key = CacheKey::new(&other, tmp.path()).unwrap();
+        cache::write(&dir, &key, &green(&["main".into()])).unwrap();
+        let entries = |dir: &Path| {
+            let mut files: Vec<(PathBuf, Vec<u8>)> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .map(|p| (p.clone(), std::fs::read(&p).unwrap()))
+                .collect();
+            files.sort();
+            files
+        };
+        let before = entries(&dir);
+        let gh = Arc::new(FakeGh::new());
+        let ctx = context(Arc::clone(&gh), Some(dir.clone()));
+        let (hosts, branches) = (acme_only(), ["main".into()]);
+
+        // Read from the remote: only the URL is read, nothing else.
+        let git = origin(b"https://github.com/other/repo");
+        let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+        git.assert_done();
+        assert_eq!(sent, [AppIntent::ForgeRepoNone { tag: tag() }]);
+
+        // Known from an earlier load: still nothing.
+        let git = FakeRunner::new();
+        for refresh_too in [true, false] {
+            let load = Load {
+                known: Some(&other),
+                refresh: refresh_too,
+                ..refresh(&hosts, &branches, tmp.path())
+            };
+            let sent = self::sent(&git, &ctx, &load);
+            assert_eq!(sent, [AppIntent::ForgeRepoNone { tag: tag() }]);
+        }
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
+        assert_eq!(entries(&dir), before);
+    }
+
+    #[test]
+    fn a_clone_the_allow_list_names_loads_as_without_one() {
+        let tmp = TempDir::new("forge-listed");
+        let gh = Arc::new(FakeGh::new().reply(answer(PROBE_200)).reply(answer(STATES)));
+        let ctx = context(Arc::clone(&gh), Some(tmp.path().join("forge")));
+        let (hosts, branches) = (acme_only(), ["main".into()]);
+        let git = origin_refresh(b"https://github.com/acme/widgets.git");
+        let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
+        git.assert_done();
+        assert!(
+            matches!(&sent[0], AppIntent::PullRequestsCached { repo: r, .. } if *r == repo()),
+            "{sent:?}"
+        );
+        assert!(matches!(fetched(&sent), (Ok(_), None)), "{sent:?}");
+        assert_eq!(gh.calls().len(), 2);
     }
 
     #[test]
