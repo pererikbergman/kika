@@ -409,8 +409,9 @@ pull request, then to the queue, then to the workspace.
 - Viewed marks are read for the first 100 files; the rest, and a file
   whose name is not UTF-8, show `?`. Marking files viewed is not done here.
 
-- GitHub is asked only when you enter review mode, open a pull request or
-  press `r`; nothing refreshes by itself, and nothing is cached on disk.
+- GitHub is asked only when you enter review mode, open a pull request,
+  press `r` or answer `y` to a merge; nothing refreshes by itself, and
+  nothing is cached on disk.
 - Only a `github` host is asked. With none, or with the remote on another
   host, review mode says so and asks nobody; a rate-limited host is not
   asked until its limit resets.
@@ -420,6 +421,33 @@ pull request, then to the queue, then to the workspace.
 - Only the first 50 pull requests of each queue show. Descriptions show
   headings, lists, quotes, code, emphasis and links; images, tables and
   HTML show as text.
+
+#### Merging a pull request
+
+Under the mergeability line the detail says how it may be merged
+(`Merge: merge commit · squash · rebase`, only the methods the repository
+allows) or why it may not (`Cannot merge: …`). `M` merges it: when the
+repository allows several methods it first asks which, then asks
+`Merge #N <title> into <base> by <method>?`, adding "Some checks have not
+passed" when a check that is not required failed. Only `y` answers yes;
+`enter` does not.
+
+- A pull request may be merged only when it is open, not a draft,
+  mergeable, and GitHub's merge state is clean, or held up only by checks
+  that are not required. Already merged, closed, a draft, conflicts, a
+  missing required review or check, a branch behind its base, a state
+  GitHub is still working out (press `r`), no allowed method, or no head
+  commit each say why, in Kika's own words.
+- The merge is one
+  `gh api --include --hostname <host> --method PUT repos/<owner>/<name>/pulls/<number>/merge --input -`,
+  shown in the Command log. The method and the head commit you saw travel
+  on its input, so GitHub refuses rather than merge a head that moved since.
+  GitHub's default commit title and message apply. GitHub's own refusal is
+  shown cut short and with control characters escaped.
+- Nothing else is asked first, and the branch is not deleted. Once merged,
+  the detail says merged, the pull request leaves the queues and the local
+  branch's badge turns `merged`; the badges are then read again once.
+- Only a `github` host is asked, and not while it is rate limited.
 
 **Changes to `[forge]` take effect after a restart.**
 
@@ -1630,7 +1658,18 @@ reaches GitHub, so `enter` does not answer it.
 | `create_pull_request.no` | `n`, `esc` | No, create nothing | locked |
 | `create_pull_request.quit` | `ctrl-c` | Quit Kika | locked |
 
-### Pick one (a pull request's target remote or base branch, or a failing check)
+### Merge this pull request?
+
+The question names the number, title, base and method. Merging reaches
+GitHub and cannot be undone, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `merge_pr.yes` | `y` | Yes, merge the pull request on GitHub | locked |
+| `merge_pr.no` | `n`, `esc` | No, merge nothing | locked |
+| `merge_pr.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pick one (a pull request's target remote or base branch, a failing check, or a merge method)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1654,6 +1693,7 @@ reaches GitHub, so `enter` does not answer it.
 | `review.open_check` | `o` | Open a failing check's page in the browser | locked |
 | `review.back` | `esc` | Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
 | `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
+| `review.merge` | `M` | Merge the open pull request on GitHub, after a question only y answers | locked |
 
 ### Review files (one pull request's changed files and diff)
 

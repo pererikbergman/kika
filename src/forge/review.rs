@@ -106,6 +106,14 @@ impl Queues {
     pub fn get(&self, kind: QueueKind) -> &[PrSummary] {
         &self.0[kind.index()]
     }
+
+    /// Take pull request `number` out of every queue, as once it is
+    /// merged it is open no more.
+    pub fn remove(&mut self, number: u64) {
+        for list in &mut self.0 {
+            list.retain(|pr| pr.number != number);
+        }
+    }
 }
 
 /// What a reviewer last said about the pull request.
@@ -124,6 +132,55 @@ pub enum Mergeability {
     Mergeable,
     Conflicting,
     Unknown,
+}
+
+/// What GitHub says stands between the pull request and a merge, from
+/// its `mergeStateStatus`. Any value Kika does not know is `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeState {
+    Clean,
+    /// Clean, with a commit status or check that is not required.
+    HasHooks,
+    /// Mergeable, but a check that is not required has not passed.
+    Unstable,
+    /// The base moved on; the branch must be updated first.
+    Behind,
+    /// A required review or check is missing.
+    Blocked,
+    /// The head conflicts with the base.
+    Dirty,
+    Draft,
+    /// GitHub is still working it out.
+    Unknown,
+}
+
+/// A way the repository lets a pull request be merged, in the order
+/// GitHub offers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    /// The REST API's `merge_method` value.
+    pub fn api_name(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+
+    /// The words shown for it.
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge commit",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +227,9 @@ pub struct PrDetail {
     pub base: String,
     pub head: String,
     pub mergeable: Mergeability,
+    pub merge_state: MergeState,
+    /// The ways the repository allows a merge, in [`MergeMethod`] order.
+    pub merge_methods: Vec<MergeMethod>,
     pub checks: Vec<Check>,
     /// The head and base commits; `None` when GitHub sent no hex id.
     pub head_oid: Option<CommitId>,
@@ -306,8 +366,9 @@ fn queues_body(repo: &ForgeRepo) -> Vec<u8> {
 
 /// The detail query: fixed text; owner, name and number are variables.
 const DETAIL_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!)\
-{repository(owner:$owner,name:$name){pullRequest(number:$number)\
-{number title body state isDraft mergeable baseRefName headRefName headRefOid baseRefOid \
+{repository(owner:$owner,name:$name){mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed \
+pullRequest(number:$number)\
+{number title body state isDraft mergeable mergeStateStatus baseRefName headRefName headRefOid baseRefOid \
 author{login} files(first:100){totalCount nodes{path viewerViewedState}} \
 labels(first:20){nodes{name}} \
 reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Bot{login} \
@@ -410,6 +471,9 @@ struct DetailData {
 #[serde(rename_all = "camelCase")]
 struct DetailRepo {
     pull_request: Option<PrNode>,
+    merge_commit_allowed: Option<bool>,
+    squash_merge_allowed: Option<bool>,
+    rebase_merge_allowed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -422,6 +486,7 @@ struct PrNode {
     #[serde(default)]
     is_draft: bool,
     mergeable: Option<String>,
+    merge_state_status: Option<String>,
     base_ref_name: Option<String>,
     head_ref_name: Option<String>,
     head_ref_oid: Option<String>,
@@ -516,7 +581,10 @@ fn pull_request_null(body: &[u8]) -> bool {
         matches!(
             r.data,
             Some(DetailData {
-                repository: Some(DetailRepo { pull_request: None })
+                repository: Some(DetailRepo {
+                    pull_request: None,
+                    ..
+                })
             })
         )
     })
@@ -525,6 +593,15 @@ fn pull_request_null(body: &[u8]) -> bool {
 fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
     let data: DetailData = data_of(body)?;
     let repository = data.repository.ok_or(ForgeStatus::NoAccess)?;
+    // A flag GitHub did not send allows nothing.
+    let merge_methods = [
+        (repository.merge_commit_allowed, MergeMethod::Merge),
+        (repository.squash_merge_allowed, MergeMethod::Squash),
+        (repository.rebase_merge_allowed, MergeMethod::Rebase),
+    ]
+    .into_iter()
+    .filter_map(|(allowed, method)| (allowed == Some(true)).then_some(method))
+    .collect();
     let Some(pr) = repository.pull_request else {
         return Ok(None);
     };
@@ -537,6 +614,16 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         Some("MERGEABLE") => Mergeability::Mergeable,
         Some("CONFLICTING") => Mergeability::Conflicting,
         _ => Mergeability::Unknown,
+    };
+    let merge_state = match pr.merge_state_status.as_deref() {
+        Some("CLEAN") => MergeState::Clean,
+        Some("HAS_HOOKS") => MergeState::HasHooks,
+        Some("UNSTABLE") => MergeState::Unstable,
+        Some("BEHIND") => MergeState::Behind,
+        Some("BLOCKED") => MergeState::Blocked,
+        Some("DIRTY") => MergeState::Dirty,
+        Some("DRAFT") => MergeState::Draft,
+        _ => MergeState::Unknown,
     };
     let labels = pr
         .labels
@@ -616,6 +703,8 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         base: line(pr.base_ref_name.as_deref().unwrap_or_default()),
         head: line(pr.head_ref_name.as_deref().unwrap_or_default()),
         mergeable,
+        merge_state,
+        merge_methods,
         checks,
         head_oid: oid(pr.head_ref_oid),
         base_oid: oid(pr.base_ref_oid),
@@ -994,6 +1083,80 @@ pub(crate) mod tests {
                 ("docs/café.md".to_string(), ViewedState::Unviewed),
             ]
         );
+    }
+
+    #[test]
+    fn the_detail_reads_its_merge_state_and_the_allowed_methods() {
+        let runner = FakeGh::new().reply(answer(DETAIL));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        let query = sent(&runner.calls()[0])["query"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for field in [
+            "mergeStateStatus",
+            "mergeCommitAllowed",
+            "squashMergeAllowed",
+            "rebaseMergeAllowed",
+        ] {
+            assert!(query.contains(field), "{field} not asked: {query}");
+        }
+        assert_eq!(pr.merge_state, MergeState::Clean);
+        assert_eq!(pr.merge_methods, [MergeMethod::Merge, MergeMethod::Squash]);
+
+        for (text, want) in [
+            ("HAS_HOOKS", MergeState::HasHooks),
+            ("UNSTABLE", MergeState::Unstable),
+            ("BEHIND", MergeState::Behind),
+            ("BLOCKED", MergeState::Blocked),
+            ("DIRTY", MergeState::Dirty),
+            ("DRAFT", MergeState::Draft),
+            ("UNKNOWN", MergeState::Unknown),
+            ("SOMETHING_NEW", MergeState::Unknown),
+        ] {
+            let other = DETAIL.replace("\"CLEAN\"", &format!("\"{text}\""));
+            let runner = FakeGh::new().reply(answer(&other));
+            assert_eq!(detail(&runner, 42).unwrap().unwrap().merge_state, want);
+        }
+        let all = DETAIL.replace(
+            "\"rebaseMergeAllowed\":false",
+            "\"rebaseMergeAllowed\":true",
+        );
+        let runner = FakeGh::new().reply(answer(&all));
+        assert_eq!(
+            detail(&runner, 42).unwrap().unwrap().merge_methods,
+            [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase]
+        );
+    }
+
+    #[test]
+    fn missing_merge_fields_mean_unknown_and_no_method() {
+        let bare = DETAIL.replace("\"mergeStateStatus\":\"CLEAN\",", "").replace(
+            "\"mergeCommitAllowed\":true,\"squashMergeAllowed\":true,\"rebaseMergeAllowed\":false,",
+            "",
+        );
+        assert!(!bare.contains("Allowed") && !bare.contains("mergeState"));
+        let runner = FakeGh::new().reply(answer(&bare));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        assert_eq!(pr.merge_state, MergeState::Unknown);
+        assert_eq!(pr.merge_methods, []);
+        // A null flag allows nothing either.
+        let null = DETAIL.replace("\"mergeCommitAllowed\":true", "\"mergeCommitAllowed\":null");
+        let runner = FakeGh::new().reply(answer(&null));
+        assert_eq!(
+            detail(&runner, 42).unwrap().unwrap().merge_methods,
+            [MergeMethod::Squash]
+        );
+    }
+
+    #[test]
+    fn a_merged_pull_request_leaves_every_queue() {
+        let runner = FakeGh::new().reply(answer(QUEUES));
+        let mut queues = queues(&runner).unwrap();
+        queues.remove(12);
+        assert_eq!(numbers(queues.get(QueueKind::Assigned)), [7]);
+        assert_eq!(numbers(queues.get(QueueKind::ReviewRequested)), [15]);
+        assert_eq!(numbers(queues.get(QueueKind::AllOpen)), [15, 9, 7]);
     }
 
     #[test]

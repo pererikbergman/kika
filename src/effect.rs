@@ -16,6 +16,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
+use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
 use crate::forge::{CreateError, ForgeStatus};
@@ -380,6 +381,17 @@ pub enum Effect {
         base: String,
         title: String,
     },
+    /// Merge pull request `number` of `repo` by `method` through `gh`, on
+    /// the configured `host`, only while its head is still `head_oid`;
+    /// always answered by one `PullRequestMerged`.
+    MergePullRequest {
+        tag: Tag,
+        host: ForgeHost,
+        repo: ForgeRepo,
+        number: u64,
+        method: MergeMethod,
+        head_oid: CommitId,
+    },
     /// Read the review queues of the remote's repository: `repo` when an
     /// earlier load found it, else the remote is read and matched against
     /// `hosts`. A host in `limited` is not asked before its second has
@@ -651,6 +663,16 @@ fn run_clipboard_command(
             }
         }
     });
+}
+
+/// Where a create or merge runs `gh`: as for loads, the cache directory,
+/// never the repository, so `gh` reads no repository's git config.
+fn gh_cwd(forge: &ForgeContext) -> PathBuf {
+    forge
+        .cache_dir
+        .clone()
+        .filter(|dir| crate::forge::cache::ensure_dir(dir).is_ok())
+        .unwrap_or_else(std::env::temp_dir)
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -1483,13 +1505,7 @@ impl Runtime {
                 };
                 tokio::spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        // As for loads: `gh` runs in the cache directory,
-                        // never the repository.
-                        let cwd = forge
-                            .cache_dir
-                            .clone()
-                            .filter(|dir| crate::forge::cache::ensure_dir(dir).is_ok())
-                            .unwrap_or_else(std::env::temp_dir);
+                        let cwd = gh_cwd(&forge);
                         let gh = crate::forge::github::Gh {
                             runner: forge.gh.as_ref(),
                             sink: &forge.sink,
@@ -1503,6 +1519,45 @@ impl Runtime {
                     // A panic still answers, or the create would stay in flight.
                     .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
                     let _ = tx.send(AppIntent::PullRequestCreated { tag, result });
+                });
+            }
+            Effect::MergePullRequest {
+                tag,
+                host,
+                repo,
+                number,
+                method,
+                head_oid,
+            } => {
+                let Some(forge) = self.forge.clone() else {
+                    // No forge client: nothing may reach the network.
+                    let _ = tx.send(AppIntent::PullRequestMerged {
+                        tag,
+                        number,
+                        result: Err(CreateError::Status(ForgeStatus::Failed)),
+                    });
+                    return;
+                };
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let cwd = gh_cwd(&forge);
+                        let gh = crate::forge::github::Gh {
+                            runner: forge.gh.as_ref(),
+                            sink: &forge.sink,
+                            host: &host,
+                            cwd,
+                            now: unix_now(),
+                        };
+                        gh.merge_pull(&repo, number, method, &head_oid)
+                    })
+                    .await
+                    // A panic still answers, or the merge would stay in flight.
+                    .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
+                    let _ = tx.send(AppIntent::PullRequestMerged {
+                        tag,
+                        number,
+                        result,
+                    });
                 });
             }
             Effect::AnswerCredential(answer) => {
@@ -1968,6 +2023,65 @@ mod tests {
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_merge_runs_gh_in_the_cache_dir_and_answers_once() {
+        use crate::forge::github::{FakeGh, GhCall, answer};
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-merge");
+        let cache_dir = tmp.path().join("forge");
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new().reply(answer(
+            "HTTP/2.0 200 OK\r\n\r\n{\"merged\":true,\"message\":\"Pull Request successfully merged\"}",
+        )));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: Some(cache_dir.clone()),
+        }));
+        let merge = Effect::MergePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com").unwrap(),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            number: 42,
+            method: MergeMethod::Rebase,
+            head_oid: CommitId::parse(&"1".repeat(40)).unwrap(),
+        };
+        runtime.spawn(merge.clone());
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestMerged {
+                tag: forge_tag(),
+                number: 42,
+                result: Ok(()),
+            })
+        );
+        git.assert_done();
+        let [call] = gh.calls().try_into().unwrap();
+        assert_eq!(call.cwd, cache_dir);
+        assert!(matches!(
+            &call.kind,
+            GhCall::Merge { path, .. } if path == "repos/acme/widgets/pulls/42/merge"
+        ));
+
+        // Without a forge client, nothing is asked.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git, tx).spawn(merge);
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestMerged {
+                tag: forge_tag(),
+                number: 42,
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        assert_eq!(gh.calls().len(), 1);
     }
 
     #[tokio::test]

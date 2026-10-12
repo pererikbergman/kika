@@ -820,6 +820,17 @@ pub enum AppIntent {
     /// Open a failing check's page in the browser, picking one when
     /// several fail.
     OpenCheckDetails,
+    /// Merge the open pull request: pick a method when several are
+    /// allowed, then ask.
+    OpenMergePr,
+    /// Merge the pull request the open question describes.
+    ConfirmMergePr,
+    /// GitHub answered a merge of pull request `number`, or why not.
+    PullRequestMerged {
+        tag: Tag,
+        number: u64,
+        result: Result<(), CreateError>,
+    },
     /// Move the queue's cursor, or scroll the pull request, by a line.
     ReviewNext,
     ReviewPrev,

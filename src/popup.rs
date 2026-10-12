@@ -10,6 +10,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::custom_patch::PatchAction;
+use crate::forge::merge::MergeMethod;
+use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
@@ -60,6 +62,8 @@ pub enum Popup {
     Travel(TravelConfirm),
     /// The git commands Kika ran; the entries live in `AppState`.
     CommandLog(CommandLogView),
+    /// "Merge this pull request?" It reaches GitHub, so only `y` answers.
+    MergePullRequest(MergePrConfirm),
 }
 
 /// A question from git or ssh, and what the user has typed so far. The
@@ -407,6 +411,54 @@ impl RemoveRemoteConfirm {
              branches tracking it lose their upstream. (y/n)",
             self.name
         )
+    }
+}
+
+/// "Merge this pull request?" Every value is taken when it is asked, so
+/// a refresh before the answer cannot change what is merged; the head
+/// commit guards the merge on GitHub's side too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergePrConfirm {
+    pub number: u64,
+    /// The title, base and head as parsed, already terminal-safe.
+    pub title: String,
+    pub base: String,
+    pub head: String,
+    pub method: MergeMethod,
+    pub head_oid: CommitId,
+    pub repo: ForgeRepo,
+    pub host: ForgeHost,
+    /// A check that is not required has not passed.
+    pub unstable: bool,
+}
+
+/// The most of a title the merge question shows, in characters.
+const MERGE_TITLE: usize = 72;
+
+impl MergePrConfirm {
+    pub fn title(&self) -> &'static str {
+        "Merge pull request"
+    }
+
+    /// What to press first, so a short screen cuts the details rather
+    /// than the answer; then what is merged into what, and how.
+    pub fn question(&self) -> String {
+        let title = terminal_safe(self.title.as_bytes());
+        let title = match title.char_indices().nth(MERGE_TITLE) {
+            Some((cut, _)) => format!("{}…", &title[..cut]),
+            None => title,
+        };
+        let mut text = format!(
+            "Press y to merge it on GitHub, n or Esc to cancel\n\
+             Merge #{} {title} into {} by {}?",
+            self.number,
+            terminal_safe(self.base.as_bytes()),
+            self.method.label(),
+        );
+        if self.unstable {
+            text.push_str("\nSome checks have not passed");
+        }
+        text
     }
 }
 

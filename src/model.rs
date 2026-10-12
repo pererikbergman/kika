@@ -329,6 +329,8 @@ pub struct AppState {
     pub pr_draft: Option<pull_request::PrDraft>,
     /// The pull request being created on GitHub; one at a time.
     pub pr_create: Option<pull_request::PrCreating>,
+    /// The pull request being merged on GitHub; one at a time.
+    pub pr_merge: Option<merge_pr::PrMerging>,
     /// The message read to copy it; any other answer is stale.
     pub pending_copy: Option<(Tag, CommitId)>,
     /// The pattern the open `.gitignore` prompt was filled with.
@@ -427,6 +429,7 @@ impl AppState {
             browser: None,
             pr_draft: None,
             pr_create: None,
+            pr_merge: None,
             pending_copy: None,
             ignore_draft: None,
             now: 0,
@@ -1047,6 +1050,13 @@ impl AppState {
             AppIntent::CloseReviewDetail => return self.close_review(),
             AppIntent::RefreshReview => return self.refresh_review(),
             AppIntent::OpenCheckDetails => return self.open_check_details(),
+            AppIntent::OpenMergePr => self.open_merge_pr(),
+            AppIntent::ConfirmMergePr => return self.confirm_merge_pr(),
+            AppIntent::PullRequestMerged {
+                tag,
+                number,
+                result,
+            } => return self.pull_request_merged(tag, number, result),
             AppIntent::ReviewNext => return self.review_move(1),
             AppIntent::ReviewPrev => return self.review_move(-1),
             AppIntent::OpenReviewFiles => return self.open_review_files(),
@@ -1454,6 +1464,7 @@ impl AppState {
             Some(Popup::Credential(_)) => return KeyScope::Credential,
             Some(Popup::Travel(_)) => return KeyScope::Travel,
             Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
+            Some(Popup::MergePullRequest(_)) => return KeyScope::MergePullRequest,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -1756,6 +1767,8 @@ impl AppState {
             ) if !yes => vec![],
             // Only `ConfirmRemoveWorktree` removes a worktree.
             Some(Popup::RemoveWorktree(_)) if !yes => vec![],
+            // Only `ConfirmMergePr` merges a pull request.
+            Some(Popup::MergePullRequest(_)) if !yes => vec![],
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
@@ -6365,6 +6378,7 @@ mod fixup;
 pub(crate) mod forge_load;
 mod leave_commits;
 mod log_query;
+pub(crate) mod merge_pr;
 pub(crate) mod pull_request;
 pub(crate) mod review;
 pub(crate) mod review_files;
