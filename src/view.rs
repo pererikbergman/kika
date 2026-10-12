@@ -868,6 +868,9 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
     lines
 }
 
+/// The fewest columns typed text keeps on the bar while a notice shows.
+const TYPED_FLOOR: usize = 8;
+
 /// The busy indicator and, while a command runs, the key that stops it;
 /// then why the last key did nothing, else the last operation's error, else
 /// the key hints. The indicator goes first so a narrow bar clips the rest,
@@ -876,7 +879,8 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 /// columns ends in `…`.
 ///
 /// While a filter or search is typed, `/` and the text come after the
-/// indicator, and the column of its cursor is returned too.
+/// indicator, and the column of its cursor is returned too. A notice
+/// takes its room before the text, so a full input can say why.
 fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
     let mut spans = Vec::new();
     let mut cursor = None;
@@ -901,6 +905,14 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         room = room.saturating_sub(width_of(&cancel) + 1);
         spans.push(Span::raw(format!(" {cancel}")));
     }
+    // Found before the input is laid out, so a full input leaves the
+    // notice room to say why the key did nothing.
+    let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
+    let notice = state
+        .notice
+        .as_deref()
+        .or(state.notice_text.as_deref())
+        .or(remote_notice);
     if let Some(input) = state
         .input
         .as_ref()
@@ -914,7 +926,15 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         let (before, after) = (sanitize(before.as_bytes()), sanitize(after.as_bytes()));
         let prompt = input.target.prompt();
         // ` ` and the prompt, then a cell for the cursor after the text.
-        let text_room = room.saturating_sub(width_of(prompt) + 2).max(1);
+        let text_room = room.saturating_sub(width_of(prompt) + 2);
+        // A notice keeps its room, but the text keeps a few cells.
+        let text_room = notice
+            .map_or(text_room, |notice| {
+                text_room
+                    .saturating_sub(width_of(notice) + 1)
+                    .max(text_room.min(TYPED_FLOOR))
+            })
+            .max(1);
         let before = if width_of(&before) + width_of(&after) <= text_room {
             before
         } else {
@@ -930,9 +950,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             Style::new().add_modifier(Modifier::BOLD),
         ));
     }
-    let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    let notice = state.notice.as_deref().or(state.notice_text.as_deref());
-    if let Some(notice) = notice.or(remote_notice) {
+    if let Some(notice) = notice {
         spans.push(Span::styled(
             elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
@@ -6027,6 +6045,70 @@ mod tests {
             Some(5),
             "` /` then two columns for 日 and one for x"
         );
+    }
+
+    /// Draw at 80x24 with `text` typed into `target` and the full-input
+    /// notice set, then check the bottom row keeps the prompt, part of the
+    /// text, the cursor and the whole notice in yellow, and nothing raw.
+    fn assert_full_notice_shows(target: crate::list_filter::InputTarget, text: &str) {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        typing(&mut state, target, text);
+        state.notice = Some(crate::list_filter::input_full_notice().into());
+        let (buffer, (cx, cy)) = draw_with_cursor(&state, 80, 24);
+        let bar = &buffer_rows(&buffer)[23];
+        let notice = crate::list_filter::input_full_notice();
+        assert!(bar.contains(&notice), "{bar:?}");
+        for skip in 0..width_of(&notice) as u16 {
+            assert_eq!(style_in(&buffer, &notice, skip).fg, Some(Color::Yellow));
+        }
+        let typed = format!(" {}…x", target.prompt());
+        assert!(bar.starts_with(&typed), "{bar:?}");
+        assert_eq!(cy, 23);
+        let notice_at = width_of(&bar[..bar.find(&notice).unwrap()]);
+        assert!(
+            usize::from(cx) < notice_at,
+            "the cursor sits before the notice: {cx} in {bar:?}"
+        );
+        assert!(!bar.chars().any(char::is_control), "{bar:?}");
+    }
+
+    #[test]
+    fn a_full_filter_still_shows_why_the_key_did_nothing() {
+        let mut text = "x".repeat(crate::list_filter::MAX_INPUT - 2);
+        text.insert_str(10, "\x1b\x07");
+        assert_full_notice_shows(crate::list_filter::InputTarget::FilesFilter, &text);
+    }
+
+    #[test]
+    fn a_full_diff_search_still_shows_why_the_key_did_nothing() {
+        let text = "x".repeat(crate::list_filter::MAX_INPUT);
+        assert_full_notice_shows(crate::list_filter::InputTarget::DiffSearch, &text);
+    }
+
+    #[test]
+    fn a_full_input_on_a_narrow_bar_elides_the_notice() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        typing(
+            &mut state,
+            crate::list_filter::InputTarget::FilesFilter,
+            &"x".repeat(crate::list_filter::MAX_INPUT),
+        );
+        state.notice = Some(crate::list_filter::input_full_notice().into());
+        for width in [40u16, 20, 8, 4] {
+            let (buffer, (cx, cy)) = draw_with_cursor(&state, width, 24);
+            let bar = &buffer_rows(&buffer)[23];
+            assert!(width_of(bar) <= usize::from(width), "{width}: {bar:?}");
+            assert!(bar.starts_with(" /…"), "{width}: {bar:?}");
+            assert_eq!(cy, 23);
+            assert!(cx < width, "{width}: cursor at {cx}");
+        }
+        let (line, _) = status_bar(&state, 40);
+        let notice = line.spans.last().unwrap();
+        assert_eq!(notice.style.fg, Some(Color::Yellow));
+        assert!(notice.content.starts_with(" Input"), "{notice:?}");
+        assert!(notice.content.ends_with('…'), "{notice:?}");
     }
 
     #[test]
