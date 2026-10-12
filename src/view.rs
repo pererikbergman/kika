@@ -1061,6 +1061,14 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             let leading = if clears { vec![ids[0]] } else { vec![] };
             (leading, vec![ids[1], ids[2]])
         }
+        KeyScope::Reflog => {
+            let leading = if state.commits.reflog.filter.is_empty() {
+                vec![]
+            } else {
+                vec!["reflog.escape"]
+            };
+            (leading, vec!["reflog.filter"])
+        }
         KeyScope::Diff
         | KeyScope::CommitFiles
         | KeyScope::StashFiles
@@ -1731,8 +1739,6 @@ fn picked_rows(view: &HunkView, patch: &CustomPatch) -> std::collections::HashSe
         .collect()
 }
 
-/// The focused pane's title: the side, the path, the mode, the options
-/// and `suffix` after a `·`, the path giving way to fit.
 /// [`search_marks`] of a pane's search, if it has one.
 fn marks_of(search: &Option<DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
     search
@@ -1817,6 +1823,8 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
     spans
 }
 
+/// The focused pane's title: the side, the path, the mode, the options
+/// and `suffix` after a `·`, the path giving way to fit.
 fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
     let side = match view.side {
         _ if view.commit.is_some() => "Commit",
@@ -6040,5 +6048,27 @@ mod tests {
             "{:?}",
             rows[19]
         );
+    }
+
+    #[test]
+    fn esc_clear_leads_the_reflog_tabs_bar_while_it_has_a_filter() {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Commits;
+        state.commits.tab = crate::commits::CommitsTab::Reflog;
+        state.commits.reflog.data = Some(crate::git::reflog::Reflog {
+            entries: crate::git::reflog::parse_records(include_bytes!(
+                "git/fixtures/reflog/commit.bin"
+            )),
+            ..Default::default()
+        });
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("V range"), "{:?}", rows[9]);
+        state.commits.reflog.set_filter("first".into());
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
     }
 }

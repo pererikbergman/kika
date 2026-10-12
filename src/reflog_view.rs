@@ -6,11 +6,12 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
 use crate::git::reflog::ReflogEntry;
-use crate::reflog::ReflogList;
-use crate::view::{elide_right, reversed, width_of};
+use crate::reflog::{ReflogList, short_id};
+use crate::view::{elide_right, no_matches, reversed, scrolled, width_of};
 
 /// The tab's lines for an inside of `height` by `width`: a placeholder
-/// until the first read, then the rows around the cursor, any error first.
+/// until the first read, then the rows the filter shows around the cursor,
+/// any error first.
 pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Vec<Line<'static>> {
     let dim = Style::new().fg(Color::DarkGray);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -33,27 +34,31 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
         lines.push(Line::styled("No reflog yet", dim));
         return lines;
     }
+    let visible = list.visible();
+    if visible.is_empty() {
+        lines.push(no_matches());
+        return lines;
+    }
     let room = height.saturating_sub(lines.len()).max(1);
-    let start = (list.selected + 1).saturating_sub(room);
-    let end = (start + room).min(reflog.entries.len());
-    lines.extend((start..end).map(|i| {
-        let line = entry_line(&reflog.entries[i], width);
-        if i == list.selected {
-            reversed(line, width)
-        } else {
-            line
-        }
-    }));
+    lines.extend(
+        scrolled(&visible, Some(list.selected), room)
+            .iter()
+            .map(|&i| {
+                let line = entry_line(&reflog.entries[i], width);
+                if i == list.selected {
+                    reversed(line, width)
+                } else {
+                    line
+                }
+            }),
+    );
     lines
 }
 
 /// `<short id> <label> <rest of the message>`, cut to `width`. An id that
 /// is not hex shows as `?`.
 fn entry_line(entry: &ReflogEntry, width: usize) -> Line<'static> {
-    let short = entry.oid.as_ref().map_or_else(
-        || "?".to_string(),
-        |id| id.as_str().chars().take(7).collect(),
-    );
+    let short = short_id(entry);
     let label = entry.label();
     let display = entry.display();
     let rest = display
@@ -167,6 +172,64 @@ mod tests {
                 "{row:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_filter_shows_only_matching_rows_and_draws_sanitised_in_the_title() {
+        let mut state = showing(include_bytes!("git/fixtures/reflog/checkout.bin"));
+        state.commits.reflog.set_filter("aaa".into());
+        let rows = buffer_rows(&draw(&state, 100, 20));
+        line_with(&rows, "aaaaaaa commit (initial) root");
+        line_with(&rows, "Reflog · /aaa 1 of 4");
+        assert!(!rows.iter().any(|r| r.contains("ccccccc")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("[Reflog]")), "{rows:#?}");
+
+        // A hostile filter matches nothing and draws made safe.
+        state
+            .commits
+            .reflog
+            .set_filter("x\x1b[2J\u{202E}\r\0".into());
+        let rows = buffer_rows(&draw(&state, 100, 20));
+        line_with(&rows, "No matches");
+        line_with(&rows, "Reflog · /");
+        line_with(&rows, " 0 of 4");
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+        // With no filter the tabs come back.
+        state.commits.reflog.set_filter(String::new());
+        line_with(
+            &buffer_rows(&draw(&state, 100, 20)),
+            "Commits · Log [Reflog]",
+        );
+    }
+
+    #[test]
+    fn a_filter_scrolls_its_shown_rows_to_the_cursor() {
+        // Twelve entries; the filter keeps the even ones.
+        let bytes: Vec<u8> = (0..12)
+            .flat_map(|i| {
+                let word = if i % 2 == 0 { "keep" } else { "drop" };
+                format!(
+                    "{} {} commit: {word}{i:02}\0",
+                    "a".repeat(40),
+                    "b".repeat(40)
+                )
+                .into_bytes()
+            })
+            .collect();
+        let mut state = showing(&bytes);
+        state.commits.reflog.set_filter("keep".into());
+        for _ in 0..5 {
+            state.commits.reflog.move_by(1);
+        }
+        assert_eq!(state.commits.reflog.selected, 10);
+        let rows = buffer_rows(&draw(&state, 60, 6));
+        line_with(&rows, "keep10");
+        assert!(!rows.iter().any(|r| r.contains("drop")), "{rows:#?}");
     }
 
     #[test]

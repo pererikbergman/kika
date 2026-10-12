@@ -620,6 +620,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "branches.escape",
     "remotes.escape",
     "tags.escape",
+    "reflog.escape",
     "input.quit",
     "commit_files.escape",
     "stash_files.escape",
@@ -2968,6 +2969,26 @@ static REGISTRY: &[Binding] = &[
         description: "Show the log",
         label: "log",
         bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "reflog.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the reflog by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "reflog.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Reflog,
+        intent: AppIntent::ListEscape,
+        description: "Clear the filter, else quit Kika",
+        label: "clear",
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -8699,6 +8720,29 @@ mod tests {
                 assert!(build(&[(&id, &["Z"])], Trust::Repo).is_ok(), "{id}");
             }
         }
+    }
+
+    #[test]
+    fn the_reflog_filter_is_remappable_but_its_escape_is_locked() {
+        // Esc with no filter to clear quits, as tags.escape does.
+        assert!(REPO_LOCKED.contains(&"reflog.escape"));
+        assert!(build(&[("reflog.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"reflog.filter"));
+        assert!(build(&[("reflog.filter", &["Z"])], Trust::Repo).is_ok());
+        assert_eq!(
+            from(KeyScope::Reflog, plain('/')),
+            Some(AppIntent::OpenFilter)
+        );
+        assert_eq!(
+            from(KeyScope::Reflog, key(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(AppIntent::ListEscape)
+        );
+        // No range: nothing on a reflog row would act on one.
+        assert!(!registry().iter().any(|b| b.id == "reflog.range"));
+        assert_ne!(
+            from(KeyScope::Reflog, plain('V')),
+            Some(AppIntent::ToggleRange)
+        );
     }
 
     #[test]
