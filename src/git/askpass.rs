@@ -62,13 +62,13 @@ mod bridge {
     use std::process::ExitCode;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, MutexGuard};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{Question, Secret};
     use crate::git::diff::terminal_safe;
 
     /// A question longer than this is cut; no real prompt comes near it.
-    const MAX_REQUEST: u64 = 64 * 1024;
+    const MAX_REQUEST: usize = 64 * 1024;
 
     /// How often the accept loop looks for a connection or a stop.
     const POLL: Duration = Duration::from_millis(20);
@@ -77,6 +77,23 @@ mod bridge {
     /// program sends it at once; a connection that never finishes must
     /// not hold up every later question.
     const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// How long a client may take to send its whole question, however
+    /// often it sends a byte. Without it a connection that trickles in
+    /// just under [`READ_TIMEOUT`] would hold every later question forever.
+    const TOTAL_READ_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// The read limits for one connection; tests shorten them.
+    #[derive(Debug, Clone, Copy)]
+    struct Limits {
+        read_timeout: Duration,
+        deadline: Duration,
+    }
+
+    const LIMITS: Limits = Limits {
+        read_timeout: READ_TIMEOUT,
+        deadline: TOTAL_READ_DEADLINE,
+    };
 
     /// The listening end. Questions are answered one at a time, in the
     /// order they arrive, by the `ask` given to [`AskpassServer::start`].
@@ -98,6 +115,13 @@ mod bridge {
         pub fn start(
             ask: impl Fn(Question) -> Option<Secret> + Send + 'static,
         ) -> io::Result<Self> {
+            Self::start_with_limits(ask, LIMITS)
+        }
+
+        fn start_with_limits(
+            ask: impl Fn(Question) -> Option<Secret> + Send + 'static,
+            limits: Limits,
+        ) -> io::Result<Self> {
             let (dir, listener) = bind()?;
             let socket = dir.join(SOCKET_NAME);
             let stop = Arc::new(AtomicBool::new(false));
@@ -112,7 +136,7 @@ mod bridge {
             // dropped, and ends once `ask` returns.
             std::thread::Builder::new()
                 .name("kika-askpass".into())
-                .spawn(move || serve(&listener, &ask, &stop, &current))?;
+                .spawn(move || serve(&listener, &ask, limits, &stop, &current))?;
             Ok(server)
         }
 
@@ -169,12 +193,13 @@ mod bridge {
     fn serve(
         listener: &UnixListener,
         ask: &dyn Fn(Question) -> Option<Secret>,
+        limits: Limits,
         stop: &AtomicBool,
         current: &Mutex<Option<UnixStream>>,
     ) {
         while !stop.load(Ordering::SeqCst) {
             match listener.accept() {
-                Ok((stream, _)) => answer(stream, ask, stop, current),
+                Ok((stream, _)) => answer(stream, ask, limits, stop, current),
                 Err(_) => std::thread::sleep(POLL),
             }
         }
@@ -185,20 +210,18 @@ mod bridge {
     fn answer(
         stream: UnixStream,
         ask: &dyn Fn(Question) -> Option<Secret>,
+        limits: Limits,
         stop: &AtomicBool,
         current: &Mutex<Option<UnixStream>>,
     ) {
-        if stream.set_nonblocking(false).is_err()
-            || stream.set_read_timeout(Some(READ_TIMEOUT)).is_err()
-        {
+        if stream.set_nonblocking(false).is_err() {
             return;
         }
         *lock(current) = stream.try_clone().ok();
-        let mut request = Vec::new();
-        let read = (&stream).take(MAX_REQUEST).read_to_end(&mut request);
+        let read = read_request(&stream, limits);
         // Stopped while this one connected: nobody is left to answer.
         let question = match read {
-            Ok(_) if !stop.load(Ordering::SeqCst) => Some(parse(&request)),
+            Ok(request) if !stop.load(Ordering::SeqCst) => Some(parse(&request)),
             _ => None,
         };
         let (reply, notice) = match question {
@@ -218,6 +241,30 @@ mod bridge {
             ask(notice);
         }
         *lock(current) = None;
+    }
+
+    /// The whole question, up to [`MAX_REQUEST`]: an error once one read
+    /// waits longer than `read_timeout` or all of them take longer than
+    /// `deadline`.
+    fn read_request(stream: &UnixStream, limits: Limits) -> io::Result<Vec<u8>> {
+        let deadline = Instant::now() + limits.deadline;
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
+        while request.len() < MAX_REQUEST {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            stream.set_read_timeout(Some(limits.read_timeout.min(left)))?;
+            let room = buf.len().min(MAX_REQUEST - request.len());
+            match (&*stream).read(&mut buf[..room]) {
+                Ok(0) => break,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(request)
     }
 
     /// A request is ssh's `SSH_ASKPASS_PROMPT` value, a newline, then the
@@ -295,14 +342,19 @@ mod bridge {
         type Asked = mpsc::Receiver<(Question, mpsc::Sender<Option<Secret>>)>;
 
         fn server() -> (AskpassServer, Asked) {
+            server_with(LIMITS)
+        }
+
+        /// As [`server`], with its own read limits.
+        fn server_with(limits: Limits) -> (AskpassServer, Asked) {
             let (asked_tx, asked) = mpsc::channel();
             let asked_tx = Mutex::new(asked_tx);
-            let server = AskpassServer::start(move |question| {
+            let ask = move |question| {
                 let (answer_tx, answer_rx) = mpsc::channel();
                 lock(&asked_tx).send((question, answer_tx)).ok()?;
                 answer_rx.recv().ok().flatten()
-            })
-            .unwrap();
+            };
+            let server = AskpassServer::start_with_limits(ask, limits).unwrap();
             (server, asked)
         }
 
@@ -423,6 +475,45 @@ mod bridge {
             assert!(matches!(question, Question::Ask { .. }), "{question:?}");
             answer.send(Some(Secret::new("x"))).unwrap();
             assert_eq!(waiting.join().unwrap().0, ExitCode::SUCCESS);
+        }
+
+        #[test]
+        fn a_client_that_trickles_its_question_is_cut_off_at_the_deadline() {
+            let limits = Limits {
+                read_timeout: Duration::from_millis(200),
+                deadline: Duration::from_millis(600),
+            };
+            let (server, asked) = server_with(limits);
+            let started = Instant::now();
+            // One byte every 100 ms, so no single read ever times out.
+            let mut trickle = UnixStream::connect(server.socket()).unwrap();
+            let done = Arc::new(AtomicBool::new(false));
+            let trickling = {
+                let done = Arc::clone(&done);
+                std::thread::spawn(move || {
+                    while !done.load(Ordering::SeqCst) && trickle.write_all(b"x").is_ok() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                })
+            };
+            let waiting = run_client(server.socket(), "Password: ", None);
+
+            let (question, answer) = asked
+                .recv_timeout(limits.deadline * 4)
+                .expect("the trickling connection was cut off");
+            // The trickled text never became a question.
+            assert_eq!(
+                question,
+                Question::Ask {
+                    prompt: "Password:".into(),
+                    confirm: false
+                }
+            );
+            answer.send(Some(Secret::new("x"))).unwrap();
+            assert_eq!(waiting.join().unwrap().0, ExitCode::SUCCESS);
+            assert!(started.elapsed() < limits.deadline * 4);
+            done.store(true, Ordering::SeqCst);
+            trickling.join().unwrap();
         }
 
         #[test]

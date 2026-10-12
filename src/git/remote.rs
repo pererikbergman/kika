@@ -204,20 +204,18 @@ fn safe(bytes: &[u8]) -> String {
 
 /// `text` with the user part of every URL taken out: `scheme://user:pass@host`
 /// becomes `scheme://host`. Git quotes remote URLs in its errors, and a URL
-/// can carry a token. The authority ends at the path, query, fragment or
-/// a line break, and everything up to its last `@` goes. Not at a quote or
-/// a space, so neither inside a password can cut the redaction short; text
-/// after a URL with no path can lose words up to a later `@`, which is the
-/// safe way to be wrong.
+/// can carry a token. The authority ends only at the path or a line break,
+/// and everything up to its last `@` goes. Not at `?`, `#`, a quote or a
+/// space, so none of them inside a password can cut the redaction short;
+/// text after a URL with no path (its query included) can lose words up to
+/// a later `@`, which is the safe way to be wrong.
 pub fn redact_userinfo(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find("://") {
         let (before, after) = rest.split_at(at + 3);
         out.push_str(before);
-        let end = after
-            .find(['/', '?', '#', '\n', '\r'])
-            .unwrap_or(after.len());
+        let end = after.find(['/', '\n', '\r']).unwrap_or(after.len());
         let authority = &after[..end];
         let host = authority.rfind('@').map_or(0, |i| i + 1);
         rest = &after[host..];
@@ -550,6 +548,25 @@ mod tests {
         // Nothing to take out.
         for text in ["git@github.com:a/b.git", "https://h/r", "no url", "a://"] {
             assert_eq!(redact_userinfo(text), text);
+        }
+    }
+
+    #[test]
+    fn redact_userinfo_removes_a_password_holding_url_syntax_whole() {
+        for (url, password) in [
+            ("https://u:p?ss@h/r", "p?ss"),
+            ("https://u:p#ss@h/r", "p#ss"),
+            ("https://u:my pass@h/r", "my pass"),
+            ("https://u:to'k@h/r", "to'k"),
+            ("https://u:to\"k@h/r", "to\"k"),
+            ("ssh://u:p@ss@h/r", "p@ss"),
+        ] {
+            let redacted = redact_userinfo(url);
+            let (scheme, rest) = redacted.split_once("://").unwrap();
+            assert_eq!(redacted, format!("{scheme}://h/r"), "{url}");
+            for part in password.split(['?', '#', ' ', '\'', '"', '@']) {
+                assert!(!rest.contains(part), "{url} -> {redacted}");
+            }
         }
     }
 
