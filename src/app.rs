@@ -65,6 +65,7 @@ pub async fn run(
     spawn_input_listener(tx.clone(), Arc::clone(&input));
     let mut spinner = Spinner::default();
     state.watch.fetch_enabled = config.watch.fetch.is_some();
+    state.commit_hooks_detached = config.commit_hooks_detached;
     // Read by `main` for this repository, so it always applies.
     let loaded = AppIntent::ConfigLoaded {
         repo: state.repo.clone(),

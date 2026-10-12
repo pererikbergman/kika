@@ -19,11 +19,14 @@
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
 //! tool = "difft --color=always"    # a display-only tool, run on OLD NEW
+//! [commit]
+//! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
 //! [forge]
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! ```
 //!
-//! `[watch]`, `[diff]` and `[forge]` are read from the global file only, at startup.
+//! `[watch]`, `[diff]`, `[commit]` and `[forge]` are read from the global
+//! file only, at startup.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -114,6 +117,9 @@ pub struct Loaded {
     pub forge_hosts: Vec<ForgeHost>,
     /// The global `[diff] tool` command, checked by `parse_command`.
     pub diff_tool: Option<String>,
+    /// The global `[commit] hooks_detached`: hooks alone do not hand a
+    /// commit the terminal.
+    pub commit_hooks_detached: bool,
     pub errors: Vec<ConfigError>,
 }
 
@@ -125,6 +131,7 @@ struct GlobalSettings {
     diff_pager: Option<String>,
     forge_hosts: Vec<ForgeHost>,
     diff_tool: Option<String>,
+    commit_hooks_detached: bool,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -141,7 +148,15 @@ struct GlobalFile {
     #[serde(default)]
     commands: Vec<CommandTable>,
     #[serde(default)]
+    commit: CommitTable,
+    #[serde(default)]
     forge: ForgeTable,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitTable {
+    hooks_detached: Option<bool>,
 }
 
 /// The hosts Kika may ask about pull requests, by forge. Only here, in
@@ -169,10 +184,11 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]`, `[diff]` or `[forge]`
-/// table, or `[[commands]]`, here is an unknown field, so a cloned
-/// repository can neither turn on fetching, name or run a program, nor
-/// make Kika contact a forge.
+/// A repository's file: keys only. A `[watch]`, `[diff]`, `[commit]` or
+/// `[forge]` table, or `[[commands]]`, here is an unknown field, so a
+/// cloned repository can neither turn on fetching, name or run a program,
+/// take the terminal away from its own hooks, nor make Kika contact a
+/// forge.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -189,6 +205,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         diff_pager: None,
         forge_hosts: Vec::new(),
         diff_tool: None,
+        commit_hooks_detached: false,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
@@ -200,11 +217,13 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
             loaded.watch,
             loaded.diff_pager,
             loaded.diff_tool,
+            loaded.commit_hooks_detached,
         ) = (
             global.keymap,
             global.watch,
             global.diff_pager,
             global.diff_tool,
+            global.commit_hooks_detached,
         );
         loaded.forge_hosts = global.forge_hosts;
     }
@@ -319,6 +338,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         diff_pager: file.diff.pager,
         diff_tool: file.diff.tool,
         forge_hosts,
+        commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
     })
 }
 
@@ -537,6 +557,7 @@ mod tests {
                 diff_pager: None,
                 diff_tool: None,
                 forge_hosts: vec![],
+                commit_hooks_detached: false,
                 errors: vec![],
             }
         );
@@ -871,6 +892,44 @@ output = "none"
         assert_eq!(loaded.diff_pager, Some("delta".into()));
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+    }
+
+    #[test]
+    fn the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("commit");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert!(loaded.commit_hooks_detached);
+
+        let typo = global("[commit]\nbogus = 1\n").unwrap_err();
+        assert!(typo.contains("unknown field `bogus`"), "{typo}");
+        files.global("[commit]\nhooks_detached = true\nbogus = 1\n");
+        assert!(
+            !files.load().commit_hooks_detached,
+            "a broken file is ignored"
+        );
+    }
+
+    #[test]
+    fn only_the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("repo-commit");
+        files.global("").repo("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(!loaded.commit_hooks_detached);
+        let path = files.dir.join(".kika.toml").display().to_string();
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
+        assert!(loaded.errors[0].message.contains("unknown field `commit`"));
+
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(loaded.commit_hooks_detached);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
     }
 
     #[test]
