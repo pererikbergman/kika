@@ -10,13 +10,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::features::command_log;
+use crate::features::submodules::SubmoduleList;
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
-use crate::submodule_list::SubmoduleList;
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
 };
