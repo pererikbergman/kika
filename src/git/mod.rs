@@ -22,7 +22,6 @@ pub mod left_behind;
 pub mod log;
 pub mod patch;
 pub mod path;
-pub mod pr_objects;
 pub mod rebase_plan;
 pub mod recording;
 pub mod reflog;

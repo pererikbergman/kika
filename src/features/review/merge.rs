@@ -3,14 +3,16 @@
 //! merge reaches GitHub only after a question that `y` alone answers, and
 //! only on a host the global config lists.
 
-use super::review::{NO_FORGE, ReviewScreen};
-use super::{AppState, Context, REFRESH_LIMITED, same_repo};
+use super::state::{NO_FORGE, ReviewScreen};
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::{MergeMethod, merge_options};
 use crate::forge::remote::matches;
 use crate::forge::review::MergeState;
-use crate::forge::{CreateError, ForgeHost, ForgeRepo, PrBadge, PrState};
+use crate::forge::{
+    CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
+};
 use crate::keymap::Reason;
+use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, MergePrConfirm, Popup};
 
@@ -72,7 +74,7 @@ impl AppState {
 
     /// `M`: say why the open pull request cannot be merged, or ask how
     /// when several ways are allowed, or ask at once when one is.
-    pub(super) fn open_merge_pr(&mut self) {
+    pub(crate) fn open_merge_pr(&mut self) {
         if let Some(reason) = merge_disabled(self) {
             self.notice = Some(reason);
             return;
@@ -138,7 +140,7 @@ impl AppState {
 
     /// `y`: ask GitHub to merge what the question described, unless its
     /// host has since left the config or become rate limited.
-    pub(super) fn confirm_merge_pr(&mut self) -> Vec<Effect> {
+    pub(crate) fn confirm_merge_pr(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::MergePullRequest(_))) {
             return vec![];
         }
@@ -181,7 +183,7 @@ impl AppState {
     /// GitHub answered a merge. A merged pull request shows as merged at
     /// once, leaves the open queues, and its branch's badge turns merged;
     /// the badges are then asked for again.
-    pub(super) fn pull_request_merged(
+    pub(crate) fn pull_request_merged(
         &mut self,
         tag: Tag,
         number: u64,
@@ -212,7 +214,7 @@ impl AppState {
                 self.mark_badge_merged(&merging)
             }
             Err(CreateError::RateLimited { until }) => {
-                self.record_rate_limit(&merging.host, until);
+                self.forge.record_rate_limit(&merging.host, until);
                 self.notice = Some("GitHub is rate limiting: nothing was merged".into());
                 vec![]
             }
@@ -269,12 +271,12 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+    use crate::features::review::state::tests::{fixture_detail, in_queues, press, repo};
     use crate::forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
     use crate::forge::{CiState, ForgeView};
     use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::keymap::KeyPress;
-    use crate::model::review::tests::{fixture_detail, in_queues, press, repo};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -283,7 +285,7 @@ mod tests {
     fn on_detail(change: impl FnOnce(&mut PrDetail)) -> AppState {
         let mut state = in_queues();
         let effects = press(&mut state, KeyCode::Enter);
-        let (tag, number) = crate::model::review::tests::detail_load(&effects);
+        let (tag, number) = crate::features::review::state::tests::detail_load(&effects);
         let mut detail = fixture_detail();
         detail.number = number;
         change(&mut detail);

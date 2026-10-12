@@ -24,8 +24,9 @@ use crate::features::command_log::CommandLog;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
-use crate::features::pull_requests::{self, PrCreating, PrDraft, REFRESH_LIMITED, same_repo};
+use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::ParkedRepo;
+use crate::features::review::{self, PrMerging};
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -300,7 +301,7 @@ pub struct AppState {
     /// The pull request being created on GitHub; one at a time.
     pub pr_create: Option<PrCreating>,
     /// The pull request being merged on GitHub; one at a time.
-    pub pr_merge: Option<merge_pr::PrMerging>,
+    pub pr_merge: Option<PrMerging>,
     /// The message read to copy it; any other answer is stale.
     pub pending_copy: Option<(Tag, CommitId)>,
     /// The pattern the open `.gitignore` prompt was filled with.
@@ -1308,7 +1309,7 @@ impl AppState {
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
             (Context::Review { .. }, _) => match &self.review.files {
-                Some(_) if review_files::review_diff_focused(self) => KeyScope::ReviewDiff,
+                Some(_) if review::review_diff_focused(self) => KeyScope::ReviewDiff,
                 Some(_) if matches!(self.review.screen, review::ReviewScreen::Files(_)) => {
                     KeyScope::ReviewFiles
                 }
@@ -2042,7 +2043,7 @@ impl AppState {
     }
 
     /// Start streaming `request` into the Diff pane.
-    fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
+    pub(crate) fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
         let seq = self.take_seq();
         let want = self.diff.begin(seq, &request.path, self.diff_rows());
         // Diff streams report many times, so they stay out of the busy count.
@@ -2907,7 +2908,7 @@ impl AppState {
 
     /// Record the repository Kika started in and load it, or welcome the
     /// user with the recent list and the offer to make one here.
-    fn start(&mut self) -> Vec<Effect> {
+    pub(crate) fn start(&mut self) -> Vec<Effect> {
         if let Context::Review { number } = self.context {
             return self.start_review(number);
         }
@@ -4777,9 +4778,6 @@ mod custom_patch;
 mod fixup;
 mod leave_commits;
 mod log_query;
-pub(crate) mod merge_pr;
-pub(crate) mod review;
-pub(crate) mod review_files;
 mod rewrite_range;
 mod stash_actions;
 

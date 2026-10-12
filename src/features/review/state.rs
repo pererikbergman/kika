@@ -3,8 +3,7 @@
 //! enters review mode, opens a pull request or refreshes, and only on a
 //! host the global config lists.
 
-use super::review_files::PrFiles;
-use super::{AppState, Context};
+use super::files::PrFiles;
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::MergeMethod;
 use crate::forge::remote::matches;
@@ -14,6 +13,7 @@ use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
 use crate::list_filter;
+use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
 use ratatui::text::Line;
@@ -158,7 +158,7 @@ impl ReviewState {
     }
 
     /// Started afresh, but still knowing which heads were fetched.
-    pub(super) fn restart(&mut self) {
+    pub(crate) fn restart(&mut self) {
         let fetched_heads = std::mem::take(&mut self.fetched_heads);
         *self = Self {
             fetched_heads,
@@ -237,7 +237,7 @@ pub(crate) fn queue_keys_disabled(state: &AppState) -> Option<Reason> {
 
 /// A refresh waits for the load it would repeat.
 pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
-    if let Some(reason) = super::review_files::refresh_in_files(state) {
+    if let Some(reason) = super::files::refresh_in_files(state) {
         return Some(reason);
     }
     let fetch = match state.review.screen {
@@ -266,7 +266,7 @@ pub(crate) fn open_check_disabled(state: &AppState) -> Option<Reason> {
 impl AppState {
     /// Leave the workspace for review mode, started afresh, and load its
     /// queues: entering is the user's say-so to ask GitHub.
-    pub(super) fn enter_review(&mut self) -> Vec<Effect> {
+    pub(crate) fn enter_review(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -278,7 +278,7 @@ impl AppState {
 
     /// The first load of a session started in review mode: the pull
     /// request it names, else the queues.
-    pub(super) fn start_review(&mut self, number: Option<u64>) -> Vec<Effect> {
+    pub(crate) fn start_review(&mut self, number: Option<u64>) -> Vec<Effect> {
         self.review = ReviewState::for_context(&self.context);
         match number {
             Some(number) => self.open_review_detail(number),
@@ -422,7 +422,7 @@ impl AppState {
         error.into()
     }
 
-    pub(super) fn review_queues_loaded(
+    pub(crate) fn review_queues_loaded(
         &mut self,
         tag: Tag,
         repo: Option<ForgeRepo>,
@@ -443,7 +443,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn pr_detail_loaded(
+    pub(crate) fn pr_detail_loaded(
         &mut self,
         tag: Tag,
         number: u64,
@@ -470,7 +470,7 @@ impl AppState {
     }
 
     /// `j`/`k`: the queue's cursor, the detail's scroll, or the file.
-    pub(super) fn review_move(&mut self, delta: isize) -> Vec<Effect> {
+    pub(crate) fn review_move(&mut self, delta: isize) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Queue => {
                 let visible = self.review.visible();
@@ -495,19 +495,19 @@ impl AppState {
     fn review_area(&self) -> ratatui::layout::Rect {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
-        crate::review_view::detail_area(main)
+        super::view::detail_area(main)
     }
 
     /// Render the open description for the panel's width, once: on load
     /// and when the screen is resized.
-    pub(super) fn render_review_body(&mut self) {
+    pub(crate) fn render_review_body(&mut self) {
         let width = usize::from(self.review_area().width);
         if self.review.body.as_ref().is_some_and(|b| b.width == width) {
             return;
         }
         self.review.body = self.review.detail.as_ref().map(|detail| RenderedBody {
             width,
-            lines: crate::markdown::render(&detail.body, width),
+            lines: super::markdown::render(&detail.body, width),
         });
     }
 
@@ -515,13 +515,13 @@ impl AppState {
     fn review_max_scroll(&self) -> usize {
         match (&self.review.detail, &self.review.body) {
             (Some(detail), Some(body)) => {
-                crate::review_view::detail_max_scroll(detail, &body.lines, self.review_area())
+                super::view::detail_max_scroll(detail, &body.lines, self.review_area())
             }
             _ => 0,
         }
     }
 
-    pub(super) fn step_review_queue(&mut self, back: bool) {
+    pub(crate) fn step_review_queue(&mut self, back: bool) {
         if detail_shown(self) {
             return;
         }
@@ -530,7 +530,7 @@ impl AppState {
         self.review.reconcile();
     }
 
-    pub(super) fn open_pr(&mut self) -> Vec<Effect> {
+    pub(crate) fn open_pr(&mut self) -> Vec<Effect> {
         if let Some(reason) = open_pr_disabled(self) {
             self.notice = Some(reason);
             return vec![];
@@ -543,7 +543,7 @@ impl AppState {
 
     /// Esc: from a pull request back to the same queue and row; in the
     /// queue, clear the filter, else go back to the workspace.
-    pub(super) fn close_review(&mut self) -> Vec<Effect> {
+    pub(crate) fn close_review(&mut self) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Files(_) => self.close_review_files(),
             ReviewScreen::Detail(_) => {
@@ -579,7 +579,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn refresh_review(&mut self) -> Vec<Effect> {
+    pub(crate) fn refresh_review(&mut self) -> Vec<Effect> {
         if let Some(reason) = refresh_review_disabled(self) {
             self.notice = Some(reason);
             return vec![];
@@ -593,7 +593,7 @@ impl AppState {
     }
 
     /// `o`: open the one failing check's page, or pick among several.
-    pub(super) fn open_check_details(&mut self) -> Vec<Effect> {
+    pub(crate) fn open_check_details(&mut self) -> Vec<Effect> {
         if let Some(reason) = open_check_disabled(self) {
             self.notice = Some(reason);
             return vec![];
