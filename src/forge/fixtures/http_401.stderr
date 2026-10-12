@@ -1,0 +1,3 @@
+gh: Bad credentials (HTTP 401)
+gh: HTTP 401: Bad credentials (https://api.github.com/graphql)
+Try authenticating with:  gh auth login

@@ -1,0 +1,727 @@
+//! Pull requests from a forge, shown beside the local branches. Off unless
+//! the global config names the hosts Kika may contact: with none, no
+//! effect is ever asked for, so nothing reaches the network.
+//!
+//! GitHub is reached through the `gh` CLI, never an HTTP client of Kika's
+//! own, so the user's login, proxy and TLS settings apply and Kika never
+//! holds a token.
+
+pub mod cache;
+pub mod github;
+pub mod remote;
+pub mod task;
+
+use std::collections::HashMap;
+
+use crate::effect::{Effect, Tag};
+use crate::git::branches::BranchName;
+use crate::model::AppState;
+
+/// A host the user lets Kika contact, checked when the config is read:
+/// lower-case ASCII DNS labels joined by dots, nothing else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeHost(String);
+
+impl ForgeHost {
+    /// `text` as a host, or why it is not one. No scheme, port, userinfo,
+    /// path, wildcard, trailing dot or non-ASCII byte: anything looser
+    /// could match more than the user meant.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let bad = |why: &str| Err(format!("{text:?} is not a host name: {why}"));
+        if text.is_empty() || text.len() > 253 {
+            return bad("it must hold 1 to 253 characters");
+        }
+        if !text.is_ascii() {
+            return bad("write an international name in its xn-- form");
+        }
+        if text.bytes().any(|b| b.is_ascii_uppercase()) {
+            return bad("use lower case");
+        }
+        let label_ok = |label: &str| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        };
+        if !text.split('.').all(label_ok) {
+            return bad("only letters, digits, - and dots between labels");
+        }
+        Ok(Self(text.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The forge repository a remote points at. Only these three parts of
+/// the URL are ever kept: never its userinfo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeRepo {
+    pub host: String,
+    pub owner: String,
+    pub name: String,
+}
+
+/// What a pull request shows beside its branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrBadge {
+    pub number: u64,
+    pub state: PrState,
+    /// `None` when the PR's head has no checks.
+    pub ci: Option<CiState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+    Success,
+    Failure,
+    Pending,
+}
+
+/// Why pull requests could not be loaded. A fixed set, so nothing the
+/// forge or `gh` says is ever kept or drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgeStatus {
+    NoGh,
+    NotLoggedIn,
+    Offline,
+    NoAccess,
+    Failed,
+}
+
+/// What the Branches panel says about the forge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgeView {
+    /// Off, or not known yet: nothing is said.
+    Off,
+    /// Badges come from the cache and no refresh runs.
+    Cached,
+    Updating,
+    Fresh,
+    Problem(ForgeStatus),
+}
+
+/// Pull requests by local branch, for the repository open now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForgeState {
+    /// From the global config at startup; empty means off.
+    pub hosts: Vec<ForgeHost>,
+    /// Known once the remote matched one of `hosts`.
+    pub repo: Option<ForgeRepo>,
+    pub badges: HashMap<BranchName, PrBadge>,
+    pub status: ForgeView,
+    /// A `gh` call runs. Only one at a time.
+    pub in_flight: bool,
+    /// The next load asks the forge, not only the cache: the first one for
+    /// a repository, and the one after a user fetch, pull or push.
+    pub refresh_wanted: bool,
+    /// The latest load asked for; answers to older ones are dropped.
+    pub seq: Option<u64>,
+    /// The local branches last listed, UTF-8 names only.
+    pub branches: Vec<BranchName>,
+    /// The last load found the remote on no configured host.
+    pub unmatched: bool,
+}
+
+impl Default for ForgeState {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl ForgeState {
+    pub fn new(hosts: Vec<ForgeHost>) -> Self {
+        Self {
+            hosts,
+            repo: None,
+            badges: HashMap::new(),
+            status: ForgeView::Off,
+            in_flight: false,
+            refresh_wanted: true,
+            seq: None,
+            branches: Vec::new(),
+            unmatched: false,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        !self.hosts.is_empty()
+    }
+
+    /// Back to nothing known, for another repository. The hosts stay.
+    pub fn reset(&mut self) {
+        *self = Self::new(std::mem::take(&mut self.hosts));
+    }
+
+    /// Remember the listed branches; names that are not UTF-8 cannot be
+    /// sent to the forge and get no badge.
+    pub fn set_branches<'a>(&mut self, names: impl IntoIterator<Item = &'a BranchName>) {
+        self.branches = names
+            .into_iter()
+            .filter(|name| std::str::from_utf8(&name.0).is_ok())
+            .cloned()
+            .collect();
+    }
+
+    /// The load to start under `tag`, or none: when off, or while a call
+    /// runs (a wanted refresh then waits for it to end).
+    pub fn load(&mut self, tag: Tag) -> Option<Effect> {
+        // A repository on no configured host has nothing cached either;
+        // only a refresh looks at its remote again.
+        if !self.enabled() || self.in_flight || (self.unmatched && !self.refresh_wanted) {
+            return None;
+        }
+        let refresh = std::mem::take(&mut self.refresh_wanted);
+        if refresh {
+            self.in_flight = true;
+            self.status = ForgeView::Updating;
+        }
+        self.seq = Some(tag.seq);
+        Some(Effect::LoadPullRequests {
+            tag,
+            hosts: self.hosts.clone(),
+            branches: self.branches.clone(),
+            refresh,
+            // A refresh reads the remote again, in case its URL changed.
+            known: self.repo.clone().filter(|_| !refresh),
+        })
+    }
+
+    fn current(&self, tag: Tag) -> bool {
+        self.seq == Some(tag.seq)
+    }
+
+    /// The remote matched none of the hosts: show nothing, as when off.
+    pub fn repo_none(&mut self, tag: Tag) {
+        if !self.current(tag) {
+            return;
+        }
+        self.repo = None;
+        self.badges.clear();
+        self.status = ForgeView::Off;
+        self.in_flight = false;
+        self.unmatched = true;
+    }
+
+    /// The cache's badges, shown at once. A miss keeps what is shown.
+    pub fn cached(
+        &mut self,
+        tag: Tag,
+        repo: ForgeRepo,
+        badges: Option<HashMap<BranchName, PrBadge>>,
+    ) {
+        if !self.current(tag) {
+            return;
+        }
+        self.repo = Some(repo);
+        self.unmatched = false;
+        if let Some(badges) = badges {
+            self.badges = badges;
+        }
+        if !self.in_flight && self.status == ForgeView::Off {
+            self.status = ForgeView::Cached;
+        }
+    }
+
+    /// The forge answered. A failure keeps the badges shown and only says
+    /// why in the status line: it never interrupts local work.
+    pub fn fetched(&mut self, tag: Tag, result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>) {
+        if !self.current(tag) {
+            return;
+        }
+        self.in_flight = false;
+        match result {
+            Ok(badges) => {
+                self.badges = badges;
+                self.status = ForgeView::Fresh;
+            }
+            Err(status) => self.status = ForgeView::Problem(status),
+        }
+    }
+
+    /// Ask the forge again on the next load.
+    pub fn want_refresh(&mut self) {
+        if self.enabled() {
+            self.refresh_wanted = true;
+        }
+    }
+}
+
+/// The forge's part of `update`.
+impl AppState {
+    /// Start a pull-request load when the forge is on and no call runs.
+    pub(crate) fn load_pull_requests(&mut self) -> Vec<Effect> {
+        if !self.forge.enabled() || self.forge.in_flight {
+            return vec![];
+        }
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: false,
+        };
+        self.forge.load(tag).into_iter().collect()
+    }
+
+    /// Show the answer, then run a refresh that waited for this call.
+    pub(crate) fn pull_requests_fetched(
+        &mut self,
+        tag: Tag,
+        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+    ) -> Vec<Effect> {
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        self.forge.fetched(tag, result);
+        if self.forge.refresh_wanted {
+            self.load_pull_requests()
+        } else {
+            vec![]
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::git::FileEntry;
+    use crate::git::branches::{Branch, Track};
+    use crate::git::remote::RemoteOp;
+    use crate::git::status::{BranchStatus, EntryKind, Head};
+    use crate::intent::AppIntent;
+    use crate::layout::SidePanel;
+    use crate::model::{CommitFlow, Context, Focus};
+
+    fn github() -> Vec<ForgeHost> {
+        vec![ForgeHost::parse("github.com").unwrap()]
+    }
+
+    fn branch(name: &str) -> Branch {
+        Branch {
+            name: name.into(),
+            head: name == "main",
+            upstream: None,
+            track: Track::None,
+            merged: true,
+        }
+    }
+
+    fn repo() -> ForgeRepo {
+        ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        }
+    }
+
+    fn badge(number: u64) -> PrBadge {
+        PrBadge {
+            number,
+            state: PrState::Open,
+            ci: Some(CiState::Success),
+        }
+    }
+
+    /// A workspace on github.com with `branches` listed, the Branches
+    /// panel shown, and no load started.
+    pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let listed = branches
+            .iter()
+            .map(|b| branch(&String::from_utf8_lossy(&b.0)))
+            .collect();
+        state.branches.loaded(Ok(listed));
+        state.forge.set_branches(branches);
+        state.focus = Focus::Branches;
+        state.expanded = SidePanel::Branches;
+        state.files_loaded = true;
+        state
+    }
+
+    fn loads(effects: &[Effect]) -> Vec<(Tag, bool)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadPullRequests { tag, refresh, .. } => Some((*tag, *refresh)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The tag of the `LoadBranches` in `effects`.
+    fn branches_tag(effects: &[Effect]) -> Tag {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::LoadBranches { tag } => Some(*tag),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no LoadBranches in {effects:?}"))
+    }
+
+    /// Reload the branches and answer with `names`; every effect seen.
+    fn list_branches(state: &mut AppState, names: &[&str]) -> Vec<Effect> {
+        let mut effects = state.update(AppIntent::RefreshStatus);
+        let tag = branches_tag(&effects);
+        effects.extend(state.update(AppIntent::BranchesLoaded {
+            tag,
+            result: Ok(names.iter().map(|n| branch(n)).collect()),
+        }));
+        effects
+    }
+
+    /// Run `op` from its intent to a successful end, and answer the branch
+    /// reload that follows; every effect seen.
+    fn remote_ok(state: &mut AppState, intent: AppIntent, op: RemoteOp) -> Vec<Effect> {
+        state.branch = Some(BranchStatus {
+            head: Head::Branch("main".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![],
+            bisect: None,
+        });
+        let mut effects = state.update(intent);
+        let tag = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Remote { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Remote in {effects:?}"));
+        let finished = state.update(AppIntent::RemoteFinished {
+            tag,
+            op,
+            result: Ok(()),
+        });
+        let tag = branches_tag(&finished);
+        effects.extend(finished);
+        effects.extend(state.update(AppIntent::BranchesLoaded {
+            tag,
+            result: Ok(vec![branch("main")]),
+        }));
+        effects
+    }
+
+    /// A workspace in a repository, so remote operations may run.
+    fn in_repo(hosts: Vec<ForgeHost>) -> AppState {
+        AppState::new(Context::Workspace)
+            .with_location(Some("/r".into()), "/r".into())
+            .with_forge_hosts(hosts)
+    }
+
+    #[test]
+    fn off_by_default_no_load_is_ever_asked_for() {
+        let tmp = crate::git::fake::TempDir::new("forge-default");
+        let global = tmp.path().join("config.toml");
+        std::fs::write(&global, "[watch]\nrefs = 3\n").unwrap();
+        let loaded = crate::config::load(&crate::config::ConfigPaths::new(Some(global), None));
+        assert_eq!(loaded.errors, []);
+        assert_eq!(loaded.forge_hosts, []);
+
+        let mut state = in_repo(loaded.forge_hosts);
+        let mut effects = state.update(AppIntent::ConfigLoaded {
+            repo: None,
+            keymap: loaded.keymap,
+            errors: loaded.errors,
+        });
+        effects.extend(list_branches(&mut state, &["main", "topic"]));
+        effects.extend(remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch));
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        effects.extend(remote_ok(&mut state, AppIntent::Push, push));
+        effects.extend(list_branches(&mut state, &["main"]));
+        assert_eq!(loads(&effects), []);
+        assert_eq!(state.forge.status, ForgeView::Off);
+    }
+
+    #[test]
+    fn the_first_branch_list_refreshes_and_later_ones_read_the_cache() {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let effects = list_branches(&mut state, &["main", "topic"]);
+        let [(first, true)] = loads(&effects)[..] else {
+            panic!("{effects:?}");
+        };
+        match effects
+            .iter()
+            .find(|e| matches!(e, Effect::LoadPullRequests { .. }))
+        {
+            Some(Effect::LoadPullRequests {
+                hosts, branches, ..
+            }) => {
+                assert_eq!(*hosts, github());
+                assert_eq!(*branches, [BranchName::from("main"), "topic".into()]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(state.forge.in_flight);
+        // While it runs, nothing else starts.
+        assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
+
+        state.update(AppIntent::PullRequestsFetched {
+            tag: first,
+            result: Ok(HashMap::new()),
+        });
+        assert!(!state.forge.in_flight);
+        assert_eq!(state.forge.status, ForgeView::Fresh);
+        let later = loads(&list_branches(&mut state, &["main"]));
+        assert!(matches!(later[..], [(_, false)]), "{later:?}");
+    }
+
+    #[test]
+    fn a_user_fetch_pull_or_push_refreshes_and_one_waits_for_a_call_in_flight() {
+        let mut state = in_repo(github());
+        let [(first, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
+            panic!()
+        };
+        // A push ends while the first call still runs: its refresh waits.
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        let effects = remote_ok(&mut state, AppIntent::Push, push);
+        assert_eq!(loads(&effects), []);
+        let effects = state.update(AppIntent::PullRequestsFetched {
+            tag: first,
+            result: Ok(HashMap::new()),
+        });
+        let [(second, true)] = loads(&effects)[..] else {
+            panic!("{effects:?}")
+        };
+        state.update(AppIntent::PullRequestsFetched {
+            tag: second,
+            result: Ok(HashMap::new()),
+        });
+
+        for (intent, op) in [
+            (AppIntent::Fetch, RemoteOp::Fetch),
+            (AppIntent::Pull, RemoteOp::Pull),
+        ] {
+            let effects = remote_ok(&mut state, intent, op);
+            let [(tag, true)] = loads(&effects)[..] else {
+                panic!("{effects:?}")
+            };
+            state.update(AppIntent::PullRequestsFetched {
+                tag,
+                result: Ok(HashMap::new()),
+            });
+        }
+    }
+
+    #[test]
+    fn another_repository_starts_over_with_a_refresh_and_drops_old_answers() {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let [(old, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
+            panic!()
+        };
+        state.forge.badges.insert("main".into(), badge(1));
+        state.generation += 1;
+        state.forge.reset();
+        assert_eq!(state.forge.hosts, github());
+        assert!(state.forge.badges.is_empty() && !state.forge.in_flight);
+        state.update(AppIntent::PullRequestsFetched {
+            tag: old,
+            result: Ok(HashMap::from([("main".into(), badge(9))])),
+        });
+        assert!(state.forge.badges.is_empty());
+        assert!(matches!(
+            loads(&list_branches(&mut state, &["main"]))[..],
+            [(_, true)]
+        ));
+    }
+
+    #[test]
+    fn a_known_repository_is_reused_and_an_unmatched_one_is_not_looked_at_again() {
+        let mut state = in_repo(github());
+        let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
+            panic!()
+        };
+        state.update(AppIntent::PullRequestsCached {
+            tag,
+            repo: repo(),
+            badges: None,
+        });
+        state.update(AppIntent::PullRequestsFetched {
+            tag,
+            result: Ok(HashMap::new()),
+        });
+        let known = |effects: &[Effect]| {
+            effects.iter().find_map(|e| match e {
+                Effect::LoadPullRequests { known, refresh, .. } => Some((known.clone(), *refresh)),
+                _ => None,
+            })
+        };
+        // A cache-only reload names the repository, so no remote is read.
+        let effects = list_branches(&mut state, &["main"]);
+        assert_eq!(known(&effects), Some((Some(repo()), false)));
+        // A refresh reads the remote again.
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let (tag, _) = loads(&effects)[0];
+        assert_eq!(known(&effects), Some((None, true)));
+
+        // Once the remote matched no host, reloads start nothing, until a
+        // user fetch asks again.
+        state.update(AppIntent::ForgeRepoNone { tag });
+        assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        assert_eq!(known(&effects), Some((None, true)));
+    }
+
+    #[test]
+    fn a_remote_on_no_configured_host_shows_nothing() {
+        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
+        let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
+            panic!()
+        };
+        state.update(AppIntent::ForgeRepoNone { tag });
+        assert_eq!(state.forge.status, ForgeView::Off);
+        assert!(!state.forge.in_flight);
+        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        assert!(rows.iter().all(|r| !r.contains("GitHub")), "{rows:?}");
+    }
+
+    #[test]
+    fn cached_badges_draw_while_the_refresh_still_runs() {
+        let names: Vec<BranchName> = vec!["main".into(), "topic".into()];
+        let mut state = forge_state(&names);
+        let [(tag, true)] = loads(&state.load_pull_requests())[..] else {
+            panic!()
+        };
+        state.update(AppIntent::PullRequestsCached {
+            tag,
+            repo: repo(),
+            badges: Some(HashMap::from([("topic".into(), badge(12))])),
+        });
+        assert_eq!(state.forge.status, ForgeView::Updating);
+        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("topic  #12 open ✓")),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("GitHub: updating…")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn offline_keeps_the_cached_badges_and_never_blocks_local_work() {
+        let names: Vec<BranchName> = vec!["main".into()];
+        let mut state = forge_state(&names);
+        let [(tag, true)] = loads(&state.load_pull_requests())[..] else {
+            panic!()
+        };
+        state.update(AppIntent::PullRequestsCached {
+            tag,
+            repo: repo(),
+            badges: Some(HashMap::from([("main".into(), badge(3))])),
+        });
+        let effects = state.update(AppIntent::PullRequestsFetched {
+            tag,
+            result: Err(ForgeStatus::Offline),
+        });
+        assert_eq!(effects, []);
+        assert_eq!(state.forge.badges[&BranchName::from("main")], badge(3));
+        assert_eq!(state.forge.status, ForgeView::Problem(ForgeStatus::Offline));
+        assert_eq!(state.op_error, None);
+        assert!(state.popups.is_empty());
+        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        assert!(
+            rows.iter().any(|r| r.contains("GitHub: offline · cached")),
+            "{rows:#?}"
+        );
+
+        // Staging and committing go on as ever.
+        state.files = vec![FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '?',
+            worktree: '?',
+            kind: EntryKind::Untracked,
+        }];
+        state.selected = Some(0);
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let staged = state.update(AppIntent::ToggleStage);
+        assert!(
+            staged.iter().any(|e| matches!(e, Effect::RunOp { .. })),
+            "{staged:?}"
+        );
+        state.op_seq = None;
+        state.update(AppIntent::OpenCommit);
+        assert_ne!(state.commit, CommitFlow::Closed);
+    }
+
+    #[test]
+    fn stale_answers_are_dropped() {
+        let mut state = forge_state(&["main".into()]);
+        let [(tag, true)] = loads(&state.load_pull_requests())[..] else {
+            panic!()
+        };
+        let old = Tag {
+            seq: tag.seq + 100,
+            ..tag
+        };
+        state.update(AppIntent::PullRequestsCached {
+            tag: old,
+            repo: repo(),
+            badges: Some(HashMap::from([("main".into(), badge(1))])),
+        });
+        state.update(AppIntent::ForgeRepoNone { tag: old });
+        state.update(AppIntent::PullRequestsFetched {
+            tag: old,
+            result: Err(ForgeStatus::Failed),
+        });
+        assert!(state.forge.in_flight);
+        assert_eq!(state.forge.repo, None);
+        assert_eq!(state.forge.status, ForgeView::Updating);
+    }
+
+    #[test]
+    fn names_that_are_not_utf8_are_never_sent() {
+        let mut forge = ForgeState::new(github());
+        let odd = BranchName::from_bytes(b"caf\xe9");
+        forge.set_branches([&BranchName::from("main"), &odd]);
+        assert_eq!(forge.branches, [BranchName::from("main")]);
+    }
+
+    #[test]
+    fn a_host_is_lower_case_ascii_labels_and_nothing_else() {
+        for good in [
+            "github.com",
+            "github.example.com",
+            "xn--bcher-kva.example",
+            "localhost",
+        ] {
+            assert_eq!(ForgeHost::parse(good).unwrap().as_str(), good);
+        }
+        for bad in [
+            "",
+            "GitHub.com",
+            "github.com:443",
+            "user@github.com",
+            "https://github.com",
+            "*.github.com",
+            "github.com.",
+            "github.com/o",
+            "gіthub.com",
+            ".github.com",
+            "git..hub.com",
+            "-github.com",
+            "git_hub.com",
+        ] {
+            assert!(ForgeHost::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+}
