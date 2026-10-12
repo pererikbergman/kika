@@ -24,6 +24,8 @@ pub enum InputTarget {
     LogAuthor,
     /// Narrows the shown review queue.
     ReviewFilter,
+    /// Narrows the Worktrees popup's list.
+    WorktreesFilter,
 }
 
 impl InputTarget {
@@ -33,7 +35,8 @@ impl InputTarget {
             InputTarget::FilesFilter
             | InputTarget::CommitsFilter
             | InputTarget::DiffSearch
-            | InputTarget::ReviewFilter => "/",
+            | InputTarget::ReviewFilter
+            | InputTarget::WorktreesFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }

@@ -1356,6 +1356,15 @@ impl AppState {
     /// Where key lookup starts: the top popup, else the commit popup, else
     /// the help menu while one is open.
     pub fn key_focus(&self) -> KeyScope {
+        // The Worktrees popup's filter types on the bar below it.
+        if matches!(self.popups.last(), Some(Popup::Worktrees(_)))
+            && self
+                .input
+                .as_ref()
+                .is_some_and(|i| i.target == InputTarget::WorktreesFilter)
+        {
+            return KeyScope::Input;
+        }
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
@@ -5531,6 +5540,15 @@ impl AppState {
 
     /// Type into the focused list's filter, starting from its text.
     fn open_filter(&mut self) {
+        if self.key_focus() == KeyScope::Worktrees {
+            if let Some(list) = self.worktree_list() {
+                self.input = Some(ListInput {
+                    target: InputTarget::WorktreesFilter,
+                    line: LineInput::with_text(&list.filter),
+                });
+            }
+            return;
+        }
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
@@ -5584,6 +5602,12 @@ impl AppState {
             InputTarget::ReviewFilter => {
                 self.review.filter = text;
                 self.review.reconcile();
+            }
+            InputTarget::WorktreesFilter => {
+                if let Some(list) = self.worktree_list_mut() {
+                    list.filter = text;
+                    list.reconcile();
+                }
             }
             // Git runs the query on Enter, not on every key.
             InputTarget::LogPath | InputTarget::LogAuthor => {}
@@ -5647,8 +5671,18 @@ impl AppState {
     }
 
     /// Esc in a list: clear the range, else the filter, else (in Commits)
-    /// the diff mark, else the log query, else quit as Esc always has.
+    /// the diff mark, else the log query, else quit as Esc always has. In
+    /// the Worktrees popup: clear the filter, else close the popup.
     fn list_escape(&mut self) -> Vec<Effect> {
+        if self.key_focus() == KeyScope::Worktrees {
+            if let Some(list) = self.worktree_list_mut()
+                && !list.filter.is_empty()
+            {
+                list.filter.clear();
+                return vec![];
+            }
+            return self.update(AppIntent::PopPopup);
+        }
         let (cleared, filter) = match self.panel_focus() {
             KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
             KeyScope::Commits => (
@@ -16274,6 +16308,157 @@ mod tests {
         let mut state = with_worktrees(bare, 0);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some("Bare repository".into()));
+    }
+
+    fn worktree_rows(state: &AppState) -> Vec<usize> {
+        the_worktree_list(state).visible()
+    }
+
+    #[test]
+    fn slash_in_the_worktrees_popup_filters_it_as_typed() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        assert_eq!(press_char(&mut state, '/'), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        let input = state.input.as_ref().expect("the input is open");
+        assert_eq!(input.target, InputTarget::WorktreesFilter);
+        assert_eq!(input.target.prompt(), "/");
+        type_text(&mut state, "gone");
+        assert_eq!(the_worktree_list(&state).filter, "gone");
+        assert_eq!(worktree_rows(&state), [2]);
+        assert_eq!(the_worktree_list(&state).cursor, 2, "moved to a shown row");
+        // Smart case: an uppercase char makes the match exact.
+        press(&mut state, KeyCode::Backspace);
+        press(&mut state, KeyCode::Backspace);
+        type_text(&mut state, "NE");
+        assert_eq!(worktree_rows(&state), Vec::<usize>::new());
+        assert_eq!(state.key_focus(), KeyScope::Input);
+    }
+
+    #[test]
+    fn the_worktrees_filter_stops_at_its_limit() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(
+            the_worktree_list(&state).filter.chars().count(),
+            list_filter::MAX_INPUT
+        );
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+    }
+
+    #[test]
+    fn enter_keeps_the_worktrees_filter_and_esc_in_the_input_clears_it() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        press_char(&mut state, '/');
+        type_text(&mut state, "topic");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.input, None);
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+        assert_eq!(worktree_rows(&state), [1]);
+        assert_eq!(state.repo.as_deref(), Some(Path::new("/r/a")), "no switch");
+
+        // `/` again starts from the kept text; Esc there clears it.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "topic");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(the_worktree_list(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    #[test]
+    fn esc_in_the_worktrees_popup_clears_the_filter_then_closes_it() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        press_char(&mut state, '/');
+        type_text(&mut state, "topic");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(the_worktree_list(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::Worktrees, "still open");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert!(state.popups.is_empty());
+        assert!(!state.should_quit);
+
+        // `q` closes at once, filter or not.
+        let mut state = with_worktrees(four_worktrees(), 0);
+        press_char(&mut state, '/');
+        type_text(&mut state, "topic");
+        press(&mut state, KeyCode::Enter);
+        press_char(&mut state, 'q');
+        assert!(state.popups.is_empty());
+
+        // Opened again, the list starts unfiltered.
+        worktrees_tag(&press_char(&mut state, 'W'));
+        assert_eq!(the_worktree_list(&state).filter, "");
+    }
+
+    #[test]
+    fn a_filter_hiding_every_worktree_disables_switch_and_remove() {
+        let mut state = with_worktrees(four_worktrees(), 1);
+        press_char(&mut state, '/');
+        type_text(&mut state, "--force \x1b[31m");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(worktree_rows(&state), Vec::<usize>::new());
+        assert_eq!(the_worktree_list(&state).selected(), None);
+        for code in [KeyCode::Char('d'), KeyCode::Enter] {
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.notice, Some(keymap::FILTER_HIDES_ROW.into()));
+            assert_eq!(state.key_focus(), KeyScope::Worktrees);
+        }
+        assert_eq!(state.repo.as_deref(), Some(Path::new("/r/a")));
+    }
+
+    /// The worktrees of [`four_worktrees`] plus one at a path only a
+    /// hostile-looking filter picks out, the filter set and accepted.
+    fn filtered_to_hostile() -> (AppState, &'static str) {
+        let mut items = four_worktrees();
+        items.extend(parse_list(
+            b"worktree /r/a-b-fo-rce-wt\0branch refs/heads/side\0\0",
+            0,
+        ));
+        items[4].main = false;
+        let mut state = with_worktrees(items, 0);
+        let filter = "--force wt";
+        press_char(&mut state, '/');
+        type_text(&mut state, filter);
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(worktree_rows(&state), [4]);
+        (state, filter)
+    }
+
+    /// No effect, and so no argv built from one, holds the filter's text.
+    fn assert_no_filter_text(effects: &[Effect], filter: &str) {
+        let shown = format!("{effects:?}");
+        for part in [filter, "--force", "force"] {
+            assert!(!shown.contains(part), "{part:?} in {shown}");
+        }
+    }
+
+    #[test]
+    fn the_worktrees_filter_never_reaches_git() {
+        let (mut state, filter) = filtered_to_hostile();
+        let loaded = RepoPath::from("/r/a-b-fo-rce-wt");
+        assert_eq!(the_worktree_list(&state).selected().unwrap().path, loaded);
+
+        let mut expected = state.clone();
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            expected.update(AppIntent::OpenRepo("/r/a-b-fo-rce-wt".into()))
+        );
+        assert_no_filter_text(&effects, filter);
+
+        let (mut state, filter) = filtered_to_hostile();
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::RemoveWorktree);
+        let effects = press_char(&mut state, 'y');
+        match &effects[..] {
+            [Effect::RemoveWorktree { path, .. }] => assert_eq!(*path, loaded),
+            other => panic!("expected one RemoveWorktree, got {other:?}"),
+        }
+        assert_no_filter_text(&effects, filter);
     }
 
     /// `a` pressed with the Branches panel on `wip`, which no worktree has.
