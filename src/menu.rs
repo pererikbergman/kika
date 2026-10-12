@@ -5,6 +5,9 @@ use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
 use crate::features::operation::keys::merge_disabled;
+use crate::features::pull_requests::{
+    commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
+};
 use crate::git::FileEntry;
 use crate::git::bisect::BisectMark;
 use crate::git::path::RepoPath;
@@ -16,9 +19,6 @@ use crate::keymap::{
     no_commit_selected, patch_rewrite_disabled, reset_disabled, stage_all_disabled,
 };
 use crate::model::AppState;
-use crate::model::pull_request::{
-    commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
-};
 use crate::op::{GitOp, MergeStrategy, ResetMode, leading_dirs};
 use crate::popup::{ConfirmKind, PromptKind};
 

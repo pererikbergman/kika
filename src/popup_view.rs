@@ -1129,8 +1129,8 @@ mod tests {
 
     #[test]
     fn the_create_question_names_where_what_and_the_title_and_offers_no_enter() {
+        use crate::features::pull_requests::PrDraft;
         use crate::forge::ForgeRepo;
-        use crate::model::pull_request::PrDraft;
         use crate::popup::ConfirmKind;
         let repo = |owner: &str| ForgeRepo {
             host: "github.com".into(),
@@ -1172,7 +1172,7 @@ mod tests {
     }
 
     /// A create draft whose names and title are far longer than a screen.
-    fn long_draft() -> crate::model::pull_request::PrDraft {
+    fn long_draft() -> crate::features::pull_requests::PrDraft {
         use crate::forge::ForgeRepo;
         let repo = |owner: &str| ForgeRepo {
             host: "github.com".into(),
@@ -1180,7 +1180,7 @@ mod tests {
             name: "w".repeat(90),
         };
         let head = format!("feature/{}-日本語", "x".repeat(120));
-        crate::model::pull_request::PrDraft {
+        crate::features::pull_requests::PrDraft {
             branch: head.as_str().into(),
             head_remote: "origin".into(),
             head_repo: repo("me"),
