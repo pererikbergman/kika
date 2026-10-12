@@ -3,7 +3,6 @@
 //! plus why its keys cannot run. Pure; the model loads it and moves the
 //! cursor.
 
-use crate::branches::BranchesTab;
 use crate::git::branches::BranchName;
 use crate::git::worktrees::Worktree;
 use crate::keymap::{FILTER_HIDES_ROW, OP_RUNNING, Reason};
@@ -185,9 +184,7 @@ pub(crate) fn open_worktree_disabled(state: &AppState) -> Option<Reason> {
 
 /// Why no worktree can be added for the Branches panel's selection.
 pub(crate) fn add_worktree_disabled(state: &AppState) -> Option<Reason> {
-    let branch = (state.branches.tab == BranchesTab::Local)
-        .then(|| state.branches.selected_branch())
-        .flatten();
+    let branch = state.local_branch_selected();
     let Some(branch) = branch else {
         return Some("Select a local branch in the Branches panel".into());
     };

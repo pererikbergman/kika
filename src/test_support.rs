@@ -4,8 +4,9 @@
 
 use crate::commit_editor::CommitEditor;
 use crate::effect::{Effect, Tag};
+use crate::forge::ForgeHost;
 use crate::git::FileEntry;
-use crate::git::branches::{Branch, Track};
+use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffLine, DiffRequest, LineKind};
 use crate::git::log::{CommitRow, LogPage};
@@ -25,8 +26,11 @@ use crate::keymap::{KeyPress, KeyScope};
 use crate::layout::{self, SidePanel};
 use crate::model::*;
 use crate::op::{GitOp, ResetMode};
+use crate::view::{buffer_rows, render};
 use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 pub(crate) fn untracked(path: &str) -> FileEntry {
     FileEntry {
@@ -862,4 +866,50 @@ pub(crate) fn stash_opened(state: &mut AppState) -> Vec<Effect> {
         tag,
         result: Ok(tracked_and_untracked()),
     })
+}
+
+/// The Branches panel drawn on its own, focused, for checks that only
+/// care what it shows.
+pub(crate) fn draw_branches(state: &AppState, width: u16, height: u16) -> Vec<String> {
+    let mut state = state.clone();
+    state.files_loaded = true;
+    state.focus = Focus::Branches;
+    state.expanded = SidePanel::Branches;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| render(&state, frame)).unwrap();
+    buffer_rows(terminal.backend().buffer())
+}
+
+/// Whether the row holding `needle` is drawn reversed where it starts.
+pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+    let rows = buffer_rows(buffer);
+    let y = rows
+        .iter()
+        .position(|r| r.contains(needle))
+        .unwrap_or_else(|| panic!("{needle} in {rows:#?}"));
+    let x = rows[y].find(needle).map(|b| rows[y][..b].chars().count());
+    buffer[(x.unwrap() as u16, y as u16)]
+        .style()
+        .add_modifier
+        .contains(ratatui::style::Modifier::REVERSED)
+}
+
+/// A workspace on github.com with `branches` listed, the Branches
+/// panel shown, and no load started.
+pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
+    let mut state = AppState::new(Context::Workspace)
+        .with_forge_hosts(vec![ForgeHost::parse("github.com").unwrap()]);
+    let listed = branches
+        .iter()
+        .map(|b| {
+            let name = String::from_utf8_lossy(&b.0);
+            git_branch(&name, name == "main", true)
+        })
+        .collect();
+    state.branches.loaded(Ok(listed));
+    state.forge.set_branches(branches);
+    state.focus = Focus::Branches;
+    state.expanded = SidePanel::Branches;
+    state.files_loaded = true;
+    state
 }

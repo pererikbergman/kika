@@ -278,7 +278,7 @@ mod tests {
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "/origin 3 of 5 · 2 selected"), "{rows:#?}");
         assert!(!contains(&rows, "/srv/fork"), "{rows:#?}");
-        let reversed = crate::branches_view::tests::reversed_at;
+        let reversed = crate::test_support::reversed_at;
         assert!(reversed(&buffer, "origin  /srv/origin"));
         assert!(reversed(&buffer, "  main"));
         assert!(!reversed(&buffer, "  topic"));

@@ -60,7 +60,7 @@ impl AppState {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use crate::forge::{CiState, ForgeHost, ForgeRepo, ForgeState, ForgeView, PrState};
     use crate::git::FileEntry;
@@ -70,6 +70,7 @@ pub(crate) mod tests {
     use crate::intent::AppIntent;
     use crate::layout::SidePanel;
     use crate::model::{CommitFlow, Context, Focus};
+    use crate::test_support::forge_state;
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
@@ -99,22 +100,6 @@ pub(crate) mod tests {
             state: PrState::Open,
             ci: Some(CiState::Success),
         }
-    }
-
-    /// A workspace on github.com with `branches` listed, the Branches
-    /// panel shown, and no load started.
-    pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
-        let mut state = AppState::new(Context::Workspace).with_forge_hosts(github());
-        let listed = branches
-            .iter()
-            .map(|b| branch(&String::from_utf8_lossy(&b.0)))
-            .collect();
-        state.branches.loaded(Ok(listed));
-        state.forge.set_branches(branches);
-        state.focus = Focus::Branches;
-        state.expanded = SidePanel::Branches;
-        state.files_loaded = true;
-        state
     }
 
     fn loads(effects: &[Effect]) -> Vec<(Tag, bool)> {
@@ -441,7 +426,7 @@ pub(crate) mod tests {
         state.update(AppIntent::ForgeRepoNone { tag });
         assert_eq!(state.forge.status, ForgeView::Off);
         assert!(!state.forge.in_flight);
-        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(rows.iter().all(|r| !r.contains("GitHub")), "{rows:?}");
     }
 
@@ -458,7 +443,7 @@ pub(crate) mod tests {
             badges: Some(HashMap::from([("topic".into(), badge(12))])),
         });
         assert_eq!(state.forge.status, ForgeView::Updating);
-        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
             rows.iter().any(|r| r.contains("topic  #12 open ✓")),
             "{rows:#?}"
@@ -491,7 +476,7 @@ pub(crate) mod tests {
         assert_eq!(state.forge.status, ForgeView::Problem(ForgeStatus::Offline));
         assert_eq!(state.op_error, None);
         assert!(state.popups.is_empty());
-        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
             rows.iter().any(|r| r.contains("GitHub: offline · cached")),
             "{rows:#?}"

@@ -8,7 +8,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use crate::branches_view::clock;
 use crate::forge::merge::{MergeBlock, merge_options};
 use crate::forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
@@ -19,6 +18,7 @@ use crate::markdown;
 use crate::model::AppState;
 use crate::model::review::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
 use crate::model::review_files::{FilesFocus, FilesStage, PrFile, PrFiles};
+use crate::rows::{clock, drawn_path, status_colour};
 use crate::view::{self, elide_right};
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
@@ -336,7 +336,7 @@ const MIN_PATH: usize = 6;
 /// four columns of status and mark): the path loses its start to fit, and
 /// on a list too narrow for both the counts give way to it.
 fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
-    let colour = crate::commits_view::status_colour(row.file.status);
+    let colour = status_colour(row.file.status);
     let (mark, mark_style) = match row.viewed {
         Some(ViewedState::Viewed) => ("✓", Style::new().fg(Color::Green)),
         Some(ViewedState::Dismissed) => ("~", Style::new().fg(Color::Yellow)),
@@ -358,7 +358,7 @@ fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
     } else {
         counts
     };
-    let path = crate::commit_files::drawn_path(&row.file);
+    let path = drawn_path(&row.file);
     let room = width.saturating_sub(4 + counts_width);
     let path = view::elide_left(&path, room);
     let pad = room.saturating_sub(width_of(&path));

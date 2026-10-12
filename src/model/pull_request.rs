@@ -1111,7 +1111,7 @@ mod tests {
             "{effects:?}"
         );
         assert_eq!(state.pr_create, None);
-        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
             rows.iter().any(|r| r.contains("topic  #42 open")),
             "{rows:#?}"
