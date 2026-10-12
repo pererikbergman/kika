@@ -22,12 +22,14 @@ mod conflict_view;
 mod copied;
 mod custom_command;
 mod diff_pane;
+mod diff_search;
 mod diff_stream;
 mod diff_tool;
 #[cfg(test)]
 mod e2e;
 mod effect;
 mod external_diff;
+mod forge;
 mod git;
 mod gitignore;
 mod handoff;
@@ -35,6 +37,7 @@ mod hunk_view;
 mod intent;
 mod keymap;
 mod layout;
+mod list_filter;
 mod menu;
 mod model;
 mod popup;
@@ -126,7 +129,8 @@ fn main() -> color_eyre::Result<ExitCode> {
     let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
     let state = AppState::new(cli.context())
         .with_location(repo, launch)
-        .with_git_version(git_version);
+        .with_git_version(git_version)
+        .with_forge_hosts(config.forge_hosts.clone());
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 

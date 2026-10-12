@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
@@ -9,11 +10,12 @@ use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
+use crate::forge::{ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branch_tips::Tip;
-use crate::git::branches::{Branch, LogRow};
+use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
@@ -669,6 +671,39 @@ pub enum AppIntent {
         repo: Option<PathBuf>,
         keymap: Keymap,
         errors: Vec<ConfigError>,
+    },
+    /// Type into the focused list's filter, which narrows it live.
+    OpenFilter,
+    /// Type a text to search the focused Diff pane for.
+    OpenSearch,
+    /// Close the text input, keeping what it typed; a search goes to its
+    /// current match.
+    InputAccept,
+    /// Close the text input and clear what it typed.
+    InputCancel,
+    /// Start a range selection at the cursor, or clear the one there is.
+    ToggleRange,
+    /// Clear the range, else the filter, else quit.
+    ListEscape,
+    /// Clear the search, else go back to the side panel.
+    DiffEscape,
+    /// Go to the next or previous match of the search.
+    SearchNext,
+    SearchPrev,
+    /// The remote is on none of the forge hosts: no badges.
+    ForgeRepoNone {
+        tag: Tag,
+    },
+    /// The forge repository found, and its cached badges; `None` is a miss.
+    PullRequestsCached {
+        tag: Tag,
+        repo: ForgeRepo,
+        badges: Option<HashMap<BranchName, PrBadge>>,
+    },
+    /// The forge answered, or why it could not.
+    PullRequestsFetched {
+        tag: Tag,
+        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
     },
 }
 

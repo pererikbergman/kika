@@ -1,0 +1,1 @@
+{"data":{"repository":null},"errors":[{"type":"FORBIDDEN","path":["repository"],"extensions":{"saml_failure":false},"locations":[{"line":1,"column":88}],"message":"Resource not accessible by integration"}]}

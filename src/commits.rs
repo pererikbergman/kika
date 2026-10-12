@@ -7,6 +7,7 @@ use crate::commit_graph::{GraphBuilder, GraphRow};
 use crate::git::branch_tips::Tip;
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, Markers};
+use crate::list_filter;
 use crate::rebase_todo::RebaseTodo;
 use crate::reflog::ReflogList;
 
@@ -81,6 +82,11 @@ pub struct CommitsPanel {
     pub tab: CommitsTab,
     /// `HEAD`'s reflog, read when its tab is first shown or an undo asks.
     pub reflog: ReflogList,
+    /// Narrows the loaded rows as typed; empty shows them all.
+    pub filter: String,
+    /// The full id of the commit a range selection started on, so a reload
+    /// keeps the range on the same commits.
+    pub range_anchor: Option<String>,
 }
 
 /// The Commits panel's two lists.
@@ -236,20 +242,78 @@ impl CommitsPanel {
         match (self.todo_selected, delta) {
             (Some(0), 1) => {
                 self.todo_selected = None;
-                self.selected = 0;
+                // The log's first row the filter shows.
+                self.selected = self.visible().first().copied().unwrap_or(0);
             }
             (Some(i), 1) => self.todo_selected = Some(i - 1),
             (Some(i), _) => self.todo_selected = Some((i + 1).min(rows.saturating_sub(1))),
-            (None, -1) if self.selected == 0 && rows > 0 => self.todo_selected = Some(0),
+            (None, -1)
+                if rows > 0
+                    && self
+                        .visible()
+                        .first()
+                        .is_none_or(|&top| top == self.selected) =>
+            {
+                self.todo_selected = Some(0)
+            }
             (None, _) => self.move_by(delta),
         }
     }
 
     pub fn move_by(&mut self, delta: isize) {
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(self.rows.len().saturating_sub(1));
+        if let Some(next) = list_filter::step(&self.visible(), self.selected, delta) {
+            self.selected = next;
+        }
+    }
+
+    /// What the filter matches a row against: what the row shows of it.
+    fn filter_text(row: &CommitRow) -> String {
+        format!("{} {} {}", row.short_oid, row.subject, row.author)
+    }
+
+    /// The indexes of the rows the filter shows, in log order.
+    pub fn visible(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.rows.len()).collect();
+        }
+        let texts: Vec<String> = self.rows.iter().map(Self::filter_text).collect();
+        list_filter::visible(&self.filter, texts.iter().map(String::as_str))
+    }
+
+    /// The filter hides the cursor's row, which happens only when it hides
+    /// every row.
+    pub fn selected_hidden(&self) -> bool {
+        !self.filter.is_empty()
+            && self
+                .rows
+                .get(self.selected)
+                .is_some_and(|row| !list_filter::matches(&self.filter, &Self::filter_text(row)))
+    }
+
+    /// The rows the range covers, in log order; empty without one.
+    pub fn range(&self) -> Vec<usize> {
+        let Some(anchor) = &self.range_anchor else {
+            return Vec::new();
+        };
+        match self.rows.iter().position(|row| &row.oid == anchor) {
+            Some(at) => list_filter::range(&self.visible(), at, self.selected),
+            None => Vec::new(),
+        }
+    }
+
+    /// After the filter or the rows changed: a range whose first commit is
+    /// gone is cleared, and a hidden cursor moves to the first row shown.
+    pub fn reconcile(&mut self) {
+        if let Some(anchor) = &self.range_anchor
+            && !self.rows.iter().any(|row| &row.oid == anchor)
+        {
+            self.range_anchor = None;
+        }
+        if self.selected_hidden()
+            && let Some(&first) = self.visible().first()
+        {
+            self.selected = first;
+        }
     }
 
     /// The `skip` of the next page, when the cursor is near the end of what

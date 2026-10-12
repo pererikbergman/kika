@@ -14,6 +14,7 @@ pub mod diff;
 #[cfg(test)]
 pub mod fake;
 pub mod fetch;
+pub mod forge_remote;
 pub mod head;
 mod joiner;
 pub mod log;
