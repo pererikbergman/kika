@@ -46,9 +46,16 @@ pub enum CommandOutcome {
 type Listener = Box<dyn Fn(CommandEvent) + Send + Sync>;
 
 /// Where events go. Built before the loop exists, and connected by it, so
-/// events sent before then are dropped.
+/// events sent before then are dropped. It hands out the ids too, so every
+/// process that reports here, git or not, gets one of its own.
 #[derive(Clone, Default)]
-pub struct CommandSink(Arc<OnceLock<Listener>>);
+pub struct CommandSink(Arc<SinkInner>);
+
+#[derive(Default)]
+struct SinkInner {
+    listener: OnceLock<Listener>,
+    next_id: AtomicU64,
+}
 
 impl CommandSink {
     pub fn new() -> Self {
@@ -57,20 +64,25 @@ impl CommandSink {
 
     /// Send every later event to `listener`. Only the first call counts.
     pub fn connect(&self, listener: impl Fn(CommandEvent) + Send + Sync + 'static) {
-        let _ = self.0.set(Box::new(listener));
+        let _ = self.0.listener.set(Box::new(listener));
     }
 
     pub fn send(&self, event: CommandEvent) {
-        if let Some(listener) = self.0.get() {
+        if let Some(listener) = self.0.listener.get() {
             listener(event);
         }
+    }
+
+    /// An id no other command reporting to this sink has.
+    pub fn next_id(&self) -> u64 {
+        self.0.next_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
 impl fmt::Debug for CommandSink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CommandSink")
-            .field("connected", &self.0.get().is_some())
+            .field("connected", &self.0.listener.get().is_some())
             .finish()
     }
 }
@@ -80,21 +92,16 @@ impl fmt::Debug for CommandSink {
 pub struct RecordingRunner {
     inner: Arc<dyn GitRunner>,
     sink: CommandSink,
-    next_id: AtomicU64,
 }
 
 impl RecordingRunner {
     pub fn new(inner: Arc<dyn GitRunner>, sink: CommandSink) -> Self {
-        Self {
-            inner,
-            sink,
-            next_id: AtomicU64::new(0),
-        }
+        Self { inner, sink }
     }
 
     /// Announce `cmd` and return its id and start time.
     fn start(&self, cmd: &GitCommand, attached: bool) -> (u64, Instant) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = self.sink.next_id();
         self.sink.send(CommandEvent::Started {
             id,
             line: display_line(cmd),
@@ -455,6 +462,32 @@ mod tests {
         assert_eq!(runner.workdir(), tmp.path());
         runner.set_workdir(tmp.path().join("sub"));
         assert_eq!(runner.workdir(), tmp.path().join("sub"));
+    }
+
+    #[test]
+    fn runners_sharing_a_sink_never_share_an_id() {
+        let (sink, events) = collecting();
+        let one = RecordingRunner::new(
+            Arc::new(FakeRunner::new().expect(&["status"], ok(b""))),
+            sink.clone(),
+        );
+        let two = RecordingRunner::new(
+            Arc::new(FakeRunner::new().expect(&["log"], ok(b""))),
+            sink.clone(),
+        );
+        one.run(&GitCommand::new("status")).unwrap();
+        let other = sink.next_id();
+        two.run(&GitCommand::new("log")).unwrap();
+        assert_eq!(
+            timeless(&events),
+            [
+                started(0, "git status", false),
+                finished(0, CommandOutcome::Ok),
+                started(2, "git log", false),
+                finished(2, CommandOutcome::Ok),
+            ]
+        );
+        assert_eq!(other, 1);
     }
 
     #[test]

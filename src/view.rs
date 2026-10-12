@@ -69,7 +69,15 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                     .remote
                     .as_ref()
                     .and_then(|run| Some((run.branch.as_ref()?, run.spinner())));
-                branches_view::render_panel(&state.branches, &look, expanded, spinner, frame, area)
+                branches_view::render_panel(
+                    &state.branches,
+                    &state.forge,
+                    &look,
+                    expanded,
+                    spinner,
+                    frame,
+                    area,
+                )
             }
             SidePanel::Commits => {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
