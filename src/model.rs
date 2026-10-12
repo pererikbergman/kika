@@ -19930,6 +19930,20 @@ mod tests {
     }
 
     #[test]
+    fn a_rename_whose_old_directory_is_now_a_file_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_RENAME_TAKEN.into());
+        for taken in ["d", "d/e"] {
+            let files = vec![renamed("new.rs", "d/e/old.rs"), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A file beside the old path, inside its directory, is fine.
+        let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
+        let (state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+    }
+
+    #[test]
     fn stashing_a_range_pushes_its_files_and_drops_the_range() {
         let (mut state, _) = with_files(three_files(), 24);
         press_char(&mut state, 'V');

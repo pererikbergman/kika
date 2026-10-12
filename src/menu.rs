@@ -5,7 +5,7 @@ use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
 use crate::git::bisect::BisectMark;
-use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode, leading_dirs};
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
@@ -275,8 +275,9 @@ pub(crate) use crate::git::ops::STASH_RENAME_TAKEN;
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
 /// cursor's row refuses it, as other row actions are refused. A staged
-/// rename whose old path any listed entry holds again is refused: the
-/// restore after the push would overwrite that file.
+/// rename is refused when any listed entry sits at its old path or at a
+/// directory that path needs: the restore after the push would overwrite
+/// or unlink that file.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true)
         .or_else(|| stash_blocked(state))
@@ -285,7 +286,8 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
             let taken = (entries.iter())
                 .filter_map(|e| GitOp::stash_file_for(e))
                 .flat_map(|set| set.restore)
-                .any(|old| state.files.iter().any(|f| f.path == old));
+                .flat_map(|old| leading_dirs(&old).into_iter().chain([old]))
+                .any(|taken| state.files.iter().any(|f| f.path == taken));
             if entries.is_empty() {
                 Some("No file selected".into())
             } else if taken {

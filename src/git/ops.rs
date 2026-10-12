@@ -856,6 +856,38 @@ fn restore_taken_command(restore: &[RepoPath]) -> GitCommand {
     with_literal_paths(cmd, restore)
 }
 
+/// The directories `path` sits in, outermost first: `a` and `a/b` for
+/// `a/b/c`. A restore must make each of them, so a file or symlink at any
+/// of them would be unlinked.
+pub(crate) fn leading_dirs(path: &RepoPath) -> Vec<RepoPath> {
+    let bytes = path.as_bytes();
+    (bytes.iter().enumerate())
+        .filter(|&(i, &b)| b == b'/' && i > 0)
+        .map(|(i, _)| RepoPath::from_bytes(&bytes[..i]))
+        .collect()
+}
+
+/// Whether anything sits where a restore of `restore` would write: at an
+/// old path or under it, or exactly at one of its leading directories. A
+/// file under a leading directory is fine; that directory is real.
+fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, String> {
+    let at_old = run_checked(runner, &restore_taken_command(restore))?;
+    if !at_old.stdout.is_empty() {
+        return Ok(true);
+    }
+    let mut dirs: Vec<RepoPath> = Vec::new();
+    for dir in restore.iter().flat_map(leading_dirs) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    if dirs.is_empty() {
+        return Ok(false);
+    }
+    let found = run_checked(runner, &restore_taken_command(&dirs))?;
+    Ok((found.stdout.split(|&b| b == 0)).any(|name| dirs.iter().any(|d| d.as_bytes() == name)))
+}
+
 /// `HEAD` as a commit id, for a restore that must use the tree the push
 /// was made on.
 fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
@@ -871,15 +903,15 @@ fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
 
 /// Stash a set with staged renames in it: the push without their old
 /// paths, then those checked out from `HEAD`, so the worktree is clean for
-/// both sides. Fails closed: nothing runs when the old paths are taken.
+/// both sides. Fails closed: nothing runs when the old paths, or the
+/// directories they need, are taken.
 fn push_with_restore(
     runner: &dyn GitRunner,
     op: &GitOp,
     restore: &[RepoPath],
 ) -> Result<(), String> {
     let head = head_commit(runner)?;
-    let taken = run_checked(runner, &restore_taken_command(restore))?;
-    if !taken.stdout.is_empty() {
+    if restore_taken(runner, restore)? {
         return Err(STASH_RENAME_TAKEN.into());
     }
     run_checked(runner, &op_command(op))?;
@@ -889,9 +921,8 @@ fn push_with_restore(
             let names: Vec<&str> = restore.iter().map(RepoPath::display).collect();
             format!(
                 "{why}\nThe stash was saved, but {} is still staged as deleted; \
-                 git checkout HEAD -- {} restores it.",
-                names.join(", "),
-                names.join(" ")
+                 check it out from HEAD to restore it.",
+                names.join(", ")
             )
         })
 }
@@ -3999,11 +4030,67 @@ mod tests {
             run_op(&runner, &op),
             Err(
                 "fatal: index.lock exists\nThe stash was saved, but old.rs is still \
-                 staged as deleted; git checkout HEAD -- old.rs restores it."
+                 staged as deleted; check it out from HEAD to restore it."
                     .into()
             )
         );
         runner.assert_done();
+    }
+
+    #[test]
+    fn leading_dirs_are_every_directory_a_path_sits_in() {
+        let dirs = |p: &str| leading_dirs(&p.into());
+        assert_eq!(dirs("old.rs"), Vec::<RepoPath>::new());
+        assert_eq!(dirs("a/b/c"), [RepoPath::from("a"), "a/b".into()]);
+    }
+
+    #[test]
+    fn a_file_at_a_directory_the_restore_needs_runs_no_push() {
+        let head = "ab".repeat(20);
+        let op = set_push(set(StashMode::All, &["new.rs"], &["a/b/old.rs"]), None);
+        let at_old = ["ls-files", "-z", "--cached", "--others", "--", "a/b/old.rs"];
+        let at_dirs = ["ls-files", "-z", "--cached", "--others", "--", "a", "a/b"];
+        let verify = ["rev-parse", "--verify", "-q", "HEAD^{commit}"];
+        // `a/b` is a file: refused.
+        let runner = FakeRunner::new()
+            .expect(&verify, ok(head.as_bytes()))
+            .expect(&at_old, ok(b""))
+            .expect(&at_dirs, ok(b"a/other.rs\0a/b\0"));
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        runner.assert_done();
+        // Only files inside real directories: the push and restore run.
+        let runner = FakeRunner::new()
+            .expect(&verify, ok(head.as_bytes()))
+            .expect(&at_old, ok(b""))
+            .expect(&at_dirs, ok(b"a/other.rs\0a/bc\0"))
+            .expect(&["stash", "push", "--", "new.rs"], ok(b""))
+            .expect(&["checkout", "-q", &head, "--", "a/b/old.rs"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_file_where_the_old_paths_directory_was_stops_the_stash_in_real_git() {
+        use crate::git::fake::git;
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        std::fs::create_dir(dir.join("d")).unwrap();
+        std::fs::write(dir.join("d/old.txt"), "old\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "old"]);
+        git(dir, &["mv", "--", "d/old.txt", "new.txt"]);
+        // Git may leave the emptied directory behind.
+        let _ = std::fs::remove_dir(dir.join("d"));
+        std::fs::write(dir.join("d"), "mine\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+        assert_eq!(before, b"R  d/old.txt -> new.txt\n?? d\n");
+
+        let op = set_push(set(StashMode::All, &["new.txt"], &["d/old.txt"]), None);
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(std::fs::read_to_string(dir.join("d")).unwrap(), "mine\n");
     }
 
     /// A repo with `old.txt` committed and staged as renamed to `new.txt`,
