@@ -10,7 +10,7 @@ use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffLine, DiffRequest, LineKind};
-use crate::git::log::{CommitRow, LogPage};
+use crate::git::log::{CommitRow, LogPage, LogQuery};
 use crate::git::patch::{self, FilePatch};
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan;
@@ -429,6 +429,66 @@ pub(crate) fn on_commit_five() -> AppState {
     state.focus = Focus::Commits;
     state.expanded = SidePanel::Commits;
     state.commits.selected = 5;
+    state
+}
+
+/// The full id of row `i`: hex, so it parses as a commit id.
+pub(crate) fn oid(i: usize) -> String {
+    format!("{i:040x}")
+}
+
+pub(crate) fn hex_page(n: usize, done: bool) -> LogPage {
+    let rows = (0..n)
+        .map(|i| CommitRow {
+            oid: oid(i),
+            short_oid: oid(i)[33..].to_string(),
+            parents: vec![oid(i + 1)],
+            author: "Ann".into(),
+            time: 0,
+            subject: format!("commit {i}"),
+            subject_altered: false,
+        })
+        .collect();
+    LogPage { rows, done }
+}
+
+/// Every page load in `effects`: its tip, skip and query.
+pub(crate) fn loads(effects: &[Effect]) -> Vec<(Tag, Option<String>, usize, LogQuery)> {
+    effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::LoadCommits {
+                tag,
+                tip,
+                skip,
+                query,
+            } => Some((*tag, tip.clone(), *skip, query.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Answer a page load; a short page that is not the last asks for
+/// the next one at once.
+pub(crate) fn answer(state: &mut AppState, tag: Tag, skip: usize, page: LogPage) -> Vec<Effect> {
+    state.update(AppIntent::CommitsLoaded {
+        tag,
+        skip,
+        result: Ok((page, 1_000)),
+    })
+}
+
+/// Started in a repository, the Commits panel focused on `n` commits.
+pub(crate) fn with_log(n: usize) -> AppState {
+    let mut state =
+        AppState::new(Context::Workspace).with_location(Some("/r/top".into()), "/r/top".into());
+    let effects = state.update(AppIntent::Start);
+    let [(tag, ..)] = loads(&effects)[..] else {
+        panic!("expected one page load in {effects:?}");
+    };
+    answer(&mut state, tag, 0, hex_page(n, true));
+    state.focus = Focus::Commits;
+    state.expanded = SidePanel::Commits;
     state
 }
 
