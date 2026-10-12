@@ -137,7 +137,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
             Selection::KeepPath,
         ),
         // These change only the list.
-        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+        GitOp::StashDrop(_) | GitOp::StashDrops(_) | GitOp::StashRename { .. } => {
             (&[Scope::Stash][..], Selection::KeepPath)
         }
         // A mark can check out the next commit to test, and a reset goes
@@ -296,11 +296,12 @@ mod tests {
             paths: vec![],
         };
         let worktree = [Scope::Files, Scope::Branch, Scope::Diff, Scope::Stash];
-        let cases: [(GitOp, &[Scope]); 5] = [
+        let cases: [(GitOp, &[Scope]); 6] = [
             (push, &[Scope::Files, Scope::Diff, Scope::Stash]),
             (GitOp::StashApply(at()), &worktree),
             (GitOp::StashPop(at()), &worktree),
             (GitOp::StashDrop(at()), &[Scope::Stash]),
+            (GitOp::StashDrops(vec![at()]), &[Scope::Stash]),
             (
                 GitOp::StashRename {
                     stash: at(),

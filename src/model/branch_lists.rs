@@ -59,6 +59,7 @@ impl AppState {
             RangeKind::Branches => keymap::delete_branch_disabled,
             RangeKind::Tags => keymap::delete_tag_disabled,
             RangeKind::Remotes => keymap::change_remote_disabled,
+            RangeKind::Stashes => keymap::drop_stash_disabled,
         };
         if let Some(reason) = disabled(self) {
             self.notice = Some(reason);
@@ -68,6 +69,7 @@ impl AppState {
             RangeKind::Branches => self.branches_range_confirm(),
             RangeKind::Tags => self.tags_range_confirm(),
             RangeKind::Remotes => self.remotes_range_confirm(),
+            RangeKind::Stashes => self.stashes_range_confirm(),
         };
         if confirm.names.is_empty() {
             self.notice = Some(
@@ -75,6 +77,7 @@ impl AppState {
                     RangeKind::Branches => "No branch in the selection can be deleted with y",
                     RangeKind::Tags => "No tag in the selection",
                     RangeKind::Remotes => "No remote in the selection can be removed",
+                    RangeKind::Stashes => "No stash in the selection",
                 }
                 .into(),
             );
@@ -173,12 +176,12 @@ impl AppState {
         let Some(Popup::DeleteRange(confirm)) = self.popups.pop() else {
             return vec![];
         };
-        let tab = match confirm.kind {
-            RangeKind::Branches => BranchesTab::Local,
-            RangeKind::Tags => BranchesTab::Tags,
-            RangeKind::Remotes => BranchesTab::Remotes,
-        };
-        self.branches.clear_range(tab);
+        match confirm.kind {
+            RangeKind::Branches => self.branches.clear_range(BranchesTab::Local),
+            RangeKind::Tags => self.branches.clear_range(BranchesTab::Tags),
+            RangeKind::Remotes => self.branches.clear_range(BranchesTab::Remotes),
+            RangeKind::Stashes => self.stash.range_anchor = None,
+        }
         self.start_op(Ok(Some(confirm.op)))
     }
 }
