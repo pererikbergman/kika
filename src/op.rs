@@ -136,8 +136,8 @@ pub enum GitOp {
     /// commit, which needs a mainline.
     Revert(CommitId),
     /// Pick these commits onto `HEAD`, one by one in this order. Built
-    /// with parents first (see `crate::git::cherry_pick::ordered`); never with
-    /// a merge commit, which needs a mainline.
+    /// with parents first (see `crate::features::commits::copy::git::ordered`);
+    /// never with a merge commit, which needs a mainline.
     CherryPick(Vec<CommitId>),
     /// Move the current branch, or a detached `HEAD`, to `to`; `mode` says
     /// what happens to the index and the worktree.
@@ -1301,7 +1301,10 @@ pub fn refusal(op: &GitOp) -> Option<&'static str> {
         }
         // Only a full id is surely a commit, never a ref of that name.
         GitOp::CherryPick(picks)
-            if picks.is_empty() || !picks.iter().all(crate::git::cherry_pick::is_full_id) =>
+            if picks.is_empty()
+                || !picks
+                    .iter()
+                    .all(crate::features::commits::copy::git::is_full_id) =>
         {
             Some("Only full commit ids can be cherry-picked")
         }
@@ -1679,15 +1682,6 @@ mod tests {
             ]
         );
         assert_eq!(cmd.subcommand(), "rebase");
-    }
-
-    #[test]
-    fn cherry_pick_names_each_commit_in_order_and_sets_no_env() {
-        let (one, two) = ("1".repeat(40), "2".repeat(40));
-        let cmd = op_command(&GitOp::CherryPick(vec![oid(&one), oid(&two)]));
-        assert_eq!(argv(&cmd), ["cherry-pick", one.as_str(), two.as_str()]);
-        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
-        assert_eq!(cmd.input(), None);
     }
 
     #[test]

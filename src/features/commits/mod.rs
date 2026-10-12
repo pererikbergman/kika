@@ -6,6 +6,7 @@
 //! `patch_plan`.
 
 pub(crate) mod bisect;
+pub(crate) mod copy;
 pub(crate) mod custom_patch;
 
 use crate::git::rebase_plan::{self, RebasePlan};

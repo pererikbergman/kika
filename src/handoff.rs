@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::effect::Tag;
+use crate::features::commits::copy::git::ordered;
 use crate::features::commits::custom_patch;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::git::GitRunner;
-use crate::git::cherry_pick;
 use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
@@ -98,7 +98,7 @@ pub fn execute_as(
             // A paste picks parents first, which only git can say; asked
             // here, just before the picks, so the order is the branch's now.
             let op = match op {
-                GitOp::CherryPick(picks) => match cherry_pick::ordered(runner, &picks) {
+                GitOp::CherryPick(picks) => match ordered(runner, &picks) {
                     Ok(ordered) => GitOp::CherryPick(ordered),
                     Err(error) => {
                         return AppIntent::OpFinished {

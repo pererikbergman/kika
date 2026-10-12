@@ -762,6 +762,24 @@ pub(crate) fn copy_ready() -> AppState {
     state
 }
 
+/// `copy_ready`, with the selected commit copied.
+pub(crate) fn one_copied() -> AppState {
+    let mut state = copy_ready();
+    press_char(&mut state, 'c');
+    assert_eq!(state.copied.len(), 1);
+    state
+}
+
+/// Four commits with full-length ids, the second a merge.
+pub(crate) fn with_merge() -> AppState {
+    let mut state = with_commits(4, true);
+    for (i, row) in state.commits.rows.iter_mut().enumerate() {
+        row.oid = format!("{i}").repeat(40);
+    }
+    state.commits.rows[1].parents = vec!["2".repeat(40), "9".repeat(40)];
+    state
+}
+
 /// A repository with `three_branches`, on `main`, nothing running.
 pub(crate) fn remote_ready() -> AppState {
     let mut state = with_branches().with_location(Some("/r".into()), "/r".into());

@@ -1205,7 +1205,7 @@ fn least_context(state: &AppState) -> Option<Reason> {
 /// Enter has no commit to open before the log has rows.
 /// Why a key that acts on a log commit does nothing: there is none, or
 /// the cursor is on the rebase's todo list above the log.
-fn no_commit(state: &AppState) -> Option<Reason> {
+pub(crate) fn no_commit(state: &AppState) -> Option<Reason> {
     if state.commits.todo_selected.is_some() {
         return Some("Select a commit in the log first".into());
     }
@@ -1676,41 +1676,6 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<Reason> {
         })
 }
 
-/// Why the selected commit cannot be copied. A merge commit needs a
-/// mainline chosen to be picked, which Kika does not ask for. Copying
-/// runs no git, so it works while an operation runs.
-pub(crate) fn copy_disabled(state: &AppState) -> Option<Reason> {
-    no_commit(state).or_else(|| {
-        let row = state.commits.rows.get(state.commits.selected);
-        row.is_some_and(|r| r.parents.len() > 1)
-            .then_some("Cannot cherry-pick a merge commit".into())
-    })
-}
-
-/// Why the copied commits cannot be pasted now. Untracked files may stay:
-/// git refuses to overwrite one before it changes anything. Any tracked
-/// change is refused, though git would pick around some, because it would
-/// mix into a later conflict.
-pub(crate) fn paste_disabled(state: &AppState) -> Option<Reason> {
-    let unborn = state
-        .branch
-        .as_ref()
-        .is_none_or(|b| matches!(b.head, Head::Unborn(_)));
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else if state.copied.is_empty() {
-        Some("Nothing copied".into())
-    } else if unborn {
-        Some("No commit to cherry-pick onto".into())
-    } else if let Some(reason) = in_progress_disabled(state) {
-        Some(reason)
-    } else if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
-        Some("Commit or stash your changes first".into())
-    } else {
-        None
-    }
-}
-
 /// Why the selected commit or todo row cannot be rewritten now. On a log
 /// row: one operation at a time, none in progress, and a history the
 /// planner can rewrite. On a todo row: one write at a time, and an edit
@@ -2150,31 +2115,8 @@ fn commits_reword_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| reword_disabled(state))
 }
 
-/// The copy menu copies the selected commit's text: one row's action.
-fn commits_copy_menu_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false)
-}
-
 fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| ignore_disabled(state))
-}
-
-/// `c` copies a range too, but a range of merge commits only has nothing
-/// it can copy.
-pub(crate) fn commits_copy_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, true).or_else(|| {
-        if state.commits.range_anchor.is_none() {
-            return copy_disabled(state);
-        }
-        let rows = &state.commits.rows;
-        let range = state.commits.range();
-        no_commit(state).or_else(|| {
-            range
-                .iter()
-                .all(|&i| rows[i].parents.len() > 1)
-                .then_some("Cannot cherry-pick a merge commit".into())
-        })
-    })
 }
 
 /// Why a rewrite cannot run on a log narrowed to a path or an author.
@@ -2796,51 +2738,6 @@ static COMMITS_SWITCH_TAB: &[Binding] = &[
         label: "reflog",
         bar: true,
         disabled: never,
-    },
-];
-
-// Chunk 14: copy
-static COPY_COMMITS: &[Binding] = &[
-    Binding {
-        id: "commits.copy",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::CopyCommit,
-        description: "Add the selected commit to the copied set, or take it out",
-        label: "copy",
-        bar: true,
-        disabled: commits_copy_disabled,
-    },
-    Binding {
-        id: "commits.paste",
-        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::PasteCommits,
-        description: "Cherry-pick the copied commits onto the current branch, oldest first",
-        label: "paste",
-        bar: true,
-        disabled: paste_disabled,
-    },
-    Binding {
-        id: "commits.clear_copied",
-        keys: &[KeyPattern::any(KeyCode::Char('C'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::ClearCopied,
-        description: "Clear the copied set",
-        label: "clear",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "commits.copy_menu",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::OpenMenu(MenuId::Copy),
-        description: "Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on)",
-        label: "clipboard",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: commits_copy_menu_disabled,
     },
 ];
 
@@ -4839,7 +4736,7 @@ static CHUNKS: &[&[Binding]] = &[
     COMMITS_KEYS,
     REWRITE_COMMITS,
     COMMITS_SWITCH_TAB,
-    COPY_COMMITS,
+    commits::copy::keys::COPY_COMMITS,
     REFLOG_KEYS,
     COMMITS_FILES_NAV,
     commits::custom_patch::keys::CUSTOM_PATCH_COMMIT_FILES,
@@ -6938,65 +6835,6 @@ mod tests {
     }
 
     #[test]
-    fn c_v_and_shift_c_copy_paste_and_clear_in_the_commits_panel() {
-        use AppIntent::*;
-        // Everything enabled: a commit to copy, one copied, a clean branch.
-        let mut state = AppState::new(Context::Workspace);
-        let oid = "a".repeat(40);
-        state.commits.rows = vec![crate::git::log::CommitRow {
-            oid: oid.clone(),
-            short_oid: "aaaaaaa".into(),
-            parents: vec![],
-            author: "Ann".into(),
-            time: 0,
-            subject: "s".into(),
-            subject_altered: false,
-        }];
-        state.copied.toggle(crate::copied::CopiedCommit {
-            id: CommitId::parse(&oid).unwrap(),
-            short: "aaaaaaa".into(),
-            subject: "s".into(),
-        });
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![],
-            bisect: None,
-        });
-        let run = |k| match resolve(registry(), &Keymap::default(), KeyScope::Commits, &state, k) {
-            Resolution::Run(binding) => binding.intent.clone(),
-            other => panic!("{k:?}: {other:?}"),
-        };
-        assert_eq!(run(plain('c')), CopyCommit);
-        assert_eq!(run(plain('v')), PasteCommits);
-        assert_eq!(
-            run(key(KeyCode::Char('C'), KeyModifiers::SHIFT)),
-            ClearCopied
-        );
-        assert!(binding("commits.copy").bar && binding("commits.paste").bar);
-        assert!(!binding("commits.clear_copied").bar);
-    }
-
-    #[test]
-    fn the_copy_keys_clash_with_nothing_the_commits_panel_reaches() {
-        let reached = [KeyScope::Commits, KeyScope::Workspace, KeyScope::Global];
-        for id in ["commits.copy", "commits.paste", "commits.clear_copied"] {
-            let new = binding(id);
-            for other in registry()
-                .iter()
-                .filter(|b| b.id != id && reached.contains(&b.scope))
-            {
-                for a in new.keys {
-                    for b in other.keys {
-                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn the_filter_range_and_search_keys_clash_with_nothing_their_scope_reaches() {
         use KeyScope::*;
         let new: &[(&str, &[KeyScope])] = &[
@@ -7602,16 +7440,6 @@ mod tests {
                 );
             }
             assert_eq!((binding("remotes.add").disabled)(&state), None);
-        }
-    }
-
-    #[test]
-    fn paste_is_locked_and_copy_and_clear_are_not() {
-        assert!(REPO_LOCKED.contains(&"commits.paste"));
-        assert!(build(&[("commits.paste", &["Z"])], Trust::Repo).is_err());
-        for id in ["commits.copy", "commits.clear_copied"] {
-            assert!(!REPO_LOCKED.contains(&id), "{id}");
-            assert!(build(&[(id, &["Z"])], Trust::Repo).is_ok(), "{id}");
         }
     }
 
