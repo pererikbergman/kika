@@ -15,9 +15,13 @@ use crate::hunk_view::HunkView;
 use crate::keymap;
 use crate::layout::SidePanel;
 use crate::popup::{ConfirmKind, LineInput, Popup, PromptKind};
+use crate::view::elide_right;
 
 /// Why resetting does nothing.
 pub(super) const NO_PATCH: &str = "No custom patch";
+
+/// How much of a new commit's message the question shows.
+const MESSAGE_SHOWN: usize = 30;
 
 /// Why "New commit after source" asks again.
 pub(crate) const MESSAGE_NEEDED: &str = "Type a message for the new commit";
@@ -245,13 +249,16 @@ impl AppState {
                 format!("Take {what} out of {source} and stage it?")
             }
             PatchAction::NewCommit(message) => {
-                let message = terminal_safe(message.as_bytes());
+                // Cut so the question never grows past a small screen.
+                let message = elide_right(&terminal_safe(message.as_bytes()), MESSAGE_SHOWN);
                 format!("Take {what} out of {source} into a new commit after it, \"{message}\"?")
             }
         };
+        // The answer keys first, so a screen too small for the whole box
+        // still shows how to answer.
         Some(format!(
-            "{question}\nThe commits from there up are rewritten. If any step fails, \
-             everything is put back. (y/n)"
+            "{question} (y/n)\nThe commits from there up are rewritten. If any step \
+             fails, everything is put back."
         ))
     }
 }

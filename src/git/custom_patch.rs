@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use super::commit_files::CommitId;
-use super::diff::{DiffOptions, commit_patch_command, run_diff};
+use super::diff::{DiffOptions, commit_patch_command, run_diff, terminal_safe};
 use super::patch::{self, Direction, PatchSelection};
 use super::rebase_plan::{RebasePlan, TodoAction};
 use super::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
@@ -129,18 +129,31 @@ pub fn build(runner: &dyn GitRunner, picks: &CustomPatch) -> Result<Vec<u8>, Str
             super::diff::DiffSide::Index,
         )?;
         let file = patch::parse(&stdout).map_err(|e| format!("{}: {e}", path.display()))?;
-        let lines: BTreeSet<_> = match pick {
-            FilePick::Whole => file
-                .hunks
-                .iter()
-                .flat_map(patch::Hunk::line_ids)
-                .flatten()
-                .collect(),
+        let all: BTreeSet<_> = file
+            .hunks
+            .iter()
+            .flat_map(patch::Hunk::line_ids)
+            .flatten()
+            .collect();
+        let lines = match pick {
+            FilePick::Whole => all.clone(),
             FilePick::Lines(lines) => lines.clone(),
         };
-        let built = patch::build(&file, &PatchSelection::Lines(lines), Direction::Stage)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        out.extend(built);
+        // Built either way, so a file the engine cannot take is refused.
+        let built = patch::build(
+            &file,
+            &PatchSelection::Lines(lines.clone()),
+            Direction::Stage,
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        // The whole change goes as git wrote it, with its `new file`,
+        // `deleted file` and mode lines, which `git apply` needs to add or
+        // delete the file and the engine leaves out.
+        if lines == all {
+            out.extend(stdout);
+        } else {
+            out.extend(built);
+        }
     }
     Ok(out)
 }
@@ -166,6 +179,9 @@ pub fn run(
     let head = run_checked(runner, &head_command())?;
     if String::from_utf8_lossy(&head).trim() != rewrite.orig_head.as_str() {
         return Err(HEAD_MOVED.into());
+    }
+    if !worktree_clean(runner)? {
+        return Err(DIRTY.into());
     }
     let patch = build(runner, rewrite.picks)?;
     let work = stop_work(rewrite.plan, rewrite.action, &rewrite.picks.source.oid);
@@ -197,10 +213,52 @@ pub fn run(
     Ok(())
 }
 
+/// Whether no tracked file differs from `HEAD`, staged or not, read now:
+/// the file list the question was asked with may be out of date. The
+/// refresh first, so a file only touched is not taken as changed.
+fn worktree_clean(runner: &dyn GitRunner) -> Result<bool, String> {
+    // Its exit says some entries needed refreshing, which is no error.
+    let _ = runner.run(&refresh_command());
+    let output = runner.run(&dirty_command()).map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(true);
+    }
+    // `--quiet` exits 1 on a difference and says nothing; anything on
+    // stderr is a real failure.
+    if output.stderr.is_empty() {
+        Ok(false)
+    } else {
+        Err(terminal_safe(&output.stderr))
+    }
+}
+
+/// `git update-index -q --refresh`: the index's stat data brought up to
+/// date, so the next compare reads content.
+pub fn refresh_command() -> GitCommand {
+    GitCommand::new("update-index")
+        .arg("-q")
+        .arg("--refresh")
+        .env("LC_ALL", "C")
+}
+
+/// `git diff-index --quiet HEAD --`: exit 1 when a tracked file differs
+/// from `HEAD` in the index or the worktree.
+pub fn dirty_command() -> GitCommand {
+    GitCommand::new("diff-index")
+        .arg("--quiet")
+        .arg("HEAD")
+        .arg("--")
+        .env("LC_ALL", "C")
+}
+
+/// Why nothing ran: a tracked file changed since the question was asked.
+pub const DIRTY: &str = "Commit or stash your changes first; nothing was changed";
+
 /// Why nothing ran: `HEAD` is not where it was when the user was asked.
 pub const HEAD_MOVED: &str = "HEAD moved since the question was asked; nothing was changed";
 const NOT_STOPPED: &str = "The rebase did not stop where it was planned to";
-const EXTRA_STOP: &str = "The rebase stopped where it was not planned to";
+const EXTRA_STOP: &str = "The rebase stopped where it was not planned to, such as on a commit \
+the move left empty; it was aborted";
 
 fn do_work(
     runner: &dyn GitRunner,
@@ -240,18 +298,28 @@ fn rebasing(runner: &dyn GitRunner) -> Result<bool, String> {
 /// Put everything back after `error`: abort a rebase in progress, else
 /// reset to `orig`. The message says if that failed too.
 fn fail_closed(runner: &dyn GitRunner, orig: &CommitId, error: String) -> String {
+    let mut reset = false;
     let undo = match rebasing(runner) {
         Ok(true) => run_checked(runner, &rebase_command("--abort")).map(|_| ()),
         Ok(false) => {
             let head = run_checked(runner, &head_command());
             match head {
                 Ok(head) if String::from_utf8_lossy(&head).trim() == orig.as_str() => Ok(()),
-                _ => run_checked(runner, &reset_command(orig)).map(|_| ()),
+                _ => {
+                    reset = true;
+                    run_checked(runner, &reset_command(orig)).map(|_| ())
+                }
             }
         }
         Err(e) => Err(e),
     };
     match undo {
+        // A finished rebase was reset: only the current branch goes back.
+        Ok(()) if reset => format!(
+            "{error}\nThe branch was reset to {}; other branches the rebase moved \
+             with --update-refs may have stayed moved.",
+            orig.as_str()
+        ),
         Ok(()) => error,
         Err(undo) => format!(
             "{error}\nPutting things back failed too: {undo}\nThe branch was at {}.",
@@ -468,6 +536,8 @@ mod tests {
                 &["rev-parse", "-q", "--verify", "HEAD"],
                 ok(head.as_bytes()),
             )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], ok(b""))
             .expect(&strs(&diff), ok(DIFF))
             .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
             .expect(
@@ -543,6 +613,8 @@ mod tests {
                 &["rev-parse", "-q", "--verify", "HEAD"],
                 ok(head.as_bytes()),
             )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], ok(b""))
             .expect(&strs(&diff), ok(DIFF))
             .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
             .expect(
@@ -559,6 +631,87 @@ mod tests {
             Err("error: patch failed: a.txt:1".into())
         );
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_rebase_that_finished_without_its_stop_is_reset_and_says_other_branches_may_move() {
+        let tmp = TempDir::new("custom-patch-reset");
+        let git_dir = format!("{}\n", tmp.path().display());
+        let plan = plan(TodoAction::Edit, TodoAction::Pick);
+        let diff = argv(&diff_command(&picks(), &RepoPath::from("a.txt")));
+        let rebase = rebase_argv(&plan);
+        let head = |c| format!("{}\n", id(c).as_str());
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "-q", "--verify", "HEAD"],
+                ok(head('c').as_bytes()),
+            )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], ok(b""))
+            .expect(&strs(&diff), ok(DIFF))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
+            .expect(
+                &["rev-parse", "-q", "--verify", "HEAD"],
+                ok(head('e').as_bytes()),
+            )
+            .expect(&["reset", "-q", "--keep", id('c').as_str(), "--"], ok(b""))
+            .expect_attached(&strs(&rebase), true);
+
+        let error = run_with(&runner, &plan, &PatchAction::Remove).unwrap_err();
+
+        assert!(error.starts_with(NOT_STOPPED), "{error}");
+        assert!(error.contains("other branches"), "{error}");
+        runner.assert_done();
+    }
+
+    #[test]
+    fn nothing_runs_when_a_tracked_file_changed_since_the_question() {
+        let plan = plan(TodoAction::Edit, TodoAction::Pick);
+        let dirty = FakeRunner::new()
+            .expect(
+                &["rev-parse", "-q", "--verify", "HEAD"],
+                ok(format!("{}\n", id('c').as_str()).as_bytes()),
+            )
+            .expect(&["update-index", "-q", "--refresh"], fail(""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], fail(""));
+        assert_eq!(
+            run_with(&dirty, &plan, &PatchAction::Remove),
+            Err(DIRTY.into())
+        );
+        dirty.assert_done();
+    }
+
+    #[test]
+    fn the_worktree_check_reads_real_changes_and_not_a_touched_file() {
+        use crate::git::fake::git;
+        let tmp = TempDir::new("custom-patch-dirty");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        git(
+            dir,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "a",
+            ],
+        );
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
+        // Rewritten with the same bytes: only its stat data changed.
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        assert_eq!(worktree_clean(&runner), Ok(true));
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        assert_eq!(worktree_clean(&runner), Ok(false));
+        git(dir, &["add", "a.txt"]);
+        assert_eq!(worktree_clean(&runner), Ok(false));
     }
 
     #[test]
@@ -581,6 +734,8 @@ mod tests {
                 &["rev-parse", "-q", "--verify", "HEAD"],
                 ok(format!("{}\n", id('c').as_str()).as_bytes()),
             )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], ok(b""))
             .expect(&strs(&diff), ok(binary));
         let error = run_with(&refused, &plan, &PatchAction::Remove).unwrap_err();
         assert!(error.contains("Binary file"), "{error}");

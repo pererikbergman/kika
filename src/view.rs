@@ -1549,7 +1549,7 @@ fn render_hunk_view(
                     if let Some(ids) = &picked_ids {
                         let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
                         let mark = if held { "●" } else { " " };
-                        spans.push(Span::styled(mark, Style::new().fg(Color::Magenta)));
+                        spans.push(Span::styled(mark, commits_view::PATCH_MARK));
                     }
                     spans.extend(marked_spans(text, style, &search_marks(view, at)));
                     let line = Line::from(spans);
@@ -3915,6 +3915,47 @@ mod tests {
         }
         let rows = draw(&state, 100, 20);
         assert!(!contains(&rows, "●"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_patch_mark_keeps_wide_lines_aligned_at_any_width() {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::commit_files::{CommitId, CommitRange};
+        use crate::git::patch::LineId;
+        let range = CommitRange {
+            oid: CommitId::parse("b0b").unwrap(),
+            parent: CommitId::parse("a0a"),
+        };
+        let wide = "漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字 👩\u{200D}💻 end";
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{wide}\n");
+        let mut state = loaded(vec![file("a.rs")]);
+        let mut view = HunkView::for_commit("a.rs".into(), range.clone());
+        view.loaded(crate::git::patch::parse(diff.as_bytes()).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        let mut patch = CustomPatch::new(range, "b0b".into());
+        patch.toggle_lines(&"a.rs".into(), &[LineId::added(1)].into());
+        state.custom_patch = Some(patch);
+
+        for width in [100, 50, 30, 16] {
+            let buffer = draw_buffer(&state, width, 12);
+            let rows = buffer_rows(&buffer);
+            let y = rows
+                .iter()
+                .position(|r| r.contains("●+"))
+                .unwrap_or_else(|| {
+                    panic!("{width}: {rows:#?}");
+                });
+            // Clipped to the pane, the right border stays where it is.
+            assert_eq!(
+                buffer[(width - 1, y as u16)].symbol(),
+                "┃",
+                "{width}: {rows:#?}"
+            );
+            assert!(contains(&rows, " -x"), "{width}: {rows:#?}");
+        }
+        let rows = draw(&state, 8, 4);
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]

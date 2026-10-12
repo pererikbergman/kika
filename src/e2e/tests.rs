@@ -2763,3 +2763,104 @@ async fn a_custom_patch_that_cannot_go_to_the_index_changes_nothing() {
     assert!(clean(&repo));
     assert!(app.state().custom_patch.is_some());
 }
+
+#[cfg(unix)]
+fn rev(repo: &TestRepo, what: &str) -> String {
+    String::from_utf8(repo.git(["rev-parse", what]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// With `--update-refs`, a branch on the rewritten source moves to its
+/// new copy; when the rewrite fails, it stays where it was.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_branch_follows_a_rewrite_and_stays_put_when_one_fails() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    repo.git(["branch", "stack", "HEAD~1"]);
+    app.press(KeyCode::Char('r')).await;
+    let (head, stack) = (repo.head(), rev(&repo, "stack"));
+    pick_line_two_of_b(&mut app, 3).await;
+
+    // Into `X`, before the file existed: it fails and changes nothing.
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+    app.assert_screen_contains("Could not apply the custom patch");
+    assert_eq!(repo.head(), head);
+    assert_eq!(rev(&repo, "stack"), stack);
+    app.press(KeyCode::Esc).await;
+
+    // Out of `B` altogether: the branch moves with it.
+    patch_menu(&mut app, 0).await;
+    confirm_patch(&mut app).await;
+    assert_no_failure(&mut app);
+    assert_ne!(rev(&repo, "stack"), stack);
+    assert_eq!(rev(&repo, "stack"), rev(&repo, "HEAD~1"));
+    assert_eq!(show(&repo, "stack:f.txt"), numbered(&[(15, "changed")]));
+    assert!(clean(&repo));
+}
+
+/// `init`, `A` with `old.txt`, `B` adding `new.txt` and deleting
+/// `old.txt`, `C` (tip) adding `g.txt`; both of `B`'s files picked whole.
+#[cfg(unix)]
+async fn added_and_deleted_picked() -> (TestRepo, Harness) {
+    let repo = on_main()
+        .write("old.txt", "old\nfile\n")
+        .commit("A")
+        .write("new.txt", "brand\nnew\nstuff\n");
+    repo.remove("old.txt");
+    let repo = repo.commit("B").write("g.txt", "g\n").commit("C");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char(' ')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    app.assert_screen_contains("● A new.txt");
+    app.assert_screen_contains("● D old.txt");
+    app.press(KeyCode::Esc).await;
+    app.press(KeyCode::Char('k')).await;
+    (repo, app)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_and_a_deleted_file_picked_whole_come_out_of_their_commit() {
+    let (repo, mut app) = added_and_deleted_picked().await;
+
+    patch_menu(&mut app, 0).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nB\nA\ninit\n");
+    assert!(commit_diff(&repo, "HEAD~1").is_empty(), "B is empty now");
+    assert_eq!(show(&repo, "HEAD:old.txt"), "old\nfile\n");
+    assert!(!repo.try_git(["cat-file", "-e", "HEAD:new.txt"]));
+    assert!(repo.exists("old.txt") && !repo.exists("new.txt"));
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_and_a_deleted_file_picked_whole_split_off_into_a_new_commit() {
+    let (repo, mut app) = added_and_deleted_picked().await;
+    let tip = tree(&repo, "HEAD");
+
+    patch_menu(&mut app, 3).await;
+    app.type_text("Files").await;
+    app.press(KeyCode::Enter).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nFiles\nB\nA\ninit\n");
+    let split = commit_diff(&repo, "HEAD~1");
+    assert!(split.contains("new file mode"), "{split}");
+    assert!(split.contains("deleted file mode"), "{split}");
+    assert_eq!(tree(&repo, "HEAD"), tip);
+    assert!(clean(&repo));
+}

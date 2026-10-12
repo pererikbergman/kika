@@ -108,13 +108,16 @@ pub(crate) fn render_commits_panel(
             last.to_string(),
         ],
     };
-    // The patch is named first, and goes before anything else does.
+    // The patch is named first; on a narrow panel its file count goes,
+    // then the panel's own words, so its commit stays named longest.
     if let Some(patch) = patch {
         let summary = patch.summary();
-        let with: Vec<String> = candidates
+        let mut with: Vec<String> = candidates
             .iter()
             .map(|text| format!("{text} · {summary}"))
             .collect();
+        with.push(format!("{last} · patch {}", patch.short_oid));
+        with.push(format!("patch {}", patch.short_oid));
         candidates.splice(0..0, with);
     }
     let title = candidates
@@ -223,6 +226,10 @@ fn render_commit_files(
     frame.render_widget(paragraph.block(block), area);
 }
 
+/// What the custom patch holds, in the file list and the hunk view. The
+/// symbol carries the meaning; the colour only adds to it.
+pub(crate) const PATCH_MARK: Style = Style::new().fg(Color::Magenta);
+
 /// A commit file's row behind a mark of what the custom patch holds of
 /// it: `●` the whole file, `◐` some lines, a blank nothing.
 fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Line<'static> {
@@ -232,10 +239,8 @@ fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Lin
         None => " ",
     };
     let mut line = commit_file_line(file, width.saturating_sub(2));
-    line.spans.insert(
-        0,
-        Span::styled(format!("{mark} "), Style::new().fg(Color::Magenta)),
-    );
+    line.spans
+        .insert(0, Span::styled(format!("{mark} "), PATCH_MARK));
     line
 }
 
@@ -1363,6 +1368,36 @@ mod tests {
         );
         state.custom_patch = None;
         assert!(!title(&state).contains("patch"), "{}", title(&state));
+    }
+
+    #[test]
+    fn a_narrow_commits_title_still_names_the_patch_or_the_panel() {
+        let mut state = opened(Some(Ok(five_files())));
+        with_patch(&mut state);
+        state.commits.open = None;
+        for width in [120, 60, 40, 30, 24, 15] {
+            let rows = buffer_rows(&draw(&state, width, 20));
+            let title = rows
+                .iter()
+                .find(|r| r.contains("[4]"))
+                .unwrap_or_else(|| panic!("{width}: {rows:#?}"));
+            // Too narrow for the patch, the title falls back as before.
+            let named = ["patch a000000", "Commits", "Log"]
+                .iter()
+                .any(|name| title.contains(name));
+            // Below that, the existing elision keeps at least the number.
+            assert!(named || width < 24, "{width}: {title}");
+            if width >= 40 {
+                assert!(title.contains("patch a000000"), "{width}: {title}");
+            }
+        }
+        // The open commit's files too, down to a tiny screen.
+        let mut state = opened(Some(Ok(five_files())));
+        with_patch(&mut state);
+        for width in [40, 24, 12] {
+            let rows = buffer_rows(&draw(&state, width, 10));
+            assert_eq!(rows.len(), 10);
+        }
     }
 
     #[test]
