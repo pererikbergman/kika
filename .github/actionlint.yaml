@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # Label of the owner's self-hosted macOS runner (see .github/workflows/ci.yml).
+  labels:
+    - mac
