@@ -4,6 +4,7 @@ use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
 use crate::conflict_view;
+use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
@@ -76,12 +77,17 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                     .remote
                     .as_ref()
                     .and_then(|run| Some((run.branch.as_ref()?, run.spinner())));
+                let diff = match &state.diff_mark {
+                    Some(DiffMark::Branch(name)) => Some(name),
+                    _ => None,
+                };
+                let marks = branches_view::RowMarks { spinner, diff };
                 branches_view::render_panel(
                     &state.branches,
                     &state.forge,
                     &look,
                     expanded,
-                    spinner,
+                    marks,
                     frame,
                     area,
                 )
@@ -215,6 +221,11 @@ impl PanelLook {
             return elide_right(&key, self.title_width);
         }
         format!("{key} {}{}", elide_right(text, room), self.mode)
+    }
+
+    /// Columns of title between the corners.
+    pub(crate) fn title_room(&self) -> usize {
+        self.title_width
     }
 
     /// Whether ` [n] <text><mode> ` fits the border whole.
@@ -897,8 +908,9 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         let before: String = input.line.text.chars().take(input.line.col).collect();
         let after: String = input.line.text.chars().skip(input.line.col).collect();
         let (before, after) = (sanitize(before.as_bytes()), sanitize(after.as_bytes()));
-        // ` /`, then a cell for the cursor after the text.
-        let text_room = room.saturating_sub(3).max(1);
+        let prompt = input.target.prompt();
+        // ` ` and the prompt, then a cell for the cursor after the text.
+        let text_room = room.saturating_sub(width_of(prompt) + 2).max(1);
         let before = if width_of(&before) + width_of(&after) <= text_room {
             before
         } else {
@@ -906,8 +918,8 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         };
         let after = elide_right(&after, text_room.saturating_sub(width_of(&before)));
         let used = usize::from(width).saturating_sub(room);
-        cursor = Some(used + 2 + width_of(&before));
-        let typed = format!(" /{before}{after}");
+        cursor = Some(used + 1 + width_of(prompt) + width_of(&before));
+        let typed = format!(" {prompt}{before}{after}");
         room = room.saturating_sub(width_of(&typed) + 1);
         spans.push(Span::styled(
             typed,
@@ -1302,6 +1314,87 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
     ));
     let room = look.title_width.saturating_sub(fixed).max(1);
     format!("{name} · /{} {counts}", elide_right(&query, room))
+}
+
+/// `<name> · path: <path> · author: <author>`, naming the parts set, each
+/// made safe, cut so the title fits the border with `reserve` columns to
+/// spare. As room runs out, `name` goes, then the parts share what is left
+/// (the path loses its start, so the file name stays, the author its end),
+/// then the labels go, and last only the path's end is left. The result
+/// always fits, so [`PanelLook::title`] never cuts the end it kept.
+pub(crate) fn query_title(
+    look: &PanelLook,
+    name: &str,
+    path: Option<&str>,
+    author: Option<&str>,
+    reserve: usize,
+) -> String {
+    let author = author.map(|a| sanitize(a.as_bytes()));
+    let (path_label, author_label) = ("path: ", "author: ");
+    let join = |labels: bool, path: Option<String>, author: Option<String>| {
+        let parts: Vec<String> = [
+            path.map(|p| {
+                if labels {
+                    format!("{path_label}{p}")
+                } else {
+                    p
+                }
+            }),
+            author.map(|a| {
+                if labels {
+                    format!("{author_label}{a}")
+                } else {
+                    a
+                }
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        parts.join(" · ")
+    };
+    let whole = format!(
+        "{name} · {}",
+        join(true, path.map(str::to_string), author.clone())
+    );
+    if look.fits(&format!("{whole}{}", " ".repeat(reserve))) {
+        return whole;
+    }
+    // Measured without the padding `title` drops first when it must.
+    let room = |labels: bool, reserve: usize| {
+        let empty = join(
+            labels,
+            path.map(|_| String::new()),
+            author.as_ref().map(|_| String::new()),
+        );
+        let fixed = width_of(&format!("[{}] {empty}{}", look.number, look.mode));
+        look.title_width.saturating_sub(fixed + reserve)
+    };
+    let shares = usize::from(path.is_some()) + usize::from(author.is_some());
+    let cut = |labels: bool, each: usize| {
+        join(
+            labels,
+            path.map(|p| elide_left(p, each)),
+            author.as_deref().map(|a| elide_right(a, each)),
+        )
+    };
+    // Each part keeps `…` and a few columns, or the tier gives way.
+    const PART_MIN: usize = 4;
+    let each = room(true, reserve) / shares.max(1);
+    if each >= PART_MIN {
+        return cut(true, each);
+    }
+    let each = room(false, 0) / shares.max(1);
+    if each >= PART_MIN {
+        return cut(false, each);
+    }
+    let last = width_of(&format!("[{}] {}", look.number, look.mode));
+    let room = look.title_width.saturating_sub(last);
+    match (path, &author) {
+        (Some(path), _) => elide_left(path, room),
+        (None, Some(author)) => elide_right(author, room),
+        (None, None) => String::new(),
+    }
 }
 
 /// Row `i` drawn as the cursor or a range row: both reversed, and within a
@@ -2330,7 +2423,7 @@ mod tests {
         state.selected = Some(0);
         state.help_open = true;
         // Tall enough for every Files key; a shorter screen clips the list.
-        let rows = draw(&state, 80, 50);
+        let rows = draw(&state, 80, 54);
         assert!(contains(&rows, " Keys: Files "), "{rows:#?}");
         let row = |needle: &str| {
             rows.iter()
@@ -2428,7 +2521,7 @@ mod tests {
     fn disabled_help_rows_are_dimmed() {
         let mut state = loaded(vec![]);
         state.help_open = true;
-        let buffer = draw_buffer(&state, 80, 50);
+        let buffer = draw_buffer(&state, 80, 54);
         let (x, y) = find(&buffer, "Stage the selected file");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
         let (x, y) = find(&buffer, "Quit Kika");
@@ -4987,6 +5080,21 @@ mod tests {
         assert!(rows[19].starts_with(" /a<U+202E>b"), "{rows:#?}");
         assert!(rows[19].contains("q and ? are typed"), "{rows:#?}");
         assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_bar_names_the_log_query_being_typed() {
+        let mut state = loaded(vec![file("a.rs")]);
+        typing(
+            &mut state,
+            crate::list_filter::InputTarget::LogAuthor,
+            "a\u{202E}b",
+        );
+        let rows = draw(&state, 100, 20);
+        assert!(rows[19].starts_with(" author: a<U+202E>b"), "{rows:#?}");
+        typing(&mut state, crate::list_filter::InputTarget::LogPath, "src");
+        let rows = draw(&state, 100, 20);
+        assert!(rows[19].starts_with(" path: src"), "{rows:#?}");
     }
 
     #[test]
