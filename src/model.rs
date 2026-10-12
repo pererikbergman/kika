@@ -1332,7 +1332,7 @@ impl AppState {
             .join("\n");
         if self.config_error.as_deref() != Some(text.as_str()) {
             let hint = if errors.iter().all(|e| e.dropped_binding) {
-                "Kika dropped these key changes and used the rest of the file. \
+                "Kika dropped these entries and used the rest of the file. \
                  Fix it, then come back to Kika to reload it."
             } else {
                 "Kika ignored this file. Fix it, then come back to Kika to reload it."
@@ -11935,7 +11935,7 @@ mod tests {
         };
         let only_dropped = hint(vec![dropped("a"), dropped("b")]);
         assert!(
-            only_dropped.contains("used the rest of the file"),
+            only_dropped.starts_with("Kika dropped these entries and used the rest of the file."),
             "{only_dropped}"
         );
         assert!(!only_dropped.contains("ignored"), "{only_dropped}");
@@ -12508,7 +12508,9 @@ mod tests {
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
-        let keymap = Keymap::default().with_commands(tables).unwrap();
+        let (keymap, _) = Keymap::default()
+            .with_commands(tables, &Default::default())
+            .unwrap();
         let repo = state.repo.clone();
         state.update(AppIntent::ConfigLoaded {
             repo,

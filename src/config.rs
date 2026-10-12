@@ -45,7 +45,11 @@
 //! file, not a symlink. Either file must be a regular file of at most
 //! 64 KiB. A `[keys]` entry that binds a key twice in one scope is dropped
 //! alone: its binding keeps the keys of the layer below, and the rest of the
-//! file applies. A file with any other error is ignored as a whole, and the
+//! file applies. A global `[[commands]]` entry on a key the same file's
+//! `[keys]` gives a binding of its scope is dropped alone too, whatever its
+//! other keys: the binding keeps the key. The commands left must pass every
+//! other check. A file with any other error, a command left clashing with a
+//! default key or another command included, is ignored as a whole, and the
 //! layer below it applies.
 //!
 //! The user's guide to both files, with every binding id, is
@@ -115,7 +119,7 @@ fn global_path(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) 
 pub struct ConfigError {
     pub path: String,
     pub message: String,
-    /// Only one key change was dropped and the rest of the file applied;
+    /// Only one key change or command was dropped and the rest of the file applied;
     /// `false` means the whole file was ignored.
     pub dropped_binding: bool,
 }
@@ -310,8 +314,8 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     loaded
 }
 
-/// Record each of `messages`, a `[keys]` entry of the file at `path`
-/// dropped while the rest of the file applied.
+/// Record each of `messages`, a `[keys]` entry or a command of the file
+/// at `path` dropped while the rest of the file applied.
 fn dropped(path: &Option<PathBuf>, messages: Vec<String>, errors: &mut Vec<ConfigError>) {
     let Some(path) = path.as_deref() else {
         return;
@@ -396,8 +400,9 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
 /// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
-    let (keymap, dropped) = Keymap::build(keymap, &file.keys, Trust::Global)?;
-    let keymap = keymap.with_commands(&file.commands)?;
+    let (keymap, mut dropped, kept) = Keymap::build_layer(keymap, &file.keys, Trust::Global)?;
+    let (keymap, commands_dropped) = keymap.with_commands(&file.commands, &kept)?;
+    dropped.extend(commands_dropped);
     let seconds = |name: &str, value: Option<u64>| match value {
         // A zero interval would poll without pause.
         Some(0) => Err(format!("watch.{name} must be at least 1 second")),
@@ -983,22 +988,171 @@ output = "none"
         assert!(typo.contains("unknown field `shell`"), "{typo}");
     }
 
+    /// The global `[keys]` lines that move `files.stage` onto `ctrl-t`,
+    /// `COPY_COMMAND`'s key.
+    const STAGE_ON_CTRL_T: &str =
+        "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n";
+
+    /// `STAGE_ON_CTRL_T` without moving `files.commit` off `c`.
+    const ONLY_STAGE_ON_CTRL_T: &str = "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n";
+
+    const COPY_DROPPED: &str = r#"key "ctrl-t" is bound to both "files.stage" and command 1 ("Copy the file to…"); command 1 was dropped"#;
+
     #[test]
-    fn a_global_binding_moved_onto_its_own_command_key_ignores_the_file() {
+    fn a_global_command_on_a_key_its_own_file_moved_a_binding_onto_is_dropped_alone() {
         let files = Files::new("global-onto-command");
         files.global(&format!(
-            "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n{COPY_COMMAND}"
+            "{STAGE_ON_CTRL_T}[watch]\nfetch = 300\n{COPY_COMMAND}"
         ));
         let loaded = files.load();
         assert_eq!(
             loaded.errors,
             [ConfigError {
                 path: files.dir.join("config.toml").display().to_string(),
-                message: r#"key "ctrl-t" is bound to both "files.stage" and command 1"#.into(),
+                message: COPY_DROPPED.into(),
+                dropped_binding: true,
+            }]
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("C")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        assert_eq!(loaded.keymap.commands, []);
+    }
+
+    #[test]
+    fn a_global_command_on_a_free_key_survives_its_neighbours_drop() {
+        let files = Files::new("global-onto-command-free");
+        files.global(&format!(
+            "{STAGE_ON_CTRL_T}{COPY_COMMAND}{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, [COPY_DROPPED]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+        // It still runs, and the help menu lists it.
+        use crate::keymap::{KeyPress, KeyScope, Resolution, available_commands, resolve};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let state = crate::model::AppState::new(crate::model::Context::Workspace);
+        let ctrl_y = KeyPress::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            resolve(registry(), &loaded.keymap, KeyScope::Files, &state, ctrl_y),
+            Resolution::Command(0)
+        ));
+        let listed = available_commands(&loaded.keymap, KeyScope::Files);
+        assert_eq!(listed, [&loaded.keymap.commands[0]]);
+    }
+
+    #[test]
+    fn a_repository_file_applies_over_a_global_file_with_a_dropped_command() {
+        let files = Files::new("global-onto-command-repo");
+        files
+            .global(&format!(
+                "{STAGE_ON_CTRL_T}{COPY_COMMAND}{}",
+                COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+            ))
+            .repo("[keys]\n\"files.commit\" = [\"K\"]\n");
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, [COPY_DROPPED]);
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("K")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+    }
+
+    #[test]
+    fn every_global_command_on_a_moved_key_is_dropped_with_its_own_message() {
+        let files = Files::new("global-onto-commands");
+        files.global(&format!("{STAGE_ON_CTRL_T}{COPY_COMMAND}{COPY_COMMAND}"));
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                COPY_DROPPED,
+                &COPY_DROPPED.replace("command 1", "command 2"),
+            ]
+        );
+        assert!(loaded.errors.iter().all(|e| e.dropped_binding));
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(loaded.keymap.commands, []);
+    }
+
+    #[test]
+    fn a_later_clash_after_a_drop_names_the_command_by_its_place_in_the_file() {
+        let files = Files::new("global-onto-command-numbers");
+        files.global(&format!(
+            "{ONLY_STAGE_ON_CTRL_T}{COPY_COMMAND}{}{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y"),
+            COPY_COMMAND.replace("ctrl-t", "c")
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: r#"key "c" is bound to both "files.commit" and command 3"#.into(),
                 dropped_binding: false,
             }]
         );
         assert_eq!(loaded.keymap, Keymap::default());
+    }
+
+    #[test]
+    fn a_command_on_a_moved_key_and_a_default_key_is_dropped_and_the_file_loads() {
+        let files = Files::new("global-onto-command-and-default");
+        files.global(&format!(
+            "{ONLY_STAGE_ON_CTRL_T}[watch]\nfetch = 300\n{}{}",
+            COPY_COMMAND.replace(r#"["ctrl-t"]"#, r#"["ctrl-t", "c"]"#),
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: concat!(
+                    r#"key "ctrl-t" is bound to both "files.stage" and command 1, "#,
+                    r#"and key "c" is bound to both "files.commit" and command 1 "#,
+                    r#"("Copy the file to…"); command 1 was dropped"#
+                )
+                .into(),
+                dropped_binding: true,
+            }]
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+    }
+
+    #[test]
+    fn a_droppable_command_does_not_save_a_file_with_another_error() {
+        let err = |extra_keys: &str, extra: &str| {
+            global(&format!(
+                "{ONLY_STAGE_ON_CTRL_T}{extra_keys}{extra}{COPY_COMMAND}"
+            ))
+            .unwrap_err()
+        };
+        assert_eq!(
+            err("", &COPY_COMMAND.replace("ctrl-t", "c")),
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        assert_eq!(
+            err("", &COPY_COMMAND.replace("ctrl-t", "q")),
+            r#"command 1: key "q" would hide "global.quit""#
+        );
+        assert_eq!(
+            err("\"global.quit\" = []\n", ""),
+            r#""global.quit" needs at least one key"#
+        );
+        assert_eq!(
+            err("\"files.nope\" = [\"x\"]\n", ""),
+            r#"unknown binding "files.nope""#
+        );
     }
 
     #[test]
