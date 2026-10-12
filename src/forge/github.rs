@@ -40,7 +40,7 @@ const ACCEPT: &str = "Accept: application/vnd.github+json";
 /// The most of GitHub's refusal shown, in characters.
 const MAX_REFUSAL: usize = 400;
 /// The longest page URL taken from an answer.
-const MAX_URL: usize = 2048;
+pub(super) const MAX_URL: usize = 2048;
 
 /// Set on every call: no prompt, no pager, no colour, no update check.
 pub const GH_ENV: [(&str, &str); 5] = [
@@ -379,7 +379,7 @@ impl Gh<'_> {
 
     /// Run one call, shown in the Command log under its own id, and read
     /// its answer with `read`.
-    fn call<T>(
+    pub(super) fn call<T>(
         &self,
         kind: GhCall,
         read: impl FnOnce(Answer) -> T,
@@ -391,7 +391,7 @@ impl Gh<'_> {
 
     /// Run one call, shown in the Command log under its own id, and read
     /// what `gh` left with `read`.
-    fn run_logged<T>(
+    pub(super) fn run_logged<T>(
         &self,
         kind: GhCall,
         read: impl FnOnce(io::Result<GhOutput>) -> T,

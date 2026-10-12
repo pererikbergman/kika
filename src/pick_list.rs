@@ -9,6 +9,8 @@ pub enum PickPurpose {
     TargetRemote,
     /// The branch a new pull request merges into.
     BaseBranch,
+    /// The failing check whose page opens in the browser.
+    CheckDetails,
 }
 
 impl PickPurpose {
@@ -16,6 +18,7 @@ impl PickPurpose {
         match self {
             PickPurpose::TargetRemote => "Target remote",
             PickPurpose::BaseBranch => "Base branch",
+            PickPurpose::CheckDetails => "Check details",
         }
     }
 }

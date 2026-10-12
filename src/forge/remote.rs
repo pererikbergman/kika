@@ -81,7 +81,7 @@ fn host_ok(host: &str) -> bool {
 }
 
 /// One path segment of `[A-Za-z0-9._-]+`, not made of dots only.
-fn segment_ok(segment: &str) -> bool {
+pub(super) fn segment_ok(segment: &str) -> bool {
     !segment.is_empty()
         && segment
             .bytes()

@@ -595,6 +595,12 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.quit",
     "branches.pull_request",
     "pick_list.quit",
+    "pick_list.pick",
+    "workspace.review",
+    "review.open",
+    "review.refresh",
+    "review.open_check",
+    "review.back",
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
@@ -3113,6 +3119,113 @@ static REGISTRY: &[Binding] = &[
         description: "Show recent repositories, to switch to one",
         label: "recent",
         bar: false,
+        disabled: never,
+    },
+    // Free in the workspace, every panel and the global scope.
+    Binding {
+        id: "workspace.review",
+        keys: &[KeyPattern::any(KeyCode::Char('G'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::EnterReview,
+        description: "Review this repository's pull requests on GitHub",
+        label: "review",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Review,
+        intent: AppIntent::ReviewNext,
+        description: "Select the next pull request, or scroll the open one down",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Review,
+        intent: AppIntent::ReviewPrev,
+        description: "Select the previous pull request, or scroll the open one up",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.open",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenPr,
+        description: "Open the selected pull request",
+        label: "open",
+        bar: true,
+        disabled: crate::model::review::open_pr_disabled,
+    },
+    Binding {
+        id: "review.next_queue",
+        keys: &[KeyPattern::any(KeyCode::Tab)],
+        scope: KeyScope::Review,
+        intent: AppIntent::NextQueue,
+        description: "Show the next queue",
+        label: "queue",
+        bar: true,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.prev_queue",
+        keys: &[KeyPattern::any(KeyCode::BackTab)],
+        scope: KeyScope::Review,
+        intent: AppIntent::PrevQueue,
+        description: "Show the previous queue",
+        label: "",
+        bar: false,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the queue by number, title or author",
+        label: "filter",
+        bar: false,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.refresh",
+        keys: &[KeyPattern::exact(KeyCode::Char('r'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::RefreshReview,
+        description: "Ask GitHub again for the queues or the open pull request",
+        label: "refresh",
+        bar: true,
+        disabled: crate::model::review::refresh_review_disabled,
+    },
+    Binding {
+        id: "review.open_check",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenCheckDetails,
+        description: "Open a failing check's page in the browser",
+        label: "check page",
+        bar: true,
+        disabled: crate::model::review::open_check_disabled,
+    },
+    Binding {
+        id: "review.back",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Review,
+        intent: AppIntent::CloseReviewDetail,
+        description: "Back to the queue; in the queue, clear the filter, else back to the workspace",
+        label: "back",
+        bar: true,
         disabled: never,
     },
     Binding {
@@ -5996,7 +6109,7 @@ mod tests {
     #[test]
     fn review_has_no_workspace_keys_but_still_quits() {
         let review = |k| from(KeyScope::Review, k);
-        assert_eq!(review(plain('r')), None);
+        assert_eq!(review(plain('r')), Some(AppIntent::RefreshReview));
         assert_eq!(review(plain(' ')), None);
         assert_eq!(review(plain('a')), None);
         assert_eq!(review(plain('q')), Some(AppIntent::Quit));
@@ -8617,6 +8730,15 @@ mod tests {
                     | OpenMenu(MenuId::PullRequest)
                     | ConfirmCreatePullRequest
                     | OpenPatchMenu
+                    // Review mode reaches GitHub or starts the browser, and
+                    // a pick may open a check's page.
+                    | EnterReview
+                    | OpenPr
+                    | RefreshReview
+                    | OpenCheckDetails
+                    | PickSelect
+                    // Esc falls through to quit without it.
+                    | CloseReviewDetail
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

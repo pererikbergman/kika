@@ -8,9 +8,10 @@ use std::time::Duration;
 use crossterm::event::{self, DisableFocusChange, EnableFocusChange};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute};
-use ratatui::DefaultTerminal;
+use ratatui::backend::Backend;
 use ratatui::layout::Rect;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use ratatui::{DefaultTerminal, Terminal};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::MissedTickBehavior;
 
 use crate::config::Loaded;
@@ -66,7 +67,6 @@ pub async fn run(
     #[cfg(unix)]
     spawn_interrupt_listener(tx.clone())?;
     spawn_input_listener(tx.clone(), Arc::clone(&input));
-    let mut spinner = Spinner::default();
     state.watch.fetch_enabled = config.watch.fetch.is_some();
     state.commit_hooks_detached = config.commit_hooks_detached;
     // Read by `main` for this repository, so it always applies.
@@ -80,24 +80,78 @@ pub async fn run(
     let size = terminal.size()?;
     boot(&mut state, &runtime, size.width, size.height);
 
-    while !state.should_quit {
-        spinner.follow(state.remote.is_some(), &tx);
-        terminal.draw(|frame| view::render(&state, frame))?;
-        let Some(intent) = rx.recv().await else { break };
-        let mut jobs = VecDeque::from(dispatch(&mut state, &runtime, intent));
-        while let Some(job) = jobs.pop_front() {
+    event_loop(
+        &mut terminal,
+        &mut state,
+        &runtime,
+        &mut rx,
+        &tx,
+        |terminal, job| {
             // Editors run where git does, so relative names mean the same
             // to both, inside an entered submodule too.
             let workdir = runner.workdir();
-            let intent = suspend_and_run(&mut terminal, &input, job, runner.as_ref(), &workdir)?;
-            // Resizes while the terminal was away were never seen.
-            let size = terminal.size()?;
-            let resize = AppIntent::Resize {
-                width: size.width,
-                height: size.height,
-            };
-            jobs.extend(dispatch(&mut state, &runtime, resize));
-            jobs.extend(dispatch(&mut state, &runtime, intent));
+            suspend_and_run(terminal, &input, job, runner.as_ref(), &workdir)
+        },
+    )
+    .await
+}
+
+/// Most intents applied between two frames, so a flood of intents can't
+/// hold back the next frame for long.
+const MAX_BATCH: usize = 64;
+
+/// Wait for the next intent, then take the ones already queued behind it,
+/// up to `MAX_BATCH`, in arrival order. Never waits past the first, so a
+/// lone key press is drawn as soon as it is applied. `None` once every
+/// sender is gone.
+async fn next_batch(rx: &mut UnboundedReceiver<AppIntent>) -> Option<Vec<AppIntent>> {
+    let mut batch = vec![rx.recv().await?];
+    while batch.len() < MAX_BATCH {
+        let Ok(intent) = rx.try_recv() else { break };
+        batch.push(intent);
+    }
+    Some(batch)
+}
+
+/// The loop behind `run`: draw, then apply each intent that has arrived
+/// since, with its hand-offs, before drawing again. Intents that arrive
+/// together draw one frame. `hand_off` gives the terminal to a job and
+/// returns its intent; taking it as a parameter lets tests run the loop
+/// on a test backend.
+async fn event_loop<B: Backend>(
+    terminal: &mut Terminal<B>,
+    state: &mut AppState,
+    runtime: &Runtime,
+    rx: &mut UnboundedReceiver<AppIntent>,
+    tx: &UnboundedSender<AppIntent>,
+    mut hand_off: impl FnMut(&mut Terminal<B>, HandOff) -> io::Result<AppIntent>,
+) -> color_eyre::Result<()>
+where
+    B::Error: Send + Sync + 'static,
+{
+    let mut spinner = Spinner::default();
+    while !state.should_quit {
+        spinner.follow(state.remote.is_some(), tx);
+        terminal.draw(|frame| view::render(state, frame))?;
+        let Some(batch) = next_batch(rx).await else {
+            break;
+        };
+        for intent in batch {
+            if state.should_quit {
+                break;
+            }
+            let mut jobs = VecDeque::from(dispatch(state, runtime, intent));
+            while let Some(job) = jobs.pop_front() {
+                let intent = hand_off(terminal, job)?;
+                // Resizes while the terminal was away were never seen.
+                let size = terminal.size()?;
+                let resize = AppIntent::Resize {
+                    width: size.width,
+                    height: size.height,
+                };
+                jobs.extend(dispatch(state, runtime, resize));
+                jobs.extend(dispatch(state, runtime, intent));
+            }
         }
     }
     Ok(())
@@ -123,6 +177,8 @@ pub fn boot(state: &mut AppState, runtime: &Runtime, width: u16, height: u16) {
 /// for it to run.
 pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) -> Vec<HandOff> {
     let mut jobs = Vec::new();
+    // The model has no clock of its own; rate limits are judged by this.
+    state.now = crate::effect::unix_now();
     for effect in state.update(intent) {
         match effect {
             Effect::HandOff(job) => jobs.push(job),
@@ -426,23 +482,12 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_returns_hand_offs_instead_of_spawning_them() {
-        use crate::git::FileEntry;
         use crate::git::fake::FakeRunner;
-        use crate::git::status::EntryKind;
-        use crate::model::Context;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         // No expectations queued, so any git call would panic.
         let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
-        let mut state = AppState::new(Context::Workspace);
-        state.files = vec![FileEntry {
-            path: "a.rs".into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }];
-        state.selected = Some(0);
+        let mut state = state_with_a_selected_file();
 
         let jobs = dispatch(&mut state, &runtime, AppIntent::OpenInEditor);
 
@@ -455,6 +500,240 @@ mod tests {
         );
         drop(runtime);
         assert_eq!(rx.recv().await, None);
+    }
+
+    /// A state with one changed file selected, so `OpenInEditor` hands off.
+    fn state_with_a_selected_file() -> AppState {
+        use crate::git::FileEntry;
+        use crate::git::status::EntryKind;
+        use crate::model::Context;
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state
+    }
+
+    fn started(id: u64) -> AppIntent {
+        AppIntent::CommandLogged(crate::git::recording::CommandEvent::Started {
+            id,
+            line: format!("git command-{id}"),
+            attached: false,
+        })
+    }
+
+    fn logged_lines(state: &AppState) -> Vec<String> {
+        state
+            .command_log
+            .entries()
+            .iter()
+            .map(|entry| entry.line.clone())
+            .collect()
+    }
+
+    fn resize(width: u16) -> AppIntent {
+        AppIntent::Resize { width, height: 24 }
+    }
+
+    /// What a loop run left behind: the state, the frames drawn and the
+    /// hand-offs it ran, in order.
+    struct LoopRun {
+        state: AppState,
+        frames: usize,
+        hand_offs: Vec<HandOff>,
+    }
+
+    /// Run `event_loop` on a test terminal over `batches`, each sent as
+    /// soon as the loop waits for the next one. Hand-offs are recorded and
+    /// answer with `handed_back`.
+    async fn run_loop(
+        mut state: AppState,
+        batches: Vec<Vec<AppIntent>>,
+        handed_back: AppIntent,
+    ) -> LoopRun {
+        use crate::git::fake::FakeRunner;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // No expectations queued, so any git call would panic.
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx.clone());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut hand_offs = Vec::new();
+        let mut batches = VecDeque::from(batches);
+        // The first batch is queued before the loop starts; each later one
+        // goes in while the loop waits, so it arrives as its own batch.
+        for intent in batches.pop_front().unwrap_or_default() {
+            tx.send(intent).unwrap();
+        }
+        let feeder = {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                for batch in batches {
+                    // Let the loop drain what it has and wait again.
+                    tokio::task::yield_now().await;
+                    for intent in batch {
+                        let _ = tx.send(intent);
+                    }
+                }
+            })
+        };
+        event_loop(
+            &mut terminal,
+            &mut state,
+            &runtime,
+            &mut rx,
+            &tx,
+            |_, job| {
+                hand_offs.push(job);
+                Ok(handed_back.clone())
+            },
+        )
+        .await
+        .expect("the loop ends cleanly");
+        feeder.abort();
+        LoopRun {
+            state,
+            frames: terminal.get_frame().count(),
+            hand_offs,
+        }
+    }
+
+    fn plain_state() -> AppState {
+        AppState::new(crate::model::Context::Workspace)
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_queued_intents_draws_one_frame() {
+        let mut burst: Vec<_> = (0..5).map(started).collect();
+        burst.push(AppIntent::Quit);
+
+        let run = run_loop(plain_state(), vec![burst], AppIntent::Quit).await;
+
+        assert_eq!(run.frames, 1);
+        let expected: Vec<_> = (0..5).map(|id| format!("git command-{id}")).collect();
+        assert_eq!(logged_lines(&run.state), expected);
+    }
+
+    #[tokio::test]
+    async fn every_resize_in_a_burst_is_applied_in_order() {
+        let burst = vec![resize(10), resize(20), resize(30), AppIntent::Quit];
+
+        let run = run_loop(plain_state(), vec![burst], AppIntent::Quit).await;
+
+        assert_eq!(run.frames, 1);
+        assert_eq!(run.state.size, (30, 24));
+    }
+
+    #[tokio::test]
+    async fn a_single_key_draws_before_and_after_it() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let key = AppIntent::Key(crate::keymap::KeyPress::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        ));
+
+        let run = run_loop(
+            plain_state(),
+            vec![vec![key], vec![AppIntent::Quit]],
+            AppIntent::Quit,
+        )
+        .await;
+
+        assert!(run.state.help_open);
+        assert_eq!(run.frames, 2);
+    }
+
+    #[tokio::test]
+    async fn quit_stops_the_rest_of_its_batch() {
+        let batch = vec![started(1), AppIntent::Quit, started(2)];
+
+        let run = run_loop(plain_state(), vec![batch], AppIntent::Quit).await;
+
+        assert_eq!(logged_lines(&run.state), ["git command-1"]);
+        assert_eq!(run.frames, 1);
+    }
+
+    #[tokio::test]
+    async fn a_hand_off_and_what_it_returns_come_before_the_next_intent() {
+        // The hand-off's own `Resize` reads the 80-column test terminal; the
+        // queued one after it must win. The hand-off's answer must be
+        // logged before the queued command.
+        let batch = vec![
+            AppIntent::OpenInEditor,
+            resize(30),
+            started(2),
+            AppIntent::Quit,
+        ];
+
+        let run = run_loop(state_with_a_selected_file(), vec![batch], started(1)).await;
+
+        assert_eq!(
+            run.hand_offs,
+            [HandOff::OpenFile {
+                path: "a.rs".into(),
+                line: None
+            }]
+        );
+        assert_eq!(run.state.size, (30, 24));
+        assert_eq!(logged_lines(&run.state), ["git command-1", "git command-2"]);
+        assert_eq!(run.frames, 1);
+    }
+
+    #[tokio::test]
+    async fn next_batch_returns_every_queued_intent_in_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for id in 0..7 {
+            tx.send(started(id)).unwrap();
+        }
+
+        let batch = next_batch(&mut rx).await;
+
+        assert_eq!(batch, Some((0..7).map(started).collect()));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn next_batch_returns_a_single_intent_without_waiting() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(AppIntent::Quit).unwrap();
+
+        let before = tokio::time::Instant::now();
+        let batch = next_batch(&mut rx).await;
+
+        assert_eq!(tokio::time::Instant::now(), before);
+        assert_eq!(batch, Some(vec![AppIntent::Quit]));
+    }
+
+    #[tokio::test]
+    async fn next_batch_stops_at_the_cap_and_leaves_the_rest_queued() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let total = MAX_BATCH as u64 + 10;
+        for id in 0..total {
+            tx.send(started(id)).unwrap();
+        }
+
+        let first = next_batch(&mut rx).await;
+        let second = next_batch(&mut rx).await;
+
+        let cap = MAX_BATCH as u64;
+        assert_eq!(first, Some((0..cap).map(started).collect()));
+        assert_eq!(second, Some((cap..total).map(started).collect()));
+    }
+
+    #[tokio::test]
+    async fn next_batch_is_none_once_the_channel_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<AppIntent>();
+        drop(tx);
+
+        assert_eq!(next_batch(&mut rx).await, None);
     }
 
     /// The watch intents that arrive within `window` of virtual time.

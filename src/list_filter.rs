@@ -22,13 +22,18 @@ pub enum InputTarget {
     LogPath,
     /// The author git narrows the log to; read on Enter, not as typed.
     LogAuthor,
+    /// Narrows the shown review queue.
+    ReviewFilter,
 }
 
 impl InputTarget {
     /// What the bar draws before the typed text.
     pub fn prompt(self) -> &'static str {
         match self {
-            InputTarget::FilesFilter | InputTarget::CommitsFilter | InputTarget::DiffSearch => "/",
+            InputTarget::FilesFilter
+            | InputTarget::CommitsFilter
+            | InputTarget::DiffSearch
+            | InputTarget::ReviewFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }
