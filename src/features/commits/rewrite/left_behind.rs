@@ -2,9 +2,9 @@
 //! no branch, tag or remote-tracking branch reaches, so that once `HEAD`
 //! moves away only the reflog still has them.
 
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// List the commits reachable from `head` but not from `target` or any
 /// branch, tag or remote-tracking branch. A read: no optional locks, and

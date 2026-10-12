@@ -32,7 +32,6 @@ use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::head::read_head_message;
-use crate::git::left_behind::read_left_behind;
 use crate::git::log::{LogQuery, log_page, markers};
 use crate::git::path::RepoPath;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
@@ -1159,27 +1158,7 @@ impl Runtime {
                 op,
                 head,
                 target,
-            } => {
-                tokio::spawn(async move {
-                    let from = head.clone();
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        read_left_behind(runner.as_ref(), &from, &target)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("git rev-list crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::LeftBehindChecked {
-                        tag,
-                        op,
-                        head,
-                        result,
-                    });
-                });
-            }
+            } => rewrite::effects::check_left_behind(runner, tx, tag, op, head, target),
             Effect::AppendIgnore { tag, line } => {
                 // Where git runs now, inside an entered submodule too.
                 let workdir = self.runner.workdir();
@@ -1722,84 +1701,6 @@ mod tests {
             })
         );
         runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn check_left_behind_answers_with_the_op_head_and_ids() {
-        let head = CommitId::parse("aa11").unwrap();
-        let target = CommitId::parse("bb22").unwrap();
-        let op = GitOp::CheckoutCommit(target.clone());
-        let runner = Arc::new(FakeRunner::new().expect(
-            &[
-                "rev-list",
-                "aa11",
-                "--not",
-                "bb22",
-                "--branches",
-                "--tags",
-                "--remotes",
-                "--",
-            ],
-            ok(b"aa11\ncc33\n"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 4,
-            user: true,
-        };
-
-        runtime.spawn(Effect::CheckLeftBehind {
-            tag,
-            op: op.clone(),
-            head: head.clone(),
-            target,
-        });
-
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head,
-                result: Ok(vec![
-                    CommitId::parse("aa11").unwrap(),
-                    CommitId::parse("cc33").unwrap()
-                ]),
-            })
-        );
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_panicking_left_behind_check_still_reports_back() {
-        // No expectations queued, so the fake panics on the call.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
-        let tag = Tag {
-            generation: 0,
-            seq: 2,
-            user: true,
-        };
-        let id = CommitId::parse("aa").unwrap();
-        runtime.spawn(Effect::CheckLeftBehind {
-            tag,
-            op: GitOp::CheckoutCommit(id.clone()),
-            head: id.clone(),
-            target: id,
-        });
-        match rx.recv().await {
-            Some(AppIntent::LeftBehindChecked {
-                tag: got,
-                result: Err(message),
-                ..
-            }) => {
-                assert_eq!(got, tag);
-                assert!(message.contains("git rev-list crashed"), "{message}");
-            }
-            other => panic!("expected a failed LeftBehindChecked, got {other:?}"),
-        }
     }
 
     #[tokio::test]
