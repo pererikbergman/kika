@@ -790,6 +790,16 @@ fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
 }
 
+/// A diff tool draws the files, not the patch, so nothing in its view can
+/// be staged, discarded or edited.
+pub const DISPLAY_ONLY: &str = "The diff tool view is display-only: press R for the built-in diff";
+
+/// The Diff pane shows a tool's rows, which hunk and line keys cannot act on.
+fn display_only(state: &AppState) -> Option<&'static str> {
+    let in_diff = matches!(state.focus, Focus::Diff(_));
+    (in_diff && state.display_only()).then_some(DISPLAY_ONLY)
+}
+
 /// The diff keys of the Workspace scope reach the blame through its
 /// parent, but the diff they would change is hidden behind it.
 const BLAME_OPEN: &str = "Close the blame first";
@@ -916,7 +926,7 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.loading() {
@@ -995,7 +1005,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
     }
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     match &state.focus {
@@ -1021,7 +1031,7 @@ fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.lines.is_some() {
@@ -6104,6 +6114,69 @@ mod tests {
             );
         }
         state.diff_options.ignore_whitespace = false;
+        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
+    }
+
+    #[test]
+    fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
+        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::git::patch::parse;
+        use crate::hunk_view::{HunkView, LineCursor};
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        state.renderer = Some(0);
+        let reason = |state: &AppState, scope, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            scope,
+            state,
+            plain(c),
+        ) {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
+        };
+        // Whole-file keys are unaffected.
+        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
+        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
+
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.patch =
+            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
+        state.focus = Focus::Diff(view.clone());
+        for c in [' ', 'v', 'd', 'e'] {
+            assert_eq!(
+                reason(&state, KeyScope::Diff, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        view.lines = Some(LineCursor {
+            anchor: 0,
+            cursor: 0,
+        });
+        state.focus = Focus::Diff(view);
+        for c in [' ', 'd'] {
+            assert_eq!(
+                reason(&state, KeyScope::Lines, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        state.renderer = None;
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
     }
 

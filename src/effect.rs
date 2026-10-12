@@ -13,7 +13,8 @@ use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
-use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
+use crate::diff_tool;
+use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
@@ -192,10 +193,12 @@ pub enum Effect {
         oid: String,
     },
     /// Find the configured diff renderers: the global `[diff] pager`, then
-    /// git's global pagers. Answered by one `RenderersFound`.
+    /// git's global pagers, then the global `[diff] tool`. Answered by one
+    /// `RenderersFound`.
     FindRenderers,
-    /// Run `renderer` on the diff for `request` at `cols` columns; always
-    /// answered by one `DiffRendered`.
+    /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
+    /// a tool on both sides of its file. Always answered by one
+    /// `DiffRendered`.
     RenderDiff {
         tag: Tag,
         request: DiffRequest,
@@ -302,6 +305,8 @@ pub struct Runtime {
     recent_store: Option<PathBuf>,
     /// The global config's `[diff] pager`, read once at startup.
     diff_pager: Option<String>,
+    /// The global config's `[diff] tool`, read once at startup.
+    diff_tool: Option<String>,
     /// Stops the last captured command; aborting a finished one is a no-op.
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
@@ -319,6 +324,7 @@ impl Runtime {
             global_config: None,
             recent_store: None,
             diff_pager: None,
+            diff_tool: None,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
             clipboard: Arc::new(TerminalSink),
@@ -344,6 +350,12 @@ impl Runtime {
     /// The renderer the global config names, offered first by `FindRenderers`.
     pub fn with_diff_pager(self, diff_pager: Option<String>) -> Self {
         Self { diff_pager, ..self }
+    }
+
+    /// The display-only tool the global config names, offered last by
+    /// `FindRenderers`.
+    pub fn with_diff_tool(self, diff_tool: Option<String>) -> Self {
+        Self { diff_tool, ..self }
     }
 
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
@@ -606,10 +618,11 @@ impl Runtime {
             }
             Effect::FindRenderers => {
                 let pager = self.diff_pager.clone();
+                let tool = self.diff_tool.clone();
                 tokio::spawn(async move {
                     // A panic finds nothing; the built-in view still works.
                     let found =
-                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager))
+                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager, tool))
                             .await
                             .unwrap_or_default();
                     let _ = tx.send(AppIntent::RenderersFound(found));
@@ -627,8 +640,20 @@ impl Runtime {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
                     let result = tokio::task::spawn_blocking(move || {
-                        let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
-                        run_renderer(&renderer, &workdir, &diff, cols).map(|out| ansi::parse(&out))
+                        let out = match renderer.kind {
+                            RendererKind::Pager => {
+                                let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
+                                run_renderer(&renderer, &workdir, &diff, cols)?
+                            }
+                            RendererKind::Tool => diff_tool::render(
+                                runner.as_ref(),
+                                &workdir,
+                                &request,
+                                &renderer,
+                                cols,
+                            )?,
+                        };
+                        Ok(ansi::parse(&out))
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -2547,6 +2572,7 @@ mod tests {
             renderer: ExternalRenderer {
                 label: "cat".into(),
                 argv: vec!["cat".into()],
+                kind: crate::external_diff::RendererKind::Pager,
             },
             cols: 40,
         });
@@ -2563,6 +2589,86 @@ mod tests {
             other => panic!("expected rendered rows, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    /// Run `RenderDiff` with tool `argv` on `request` and take its rows.
+    #[cfg(unix)]
+    async fn tool_rows(
+        runner: Arc<dyn GitRunner>,
+        request: DiffRequest,
+        argv: &[&str],
+    ) -> Vec<String> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner, tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 3,
+            user: true,
+        };
+        runtime.spawn(Effect::RenderDiff {
+            tag,
+            request,
+            renderer: ExternalRenderer {
+                label: argv[0].into(),
+                argv: argv.iter().map(OsString::from).collect(),
+                kind: crate::external_diff::RendererKind::Tool,
+            },
+            cols: 40,
+        });
+        match rx.recv().await {
+            Some(AppIntent::DiffRendered {
+                tag: got,
+                result: Ok(rows),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(rx.try_recv().is_err(), "one answer only");
+                rows.iter().map(|r| r.text()).collect()
+            }
+            other => panic!("expected rendered rows, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn render_diff_runs_a_tool_on_both_sides_of_a_worktree_change() {
+        use crate::git::fake::{TempDir, git};
+        let tmp = TempDir::new("effect-tool");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "old \x1b]0;title\x07one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "new \x1b[2J\x08two\n").unwrap();
+        let runner: Arc<dyn GitRunner> = Arc::new(crate::git::CliRunner::isolated(dir));
+        let request = DiffRequest {
+            path: "a.txt".into(),
+            orig_path: None,
+            side: DiffSide::Worktree,
+            options: Default::default(),
+            commit: None,
+        };
+
+        let rows = tool_rows(Arc::clone(&runner), request.clone(), &["cat"]).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows[0].starts_with("old ") && rows[0].ends_with("one"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("new ") && rows[1].ends_with("two"),
+            "{rows:?}"
+        );
+        for row in &rows {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+        }
+
+        // The tool's arguments name the temp files, gone once it is done.
+        let rows = tool_rows(runner, request, &["echo"]).await;
+        let args: Vec<&str> = rows[0].split(' ').collect();
+        assert_eq!(args.len(), 3, "{rows:?}");
+        assert_eq!(args[0], "--");
+        let old = std::path::Path::new(args[1]);
+        assert_eq!(old.file_name().unwrap(), "old.txt");
+        assert!(!old.parent().unwrap().exists(), "{old:?}");
     }
 
     #[tokio::test]

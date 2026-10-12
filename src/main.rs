@@ -23,6 +23,7 @@ mod copied;
 mod custom_command;
 mod diff_pane;
 mod diff_stream;
+mod diff_tool;
 #[cfg(test)]
 mod e2e;
 mod effect;
