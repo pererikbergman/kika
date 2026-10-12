@@ -31,6 +31,7 @@ mod diff_tool;
 mod e2e;
 mod effect;
 mod external_diff;
+mod features;
 mod forge;
 mod git;
 mod gitignore;

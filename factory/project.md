@@ -22,17 +22,59 @@ integration.
 
 A change is only done when all four pass.
 
-## Architecture: strict MVI
+## Architecture: MVI core with feature folders
+The layout is decided in `docs/adr/0001-vertical-slices.md` (ADR-0001). Core is the
+top-level files of `src/`; each feature lives in its own folder under `src/features/`.
+
+Core files:
+
 | File | Role | Rule |
 |---|---|---|
-| `src/intent.rs` | Intent | `AppIntent` enum. Raw terminal or task events map to intents here. |
-| `src/model.rs` | Model | `AppState` + `update(intent)`. Pure: no I/O, no rendering. |
-| `src/view.rs` | View | `render(&AppState, &mut Frame)`. Reads state only. |
-| `src/app.rs` | Loop | draw → wait for intent on the `mpsc` channel → update. |
+| `src/main.rs`, `src/app.rs` | Loop | draw → wait for intent on the `mpsc` channel → update. |
 | `src/cli.rs` | CLI | `clap` commands map to a starting `Context`. |
+| `src/intent.rs` | Intent | `AppIntent`, one flat enum with variants grouped by feature. Raw terminal or task events map to intents here. |
+| `src/model.rs` | Model | `AppState` (composes feature state) + `update(intent)`, one `match` whose arms call feature handlers. Pure: no I/O, no rendering. |
+| `src/effect.rs` | Effects | `Effect`, one flat enum, and the `Runtime::run` dispatch that calls each feature's `effects.rs`. |
+| `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |
+| `src/view.rs` and the shared widgets (`layout.rs`, `popup*.rs`, `menu.rs`, `pick_list.rs`, `list_filter.rs`, ...) | View | `render(&AppState, &mut Frame)` composes the frame. Reads state only. |
 
-- Git, network and filesystem work runs in tasks that send an `AppIntent` back.
-  Nothing in `update` or `render` blocks.
+Feature-folder files (each only when the feature has something to put there):
+
+| File | Holds |
+|---|---|
+| `mod.rs` | Module docs, and the feature's `pub(crate)` API: its state types and its `AppState` query methods |
+| `state.rs` (or a named file such as `list.rs`) | The feature's state types, which `AppState` holds as fields |
+| `update.rs` | `impl AppState` handlers that `update()` calls. Pure. |
+| `keys.rs` | The feature's binding chunks and the guard predicates they use |
+| `view.rs` | Its render functions. They read `&AppState` only. |
+| `effects.rs` | The I/O behind its `Effect` variants: free functions that `Runtime::run` calls |
+| `git.rs` | git reads and `GitOp` argv builders that only this feature uses |
+
+Dependency rules:
+
+| From | May import | Must not import |
+|---|---|---|
+| core (`src/*.rs`) | anything: it is the composition root | none |
+| a feature | core; `src/git`; `src/forge`; its own subtree; its parent features (for example `commits/reflog` may import `commits`) | a sibling feature, or anything inside one |
+| `src/git`, `src/forge` | the core files they already use | any feature |
+| `src/e2e` | anything | none |
+
+1. Something two features both need goes in their nearest common parent feature, or
+   in core if they have none.
+2. A feature never calls another feature's behaviour directly. It returns an `Effect`,
+   or the core refresh plan (`refresh.rs`) reloads what an operation changed.
+3. A feature reads another feature's state only through that feature's `pub(crate)`
+   query methods on `AppState`. Direct field reads kept by the move-only slices are
+   listed in the feature's `mod.rs`; new code follows the rule.
+4. noupling only sees `use` items. Every slice also runs this check, which must print
+   nothing (hits that point at a parent feature are allowed):
+   `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
+
+MVI purity:
+- `update` is pure and returns effects. Git, network and filesystem work runs in tasks
+  or `effects.rs` functions that send an `AppIntent` back. Nothing in `update` or
+  `render` blocks.
+- Views only read state.
 - Git access: the `git` CLI is the default (argv only, never shell strings);
   `git2` only for measured hot reads. See "Repository and Version Control" in the spec.
 

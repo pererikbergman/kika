@@ -2,6 +2,7 @@
 //! dispatch, the help menu and the bottom bar, so they cannot drift apart.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::LazyLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -461,7 +462,7 @@ impl KeyScope {
 }
 
 /// One entry in the keymap.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Binding {
     /// `<scope>.<action>`, the name a config file uses to remap it.
     pub id: &'static str,
@@ -751,7 +752,7 @@ impl Keymap {
         let mut keymap = base.clone();
         let mut layer_ids = BTreeSet::new();
         for (id, texts) in layer {
-            let binding = REGISTRY
+            let binding = registry()
                 .iter()
                 .find(|b| b.id == id)
                 .ok_or_else(|| format!("unknown binding \"{id}\""))?;
@@ -771,7 +772,7 @@ impl Keymap {
         if trust == Trust::Repo {
             keymap.check_locked_not_hidden(base)?;
         }
-        let quit = REGISTRY.iter().find(|b| b.id == "global.quit");
+        let quit = registry().iter().find(|b| b.id == "global.quit");
         if quit.is_some_and(|b| keymap.keys(b).is_empty()) {
             return Err("\"global.quit\" needs at least one key".to_string());
         }
@@ -886,7 +887,7 @@ impl Keymap {
     /// number of keys.
     fn binding_clashes(&self, kept: &BTreeSet<&'static str>) -> Vec<Option<Vec<String>>> {
         let mut held: HashMap<(KeyScope, KeyCode), Vec<(&KeyPattern, &Binding)>> = HashMap::new();
-        for binding in REGISTRY {
+        for binding in registry() {
             for key in self.keys(binding) {
                 held.entry((binding.scope, key.code))
                     .or_default()
@@ -923,7 +924,7 @@ impl Keymap {
     /// `numbers` holds each command's place in the file, from 0.
     fn check_locked_commands(&self, numbers: &[usize]) -> Result<(), String> {
         for (command, n) in self.commands.iter().zip(numbers) {
-            let locked = REGISTRY.iter().filter(|b| REPO_LOCKED.contains(&b.id));
+            let locked = registry().iter().filter(|b| REPO_LOCKED.contains(&b.id));
             for binding in locked.filter(|b| command.scope.chain().any(|s| s == b.scope)) {
                 let hidden = self
                     .keys(binding)
@@ -945,7 +946,7 @@ impl Keymap {
     /// Every key in force with its owner and scope: the registry's, then
     /// the commands'.
     fn owned_keys(&self) -> Vec<(Owner<'_>, KeyScope, &KeyPattern)> {
-        let builtin = REGISTRY.iter().flat_map(|b| {
+        let builtin = registry().iter().flat_map(|b| {
             self.keys(b)
                 .iter()
                 .map(move |k| (Owner::Binding(b), b.scope, k))
@@ -1012,13 +1013,13 @@ impl Keymap {
     /// A key a repository file adds in a nearer scope would take a locked
     /// binding's key away from it, as surely as removing it would.
     fn check_locked_not_hidden(&self, base: &Keymap) -> Result<(), String> {
-        for binding in REGISTRY {
+        for binding in registry() {
             let added = self
                 .keys(binding)
                 .iter()
                 .filter(|k| !base.keys(binding).contains(k));
             for key in added {
-                let hidden = REGISTRY.iter().find(|locked| {
+                let hidden = registry().iter().find(|locked| {
                     REPO_LOCKED.contains(&locked.id)
                         && binding.scope.chain().skip(1).any(|s| s == locked.scope)
                         && self.keys(locked).iter().any(|k| k.overlaps(key))
@@ -1139,7 +1140,7 @@ pub fn available_commands(keymap: &Keymap, focus: KeyScope) -> Vec<&CustomComman
                 out.push(command);
             }
         }
-        let builtin = REGISTRY.iter().filter(|b| b.scope == scope);
+        let builtin = registry().iter().filter(|b| b.scope == scope);
         claimed.extend(builtin.flat_map(|b| keymap.keys(b).iter().copied()));
         claimed.extend(commands_in(keymap, scope).flat_map(|c| c.keys.iter().copied()));
     }
@@ -2708,7 +2709,8 @@ fn pane_step_disabled(state: &AppState) -> Option<Reason> {
 
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
-static REGISTRY: &[Binding] = &[
+// Chunk 1: core
+static CORE_GLOBAL: &[Binding] = &[
     Binding {
         id: "global.help",
         keys: &[KeyPattern::any(KeyCode::Char('?'))],
@@ -2743,6 +2745,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 2: sync
+static SYNC_WORKSPACE: &[Binding] = &[
     Binding {
         id: "workspace.fetch",
         keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
@@ -2773,6 +2779,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: pull_push_disabled,
     },
+];
+
+// Chunk 3: core
+static CORE_SCROLL: &[Binding] = &[
     Binding {
         id: "workspace.scroll_down",
         keys: &[KeyPattern::any(KeyCode::Char('J'))],
@@ -2813,6 +2823,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 4: submodules
+#[rustfmt::skip]
+static SUBMODULES_WORKSPACE: &[Binding] = &[
     Binding {
         id: "workspace.parent",
         keys: &[KeyPattern::any(KeyCode::Backspace)],
@@ -2823,6 +2838,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: leave_submodule_disabled,
     },
+];
+
+// Chunk 5: diff
+static DIFF_WORKSPACE: &[Binding] = &[
     // Diff settings, in Workspace so they work from Files, Diff and Lines.
     // Out of the bar, which is full at 80 columns; the help menu lists them.
     Binding {
@@ -2858,6 +2877,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: diff_hidden,
     },
+];
+
+// Chunk 6: core
+static CORE_FOCUS: &[Binding] = &[
     // Moving between panels and zooming. Out of the bar, which is full at
     // 80 columns; the help menu lists them.
     Binding {
@@ -2954,6 +2977,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 7: custom_patch
+#[rustfmt::skip]
+static CUSTOM_PATCH_WORKSPACE: &[Binding] = &[
     // Out of the bar, which is full at 80 columns; the help menu lists it.
     Binding {
         id: "workspace.patch_menu",
@@ -2965,6 +2993,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 8: custom_commands
+#[rustfmt::skip]
+static CUSTOM_COMMANDS_WORKSPACE: &[Binding] = &[
     Binding {
         id: "workspace.cancel_command",
         keys: &[KeyPattern::exact(KeyCode::Char('x'), KeyModifiers::CONTROL)],
@@ -2977,6 +3010,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: no_command_running,
     },
+];
+
+// Chunk 9: reflog
+static REFLOG_WORKSPACE: &[Binding] = &[
     // Raw mode turns off the terminal's own meaning of Ctrl+Z (suspend)
     // and Ctrl+R (reprint), so both reach Kika as keys on every platform.
     // Redo is not Ctrl+Y: the custom-command example in the docs, and so
@@ -3002,6 +3039,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: undo_disabled,
     },
+];
+
+// Chunk 10: files
+static FILES_NAV: &[Binding] = &[
     Binding {
         id: "files.next",
         keys: &[
@@ -3028,6 +3069,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 11: commits
+static COMMITS_KEYS: &[Binding] = &[
     Binding {
         id: "commits.next",
         // Not any modifiers on the arrow: Alt+Down moves the commit.
@@ -3095,6 +3140,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: commits_reset_disabled,
     },
+];
+
+// Chunk 12: rewrite
+static REWRITE_COMMITS: &[Binding] = &[
     Binding {
         id: "commits.squash",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
@@ -3226,6 +3275,11 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: todo_pick_disabled,
     },
+];
+
+// Chunk 13: commits
+#[rustfmt::skip]
+static COMMITS_SWITCH_TAB: &[Binding] = &[
     Binding {
         id: "commits.switch_tab",
         keys: &[
@@ -3239,6 +3293,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 14: copy
+static COPY_COMMITS: &[Binding] = &[
     Binding {
         id: "commits.copy",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
@@ -3280,6 +3338,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: commits_copy_menu_disabled,
     },
+];
+
+// Chunk 15: reflog
+static REFLOG_KEYS: &[Binding] = &[
     Binding {
         id: "reflog.next",
         keys: &[
@@ -3339,6 +3401,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 16: commits
+static COMMITS_FILES_NAV: &[Binding] = &[
     Binding {
         id: "commit_files.next",
         keys: &[
@@ -3365,6 +3431,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 17: custom_patch
+#[rustfmt::skip]
+static CUSTOM_PATCH_COMMIT_FILES: &[Binding] = &[
     Binding {
         id: "commit_files.patch",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
@@ -3375,6 +3446,11 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: patch_file_disabled,
     },
+];
+
+// Chunk 18: commits
+#[rustfmt::skip]
+static COMMITS_FILES_BACK: &[Binding] = &[
     Binding {
         id: "commit_files.back",
         // Esc is `commit_files.escape`, which clears a search first and stands in
@@ -3390,6 +3466,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 19: stash
+static STASH_KEYS: &[Binding] = &[
     Binding {
         id: "stash.next",
         keys: &[
@@ -3534,6 +3614,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 20: files
+static FILES_STAGE: &[Binding] = &[
     Binding {
         id: "files.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
@@ -3554,6 +3638,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: stage_all_disabled,
     },
+];
+
+// Chunk 21: commit
+static COMMIT_FROM_FILES: &[Binding] = &[
     Binding {
         id: "files.commit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
@@ -3575,6 +3663,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: amend_disabled,
     },
+];
+
+// Chunk 22: files
+static FILES_DISCARD_OPEN: &[Binding] = &[
     Binding {
         id: "files.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
@@ -3596,6 +3688,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_open_disabled,
     },
+];
+
+// Chunk 23: submodules
+#[rustfmt::skip]
+static SUBMODULES_FILES: &[Binding] = &[
     Binding {
         id: "files.submodules",
         keys: &[KeyPattern::any(KeyCode::Char('S'))],
@@ -3606,6 +3703,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 24: worktrees
+#[rustfmt::skip]
+static WORKTREES_WORKSPACE: &[Binding] = &[
     Binding {
         id: "workspace.worktrees",
         keys: &[KeyPattern::any(KeyCode::Char('W'))],
@@ -3616,6 +3718,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: worktrees_disabled,
     },
+];
+
+// Chunk 25: command_log
+#[rustfmt::skip]
+static COMMAND_LOG_WORKSPACE: &[Binding] = &[
     // `@` arrives as itself whatever it takes to type it: Shift on most
     // layouts, AltGr (reported as Ctrl+Alt on Windows) or Option on
     // others, so it matches with any modifiers.
@@ -3629,6 +3736,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 26: repos
+#[rustfmt::skip]
+static REPOS_WORKSPACE: &[Binding] = &[
     Binding {
         id: "workspace.recent",
         keys: &[KeyPattern::any(KeyCode::Char('O'))],
@@ -3640,6 +3752,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 27: review
+static REVIEW_KEYS: &[Binding] = &[
     // Free in the workspace, every panel and the global scope.
     Binding {
         id: "workspace.review",
@@ -3863,6 +3979,11 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 28: blame
+#[rustfmt::skip]
+static BLAME_FILES: &[Binding] = &[
     Binding {
         id: "files.blame",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
@@ -3873,6 +3994,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_blame_disabled,
     },
+];
+
+// Chunk 29: diff
+#[rustfmt::skip]
+static DIFF_FILES: &[Binding] = &[
     Binding {
         id: "files.hunks",
         keys: &[KeyPattern::any(KeyCode::Enter)],
@@ -3884,6 +4010,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_hunks_disabled,
     },
+];
+
+// Chunk 30: conflicts
+#[rustfmt::skip]
+static CONFLICTS_FILES: &[Binding] = &[
     Binding {
         id: "files.mergetool",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
@@ -3895,6 +4026,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_mergetool_disabled,
     },
+];
+
+// Chunk 31: files
+#[rustfmt::skip]
+static FILES_IGNORE: &[Binding] = &[
     Binding {
         id: "files.ignore",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
@@ -3906,6 +4042,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_ignore_disabled,
     },
+];
+
+// Chunk 32: diff
+static DIFF_KEYS: &[Binding] = &[
     Binding {
         id: "diff.next",
         keys: &[
@@ -3995,6 +4135,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: edit_hunk_disabled,
     },
+];
+
+// Chunk 33: renderers
+#[rustfmt::skip]
+static RENDERERS_DIFF: &[Binding] = &[
     Binding {
         id: "diff.renderer",
         keys: &[KeyPattern::any(KeyCode::Char('R'))],
@@ -4005,6 +4150,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: renderer_disabled,
     },
+];
+
+// Chunk 34: diff
+static DIFF_LINES: &[Binding] = &[
     Binding {
         id: "diff.back",
         // Esc is `diff.escape`, which clears a search first and stands in
@@ -4116,6 +4265,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: open_disabled,
     },
+];
+
+// Chunk 35: blame
+static BLAME_KEYS: &[Binding] = &[
     Binding {
         id: "blame.next",
         keys: &[
@@ -4187,6 +4340,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 36: conflicts
+static CONFLICTS_KEYS: &[Binding] = &[
     Binding {
         id: "conflict.next",
         keys: &[
@@ -4263,6 +4420,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 37: blame
+static BLAME_COMMIT: &[Binding] = &[
     Binding {
         id: "blame_commit.scroll_down",
         keys: &[
@@ -4324,6 +4485,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 38: files
+#[rustfmt::skip]
+static FILES_MENU: &[Binding] = &[
     Binding {
         id: "files.menu",
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -4334,6 +4500,11 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 39: stash
+#[rustfmt::skip]
+static STASH_FROM_FILES: &[Binding] = &[
     Binding {
         id: "files.stash",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
@@ -4345,6 +4516,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: stash_menu_disabled,
     },
+];
+
+// Chunk 40: commit
+static COMMIT_KEYS: &[Binding] = &[
     Binding {
         id: "commit_confirm.stage_all",
         keys: &[
@@ -4488,6 +4663,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 41: core
+static CORE_POPUPS: &[Binding] = &[
     Binding {
         id: "help.close",
         keys: &[
@@ -4660,6 +4839,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 42: sync
+static SYNC_CREDENTIAL: &[Binding] = &[
     Binding {
         id: "credential.answer",
         keys: &[KeyPattern::any(KeyCode::Enter)],
@@ -4690,6 +4873,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 43: core
+static CORE_ERROR: &[Binding] = &[
     Binding {
         id: "error.close",
         keys: &[
@@ -4713,6 +4900,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 44: files
+static FILES_DISCARD_CONFIRM: &[Binding] = &[
     // Only `y` throws work away. Enter is left unbound on purpose: it
     // answers yes elsewhere, and a discard cannot be undone.
     Binding {
@@ -4748,6 +4939,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 45: branches
+static BRANCHES_KEYS: &[Binding] = &[
     Binding {
         id: "branches.next",
         keys: &[
@@ -4815,6 +5010,11 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: delete_branch_disabled,
     },
+];
+
+// Chunk 46: operation
+#[rustfmt::skip]
+static OPERATION_BRANCHES: &[Binding] = &[
     Binding {
         id: "branches.merge",
         keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
@@ -4825,6 +5025,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: merge_disabled,
     },
+];
+
+// Chunk 47: pull_requests
+static PULL_REQUESTS_BRANCHES: &[Binding] = &[
     Binding {
         id: "branches.pull_request",
         keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
@@ -4845,6 +5049,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: refresh_disabled,
     },
+];
+
+// Chunk 48: branches
+static BRANCHES_UPSTREAM_TABS: &[Binding] = &[
     Binding {
         id: "branches.set_upstream",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
@@ -4885,6 +5093,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 49: remotes
+static REMOTES_KEYS: &[Binding] = &[
     Binding {
         id: "remotes.next",
         keys: &[
@@ -4972,6 +5184,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+];
+
+// Chunk 50: tags
+static TAGS_KEYS: &[Binding] = &[
     Binding {
         id: "tags.next",
         keys: &[
@@ -5059,6 +5275,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: commits_tag_disabled,
     },
+];
+
+// Chunk 51: bisect
+#[rustfmt::skip]
+static BISECT_COMMITS: &[Binding] = &[
     Binding {
         id: "commits.bisect",
         keys: &[KeyPattern::any(KeyCode::Char('B'))],
@@ -5069,6 +5290,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: commits_bisect_disabled,
     },
+];
+
+// Chunk 52: operation
+static OPERATION_STATUS: &[Binding] = &[
     Binding {
         id: "status.continue",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
@@ -5099,6 +5324,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: bisect::abort_disabled,
     },
+];
+
+// Chunk 53: bisect
+static BISECT_STATUS: &[Binding] = &[
     Binding {
         id: "status.bisect_good",
         keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
@@ -5119,6 +5348,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: bisect::head_bad_disabled,
     },
+];
+
+// Chunk 54: branches
+static BRANCHES_DELETE_CONFIRM: &[Binding] = &[
     // As with discarding, Enter is left unbound: a delete cannot be undone.
     Binding {
         id: "delete_branch.yes",
@@ -5163,6 +5396,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 55: tags
+static TAGS_DELETE_CONFIRM: &[Binding] = &[
     // As with deleting a branch, Enter is left unbound: a deleted tag
     // cannot be listed again to undo it.
     Binding {
@@ -5198,6 +5435,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 56: branches
+static BRANCHES_DELETE_RANGE_CONFIRM: &[Binding] = &[
     // Only `y` deletes a range: Enter is left unbound, as for one branch.
     Binding {
         id: "delete_range.yes",
@@ -5232,6 +5473,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 57: remotes
+static REMOTES_REMOVE_CONFIRM: &[Binding] = &[
     // As with deleting a branch, Enter is left unbound: the remote's
     // branches go with it.
     Binding {
@@ -5267,6 +5512,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 58: commits
+static COMMITS_RESET_HARD_CONFIRM: &[Binding] = &[
     // As with deleting a branch, Enter is left unbound: a hard reset
     // cannot be undone.
     Binding {
@@ -5302,6 +5551,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 59: rewrite
+static REWRITE_LEAVE_COMMITS_CONFIRM: &[Binding] = &[
     // As with a hard reset, Enter is left unbound: commits left behind
     // are only in the reflog.
     Binding {
@@ -5337,6 +5590,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 60: stash
+static STASH_DROP_CONFIRM: &[Binding] = &[
     // As with a hard reset, Enter is left unbound: a dropped stash is gone
     // from the list.
     Binding {
@@ -5372,6 +5629,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 61: operation
+static OPERATION_ABORT_CONFIRM: &[Binding] = &[
     // As with discarding, Enter is left unbound: aborting loses resolved
     // conflicts.
     Binding {
@@ -5407,6 +5668,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 62: rewrite
+static REWRITE_AUTOSQUASH_CONFIRM: &[Binding] = &[
     // Enter is left unbound here too: autosquash rewrites commits the user
     // may not be looking at.
     Binding {
@@ -5442,6 +5707,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 63: custom_patch
+static CUSTOM_PATCH_CONFIRM: &[Binding] = &[
     // Enter is left unbound here too: a custom patch rewrites commits the
     // user may not be looking at.
     Binding {
@@ -5477,6 +5746,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 64: rewrite
+static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
     // Enter is left unbound here too: dropping a range throws away the
     // changes of several commits at once, so only a deliberate y answers.
     Binding {
@@ -5512,6 +5785,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 65: reflog
+static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -5547,6 +5824,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 66: submodules
+static SUBMODULES_KEYS: &[Binding] = &[
     Binding {
         id: "submodules.next",
         keys: &[
@@ -5626,6 +5907,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 67: worktrees
+static WORKTREES_KEYS: &[Binding] = &[
     Binding {
         id: "worktrees.next",
         keys: &[
@@ -5722,6 +6007,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 68: command_log
+static COMMAND_LOG_KEYS: &[Binding] = &[
     Binding {
         id: "command_log.next",
         keys: &[
@@ -5808,6 +6097,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 69: worktrees
+static WORKTREES_REMOVE_CONFIRM: &[Binding] = &[
     // Enter is left unbound: the worktree's directory goes with it.
     Binding {
         id: "remove_worktree.yes",
@@ -5842,6 +6135,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 70: repos
+static REPOS_RECENT: &[Binding] = &[
     Binding {
         id: "recent.next",
         keys: &[
@@ -5911,6 +6208,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 71: pull_requests
+static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
     Binding {
         id: "pick_list.next",
         keys: &[
@@ -6004,6 +6305,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 71b: review
+static REVIEW_MERGE_CONFIRM: &[Binding] = &[
     // Merging a pull request reaches GitHub and cannot be undone, so
     // Enter is left unbound.
     Binding {
@@ -6039,6 +6344,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 72: core
+static CORE_FILTER_SEARCH: &[Binding] = &[
     // List filters, ranges and the diff search.
     Binding {
         id: "files.filter",
@@ -6450,6 +6759,10 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+];
+
+// Chunk 73: commits
+static COMMITS_LOG_FILTER: &[Binding] = &[
     // The log query and the diff mark.
     Binding {
         id: "commits.filter_path",
@@ -6471,6 +6784,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: log_filter_disabled,
     },
+];
+
+// Chunk 74: compare
+#[rustfmt::skip]
+static COMPARE_COMMITS: &[Binding] = &[
     Binding {
         id: "commits.mark",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
@@ -6481,6 +6799,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: commits_mark_disabled,
     },
+];
+
+// Chunk 75: reflog
+static REFLOG_LOG_FILTER: &[Binding] = &[
     Binding {
         id: "reflog.filter_path",
         keys: &[KeyPattern::any(KeyCode::Char('L'))],
@@ -6501,6 +6823,10 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: reflog_filter_disabled,
     },
+];
+
+// Chunk 76: compare
+static COMPARE_BRANCHES: &[Binding] = &[
     Binding {
         id: "branches.mark",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
@@ -6521,6 +6847,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: branches_diff_disabled,
     },
+];
+
+// Chunk 77: commits
+#[rustfmt::skip]
+static COMMITS_FILES_LOG: &[Binding] = &[
     Binding {
         id: "files.log",
         keys: &[KeyPattern::any(KeyCode::Char('L'))],
@@ -6531,6 +6862,11 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: files_log_disabled,
     },
+];
+
+// Chunk 78: core
+#[rustfmt::skip]
+static CORE_INPUT_QUIT: &[Binding] = &[
     Binding {
         id: "input.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
@@ -6543,9 +6879,101 @@ static REGISTRY: &[Binding] = &[
     },
 ];
 
-/// The application's keymap.
+/// Every chunk in registry order. The order is behaviour: `resolve` takes
+/// the first match in a scope, and help and the bottom bar list bindings in
+/// this order. A feature moving out of core changes only its paths here.
+static CHUNKS: &[&[Binding]] = &[
+    CORE_GLOBAL,
+    SYNC_WORKSPACE,
+    CORE_SCROLL,
+    SUBMODULES_WORKSPACE,
+    DIFF_WORKSPACE,
+    CORE_FOCUS,
+    CUSTOM_PATCH_WORKSPACE,
+    CUSTOM_COMMANDS_WORKSPACE,
+    REFLOG_WORKSPACE,
+    FILES_NAV,
+    COMMITS_KEYS,
+    REWRITE_COMMITS,
+    COMMITS_SWITCH_TAB,
+    COPY_COMMITS,
+    REFLOG_KEYS,
+    COMMITS_FILES_NAV,
+    CUSTOM_PATCH_COMMIT_FILES,
+    COMMITS_FILES_BACK,
+    STASH_KEYS,
+    FILES_STAGE,
+    COMMIT_FROM_FILES,
+    FILES_DISCARD_OPEN,
+    SUBMODULES_FILES,
+    WORKTREES_WORKSPACE,
+    COMMAND_LOG_WORKSPACE,
+    REPOS_WORKSPACE,
+    REVIEW_KEYS,
+    BLAME_FILES,
+    DIFF_FILES,
+    CONFLICTS_FILES,
+    FILES_IGNORE,
+    DIFF_KEYS,
+    RENDERERS_DIFF,
+    DIFF_LINES,
+    BLAME_KEYS,
+    CONFLICTS_KEYS,
+    BLAME_COMMIT,
+    FILES_MENU,
+    STASH_FROM_FILES,
+    COMMIT_KEYS,
+    CORE_POPUPS,
+    SYNC_CREDENTIAL,
+    CORE_ERROR,
+    FILES_DISCARD_CONFIRM,
+    BRANCHES_KEYS,
+    OPERATION_BRANCHES,
+    PULL_REQUESTS_BRANCHES,
+    BRANCHES_UPSTREAM_TABS,
+    REMOTES_KEYS,
+    TAGS_KEYS,
+    BISECT_COMMITS,
+    OPERATION_STATUS,
+    BISECT_STATUS,
+    BRANCHES_DELETE_CONFIRM,
+    TAGS_DELETE_CONFIRM,
+    BRANCHES_DELETE_RANGE_CONFIRM,
+    REMOTES_REMOVE_CONFIRM,
+    COMMITS_RESET_HARD_CONFIRM,
+    REWRITE_LEAVE_COMMITS_CONFIRM,
+    STASH_DROP_CONFIRM,
+    OPERATION_ABORT_CONFIRM,
+    REWRITE_AUTOSQUASH_CONFIRM,
+    CUSTOM_PATCH_CONFIRM,
+    REWRITE_DROP_RANGE_CONFIRM,
+    REFLOG_TRAVEL_CONFIRM,
+    SUBMODULES_KEYS,
+    WORKTREES_KEYS,
+    COMMAND_LOG_KEYS,
+    WORKTREES_REMOVE_CONFIRM,
+    REPOS_RECENT,
+    PULL_REQUESTS_PICK_CREATE,
+    REVIEW_MERGE_CONFIRM,
+    CORE_FILTER_SEARCH,
+    COMMITS_LOG_FILTER,
+    COMPARE_COMMITS,
+    REFLOG_LOG_FILTER,
+    COMPARE_BRANCHES,
+    COMMITS_FILES_LOG,
+    CORE_INPUT_QUIT,
+];
+
+/// The application's keymap: `CHUNKS` flattened once, so callers keep a
+/// plain slice while the chunks can live with the features that own them.
 pub fn registry() -> &'static [Binding] {
-    REGISTRY
+    static BINDINGS: LazyLock<Vec<Binding>> = LazyLock::new(|| {
+        CHUNKS
+            .iter()
+            .flat_map(|chunk| chunk.iter().cloned())
+            .collect()
+    });
+    &BINDINGS[..]
 }
 
 #[cfg(test)]
@@ -11681,5 +12109,373 @@ mod tests {
             assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
         }
         assert!(build(&[("commits.find_base", &["Z"])], Trust::Repo).is_ok());
+    }
+
+    /// Every binding id in registry order. Order is behaviour: `resolve`
+    /// takes the first match and help lists bindings in this order. A new
+    /// binding goes into its chunk and into this list in the same change.
+    const PINNED_ORDER: &[&str] = &[
+        "global.help",
+        "global.quit",
+        "workspace.refresh",
+        "workspace.fetch",
+        "workspace.pull",
+        "workspace.push",
+        "workspace.scroll_down",
+        "workspace.scroll_up",
+        "workspace.page_down",
+        "workspace.page_up",
+        "workspace.parent",
+        "workspace.more_context",
+        "workspace.less_context",
+        "workspace.whitespace",
+        "workspace.focus_status",
+        "workspace.focus_files",
+        "workspace.focus_branches",
+        "workspace.focus_commits",
+        "workspace.focus_stash",
+        "workspace.focus_diff",
+        "workspace.next_panel",
+        "workspace.prev_panel",
+        "workspace.zoom",
+        "workspace.patch_menu",
+        "workspace.cancel_command",
+        "workspace.undo",
+        "workspace.redo",
+        "files.next",
+        "files.prev",
+        "commits.next",
+        "commits.prev",
+        "commits.open",
+        "commits.checkout",
+        "commits.revert",
+        "commits.reset",
+        "commits.squash",
+        "commits.fixup",
+        "commits.create_fixup",
+        "commits.autosquash",
+        "commits.find_base",
+        "commits.drop",
+        "commits.reword",
+        "commits.move_up",
+        "commits.move_down",
+        "commits.edit",
+        "commits.break",
+        "commits.pick",
+        "commits.switch_tab",
+        "commits.copy",
+        "commits.paste",
+        "commits.clear_copied",
+        "commits.copy_menu",
+        "reflog.next",
+        "reflog.prev",
+        "reflog.switch_tab",
+        "reflog.filter",
+        "reflog.escape",
+        "commit_files.next",
+        "commit_files.prev",
+        "commit_files.patch",
+        "commit_files.back",
+        "stash.next",
+        "stash.prev",
+        "stash.files",
+        "stash.apply",
+        "stash.pop",
+        "stash.drop",
+        "stash.rename",
+        "stash.filter",
+        "stash.range",
+        "stash.escape",
+        "stash_files.next",
+        "stash_files.prev",
+        "stash_files.close",
+        "files.stage",
+        "files.stage_all",
+        "files.commit",
+        "files.amend",
+        "files.discard",
+        "files.open",
+        "files.submodules",
+        "workspace.worktrees",
+        "workspace.command_log",
+        "workspace.recent",
+        "workspace.review",
+        "review.next",
+        "review.prev",
+        "review.open",
+        "review.next_queue",
+        "review.prev_queue",
+        "review.filter",
+        "review.refresh",
+        "review.open_check",
+        "review.merge",
+        "review.back",
+        "review.files",
+        "review_files.focus",
+        "review_diff.down",
+        "review_diff.up",
+        "review_diff.page_down",
+        "review_diff.page_up",
+        "review_diff.search",
+        "review_diff.search_next",
+        "review_diff.search_prev",
+        "review_diff.escape",
+        "files.blame",
+        "files.hunks",
+        "files.mergetool",
+        "files.ignore",
+        "diff.next",
+        "diff.prev",
+        "diff.stage",
+        "diff.lines",
+        "diff.side",
+        "diff.discard",
+        "diff.open",
+        "diff.edit_hunk",
+        "diff.renderer",
+        "diff.back",
+        "lines.next",
+        "lines.prev",
+        "lines.extend_down",
+        "lines.extend_up",
+        "lines.stage",
+        "lines.back",
+        "lines.discard",
+        "lines.open",
+        "blame.next",
+        "blame.prev",
+        "blame.page_down",
+        "blame.page_up",
+        "blame.commit",
+        "blame.back",
+        "conflict.next",
+        "conflict.prev",
+        "conflict.ours",
+        "conflict.theirs",
+        "conflict.both",
+        "conflict.mergetool",
+        "conflict.back",
+        "blame_commit.scroll_down",
+        "blame_commit.scroll_up",
+        "blame_commit.page_down",
+        "blame_commit.page_up",
+        "blame_commit.back",
+        "files.menu",
+        "files.stash",
+        "commit_confirm.stage_all",
+        "commit_confirm.cancel",
+        "commit_editor.commit",
+        "commit_editor.switch_field",
+        "commit_editor.skip_hooks",
+        "commit_editor.edit_externally",
+        "commit_editor.cancel",
+        "commit_editor.quit",
+        "commit_discard.discard",
+        "commit_discard.keep",
+        "commit_error.back",
+        "commit_loading.cancel",
+        "commit_loading.quit",
+        "help.close",
+        "help.down",
+        "help.up",
+        "help.page_down",
+        "help.page_up",
+        "menu.next",
+        "menu.prev",
+        "menu.select",
+        "menu.back",
+        "menu.quit",
+        "confirm.yes",
+        "confirm.no",
+        "prompt.ok",
+        "prompt.cancel",
+        "prompt.quit",
+        "credential.answer",
+        "credential.cancel",
+        "credential.quit",
+        "error.close",
+        "error.quit",
+        "discard_confirm.yes",
+        "discard_confirm.no",
+        "discard_confirm.quit",
+        "branches.next",
+        "branches.prev",
+        "branches.checkout",
+        "branches.new",
+        "branches.rename",
+        "branches.delete",
+        "branches.merge",
+        "branches.pull_request",
+        "branches.refresh_pull_requests",
+        "branches.set_upstream",
+        "branches.unset_upstream",
+        "branches.switch_tab",
+        "branches.prev_tab",
+        "remotes.next",
+        "remotes.prev",
+        "remotes.checkout",
+        "remotes.add",
+        "remotes.rename",
+        "remotes.remove",
+        "remotes.switch_tab",
+        "remotes.prev_tab",
+        "tags.next",
+        "tags.prev",
+        "tags.delete",
+        "tags.push",
+        "tags.switch_tab",
+        "tags.prev_tab",
+        "commits.tag",
+        "commits.tag_annotated",
+        "commits.bisect",
+        "status.continue",
+        "status.skip",
+        "status.abort",
+        "status.bisect_good",
+        "status.bisect_bad",
+        "delete_branch.yes",
+        "delete_branch.force",
+        "delete_branch.no",
+        "delete_branch.quit",
+        "delete_tag.yes",
+        "delete_tag.no",
+        "delete_tag.quit",
+        "delete_range.yes",
+        "delete_range.no",
+        "delete_range.quit",
+        "remove_remote.yes",
+        "remove_remote.no",
+        "remove_remote.quit",
+        "reset_hard.yes",
+        "reset_hard.no",
+        "reset_hard.quit",
+        "leave_commits.yes",
+        "leave_commits.no",
+        "leave_commits.quit",
+        "drop_stash.yes",
+        "drop_stash.no",
+        "drop_stash.quit",
+        "abort_confirm.yes",
+        "abort_confirm.no",
+        "abort_confirm.quit",
+        "autosquash_confirm.yes",
+        "autosquash_confirm.no",
+        "autosquash_confirm.quit",
+        "patch_confirm.yes",
+        "patch_confirm.no",
+        "patch_confirm.quit",
+        "drop_range_confirm.yes",
+        "drop_range_confirm.no",
+        "drop_range_confirm.quit",
+        "travel.yes",
+        "travel.no",
+        "travel.quit",
+        "submodules.next",
+        "submodules.prev",
+        "submodules.enter",
+        "submodules.update",
+        "submodules.init",
+        "submodules.close",
+        "submodules.quit",
+        "worktrees.next",
+        "worktrees.prev",
+        "worktrees.open",
+        "worktrees.add",
+        "worktrees.remove",
+        "worktrees.filter",
+        "worktrees.escape",
+        "worktrees.close",
+        "worktrees.quit",
+        "command_log.next",
+        "command_log.prev",
+        "command_log.page_down",
+        "command_log.page_up",
+        "command_log.filter",
+        "command_log.escape",
+        "command_log.close",
+        "command_log.quit",
+        "remove_worktree.yes",
+        "remove_worktree.no",
+        "remove_worktree.quit",
+        "recent.next",
+        "recent.prev",
+        "recent.open",
+        "recent.init",
+        "recent.close",
+        "recent.quit",
+        "pick_list.next",
+        "pick_list.prev",
+        "pick_list.pick",
+        "pick_list.close",
+        "pick_list.quit",
+        "create_pull_request.yes",
+        "create_pull_request.no",
+        "create_pull_request.quit",
+        "merge_pr.yes",
+        "merge_pr.no",
+        "merge_pr.quit",
+        "files.filter",
+        "files.range",
+        "files.escape",
+        "commits.filter",
+        "commits.range",
+        "commits.escape",
+        "branches.filter",
+        "branches.range",
+        "branches.escape",
+        "remotes.filter",
+        "remotes.range",
+        "remotes.escape",
+        "tags.filter",
+        "tags.range",
+        "tags.escape",
+        "diff.search",
+        "diff.search_next",
+        "diff.search_prev",
+        "diff.escape",
+        "files.search_diff",
+        "files.search_next",
+        "files.search_prev",
+        "commit_files.search",
+        "commit_files.search_next",
+        "commit_files.search_prev",
+        "commit_files.filter",
+        "commit_files.escape",
+        "stash_files.search",
+        "stash_files.search_next",
+        "stash_files.search_prev",
+        "stash_files.escape",
+        "blame.search",
+        "blame.search_next",
+        "blame.search_prev",
+        "blame.escape",
+        "blame_commit.search",
+        "blame_commit.search_next",
+        "blame_commit.search_prev",
+        "blame_commit.escape",
+        "input.accept",
+        "input.cancel",
+        "commits.filter_path",
+        "commits.filter_author",
+        "commits.mark",
+        "reflog.filter_path",
+        "reflog.filter_author",
+        "branches.mark",
+        "branches.diff",
+        "files.log",
+        "input.quit",
+    ];
+
+    #[test]
+    fn registry_order_is_pinned() {
+        let ids = registry().iter().map(|b| b.id).collect::<Vec<_>>();
+        assert_eq!(ids, PINNED_ORDER);
+    }
+
+    #[test]
+    fn chunks_flatten_to_registry() {
+        assert!(CHUNKS.iter().all(|chunk| !chunk.is_empty()));
+        let total: usize = CHUNKS.iter().map(|chunk| chunk.len()).sum();
+        assert_eq!(total, registry().len());
     }
 }
