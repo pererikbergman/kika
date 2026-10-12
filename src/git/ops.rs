@@ -1,17 +1,23 @@
 //! Mutations of the index and history. Each is a [`GitOp`] so the reducer can
 //! name the work, and the refresh planner can say what it invalidates.
 
+use std::ffi::OsString;
 use std::path::Path;
 
+use super::bisect::BisectMark;
 use super::branches::BranchName;
 use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::RepoPath;
 use super::rebase_plan::{RebasePlan, encode};
+use super::remote::redact_userinfo;
+use super::remotes::{RemoteBranch, RemoteName};
 use super::repo_state::Operation;
 use super::runner::{GitCommand, GitOutput, GitRunner};
 use super::stash::StashRef;
 use super::status::{EntryKind, FileEntry};
+use super::tags::{TagName, validate_tag_name};
+use super::undo::{Direction, Expected, Step};
 use super::version::{GitVersion, parse_version, version_command};
 use crate::sequence_editor::PLAN_ENV;
 
@@ -105,6 +111,10 @@ pub enum GitOp {
     /// Make a new commit that undoes this one. Never built for a merge
     /// commit, which needs a mainline.
     Revert(CommitId),
+    /// Pick these commits onto `HEAD`, one by one in this order. Built
+    /// with parents first (see `super::cherry_pick::ordered`); never with
+    /// a merge commit, which needs a mainline.
+    CherryPick(Vec<CommitId>),
     /// Move the current branch, or a detached `HEAD`, to `to`; `mode` says
     /// what happens to the index and the worktree.
     Reset {
@@ -148,6 +158,66 @@ pub enum GitOp {
         stash: StashRef,
         message: String,
     },
+    /// Make branch `name` at the remote branch `from`, tracking it, and
+    /// switch to it. Git refuses when `name` exists.
+    CheckoutTracking {
+        name: String,
+        from: RemoteBranch,
+    },
+    /// Make `branch` track the remote branch `upstream`.
+    SetUpstream {
+        branch: BranchName,
+        upstream: RemoteBranch,
+    },
+    /// Stop `branch` tracking anything.
+    UnsetUpstream(BranchName),
+    /// Add a remote. Never fetched here: its branches appear after the
+    /// user's own fetch.
+    AddRemote {
+        name: String,
+        url: String,
+    },
+    /// Rename a remote, its remote-tracking branches and the upstreams
+    /// that name it.
+    RenameRemote {
+        from: RemoteName,
+        to: String,
+    },
+    /// Remove a remote, its remote-tracking branches and the upstreams
+    /// that name it.
+    RemoveRemote(RemoteName),
+    /// Undo or redo the last action, as the undo planner chose (see
+    /// `git::undo`). Git writes `direction`'s marker into the reflog, which
+    /// is how the next plan knows this step happened. It runs only while
+    /// `HEAD` is still where `expect` says, as when the user was asked.
+    Travel {
+        direction: Direction,
+        step: Step,
+        expect: Expected,
+    },
+    /// Tag `target` as `name`: lightweight without a message, annotated
+    /// with one. Never forced, so git refuses a name that exists.
+    CreateTag {
+        name: String,
+        target: CommitId,
+        message: Option<String>,
+    },
+    /// Delete tag `name`, but only while its ref still holds `oid`, the
+    /// object it held when listed. Local only.
+    DeleteTag {
+        name: TagName,
+        oid: String,
+    },
+    /// Mark `commit` good, bad or skipped in the bisect; with `start`, a
+    /// plain `bisect start` runs first. Once there is a good and a bad
+    /// mark, git checks out the next commit to test.
+    BisectMark {
+        mark: BisectMark,
+        commit: CommitId,
+        start: bool,
+    },
+    /// End the bisect and check out where it started.
+    BisectReset,
 }
 
 /// Which changes a stash push puts aside.
@@ -214,6 +284,10 @@ impl ResetMode {
         }
     }
 }
+
+/// Why an undo or redo stopped before running: `HEAD` is no longer where
+/// the question said, so the step would move something else.
+pub const HEAD_MOVED: &str = "HEAD moved since the question was asked; nothing was changed";
 
 /// Why staging everything is refused while conflicts exist.
 pub const CONFLICTS_REFUSAL: &str = "Resolve conflicts before staging everything";
@@ -344,21 +418,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             std::slice::from_ref(path),
         )
         .env("GIT_TERMINAL_PROMPT", "0"),
-        // A short name, since a full ref would detach `HEAD`; `--` keeps
-        // it from being read as a path. A ref made outside git's porcelain
-        // can be named like an option, such as `-f`, which would force the
-        // checkout and lose the worktree's changes; `--end-of-options`
-        // keeps it a name. Only then: it needs git 2.24, newer than Kika
-        // requires, and an older git fails on it without touching anything.
-        GitOp::Checkout(name) => {
-            let cmd = GitCommand::new("checkout").arg("-q");
-            let cmd = if name.0.starts_with(b"-") {
-                cmd.arg("--end-of-options")
-            } else {
-                cmd
-            };
-            cmd.arg(name.as_os_string()).arg("--")
-        }
+        GitOp::Checkout(name) => checkout_command(name),
         // The start point as a full ref, so a tag of the same name, or a
         // name like an option, cannot stand in for it.
         GitOp::CreateBranch { name, from } => GitCommand::new("checkout")
@@ -367,13 +427,25 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(name)
             .arg(from.full_ref())
             .arg("--"),
+        // `--keep` makes git itself refuse to move when a local change, or
+        // an untracked file, is in the way. The marker in
+        // `GIT_REFLOG_ACTION` is all `checkout` logs, and `reset` logs it as
+        // `<marker>: updating HEAD`, as far back as git 2.15.
+        GitOp::Travel {
+            direction, step, ..
+        } => match step {
+            Step::MoveTo(oid) => GitCommand::new("reset")
+                .arg("-q")
+                .arg("--keep")
+                .arg(oid.as_str())
+                .arg("--"),
+            Step::CheckoutBranch(name) => checkout_command(name),
+            Step::CheckoutDetached(oid) => detached_checkout(oid),
+        }
+        .env("GIT_REFLOG_ACTION", direction.marker()),
         // The id is hex digits only, so it cannot be read as an option;
         // `--` keeps it from being read as a path.
-        GitOp::CheckoutCommit(oid) => GitCommand::new("checkout")
-            .arg("-q")
-            .arg("--detach")
-            .arg(oid.as_str())
-            .arg("--"),
+        GitOp::CheckoutCommit(oid) => detached_checkout(oid),
         GitOp::Reset { to, mode } => GitCommand::new("reset")
             .arg("-q")
             .arg(mode.flag())
@@ -424,6 +496,68 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(if *force { "-D" } else { "-d" })
             .arg("--")
             .arg(name.as_os_string()),
+        // The start point as a full ref, as for `CreateBranch`.
+        GitOp::CheckoutTracking { name, from } => GitCommand::new("checkout")
+            .arg("-q")
+            .arg("--track")
+            .arg("-b")
+            .arg(name)
+            .arg(from.full_ref())
+            .arg("--"),
+        GitOp::SetUpstream { branch, upstream } => {
+            let mut flag = OsString::from("--set-upstream-to=");
+            flag.push(upstream.full_ref());
+            GitCommand::new("branch")
+                .arg(flag)
+                .arg("--")
+                .arg(branch.as_os_string())
+        }
+        GitOp::UnsetUpstream(branch) => GitCommand::new("branch")
+            .arg("--unset-upstream")
+            .arg("--")
+            .arg(branch.as_os_string()),
+        // Never `-f`: adding a remote must not reach the network.
+        GitOp::AddRemote { name, url } => GitCommand::new("remote")
+            .arg("add")
+            .arg("--")
+            .arg(name)
+            .arg(url),
+        // In git 2.15 `remote rename` and `remote remove` parse no options,
+        // so `--` would be a usage error. The new name passed
+        // `validate_remote_name`, and no key acts on an old name that
+        // starts with `-`, so neither is read as an option.
+        GitOp::RenameRemote { from, to } => GitCommand::new("remote")
+            .arg("rename")
+            .arg(from.as_os_string())
+            .arg(to),
+        GitOp::RemoveRemote(name) => GitCommand::new("remote")
+            .arg("remove")
+            .arg(name.as_os_string()),
+        // The name passed `validate_tag_name` (see `refusal`), so it does
+        // not start with `-`; the message is `-m`'s own argument, read as
+        // its value whatever it starts with; the full id is hex digits.
+        // So no `--end-of-options`, which git 2.15 lacks.
+        GitOp::CreateTag {
+            name,
+            target,
+            message,
+        } => {
+            let cmd = GitCommand::new("tag");
+            let cmd = match message {
+                Some(message) => cmd.arg("-a").arg("-m").arg(message),
+                None => cmd,
+            };
+            cmd.arg(name).arg(target.as_str())
+        }
+        // The full ref, so a hand-made name like an option stays a name,
+        // and the old value, so a tag moved since it was listed is kept.
+        // `--no-deref`, so a symbolic ref under `refs/tags` that points at
+        // a branch loses itself, never the branch.
+        GitOp::DeleteTag { name, oid } => GitCommand::new("update-ref")
+            .arg("--no-deref")
+            .arg("-d")
+            .arg(name.full_ref())
+            .arg(oid),
         // These take no paths and may run hooks, which must see the env they
         // would see outside Kika, as a commit's do. The branch is a full
         // ref, so a name like an option, or one a tag shadows, stays this
@@ -438,6 +572,14 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         }
         GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
         GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
+        // Ids are hex digits only, so none is read as an option.
+        GitOp::CherryPick(picks) => {
+            return picks
+                .iter()
+                .fold(GitCommand::new("cherry-pick"), |cmd, pick| {
+                    cmd.arg(pick.as_str())
+                });
+        }
         // The plan goes to the sequence editor, which `handoff` names; the
         // base is hex digits only. The two keys are newer config that an
         // older git ignores; they keep the todo list to picks, which is all
@@ -468,6 +610,16 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::Abort(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--abort");
         }
+        // A bisect checks commits out, so hooks run and see the user's env,
+        // as for a merge. Only fixed words and hex digits reach argv;
+        // nothing read from the bisect's own files does. Every subcommand
+        // here predates git 2.15.
+        GitOp::BisectMark { mark, commit, .. } => {
+            return GitCommand::new("bisect")
+                .arg(mark.word())
+                .arg(commit.as_str());
+        }
+        GitOp::BisectReset => return GitCommand::new("bisect").arg("reset"),
         // The user's tool runs on the terminal and keeps their locale, so
         // no `LC_ALL`; the name is still read literally.
         GitOp::MergeTool(path) => {
@@ -509,6 +661,33 @@ fn stash_command(verb: &str, stash: &StashRef) -> GitCommand {
         .env("LC_ALL", "C")
 }
 
+/// Switch to the local branch `name`. A short name, since a full ref
+/// would detach `HEAD`; `--` keeps it from being read as a path. A ref
+/// made outside git's porcelain can be named like an option, such as
+/// `-f`, which would force the checkout and lose the worktree's changes;
+/// `--end-of-options` keeps it a name. Only then: it needs git 2.24, newer
+/// than Kika requires, and an older git fails on it without touching
+/// anything.
+fn checkout_command(name: &BranchName) -> GitCommand {
+    let cmd = GitCommand::new("checkout").arg("-q");
+    let cmd = if name.0.starts_with(b"-") {
+        cmd.arg("--end-of-options")
+    } else {
+        cmd
+    };
+    cmd.arg(name.as_os_string()).arg("--")
+}
+
+/// Check out `oid` with no branch. The id is hex digits only, so it cannot
+/// be read as an option; `--` keeps it from being read as a path.
+fn detached_checkout(oid: &CommitId) -> GitCommand {
+    GitCommand::new("checkout")
+        .arg("-q")
+        .arg("--detach")
+        .arg(oid.as_str())
+        .arg("--")
+}
+
 /// `git commit` taking its message from `message_file` (`-` is stdin), or
 /// keeping `HEAD`'s with none. Shared by the detached run and the one on
 /// the terminal, whose stdin is the user's, so the two differ only there.
@@ -529,7 +708,9 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
 /// Run `op`. Failures carry git's message, made safe to draw since it can
 /// quote repo-controlled paths. A commit's, a merge's, a revert's or a
 /// stash apply's failure also carries stdout: hooks print to stderr, but
-/// git says "nothing to commit" and names each conflict on stdout.
+/// git says "nothing to commit" and names each conflict on stdout. A
+/// bisect's does too: git says there why a mark failed, such as "merge base
+/// is bad", or which commits are left when only skipped ones remain.
 ///
 /// A stash action first checks its entry is still where it was chosen,
 /// and `--staged` first checks git is new enough.
@@ -564,6 +745,18 @@ fn run_op_with(
     if let GitOp::StashRename { stash, message } = op {
         return rename_stash(runner, stash, message);
     }
+    if let GitOp::BisectMark { start: true, .. } = op {
+        run_bisect_start(runner)?;
+    }
+    if let Some(reason) = refusal(op) {
+        return Err(reason.into());
+    }
+    if let GitOp::Travel { expect, .. } = op {
+        let now = super::reflog::read_head(runner);
+        if now.oid.as_ref() != Some(&expect.oid) || now.head_ref != expect.head_ref {
+            return Err(HEAD_MOVED.into());
+        }
+    }
     let mut cmd = op_command(op);
     if matches!(op, GitOp::SubmoduleUpdate(_)) && ssh_is_default(runner, env_set) {
         cmd = cmd.env("GIT_SSH_COMMAND", BATCH_SSH);
@@ -577,12 +770,18 @@ fn run_op_with(
         | GitOp::Merge { .. }
         | GitOp::Revert(_)
         | GitOp::StashApply(_)
-        | GitOp::StashPop(_) => [&output.stderr, &output.stdout]
-            .map(|bytes| terminal_safe(bytes))
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        | GitOp::StashPop(_)
+        | GitOp::CherryPick(_)
+        | GitOp::BisectMark { .. }
+        | GitOp::BisectReset => stderr_and_stdout(&output),
+        // Git quotes a remote's URL in these errors, and it can carry a
+        // token.
+        GitOp::CheckoutTracking { .. }
+        | GitOp::SetUpstream { .. }
+        | GitOp::UnsetUpstream(_)
+        | GitOp::AddRemote { .. }
+        | GitOp::RenameRemote { .. }
+        | GitOp::RemoveRemote(_) => redact_userinfo(&terminal_safe(&output.stderr)),
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
@@ -600,7 +799,7 @@ fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, St
     }
     let message = terminal_safe(&output.stderr);
     if message.is_empty() {
-        let subcommand = cmd.args()[0].to_string_lossy();
+        let subcommand = cmd.subcommand().to_string_lossy();
         return Err(format!("git {subcommand} failed"));
     }
     Err(message)
@@ -685,6 +884,50 @@ fn rename_stash(runner: &dyn GitRunner, stash: &StashRef, message: &str) -> Resu
     verify_stash(runner, &at(0))?;
     verify_stash(runner, &at(stash.index + 1))?;
     run_checked(runner, &drop(stash.index + 1)).map(|_| ())
+}
+
+/// Both of git's streams, made safe to draw, for commands that report
+/// their outcome on stdout.
+fn stderr_and_stdout(output: &GitOutput) -> String {
+    [&output.stderr, &output.stdout]
+        .map(|bytes| terminal_safe(bytes))
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `git bisect start` with no arguments: it records where `HEAD` is and
+/// moves nothing, so the first mark that follows starts the bisect.
+fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
+    let output = runner
+        .run(&GitCommand::new("bisect").arg("start"))
+        .map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(());
+    }
+    let message = stderr_and_stdout(&output);
+    Err(if message.is_empty() {
+        "git bisect start failed".into()
+    } else {
+        message
+    })
+}
+
+/// Why `op` must not run at all. The reducer checks a new tag's name
+/// before it builds the op; this checks it again where git would run, so
+/// no other path can pass a name git would read as an option.
+pub fn refusal(op: &GitOp) -> Option<&'static str> {
+    match op {
+        GitOp::CreateTag { name, .. } => validate_tag_name(name).err(),
+        // Only a full id is surely a commit, never a ref of that name.
+        GitOp::CherryPick(picks)
+            if picks.is_empty() || !picks.iter().all(super::cherry_pick::is_full_id) =>
+        {
+            Some("Only full commit ids can be cherry-picked")
+        }
+        _ => None,
+    }
 }
 
 /// ssh that fails instead of asking. `GIT_TERMINAL_PROMPT=0` stops git's
@@ -1037,6 +1280,15 @@ mod tests {
     }
 
     #[test]
+    fn cherry_pick_names_each_commit_in_order_and_sets_no_env() {
+        let (one, two) = ("1".repeat(40), "2".repeat(40));
+        let cmd = op_command(&GitOp::CherryPick(vec![oid(&one), oid(&two)]));
+        assert_eq!(argv(&cmd), ["cherry-pick", one.as_str(), two.as_str()]);
+        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
+        assert_eq!(cmd.input(), None);
+    }
+
+    #[test]
     fn revert_is_plain_git_revert_and_sets_no_env() {
         let cmd = op_command(&GitOp::Revert(oid("abc123")));
         assert_eq!(argv(&cmd), ["revert", "abc123"]);
@@ -1289,6 +1541,342 @@ mod tests {
         };
         run_op(&runner, &delete).unwrap();
         assert_eq!(branches(), "made\nmain\n");
+    }
+
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn create_tag(name: &str, message: Option<&str>) -> GitOp {
+        GitOp::CreateTag {
+            name: name.into(),
+            target: CommitId::parse(OID).unwrap(),
+            message: message.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn tag_ops_build_exact_argv() {
+        let cases: [(GitOp, &[&str]); 4] = [
+            (create_tag("v1", None), &["tag", "v1", OID]),
+            (
+                create_tag("v1", Some("-msg starting with dash")),
+                &["tag", "-a", "-m", "-msg starting with dash", "v1", OID],
+            ),
+            (
+                GitOp::DeleteTag {
+                    name: "v1".into(),
+                    oid: OID.into(),
+                },
+                &["update-ref", "--no-deref", "-d", "refs/tags/v1", OID],
+            ),
+            (
+                GitOp::DeleteTag {
+                    name: "-x".into(),
+                    oid: OID.into(),
+                },
+                &["update-ref", "--no-deref", "-d", "refs/tags/-x", OID],
+            ),
+        ];
+        for (op, expected) in cases {
+            assert_eq!(argv(&op_command(&op)), expected, "{op:?}");
+            let runner = FakeRunner::new().expect(expected, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_tag_with_a_bad_name_is_refused_without_running_git() {
+        for name in ["-f", "", "a..b", "HEAD", "a b"] {
+            let runner = FakeRunner::new();
+            let op = create_tag(name, Some("m"));
+            assert!(run_op(&runner, &op).is_err(), "{name:?}");
+            runner.assert_done();
+        }
+        assert_eq!(refusal(&create_tag("v1", None)), None);
+    }
+
+    #[test]
+    fn tags_are_made_and_deleted_only_while_unmoved_in_real_git() {
+        use crate::git::fake::{TempDir, git, try_git};
+        let tmp = TempDir::new("tag-ops");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        // An annotated tag records a tagger, and the runner below sees
+        // only the repository's config.
+        git(dir, &["config", "user.name", "Tagger"]);
+        git(dir, &["config", "user.email", "tagger@example.com"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
+        let head = CommitId::parse(head.trim()).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let made = |name: &str, message: Option<&str>| GitOp::CreateTag {
+            name: name.into(),
+            target: head.clone(),
+            message: message.map(Into::into),
+        };
+        let kind = |name: &str| git(dir, &["cat-file", "-t", &format!("refs/tags/{name}")]);
+
+        run_op(&runner, &made("light", None)).unwrap();
+        run_op(&runner, &made("heavy", Some("-m looks like an option"))).unwrap();
+        assert_eq!(kind("light"), b"commit\n");
+        assert_eq!(kind("heavy"), b"tag\n");
+        let body = git(dir, &["tag", "-l", "--format=%(contents:subject)", "heavy"]);
+        assert_eq!(body, b"-m looks like an option\n");
+        let again = run_op(&runner, &made("light", None)).unwrap_err();
+        assert!(again.contains("already exists"), "{again}");
+
+        // A tag that moved since it was listed is not deleted.
+        let stale = GitOp::DeleteTag {
+            name: "heavy".into(),
+            oid: head.as_str().into(),
+        };
+        assert!(run_op(&runner, &stale).is_err());
+        assert!(try_git(
+            dir,
+            &["rev-parse", "--verify", "-q", "refs/tags/heavy"]
+        ));
+        let delete = GitOp::DeleteTag {
+            name: "light".into(),
+            oid: head.as_str().into(),
+        };
+        run_op(&runner, &delete).unwrap();
+        assert!(!try_git(
+            dir,
+            &["rev-parse", "--verify", "-q", "refs/tags/light"]
+        ));
+    }
+
+    #[test]
+    fn deleting_a_symbolic_tag_removes_only_the_tag_never_its_branch() {
+        use crate::git::fake::{TempDir, git, try_git};
+        let tmp = TempDir::new("tag-symref");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(dir, &["branch", "keep"]);
+        git(dir, &["symbolic-ref", "refs/tags/evil", "refs/heads/keep"]);
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"])).unwrap();
+        let runner = crate::git::CliRunner::isolated(dir);
+
+        let delete = GitOp::DeleteTag {
+            name: "evil".into(),
+            oid: head.trim().into(),
+        };
+        run_op(&runner, &delete).unwrap();
+
+        assert!(try_git(
+            dir,
+            &["rev-parse", "--verify", "-q", "refs/heads/keep"]
+        ));
+        let left = git(dir, &["for-each-ref", "--format=%(refname)", "refs/tags"]);
+        assert!(left.is_empty(), "{}", String::from_utf8_lossy(&left));
+    }
+
+    fn origin_main() -> RemoteBranch {
+        RemoteBranch {
+            remote: "origin".into(),
+            short: b"main".to_vec(),
+            refname: b"refs/remotes/origin/main".to_vec(),
+        }
+    }
+
+    #[test]
+    fn remote_and_upstream_ops_build_exact_argv_and_never_fetch() {
+        let cases: [(GitOp, &[&str]); 7] = [
+            (
+                GitOp::CheckoutTracking {
+                    name: "main".into(),
+                    from: origin_main(),
+                },
+                &[
+                    "checkout",
+                    "-q",
+                    "--track",
+                    "-b",
+                    "main",
+                    "refs/remotes/origin/main",
+                    "--",
+                ],
+            ),
+            (
+                GitOp::SetUpstream {
+                    branch: "topic".into(),
+                    upstream: origin_main(),
+                },
+                &[
+                    "branch",
+                    "--set-upstream-to=refs/remotes/origin/main",
+                    "--",
+                    "topic",
+                ],
+            ),
+            (
+                GitOp::UnsetUpstream("topic".into()),
+                &["branch", "--unset-upstream", "--", "topic"],
+            ),
+            (
+                GitOp::AddRemote {
+                    name: "fork".into(),
+                    url: "https://h/fork.git".into(),
+                },
+                &["remote", "add", "--", "fork", "https://h/fork.git"],
+            ),
+            // No `--`: git 2.15's `remote rename` and `remote remove` parse
+            // no options and would take it for a name.
+            (
+                GitOp::RenameRemote {
+                    from: "fork".into(),
+                    to: "mine".into(),
+                },
+                &["remote", "rename", "fork", "mine"],
+            ),
+            (
+                GitOp::RemoveRemote("fork".into()),
+                &["remote", "remove", "fork"],
+            ),
+            (
+                GitOp::RemoveRemote("my.fork/x".into()),
+                &["remote", "remove", "my.fork/x"],
+            ),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            let got = argv(&cmd);
+            assert_eq!(got, expected, "{op:?}");
+            for banned in ["-f", "--fetch", "fetch", "--end-of-options"] {
+                assert!(!got.iter().any(|a| a == banned), "{op:?}: {banned}");
+            }
+            let runner = FakeRunner::new().expect(expected, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_failed_remote_op_says_why_without_credentials() {
+        let runner = FakeRunner::new().expect(
+            &["remote", "add", "--", "o", "https://u:tok@h/r"],
+            fail("error: remote o already exists at 'https://u:tok@h/r'\n"),
+        );
+        let op = GitOp::AddRemote {
+            name: "o".into(),
+            url: "https://u:tok@h/r".into(),
+        };
+        assert_eq!(
+            run_op(&runner, &op),
+            Err("error: remote o already exists at 'https://h/r'".into())
+        );
+    }
+
+    /// A repository on `main` with one commit, and `origin`: a local bare
+    /// repository holding `main` and `feature`, fetched once.
+    fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {
+        use crate::git::fake::{TempDir, git};
+        let bare = TempDir::new("remote-bare");
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        let tmp = TempDir::new("remote-ops");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let url = bare.path().to_str().unwrap();
+        git(dir, &["remote", "add", "origin", url]);
+        git(dir, &["push", "-q", "origin", "main", "main:feature"]);
+        git(dir, &["fetch", "-q", "origin"]);
+        (tmp, bare)
+    }
+
+    fn config(dir: &std::path::Path, key: &str) -> Option<String> {
+        let mut cmd = std::process::Command::new("git");
+        let out = cmd
+            .current_dir(dir)
+            .envs(crate::git::runner::isolation_env())
+            .args(["config", "--get", key])
+            .output()
+            .unwrap();
+        out.status
+            .success()
+            .then(|| String::from_utf8(out.stdout).unwrap().trim().to_string())
+    }
+
+    fn remote_refs(dir: &std::path::Path) -> String {
+        String::from_utf8(crate::git::fake::git(
+            dir,
+            &["for-each-ref", "--format=%(refname)", "refs/remotes"],
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn remotes_are_added_renamed_and_removed_without_a_fetch_in_real_git() {
+        let (tmp, bare) = cloned_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let url = bare.path().to_str().unwrap().to_string();
+
+        let add = GitOp::AddRemote {
+            name: "fork".into(),
+            url: url.clone(),
+        };
+        run_op(&runner, &add).unwrap();
+        assert_eq!(config(dir, "remote.fork.url"), Some(url));
+        assert!(!remote_refs(dir).contains("refs/remotes/fork/"), "fetched");
+
+        // Its refs move with it once there are some.
+        crate::git::fake::git(dir, &["fetch", "-q", "fork"]);
+        let rename = GitOp::RenameRemote {
+            from: "fork".into(),
+            to: "mine".into(),
+        };
+        run_op(&runner, &rename).unwrap();
+        assert_eq!(config(dir, "remote.fork.url"), None);
+        let refs = remote_refs(dir);
+        assert!(refs.contains("refs/remotes/mine/feature"), "{refs}");
+        assert!(!refs.contains("refs/remotes/fork/"), "{refs}");
+
+        run_op(&runner, &GitOp::RemoveRemote("mine".into())).unwrap();
+        assert_eq!(config(dir, "remote.mine.url"), None);
+        assert!(!remote_refs(dir).contains("refs/remotes/mine/"));
+    }
+
+    #[test]
+    fn a_tracking_checkout_then_set_and_unset_upstream_in_real_git() {
+        let (tmp, _bare) = cloned_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let feature = RemoteBranch {
+            remote: "origin".into(),
+            short: b"feature".to_vec(),
+            refname: b"refs/remotes/origin/feature".to_vec(),
+        };
+
+        let checkout = GitOp::CheckoutTracking {
+            name: "feature".into(),
+            from: feature.clone(),
+        };
+        run_op(&runner, &checkout).unwrap();
+        let head = crate::git::fake::git(dir, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(head, b"feature\n");
+        assert_eq!(
+            config(dir, "branch.feature.merge").as_deref(),
+            Some("refs/heads/feature")
+        );
+        assert_eq!(
+            config(dir, "branch.feature.remote").as_deref(),
+            Some("origin")
+        );
+
+        assert_eq!(config(dir, "branch.main.merge"), None);
+        let set = GitOp::SetUpstream {
+            branch: "main".into(),
+            upstream: feature,
+        };
+        run_op(&runner, &set).unwrap();
+        assert_eq!(
+            config(dir, "branch.main.merge").as_deref(),
+            Some("refs/heads/feature")
+        );
+        run_op(&runner, &GitOp::UnsetUpstream("main".into())).unwrap();
+        assert_eq!(config(dir, "branch.main.merge"), None);
     }
 
     fn paths(paths: &[&str]) -> Vec<RepoPath> {
@@ -2215,6 +2803,405 @@ mod tests {
         run_op(&runner, &GitOp::toggle_for(&raw).unwrap()).unwrap();
         assert_eq!(letters(RAW_NAME).as_deref(), Some(" D"));
         assert_eq!(letters(LOOK_ALIKE.as_bytes()).as_deref(), Some("M "));
+    }
+
+    /// A travel op expecting a detached `HEAD` at `abc`; only its argv
+    /// is looked at.
+    fn travel(direction: Direction, step: Step) -> GitOp {
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: None,
+                oid: oid("abc"),
+            },
+        }
+    }
+
+    /// A travel op expecting `HEAD` where it is now in `runner`'s repo.
+    fn travel_here(runner: &dyn GitRunner, direction: Direction, step: Step) -> GitOp {
+        let now = crate::git::reflog::read_head(runner);
+        GitOp::Travel {
+            direction,
+            step,
+            expect: Expected {
+                head_ref: now.head_ref,
+                oid: now.oid.unwrap(),
+            },
+        }
+    }
+
+    fn planned(plan: crate::git::undo::Plan) -> GitOp {
+        GitOp::Travel {
+            direction: plan.direction,
+            step: plan.step,
+            expect: plan.expect,
+        }
+    }
+
+    #[test]
+    fn travel_names_only_ids_and_loaded_branches_and_marks_the_reflog() {
+        let cases: [(GitOp, &[&str], &str); 4] = [
+            (
+                travel(Direction::Undo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::MoveTo(oid("abc123"))),
+                &["reset", "-q", "--keep", "abc123", "--"],
+                "kika redo",
+            ),
+            (
+                travel(Direction::Undo, Step::CheckoutBranch("main".into())),
+                &["checkout", "-q", "main", "--"],
+                "kika undo",
+            ),
+            (
+                travel(Direction::Redo, Step::CheckoutDetached(oid("abc123"))),
+                &["checkout", "-q", "--detach", "abc123", "--"],
+                "kika redo",
+            ),
+        ];
+        for (op, expected, marker) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            let envs: Vec<_> = cmd
+                .envs()
+                .iter()
+                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                envs,
+                [
+                    ("GIT_REFLOG_ACTION", marker),
+                    ("GIT_LITERAL_PATHSPECS", "1"),
+                    ("LC_ALL", "C"),
+                ],
+                "{op:?}"
+            );
+        }
+        let checkout = op_command(&GitOp::Checkout("main".into()));
+        assert_eq!(argv(&checkout), ["checkout", "-q", "main", "--"]);
+    }
+
+    #[test]
+    fn an_undo_leaves_a_marker_the_next_plan_reads_back_in_real_git() {
+        use crate::git::reflog::{Action, read_reflog};
+        use crate::git::undo::{Context, plan};
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let second = rev_parse(dir, "HEAD");
+        let runner = crate::git::CliRunner::isolated(dir);
+        let ctx = Context {
+            branch: Some("main"),
+            branches: &[],
+            dirty: false,
+        };
+
+        let undo = plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(first.clone()));
+        run_op(&runner, &planned(undo)).unwrap();
+
+        assert_eq!(rev_parse(dir, "HEAD"), first);
+        let reflog = read_reflog(&runner).unwrap();
+        assert_eq!(reflog.entries[0].action, Action::Undo);
+        assert_eq!(reflog.entries[0].message, b"kika undo: updating HEAD");
+        let redo = plan(Direction::Redo, &reflog, &ctx).unwrap();
+        assert_eq!(redo.step, Step::MoveTo(second));
+    }
+
+    #[test]
+    fn reset_keep_refuses_to_clobber_a_local_change_or_an_untracked_file_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        std::fs::write(dir.join("a.txt"), "mine\n").unwrap();
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+        let refused = run_op(&runner, &undo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+
+        // The commit after `first` adds `b.txt`; an untracked one is in
+        // the way of going back to it.
+        git(dir, &["checkout", "-q", "--", "a.txt"]);
+        std::fs::write(dir.join("b.txt"), "theirs\n").unwrap();
+        git(dir, &["add", "b.txt"]);
+        git(dir, &["commit", "-q", "-m", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        run_op(&runner, &undo).unwrap();
+        std::fs::write(dir.join("b.txt"), "untracked\n").unwrap();
+        let redo = travel_here(&runner, Direction::Redo, Step::MoveTo(third));
+        let refused = run_op(&runner, &redo).unwrap_err();
+        assert_ne!(refused, HEAD_MOVED);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "untracked\n"
+        );
+    }
+
+    #[test]
+    fn a_travel_whose_head_moved_since_the_question_changes_nothing_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first.clone()));
+
+        // Another commit lands while the question is open.
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "third"]);
+        let third = rev_parse(dir, "HEAD");
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "HEAD"), third);
+
+        // Same commit, another branch: still not what was asked about.
+        let undo = travel_here(&runner, Direction::Undo, Step::MoveTo(first));
+        git(dir, &["checkout", "-q", "-b", "other"]);
+        assert_eq!(run_op(&runner, &undo), Err(HEAD_MOVED.into()));
+        assert_eq!(rev_parse(dir, "refs/heads/other"), third);
+    }
+
+    #[test]
+    fn undoing_a_rebase_started_from_another_branch_restores_the_rebased_branch_in_real_git() {
+        use crate::git::fake::git;
+        use crate::git::reflog::read_reflog;
+        use crate::git::undo::{Context, plan};
+
+        let (tmp, base) = two_commit_repo();
+        let dir = tmp.path();
+        let main = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "topic", base.as_str()]);
+        std::fs::write(dir.join("t.txt"), "topic\n").unwrap();
+        git(dir, &["add", "t.txt"]);
+        git(dir, &["commit", "-q", "-m", "topic"]);
+        let old_topic = rev_parse(dir, "HEAD");
+        git(dir, &["checkout", "-q", "-b", "other", main.as_str()]);
+        std::fs::write(dir.join("o.txt"), "other\n").unwrap();
+        git(dir, &["add", "o.txt"]);
+        git(dir, &["commit", "-q", "-m", "other"]);
+        let other = rev_parse(dir, "HEAD");
+        // Run from `other`: HEAD's reflog never held topic's old tip.
+        git(dir, &["rebase", "-q", main.as_str(), "topic"]);
+        let new_topic = rev_parse(dir, "HEAD");
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        let reflog = read_reflog(&runner).unwrap();
+        let branches = crate::git::branches::list_branches(&runner).unwrap();
+        let ctx = Context {
+            branch: Some("topic"),
+            branches: &branches,
+            dirty: false,
+        };
+        let undo = plan(Direction::Undo, &reflog, &ctx).unwrap();
+        assert_eq!(undo.step, Step::MoveTo(old_topic.clone()));
+        assert_ne!(undo.step, Step::MoveTo(other.clone()));
+        run_op(&runner, &planned(undo)).unwrap();
+        assert_eq!(rev_parse(dir, "refs/heads/topic"), old_topic);
+        assert_eq!(rev_parse(dir, "refs/heads/other"), other);
+
+        // Without the branch's own reflog there is no safe target.
+        let redo = plan(Direction::Redo, &read_reflog(&runner).unwrap(), &ctx).unwrap();
+        run_op(&runner, &planned(redo)).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD"), new_topic);
+        std::fs::remove_file(dir.join(".git/logs/refs/heads/topic")).unwrap();
+        assert_eq!(
+            plan(Direction::Undo, &read_reflog(&runner).unwrap(), &ctx),
+            Err(
+                "Cannot undo rebase: the branch's own reflog does not say where it was before"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
+    fn a_head_pointing_outside_refs_heads_plans_no_undo_in_real_git() {
+        use crate::git::fake::git;
+        use crate::git::reflog::read_reflog;
+        use crate::git::undo::{Context, plan};
+
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        let head = rev_parse(dir, "HEAD");
+        git(
+            dir,
+            &["update-ref", "refs/remotes/origin/main", head.as_str()],
+        );
+        git(dir, &["symbolic-ref", "HEAD", "refs/remotes/origin/main"]);
+        std::fs::write(dir.join("a.txt"), "three\n").unwrap();
+        git(dir, &["commit", "-q", "-am", "on a remote ref"]);
+        let moved = rev_parse(dir, "refs/remotes/origin/main");
+
+        let runner = crate::git::CliRunner::isolated(dir);
+        let reflog = read_reflog(&runner).unwrap();
+        let ctx = Context {
+            branch: None,
+            branches: &[],
+            dirty: false,
+        };
+        assert_eq!(
+            plan(Direction::Undo, &reflog, &ctx),
+            Err("HEAD is on refs/remotes/origin/main, not a branch; nothing is undone".into())
+        );
+        assert_eq!(rev_parse(dir, "refs/remotes/origin/main"), moved);
+    }
+
+    fn mark(mark: BisectMark, start: bool) -> GitOp {
+        GitOp::BisectMark {
+            mark,
+            commit: oid("abc123"),
+            start,
+        }
+    }
+
+    #[test]
+    fn bisect_ops_pass_only_fixed_words_and_the_commits_hex() {
+        let cases: [(GitOp, &[&str]); 4] = [
+            (mark(BisectMark::Bad, false), &["bisect", "bad", "abc123"]),
+            (mark(BisectMark::Good, true), &["bisect", "good", "abc123"]),
+            (mark(BisectMark::Skip, false), &["bisect", "skip", "abc123"]),
+            (GitOp::BisectReset, &["bisect", "reset"]),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+            assert_eq!(cmd.input(), None);
+        }
+    }
+
+    #[test]
+    fn a_first_mark_runs_bisect_start_before_it() {
+        let runner = FakeRunner::new()
+            .expect(&["bisect", "start"], ok(b""))
+            .expect(&["bisect", "bad", "abc123"], ok(b""));
+        run_op(&runner, &mark(BisectMark::Bad, true)).unwrap();
+        runner.assert_done();
+
+        let runner = FakeRunner::new().expect(&["bisect", "good", "abc123"], ok(b""));
+        run_op(&runner, &mark(BisectMark::Good, false)).unwrap();
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_start_stops_before_the_mark_with_gits_words() {
+        let runner = FakeRunner::new().expect(&["bisect", "start"], fail("fatal: Bad HEAD\n"));
+        assert_eq!(
+            run_op(&runner, &mark(BisectMark::Bad, true)),
+            Err("fatal: Bad HEAD".into())
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_mark_carries_what_git_said_on_stdout() {
+        let output = GitOutput {
+            stdout: b"There are only 'skip'ped commits left to test.\nThe first bad commit could be any of:\n\x1b[31mabc\n".to_vec(),
+            ..fail("")
+        };
+        let runner = FakeRunner::new().expect(&["bisect", "skip", "abc123"], output);
+        assert_eq!(
+            run_op(&runner, &mark(BisectMark::Skip, false)),
+            Err("There are only 'skip'ped commits left to test.\n\
+                 The first bad commit could be any of:\n\u{FFFD}[31mabc"
+                .into())
+        );
+    }
+
+    /// Eight commits on `main`, `commit 1` to `commit 8`; from commit 5 on
+    /// the tree has a `bug` file. Returns the repo and the commits, oldest
+    /// first.
+    fn buggy_history() -> (crate::git::fake::TempDir, Vec<CommitId>) {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("bisect");
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "--template=", "-b", "main"]);
+        for (key, value) in [
+            ("user.name", "Kika Test"),
+            ("user.email", "test@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(dir, &["config", key, value]);
+        }
+        let mut commits = Vec::new();
+        for i in 1..=8 {
+            std::fs::write(dir.join("n.txt"), format!("{i}\n")).unwrap();
+            if i == 5 {
+                std::fs::write(dir.join("bug"), "bug\n").unwrap();
+            }
+            git(dir, &["add", "-A"]);
+            git(dir, &["commit", "-q", "-m", &format!("commit {i}")]);
+            commits.push(rev_parse(dir, "HEAD"));
+        }
+        (tmp, commits)
+    }
+
+    #[test]
+    fn marks_find_the_first_bad_commit_and_reset_returns_to_the_branch_in_real_git() {
+        use crate::git::bisect::read_bisect;
+        use crate::git::fake::{git, try_git};
+
+        let (tmp, commits) = buggy_history();
+        let dir = tmp.path();
+        let git_dir = dir.join(".git");
+        let runner = crate::git::CliRunner::isolated(dir);
+        let run = |mark: BisectMark, commit: &CommitId, start: bool| {
+            let op = GitOp::BisectMark {
+                mark,
+                commit: commit.clone(),
+                start,
+            };
+            run_op(&runner, &op).unwrap();
+        };
+
+        run(BisectMark::Bad, &commits[7], true);
+        assert_eq!(read_bisect(&git_dir).unwrap().bad, 1);
+        run(BisectMark::Good, &commits[0], false);
+        let mut steps = 0;
+        let found = loop {
+            let state = read_bisect(&git_dir).unwrap();
+            if let Some(found) = state.first_bad {
+                break found;
+            }
+            assert!(
+                !try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+                "HEAD is on a branch"
+            );
+            let head = rev_parse(dir, "HEAD");
+            assert!(
+                commits[1..7].contains(&head),
+                "HEAD {head:?} is outside the range"
+            );
+            let mark = if dir.join("bug").exists() {
+                BisectMark::Bad
+            } else {
+                BisectMark::Good
+            };
+            run(mark, &head, false);
+            steps += 1;
+            assert!(
+                steps < 8,
+                "the bisect never ended; {}:\n{}",
+                String::from_utf8_lossy(&git(dir, &["--version"])),
+                String::from_utf8_lossy(&std::fs::read(git_dir.join("BISECT_LOG")).unwrap())
+            );
+        };
+        assert_eq!(found.commit, commits[4]);
+        assert_eq!(found.subject, "commit 5");
+
+        run_op(&runner, &GitOp::BisectReset).unwrap();
+        assert_eq!(git(dir, &["symbolic-ref", "HEAD"]), b"refs/heads/main\n");
+        assert_eq!(rev_parse(dir, "HEAD"), commits[7]);
+        assert_eq!(read_bisect(&git_dir), None);
     }
 
     // --- Stash ---

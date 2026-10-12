@@ -1,13 +1,16 @@
 use crate::blame_view::{BlameView, CommitView};
+use crate::branches::BranchesTab;
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
 use crate::conflict_view;
 use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
+use crate::git::bisect::BisectState;
 use crate::git::blame::BlameLine;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize, sanitize_body};
 use crate::git::patch::{FileKind, PatchError};
+use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind};
@@ -15,6 +18,8 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands
 use crate::layout::{Panel, SidePanel, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
+use crate::remote_run::RemoteRun;
+use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
 use crate::stash_view;
 use ratatui::Frame;
@@ -93,6 +98,13 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
     };
     match (&state.focus, state.rendered_shown(), label) {
         // What the selected branch holds, before acting on it.
+        // A remote's header row has no log; what the remote is instead.
+        (Focus::Branches, ..)
+            if state.branches.tab == BranchesTab::Remotes
+                && state.branches.remotes.selected_branch().is_none() =>
+        {
+            remotes_view::render_remote(&state.branches.remotes, &look, frame, area)
+        }
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
         // A commit's file, streamed like a working-tree diff; never rendered.
         (Focus::Commits, ..) if state.commits.open.is_some() => {
@@ -180,6 +192,16 @@ impl PanelLook {
             return elide_right(&key, self.title_width);
         }
         format!("{key} {}{}", elide_right(text, room), self.mode)
+    }
+
+    /// Whether ` [n] <text><mode> ` fits the border whole.
+    pub(crate) fn fits(&self, text: &str) -> bool {
+        width_of(&format!(" [{}] {text}{} ", self.number, self.mode)) <= self.title_width
+    }
+
+    /// Whether `[n] <text><mode>` fits the border, with no space either side.
+    pub(crate) fn fits_bare(&self, text: &str) -> bool {
+        width_of(&format!("[{}] {text}{}", self.number, self.mode)) <= self.title_width
     }
 
     /// ` [n] <head> <path><tail><mode> `, the path losing its start so
@@ -300,13 +322,67 @@ fn render_status_panel(
         (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
         (Some(name), None) => fit(name, " (gone)", width),
     };
-    let lines = vec![
+    let mut lines = vec![
         Line::raw(head),
         Line::raw(upstream),
         Line::styled(elide_right(&operations, width), marker),
     ];
+    if let Some(bisect) = &branch.bisect {
+        lines.extend(bisect_lines(state, &branch.head, bisect, width));
+    }
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
+
+/// The bisect under the "bisecting" marker: its marks and outcome, the
+/// commit being tested, and where it started. A commit is shown as tested
+/// once `HEAD` is detached, as the Status panel's mark keys need. Every
+/// string here is already terminal-safe.
+fn bisect_lines(
+    state: &AppState,
+    head: &Head,
+    bisect: &BisectState,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let row = |text: String| Line::raw(elide_right(&text, width));
+    let mut lines = vec![row(format!(
+        "Bisect: {} good · {} bad · {} skipped",
+        bisect.good, bisect.bad, bisect.skip
+    ))];
+    // The outcome comes right after the counts, so a short panel clips
+    // the details before it.
+    if let Some(found) = &bisect.first_bad {
+        let short = state.commits.short_oid(&found.commit);
+        lines.push(Line::styled(
+            elide_right(
+                &format!("{FOUND_MARK} Found: {short} {}", found.subject),
+                width,
+            ),
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+    } else if bisect.only_skipped {
+        lines.push(row("Only skipped commits left".to_string()));
+    }
+    lines.push(row(match head {
+        Head::Detached(oid) => match state.commits.rows.iter().find(|r| &r.oid == oid) {
+            Some(commit) => format!("Testing: {} {}", commit.short_oid, commit.subject),
+            None => format!("Testing: {}", short_hash(oid)),
+        },
+        _ => "Mark a good and a bad commit".to_string(),
+    }));
+    if !bisect.start.is_empty() {
+        lines.push(row(format!("Started from: {}", bisect.start)));
+    }
+    if !bisect.terms.is_default() {
+        lines.push(row(format!(
+            "Terms: {}/{}",
+            bisect.terms.bad, bisect.terms.good
+        )));
+    }
+    lines
+}
+
+/// Marks the found commit's line, so it stands out without colour too.
+const FOUND_MARK: &str = "◆";
 
 /// The branch row, fitted to `width` columns.
 fn head_line(head: &Head, width: usize) -> String {
@@ -693,8 +769,13 @@ pub(crate) fn tail(rows: &[String], room: usize) -> Vec<Line<'_>> {
 fn status_bar(state: &AppState, width: u16) -> Line<'_> {
     let mut spans = Vec::new();
     let mut room = usize::from(width);
-    // A fetch, pull or push says which; anything else is loading.
+    // A fetch, pull or push says which, and a tag push where to;
+    // anything else is loading.
     let busy = match &state.remote {
+        Some(RemoteRun {
+            op: RemoteOp::PushTag { remote, .. },
+            ..
+        }) => Some(format!(" pushing tag to {}… ", remote.display())),
         Some(run) => Some(format!(" {} ", run.op.doing())),
         None => (state.busy > 0).then(|| " loading… ".to_string()),
     };
@@ -709,7 +790,8 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
         spans.push(Span::raw(format!(" {cancel}")));
     }
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    if let Some(notice) = state.notice.or(remote_notice) {
+    let notice = state.notice.or(state.notice_text.as_deref());
+    if let Some(notice) = notice.or(remote_notice) {
         spans.push(Span::styled(
             elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
@@ -729,10 +811,23 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
                 Style::new().fg(Color::DarkGray),
             ));
         }
-        let room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
-        let hints: Vec<(String, bool, bool)> = available(registry(), &state.keymap, focus, state)
+        let mut room = room.saturating_sub(note.map_or(0, |n| width_of(n) + 1));
+        let copied = copied_note(state);
+        if let Some(copied) = &copied {
+            spans.push(Span::styled(
+                format!(" {copied}"),
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ));
+            room = room.saturating_sub(width_of(copied) + 1);
+        }
+        // While commits are copied, paste and clear lead the hints, so a
+        // narrow bar keeps them.
+        let leading: &[&str] = if copied.is_some() { COPIED_HINTS } else { &[] };
+        let mut available = available(registry(), &state.keymap, focus, state);
+        available.retain(|(binding, _)| binding.bar || leading.contains(&binding.id));
+        available.sort_by_key(|(binding, _)| !leading.contains(&binding.id));
+        let hints: Vec<(String, bool, bool)> = available
             .into_iter()
-            .filter(|(binding, _)| binding.bar)
             .map(|(binding, disabled)| {
                 let key = state.keymap.keys(binding).first().map(KeyPattern::label);
                 let hint = format!("{} {}", key.unwrap_or_default(), binding.label);
@@ -740,12 +835,22 @@ fn status_bar(state: &AppState, width: u16) -> Line<'_> {
             })
             .collect();
         for (i, (hint, disabled)) in fit_hints(&hints, room).into_iter().enumerate() {
-            let first = i == 0 && note.is_none();
+            let first = i == 0 && note.is_none() && copied.is_none();
             spans.push(Span::raw(if first { " " } else { "  " }));
             spans.push(Span::styled(hint, dimmed_if(disabled)));
         }
     }
     Line::from(spans)
+}
+
+/// The bindings that lead the hints while commits are copied.
+const COPIED_HINTS: &[&str] = &["commits.paste", "commits.clear_copied"];
+
+/// `N copied` while commits wait to be pasted, so the set shows on every
+/// screen size and from every panel.
+fn copied_note(state: &AppState) -> Option<String> {
+    let n = state.copied.len();
+    (n > 0 && state.context == Context::Workspace).then(|| format!("{n} copied"))
 }
 
 /// The cancel key's hint, if the keymap leaves it a key. Shown only while a
@@ -1552,6 +1657,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         }
     }
 
@@ -3418,6 +3524,21 @@ mod tests {
             _ => String::new(),
         };
         match (panel, &state.focus) {
+            // Expanded, the Branches and Commits panels name their tabs; at
+            // 80 columns they take the place of the panel's name, the others
+            // shortened.
+            (Panel::Side(SidePanel::Branches), _) if state.expanded == SidePanel::Branches => {
+                match state.screen_mode {
+                    crate::layout::ScreenMode::Normal => format!(" [3] [Local] Rem Tag{mode} "),
+                    crate::layout::ScreenMode::Half => format!(" [3] [Local] Remotes Tags{mode} "),
+                    crate::layout::ScreenMode::Full => {
+                        format!(" [3] Branches · [Local] Remotes Tags{mode} ")
+                    }
+                }
+            }
+            (Panel::Side(SidePanel::Commits), _) if state.expanded == SidePanel::Commits => {
+                format!("[Log] Reflog{mode} ")
+            }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
             (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
             // The selected branch's commits take the diff's place.
@@ -3688,7 +3809,11 @@ mod tests {
                 let key = format!("[{}]", panel.number());
                 assert!(row.contains(&key), "{w}x{h} {focus:?}: {row:?}");
                 // Whole, or cut on purpose with `…`, the mode note kept.
+                // The expanded Branches panel keeps its shown tab instead.
                 let name = match panel {
+                    Panel::Side(SidePanel::Branches) if state.expanded == SidePanel::Branches => {
+                        "[Local]"
+                    }
                     Panel::Side(side) => side.title(),
                     Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
                     Panel::Diff if state.focus == Focus::Branches => "Commits",
@@ -4148,6 +4273,213 @@ mod tests {
                     draw(&state, w, h);
                 }
             }
+        }
+    }
+
+    fn bisect_state() -> crate::git::bisect::BisectState {
+        crate::git::bisect::BisectState {
+            start: "main".into(),
+            good: 2,
+            bad: 1,
+            skip: 3,
+            ..Default::default()
+        }
+    }
+
+    /// Bisecting with `bisect`, `HEAD` at `head`, the tested commit loaded
+    /// and the Status panel focused.
+    fn bisecting(head: Head, bisect: crate::git::bisect::BisectState) -> AppState {
+        let mut status = branch(head);
+        status.in_progress = vec![Operation::Bisect];
+        status.bisect = Some(bisect);
+        let mut state = on(status);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc1234def".into(),
+            short_oid: "abc1234".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "the tested one".into(),
+        }];
+        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        state.commits.graph = vec![graph];
+        status_focused(&state)
+    }
+
+    /// `bisecting`, drawn on a screen wide enough for its lines.
+    fn bisect_rows(head: Head, bisect: crate::git::bisect::BisectState) -> Vec<String> {
+        thin(draw(&bisecting(head, bisect), 200, 30))
+    }
+
+    fn found(subject: &str) -> Option<crate::git::bisect::Found> {
+        Some(crate::git::bisect::Found {
+            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: subject.into(),
+        })
+    }
+
+    #[test]
+    fn at_80_by_24_the_found_line_comes_right_after_the_counts_and_lines_fit() {
+        let mut bisect = bisect_state();
+        bisect.first_bad = found(&"s".repeat(72));
+        bisect.start = "a-long-branch-name-that-cannot-fit".into();
+        let rows = thin(draw(
+            &bisecting(Head::Detached("abc1234def".into()), bisect),
+            80,
+            24,
+        ));
+        let counts = rows
+            .iter()
+            .position(|r| r.starts_with("│Bisect: "))
+            .unwrap();
+        assert!(
+            rows[counts + 1].starts_with("│◆ Found: abc1234 s"),
+            "{rows:#?}"
+        );
+        assert!(rows[counts + 1].contains('…'), "{rows:#?}");
+        assert!(rows[counts].contains('…'), "{rows:#?}");
+        // Cut inside the panel: its right border is still drawn where the
+        // top border's corner is.
+        let right = rows[0].chars().position(|c| c == '┐').unwrap();
+        for row in &rows[counts..counts + 4] {
+            assert_eq!(row.chars().nth(right), Some('│'), "{row:?}");
+        }
+    }
+
+    #[test]
+    fn a_bisect_draws_at_tiny_sizes_without_panicking() {
+        let mut bisect = bisect_state();
+        bisect.first_bad = found("broke it");
+        bisect.terms = crate::git::bisect::Terms {
+            bad: "new".into(),
+            good: "old".into(),
+        };
+        let state = bisecting(Head::Detached("abc1234def".into()), bisect);
+        for (width, height) in [(20, 8), (10, 4), (3, 3), (1, 1), (0, 0), (80, 5)] {
+            draw(&state, width, height);
+        }
+    }
+
+    #[test]
+    fn the_expanded_panel_shows_the_bisect_under_its_marker() {
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect_state());
+        for line in [
+            "│bisecting",
+            "│Bisect: 2 good · 1 bad · 3 skipped",
+            "│Testing: abc1234 the tested one",
+            "│Started from: main",
+        ] {
+            assert!(contains(&rows, line), "{line}: {rows:#?}");
+        }
+        assert!(!contains(&rows, "Terms:"), "{rows:#?}");
+        assert!(!contains(&rows, "Found:"), "{rows:#?}");
+    }
+
+    #[test]
+    fn before_git_checks_out_a_commit_the_panel_asks_for_marks() {
+        let rows = bisect_rows(Head::Branch("main".into()), bisect_state());
+        assert!(
+            contains(&rows, "│Mark a good and a bad commit"),
+            "{rows:#?}"
+        );
+        let rows = bisect_rows(Head::Detached("fedcba98765".into()), bisect_state());
+        assert!(contains(&rows, "│Testing: fedcba9 "), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_found_commit_and_custom_terms_are_shown() {
+        let mut bisect = bisect_state();
+        bisect.first_bad = Some(crate::git::bisect::Found {
+            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: "broke it".into(),
+        });
+        bisect.terms = crate::git::bisect::Terms {
+            bad: "new".into(),
+            good: "old".into(),
+        };
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        assert!(contains(&rows, "│Terms: new/old"), "{rows:#?}");
+        assert!(contains(&rows, "│◆ Found: abc1234 broke it"), "{rows:#?}");
+
+        let mut stuck = bisect_state();
+        stuck.only_skipped = true;
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), stuck);
+        assert!(contains(&rows, "│Only skipped commits left"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_hostile_start_and_subject_draw_without_control_characters() {
+        let mut bisect = bisect_state();
+        bisect.start = crate::git::diff::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
+        bisect.first_bad = Some(crate::git::bisect::Found {
+            commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
+            subject: crate::git::diff::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
+        });
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        assert!(
+            contains(&rows, "│Started from: evil\u{FFFD}[2J"),
+            "{rows:#?}"
+        );
+        assert!(
+            contains(&rows, "│◆ Found: abc1234 bad\u{FFFD}]0;x"),
+            "{rows:#?}"
+        );
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_bisect_line_is_cut_to_the_panel() {
+        let mut bisect = bisect_state();
+        bisect.start = "x".repeat(300);
+        let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
+        let started = rows.iter().find(|r| r.contains("Started from:")).unwrap();
+        assert!(started.contains('…'), "{started:?}");
+    }
+
+    #[test]
+    fn a_long_announcement_keeps_the_way_to_reset_beside_the_bar_hints() {
+        let subject = "s".repeat(72);
+        let notice = crate::bisect::found_notice("abc1234", &subject);
+        let mut quiet = loaded(vec![]);
+        quiet.notice_text = Some(notice.clone());
+        let mut busy = quiet.clone();
+        busy.busy = 1;
+        let mut running = quiet.clone();
+        running.command_running = true;
+        // The cancel hint takes 22 columns, so 50 leaves too little room
+        // for any notice with it; 80 has room with every hint.
+        let cases = [
+            ("quiet", &quiet, 50),
+            ("busy", &busy, 50),
+            ("quiet", &quiet, 80),
+            ("busy", &busy, 80),
+            ("running", &running, 80),
+        ];
+        for (name, state, width) in cases {
+            let rows = draw(state, width, 24);
+            let bar = &rows[23];
+            assert!(
+                bar.contains("Bisect found abc1234 (a resets): s"),
+                "{name} at {width}: {bar:?}"
+            );
+            assert!(bar.ends_with('…'), "{name} at {width}: {bar:?}");
+            assert_eq!(width_of(bar), usize::from(width), "{name}: {bar:?}");
+        }
+    }
+
+    #[test]
+    fn the_status_bar_offers_good_bad_skip_and_abort_while_bisecting() {
+        let mut status = branch(Head::Detached("abc1234def".into()));
+        status.in_progress = vec![Operation::Bisect];
+        status.bisect = Some(bisect_state());
+        let rows = draw(&status_focused(&on(status)), 120, 24);
+        for hint in ["s skip", "a abort", "g good", "b bad"] {
+            assert!(rows[23].contains(hint), "{hint}: {:?}", rows[23]);
         }
     }
 }

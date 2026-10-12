@@ -63,14 +63,19 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         ),
         // A checkout changes the worktree, which branch is current and so
         // the log of HEAD.
-        GitOp::Checkout(_) | GitOp::CreateBranch { .. } => (
+        GitOp::Checkout(_) | GitOp::CreateBranch { .. } | GitOp::CheckoutTracking { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
         // These move HEAD, rewrite the worktree and index, and start or
         // end an operation the Status panel shows. A detached checkout
         // also changes what the Status panel says HEAD is.
-        GitOp::CheckoutCommit(_) | GitOp::Revert(_) | GitOp::Reset { .. } => (
+        // An undo or redo moves `HEAD` the same way.
+        GitOp::CheckoutCommit(_)
+        | GitOp::Revert(_)
+        | GitOp::CherryPick(_)
+        | GitOp::Reset { .. }
+        | GitOp::Travel { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
@@ -96,6 +101,22 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
         GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // The upstream shows in the Status panel and on the branch's row.
+        GitOp::SetUpstream { .. } | GitOp::UnsetUpstream(_) => {
+            (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath)
+        }
+        // A new remote has no branches until the user fetches.
+        GitOp::AddRemote { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // Tags list with the branches; nothing else shows them.
+        GitOp::CreateTag { .. } | GitOp::DeleteTag { .. } => {
+            (&[Scope::Branches][..], Selection::KeepPath)
+        }
+        // These rename or delete remote-tracking refs, which upstreams and
+        // the log's markers name.
+        GitOp::RenameRemote { .. } | GitOp::RemoveRemote(_) => (
+            &[Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
         // The tool resolves and stages the file, which can end the
         // conflicts the Status panel counts on.
         GitOp::MergeTool(_) => (&[Scope::Files, Scope::Branch][..], Selection::KeepPath),
@@ -115,6 +136,13 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
             (&[Scope::Stash][..], Selection::KeepPath)
         }
+        // A mark can check out the next commit to test, and a reset goes
+        // back to where the bisect started; both change what the Status
+        // panel says of the bisect.
+        GitOp::BisectMark { .. } | GitOp::BisectReset => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
     };
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
@@ -125,7 +153,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
 /// What a fetch, pull or push makes stale. Each moves remote refs, so
 /// ahead/behind and the log's markers; a pull also moves `HEAD` and
 /// changes the worktree.
-pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
+pub fn remote_plan(op: &RemoteOp) -> RefreshPlan {
     let scopes: &[Scope] = match op {
         // A pull under the user's `rebase.autoStash` or `merge.autoStash`
         // can leave its autostash in the stash list.
@@ -136,7 +164,7 @@ pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
             Scope::Commits,
             Scope::Stash,
         ],
-        RemoteOp::Fetch | RemoteOp::Push { .. } => {
+        RemoteOp::Fetch | RemoteOp::Push { .. } | RemoteOp::PushTag { .. } => {
             &[Scope::Branch, Scope::Branches, Scope::Commits]
         }
     };
@@ -296,9 +324,26 @@ mod tests {
         let ops = [
             GitOp::CheckoutCommit(oid()),
             GitOp::Revert(oid()),
+            GitOp::CherryPick(vec![oid()]),
             GitOp::Reset {
                 to: oid(),
                 mode: ResetMode::Hard,
+            },
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Undo,
+                step: crate::git::undo::Step::MoveTo(oid()),
+                expect: crate::git::undo::Expected {
+                    head_ref: None,
+                    oid: oid(),
+                },
+            },
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Redo,
+                step: crate::git::undo::Step::CheckoutBranch("main".into()),
+                expect: crate::git::undo::Expected {
+                    head_ref: Some(b"refs/heads/side".to_vec()),
+                    oid: oid(),
+                },
             },
         ];
         for op in ops {
@@ -355,6 +400,36 @@ mod tests {
     }
 
     #[test]
+    fn bisect_marks_and_the_reset_reload_everything_head_touches() {
+        use crate::git::bisect::BisectMark;
+        use crate::git::commit_files::CommitId;
+        let ops = [
+            GitOp::BisectMark {
+                mark: BisectMark::Good,
+                commit: CommitId::parse("abc").unwrap(),
+                start: true,
+            },
+            GitOp::BisectReset,
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_merge_tool_reloads_the_files_and_the_status_panel() {
         assert_eq!(
             plan(&GitOp::MergeTool("a".into())).scopes,
@@ -378,19 +453,93 @@ mod tests {
     }
 
     #[test]
+    fn tracking_checkout_reloads_what_a_checkout_does() {
+        let op = GitOp::CheckoutTracking {
+            name: "t".into(),
+            from: remote_branch(),
+        };
+        assert_eq!(plan(&op).scopes, plan(&GitOp::Checkout("t".into())).scopes);
+    }
+
+    #[test]
+    fn upstream_and_remote_ops_reload_the_branch_list_and_never_files() {
+        let upstream = [
+            GitOp::SetUpstream {
+                branch: "b".into(),
+                upstream: remote_branch(),
+            },
+            GitOp::UnsetUpstream("b".into()),
+        ];
+        for op in upstream {
+            assert_eq!(plan(&op).scopes, set(&[Scope::Branch, Scope::Branches]));
+        }
+        let add = GitOp::AddRemote {
+            name: "fork".into(),
+            url: "/srv/fork".into(),
+        };
+        assert_eq!(plan(&add).scopes, set(&[Scope::Branches]));
+        let refs = [
+            GitOp::RenameRemote {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            GitOp::RemoveRemote("a".into()),
+        ];
+        for op in refs {
+            assert_eq!(
+                plan(&op).scopes,
+                set(&[Scope::Branch, Scope::Branches, Scope::Commits])
+            );
+        }
+    }
+
+    #[test]
+    fn tag_ops_reload_only_the_lists_and_a_tag_push_what_a_push_does() {
+        let oid = "1".repeat(40);
+        let create = GitOp::CreateTag {
+            name: "v1".into(),
+            target: crate::git::commit_files::CommitId::parse(&oid).unwrap(),
+            message: None,
+        };
+        let delete = GitOp::DeleteTag {
+            name: "v1".into(),
+            oid,
+        };
+        for op in [create, delete] {
+            assert_eq!(plan(&op).scopes, set(&[Scope::Branches]), "{op:?}");
+        }
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        let tag = RemoteOp::PushTag {
+            remote: "origin".into(),
+            tag: "v1".into(),
+        };
+        assert_eq!(remote_plan(&tag), remote_plan(&push));
+    }
+
+    fn remote_branch() -> crate::git::remotes::RemoteBranch {
+        crate::git::remotes::RemoteBranch {
+            remote: "origin".into(),
+            short: b"t".to_vec(),
+            refname: b"refs/remotes/origin/t".to_vec(),
+        }
+    }
+
+    #[test]
     fn remote_ops_reload_the_branch_the_lists_and_a_pull_the_files_too() {
         let push = RemoteOp::Push {
             force_with_lease: false,
         };
         for op in [RemoteOp::Fetch, push] {
             assert_eq!(
-                remote_plan(op).scopes,
+                remote_plan(&op).scopes,
                 set(&[Scope::Branch, Scope::Branches, Scope::Commits]),
                 "{op:?}"
             );
         }
         assert_eq!(
-            remote_plan(RemoteOp::Pull).scopes,
+            remote_plan(&RemoteOp::Pull).scopes,
             set(&[
                 Scope::Files,
                 Scope::Branch,

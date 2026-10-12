@@ -1,7 +1,10 @@
 //! Every menu Kika shows, declared once like the keymap. An item's result
 //! is an intent, and it can be disabled with a reason, as a key can.
 
+use crate::bisect;
+use crate::git::bisect::BisectMark;
 use crate::git::ops::{MergeStrategy, ResetMode};
+use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -21,6 +24,8 @@ pub enum MenuId {
     Reset,
     /// Put changes aside in a new stash.
     Stash,
+    /// Mark the selected commit for a bisect, or end the bisect.
+    Bisect,
 }
 
 impl MenuId {
@@ -31,6 +36,7 @@ impl MenuId {
             MenuId::Merge => "Merge / rebase",
             MenuId::Reset => "Reset to commit",
             MenuId::Stash => "Stash",
+            MenuId::Bisect => "Bisect",
         }
     }
 }
@@ -77,6 +83,16 @@ static ACTIONS: &[MenuItem] = &[
     MenuItem {
         label: "Submodules…",
         intent: AppIntent::OpenSubmodules,
+        disabled: never,
+    },
+    MenuItem {
+        label: "Worktrees…",
+        intent: AppIntent::OpenWorktrees,
+        disabled: crate::worktree_list::worktrees_disabled,
+    },
+    MenuItem {
+        label: "Command log…",
+        intent: AppIntent::OpenCommandLog,
         disabled: never,
     },
     MenuItem {
@@ -208,12 +224,36 @@ static STASH: &[MenuItem] = &[
     },
 ];
 
+static BISECT: &[MenuItem] = &[
+    MenuItem {
+        label: "Mark selected bad (starts a bisect)",
+        intent: AppIntent::BisectSelected(BisectMark::Bad),
+        disabled: bisect::selected_bad_disabled,
+    },
+    MenuItem {
+        label: "Mark selected good (starts a bisect)",
+        intent: AppIntent::BisectSelected(BisectMark::Good),
+        disabled: bisect::selected_good_disabled,
+    },
+    MenuItem {
+        label: "Skip selected",
+        intent: AppIntent::BisectSelected(BisectMark::Skip),
+        disabled: bisect::selected_skip_disabled,
+    },
+    MenuItem {
+        label: "Reset bisect…",
+        intent: AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)),
+        disabled: bisect::reset_disabled,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
         MenuId::Stage => STAGE,
         MenuId::Merge => MERGE,
         MenuId::Reset => RESET,
+        MenuId::Bisect => BISECT,
         MenuId::Stash => STASH,
     }
 }

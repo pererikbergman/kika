@@ -56,6 +56,18 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::RemoveRemote(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
+            Popup::DeleteTag(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::ResetHard(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
@@ -69,12 +81,30 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
+            Popup::Worktrees(list) => {
+                crate::worktrees_view::render_worktrees(state, list, top, frame, area)
+            }
+            Popup::RemoveWorktree(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
                 let text = format!("{}\n(y/n)", prompt.prompt);
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
             }
             Popup::Credential(prompt) => render_credential(prompt, top, frame, area),
+            Popup::Travel(confirm) => render_question(
+                &format!(" {} ", confirm.title),
+                &confirm.question(),
+                frame,
+                area,
+            ),
+            Popup::CommandLog(view) => {
+                crate::command_log_view::render(&state.command_log, view, top, frame, area)
+            }
         }
     }
 }
@@ -717,6 +747,46 @@ mod tests {
     }
 
     #[test]
+    fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::undo::{Direction, Expected, Step};
+        use crate::popup::TravelConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::Travel(TravelConfirm {
+            title: "Undo",
+            preview: vec![
+                "Undo: commit: second".into(),
+                "Branch main moves from ccccccc to bbbbbbb.".into(),
+                "Files change to match bbbbbbb.".into(),
+                "Commits after bbbbbbb leave main; redo brings them back.".into(),
+            ],
+            op: GitOp::Travel {
+                direction: Direction::Undo,
+                step: Step::MoveTo(CommitId::parse("bbb").unwrap()),
+                expect: Expected {
+                    head_ref: Some(b"refs/heads/main".to_vec()),
+                    oid: CommitId::parse("ccc").unwrap(),
+                },
+            },
+        })];
+        let (_, rows) = draw(&state, 100, 14);
+        assert!(contains(&rows, " Undo "), "{rows:#?}");
+        for line in [
+            "Undo: commit: second",
+            "Branch main moves from ccccccc to bbbbbbb.",
+            "Files change to match bbbbbbb.",
+            "Commits after bbbbbbb leave main; redo brings them back.",
+            "(y/n)",
+        ] {
+            assert!(contains(&rows, line), "{line:?} in {rows:#?}");
+        }
+        assert!(
+            rows[13].starts_with(" y yes  n no  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn the_prompt_shows_the_text_and_the_cursor_after_it() {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Prompt {
@@ -817,9 +887,9 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Menu {
             id: MenuId::Actions,
-            cursor: 7,
+            cursor: menu::items(MenuId::Actions).len() - 1,
         }];
-        // Six rows: the bar leaves five, so three of the eight items show.
+        // Six rows: the bar leaves five, so three of the items show.
         let (buffer, rows) = draw(&state, 20, 6);
         assert!(reversed(&buffer, find(&rows, "Quit…")), "{rows:#?}");
         assert!(!contains(&rows, "Stage…"), "{rows:#?}");
@@ -834,7 +904,8 @@ mod tests {
                 cursor,
             }]
         };
-        // Three of the eight items show at a time.
+        // Three of the items show at a time.
+        let last = menu::items(MenuId::Actions).len() - 1;
         state.popups = menu(0);
         let (_, rows) = draw(&state, 30, 6);
         let (_, top) = find(&rows, " Actions ");
@@ -846,7 +917,7 @@ mod tests {
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(rows[usize::from(top) + 4].ends_with("▼┘"), "{rows:#?}");
 
-        state.popups = menu(7);
+        state.popups = menu(last);
         let (_, rows) = draw(&state, 30, 6);
         assert!(rows[usize::from(top)].ends_with("▲┐"), "{rows:#?}");
         assert!(!rows[usize::from(top) + 4].contains('▼'), "{rows:#?}");
@@ -1191,5 +1262,27 @@ mod tests {
         assert!(contains(&rows, "(y/n)"), "{rows:#?}");
         let bar = rows.last().unwrap();
         assert!(bar.contains("y yes") && bar.contains("n no"), "{bar:?}");
+    }
+
+    #[test]
+    fn the_bisect_reset_question_names_where_it_started() {
+        use crate::git::bisect::BisectState;
+        use crate::git::repo_state::Operation;
+        use crate::git::status::{BranchStatus, Head};
+        let mut state = workspace(&[]);
+        state.branch = Some(BranchStatus {
+            head: Head::Detached("abc".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+            bisect: Some(BisectState {
+                start: "feature".into(),
+                ..BisectState::default()
+            }),
+        });
+        state.popups = vec![Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Reset bisect "), "{rows:#?}");
+        assert!(contains(&rows, "HEAD goes back to feature;"), "{rows:#?}");
     }
 }

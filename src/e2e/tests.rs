@@ -1592,6 +1592,467 @@ async fn a_hard_reset_from_the_menu_asks_then_leaves_a_clean_worktree_at_the_tar
     );
 }
 
+/// The newest message in `HEAD`'s reflog.
+fn last_reflog_message(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["reflog", "show", "-n", "1", "--format=%gs", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_z_undoes_a_commit_ctrl_r_redoes_it_and_a_checkout_is_undone_too() {
+    let (repo, first) = two_commits();
+    let second = repo.head().trim().to_string();
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Undo: commit: second");
+    app.assert_screen_contains(&format!(
+        "Branch main moves from {} to {}.",
+        &second[..7],
+        &first[..7]
+    ));
+    // Enter does not answer; nothing has moved yet.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(repo.head().trim(), second);
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(repo.head().trim(), first);
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.read("a.txt"), "one\n");
+    assert_eq!(last_reflog_message(&repo), "kika undo: updating HEAD");
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.assert_screen_contains("[4] Log [Reflog]");
+    app.assert_screen_contains(&format!("{} kika undo updat", &first[..7]));
+
+    app.press_with(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("Redo: commit: second");
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(repo.head().trim(), second);
+    assert_eq!(repo.read("a.txt"), "two\n");
+    assert_eq!(last_reflog_message(&repo), "kika redo: updating HEAD");
+
+    repo.git(["checkout", "-q", "-b", "side"]);
+    app.press(KeyCode::Char('r')).await;
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains("HEAD switches from side to main. No branch moves.");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.head().trim(), second);
+    assert_eq!(last_reflog_message(&repo), "kika undo");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_z_undoes_a_whole_completed_rebase() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "topic"]);
+    let repo = repo
+        .write("t.txt", "one\n")
+        .commit("topic one")
+        .write("t.txt", "two\n")
+        .commit("topic two");
+    let before = repo.head().trim().to_string();
+    repo.git(["checkout", "-q", "main"]);
+    let repo = repo.write("m.txt", "main\n").commit("on main");
+    repo.git(["checkout", "-q", "topic"]);
+    repo.git(["rebase", "-q", "main"]);
+    let after = repo.head().trim().to_string();
+    assert_ne!(before, after);
+
+    let mut app = Harness::start(&repo).await;
+    app.press_with(KeyCode::Char('z'), KeyModifiers::CONTROL)
+        .await;
+    app.assert_screen_contains(&format!(
+        "Branch topic moves from {} to {}.",
+        &after[..7],
+        &before[..7]
+    ));
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(current_branch(&repo), "topic");
+    assert_eq!(repo.head().trim(), before);
+    assert!(!repo.exists("m.txt"));
+    assert_eq!(repo.read("t.txt"), "two\n");
+}
+
+fn tag_names(repo: &TestRepo) -> Vec<String> {
+    String::from_utf8(repo.git(["for-each-ref", "--format=%(refname:short)", "refs/tags"]))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What `git cat-file -t` says the tag ref holds: `commit` or `tag`.
+fn tag_kind(repo: &TestRepo, name: &str) -> String {
+    let kind = repo.git(["cat-file", "-t", &format!("refs/tags/{name}")]);
+    String::from_utf8(kind).unwrap().trim().to_string()
+}
+
+/// Focus the Branches panel and show its Tags tab.
+async fn show_tags(app: &mut Harness) {
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.press(KeyCode::Char(']')).await;
+    app.assert_screen_contains("Loc Rem [Tags]");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t_and_shift_t_tag_a_commit_and_the_tags_tab_lists_and_deletes_them() {
+    let (repo, first) = two_commits();
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('t')).await;
+    app.assert_screen_contains(&format!("New tag on {}", &first[..7]));
+    app.type_text("light\n").await;
+    app.press(KeyCode::Char('T')).await;
+    app.type_text("heavy\n").await;
+    app.assert_screen_contains("Message of tag heavy");
+    app.type_text("-m looks like an option\n").await;
+
+    assert_eq!(tag_kind(&repo, "light"), "commit");
+    assert_eq!(tag_kind(&repo, "heavy"), "tag");
+    for peeled in ["light^{commit}", "heavy^{commit}"] {
+        let oid = String::from_utf8(repo.git(["rev-parse", peeled])).unwrap();
+        assert_eq!(oid.trim(), first, "{peeled}");
+    }
+    let message = repo.git(["tag", "-l", "--format=%(contents:subject)", "heavy"]);
+    assert_eq!(message, b"-m looks like an option\n");
+
+    show_tags(&mut app).await;
+    app.assert_screen_contains("◆ heavy");
+    app.assert_screen_contains(&format!("  light  {}", &first[..7]));
+    if app.state().branches.tags.selected_tag().unwrap().name != "light".into() {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.assert_screen_contains("Commits · light");
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Delete tag light? It is not deleted on any remote.");
+    // Enter does not answer; the tag is still there.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(tag_names(&repo), ["heavy", "light"]);
+    app.press(KeyCode::Char('y')).await;
+
+    assert_eq!(tag_names(&repo), ["heavy"]);
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("  light  ")),
+        "{}",
+        screen.join("\n")
+    );
+    app.assert_screen_contains("◆ heavy");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hand_made_tag_named_like_an_option_is_listed_and_deleted() {
+    let repo = on_main();
+    repo.git(["update-ref", "refs/tags/-x", "HEAD"]);
+    let mut app = Harness::start(&repo).await;
+
+    show_tags(&mut app).await;
+    app.assert_screen_contains("  -x  ");
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Delete tag -x?");
+    app.press(KeyCode::Char('y')).await;
+
+    assert!(tag_names(&repo).is_empty());
+    app.assert_screen_contains("No tags");
+    assert_eq!(app.state().popups, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_p_on_the_tags_tab_pushes_the_tag_to_the_upstreams_remote() {
+    let (repo, remote) = with_origin();
+    repo.git(["tag", "-a", "-m", "one", "v1"]);
+    let mut app = Harness::start(&repo).await;
+
+    show_tags(&mut app).await;
+    app.press_with(KeyCode::Char('P'), KeyModifiers::SHIFT)
+        .await;
+
+    let listed = git(
+        remote.path().join("origin.git").as_path(),
+        &["ls-remote", "--tags", "."],
+    );
+    let listed = String::from_utf8(listed).unwrap();
+    assert!(listed.contains("refs/tags/v1"), "{listed}");
+    assert_eq!(app.state().popups, []);
+}
+
+/// `main` with eight commits, `commit 1` to `commit 8`; commit 5 adds a
+/// `bug` file that stays. Returns the repo and commit 5's id.
+fn buggy_main() -> (TestRepo, String) {
+    let mut repo = TestRepo::new();
+    repo.git(["checkout", "-q", "-b", "main"]);
+    let mut fifth = String::new();
+    for i in 1..=8 {
+        repo = repo.write("n.txt", &format!("{i}\n"));
+        if i == 5 {
+            repo = repo.write("bug", "bug\n");
+        }
+        repo = repo.commit(&format!("commit {i}"));
+        if i == 5 {
+            fifth = repo.head().trim().to_string();
+        }
+    }
+    (repo, fifth)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bisect_marked_from_the_panels_finds_the_bad_commit_and_resets() {
+    let (repo, fifth) = buggy_main();
+    let tip = repo.head();
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+
+    // Commits: the tip is bad, the root is good.
+    app.press(KeyCode::Char('4')).await;
+    app.press_with(KeyCode::Char('B'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains("Mark selected bad (starts a bisect)");
+    app.press(KeyCode::Enter).await;
+    assert!(repo.exists(".git/BISECT_LOG"));
+    for _ in 0..7 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.assert_screen_contains("commit 1");
+    app.press_with(KeyCode::Char('B'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    assert!(!repo.try_git(["symbolic-ref", "-q", "HEAD"]), "not testing");
+
+    // Status: test each commit git checks out until it names one.
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("Bisect: 1 good · 1 bad · 0 skipped");
+    let mut steps = 0;
+    while app.state().notice_text.is_none() {
+        let mark = if repo.exists("bug") { 'b' } else { 'g' };
+        app.press(KeyCode::Char(mark)).await;
+        steps += 1;
+        assert!(
+            steps < 8,
+            "the bisect never ended; {}:\n{}",
+            repo.read(".git/BISECT_LOG"),
+            app.screen().join("\n")
+        );
+    }
+    app.assert_screen_contains(&format!(
+        "Bisect found {} (a resets): commit 5",
+        &fifth[..7]
+    ));
+    app.assert_screen_contains(&format!("◆ Found: {} commit 5", &fifth[..7]));
+
+    // Reset, asking first.
+    app.press(KeyCode::Char('a')).await;
+    app.assert_screen_contains("HEAD goes back to main;");
+    app.press(KeyCode::Char('y')).await;
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.head(), tip);
+    assert!(!repo.exists(".git/BISECT_LOG"));
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("bisecting")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn c_copies_two_commits_on_a_branch_and_v_picks_them_onto_another_in_order() {
+    let repo = on_main();
+    repo.git(["checkout", "-q", "-b", "topic"]);
+    let repo = repo
+        .write("b.txt", "one\n")
+        .commit("one")
+        .write("c.txt", "two\n")
+        .commit("two");
+    // Wide enough for the title to keep its count beside the tabs.
+    let mut app = Harness::start_sized(&repo, 160, 30).await;
+
+    // Copied newest first; picked oldest first.
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('c')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('c')).await;
+    app.assert_screen_contains("· 2 copied");
+
+    app.press(KeyCode::Char('3')).await;
+    // The current branch is listed first.
+    app.assert_screen_contains("* topic");
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    assert_eq!(current_branch(&repo), "main");
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('v')).await;
+
+    let subjects = repo.git(["log", "--format=%s", "-3", "--reverse"]);
+    assert_eq!(String::from_utf8(subjects).unwrap(), "init\none\ntwo\n");
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(repo.read("c.txt"), "two\n");
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("Could not")),
+        "{}",
+        screen.join("\n")
+    );
+    app.assert_screen_contains("· 2 copied");
+
+    app.press_with(KeyCode::Char('C'), KeyModifiers::SHIFT)
+        .await;
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("2 copied")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+/// Deletes a directory made beside a test repository, which the repo's
+/// own temp dir does not cover, even when the test fails.
+#[cfg(unix)]
+struct Beside(std::path::PathBuf);
+
+#[cfg(unix)]
+impl Drop for Beside {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `main` with a branch `feature`, and where Kika's suggested worktree
+/// for it goes: `../<repo dir>-feature`, removed when dropped.
+#[cfg(unix)]
+fn with_feature() -> (TestRepo, Beside) {
+    let repo = on_main();
+    repo.git(["branch", "feature"]);
+    let top = repo.path().canonicalize().unwrap();
+    let name = top.file_name().unwrap().to_str().unwrap().to_string();
+    let beside = Beside(top.parent().unwrap().join(format!("{name}-feature")));
+    (repo, beside)
+}
+
+/// What `git worktree list --porcelain` says, as text.
+#[cfg(unix)]
+fn worktree_list(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["worktree", "list", "--porcelain"])).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
+    let (repo, beside) = with_feature();
+    let mut app = Harness::start(&repo).await;
+    let main = app.state().repo.clone().expect("started in the repository");
+
+    // Add one for `feature`, at the path the prompt suggests.
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains(" Worktrees ");
+    app.press(KeyCode::Char('a')).await;
+    app.assert_screen_contains("New worktree for feature");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(
+        app.state().notice,
+        Some("Worktree added; Enter switches to it")
+    );
+    let listed = worktree_list(&repo);
+    let wt = beside.0.canonicalize().unwrap();
+    assert!(
+        listed.contains(&format!("worktree {}\n", wt.display())),
+        "{listed}"
+    );
+    assert!(listed.contains("branch refs/heads/feature"), "{listed}");
+
+    // Enter on it switches Kika there.
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("feature");
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().repo.as_deref(), Some(wt.as_path()));
+    let status = app.screen()[1].clone();
+    assert!(status.contains("│feature "), "{status:?}");
+
+    // Back in the main worktree, d then y removes the clean one.
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Enter).await;
+    assert_eq!(app.state().repo.as_deref(), Some(main.as_path()));
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.assert_screen_contains("Remove worktree");
+    app.press(KeyCode::Char('y')).await;
+    let listed = worktree_list(&repo);
+    assert!(!listed.contains("feature"), "{listed}");
+    assert!(!wt.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_worktree_with_an_untracked_file_is_not_removed() {
+    let (repo, beside) = with_feature();
+    repo.git([
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+        OsStr::new("-q"),
+        beside.0.as_os_str(),
+        OsStr::new("feature"),
+    ]);
+    std::fs::write(beside.0.join("keep.txt"), "mine\n").unwrap();
+    let mut app = Harness::start(&repo).await;
+
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+    app.press(KeyCode::Char('y')).await;
+
+    app.assert_screen_contains("Could not remove worktree");
+    assert!(worktree_list(&repo).contains("branch refs/heads/feature"));
+    assert_eq!(
+        std::fs::read_to_string(beside.0.join("keep.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone() {
+    let (repo, _beside) = with_feature();
+    let repo = repo.write("full/a.txt", "kept\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char('a')).await;
+    // Clear the suggestion, then type the occupied directory.
+    for _ in 0..200 {
+        app.press(KeyCode::Backspace).await;
+    }
+    app.type_text("full\n").await;
+
+    app.assert_screen_contains("Could not add worktree");
+    assert!(!worktree_list(&repo).contains("feature"));
+    assert_eq!(repo.read("full/a.txt"), "kept\n");
+    assert_eq!(
+        std::fs::read_dir(repo.path().join("full")).unwrap().count(),
+        1
+    );
+}
+
 fn stash_count(repo: &TestRepo) -> usize {
     String::from_utf8(repo.git(["stash", "list"]))
         .unwrap()

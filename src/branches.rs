@@ -1,9 +1,41 @@
-//! The Branches panel's state: the list as last loaded, the selection, and
-//! the selected branch's log shown in the Diff pane's place. Pure; the
-//! model loads both and moves the selection.
+//! The Branches panel's state: the local list as last loaded, the
+//! selection, the Remotes and Tags tabs, and the selected branch's log
+//! shown in the Diff pane's place. Pure; the model loads them and moves the selection.
 
 use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::diff::terminal_safe;
 use crate::intent::Scroll;
+use crate::remotes::RemotesList;
+use crate::tags::{PendingTag, TagsList};
+
+/// Which list the Branches panel shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BranchesTab {
+    #[default]
+    Local,
+    Remotes,
+    Tags,
+}
+
+impl BranchesTab {
+    /// The tab to the right, wrapping round.
+    pub fn next(self) -> Self {
+        match self {
+            BranchesTab::Local => BranchesTab::Remotes,
+            BranchesTab::Remotes => BranchesTab::Tags,
+            BranchesTab::Tags => BranchesTab::Local,
+        }
+    }
+
+    /// The tab to the left, wrapping round.
+    pub fn prev(self) -> Self {
+        match self {
+            BranchesTab::Local => BranchesTab::Tags,
+            BranchesTab::Remotes => BranchesTab::Local,
+            BranchesTab::Tags => BranchesTab::Remotes,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchesPanel {
@@ -15,9 +47,15 @@ pub struct BranchesPanel {
     /// The list load whose result is awaited; older ones are dropped.
     pub list_seq: Option<u64>,
     pub log: BranchLog,
-    /// The branch an open create or rename prompt acts on, taken when the
-    /// prompt opened, so a reload while the user types cannot change it.
+    /// The branch an open create, rename or set-upstream prompt acts on,
+    /// taken when the prompt opened, so a reload while the user types
+    /// cannot change it.
     pub pending: Option<BranchName>,
+    pub tab: BranchesTab,
+    pub remotes: RemotesList,
+    pub tags: TagsList,
+    /// The tag the open name or message prompt will make.
+    pub pending_tag: Option<PendingTag>,
 }
 
 /// The selected branch's newest commits.
@@ -25,8 +63,8 @@ pub struct BranchesPanel {
 pub struct BranchLog {
     /// The load whose result is awaited.
     pub seq: Option<u64>,
-    /// The branch the rows, or the load under way, belong to.
-    pub for_name: Option<BranchName>,
+    /// The full ref the rows, or the load under way, belong to.
+    pub for_ref: Option<Vec<u8>>,
     pub rows: Vec<LogRow>,
     pub error: Option<String>,
     /// The first row shown.
@@ -83,16 +121,29 @@ impl BranchesPanel {
 }
 
 impl BranchLog {
-    /// Wait for load `seq` of `name`'s log. Another branch's rows go at
-    /// once; the same branch's stay until the new ones land.
-    pub fn begin(&mut self, seq: u64, name: BranchName) {
-        if self.for_name.as_ref() != Some(&name) {
+    /// Wait for load `seq` of the log of `refname`, a full ref. Another
+    /// branch's rows go at once; the same branch's stay until the new ones
+    /// land.
+    pub fn begin(&mut self, seq: u64, refname: Vec<u8>) {
+        if self.for_ref.as_ref() != Some(&refname) {
             self.rows.clear();
             self.scroll = 0;
         }
         self.seq = Some(seq);
-        self.for_name = Some(name);
+        self.for_ref = Some(refname);
         self.error = None;
+    }
+
+    /// The branch the log is of, as the user writes it: `main` or
+    /// `origin/main`. Terminal-safe.
+    pub fn name(&self) -> Option<String> {
+        let refname = self.for_ref.as_ref()?;
+        let short = refname
+            .strip_prefix(b"refs/heads/")
+            .or_else(|| refname.strip_prefix(b"refs/remotes/"))
+            .or_else(|| refname.strip_prefix(b"refs/tags/"))
+            .unwrap_or(refname);
+        Some(terminal_safe(short))
     }
 
     /// Take load `seq`'s result, unless a newer load was started.
@@ -197,12 +248,12 @@ mod tests {
     #[test]
     fn a_log_for_another_branch_clears_and_a_stale_result_is_dropped() {
         let mut log = BranchLog::default();
-        log.begin(1, "a".into());
+        log.begin(1, b"refs/heads/a".to_vec());
         log.apply(1, Ok(vec![row("one"), row("two")]));
         log.scroll(Scroll::LineDown, 10);
-        log.begin(2, "a".into());
+        log.begin(2, b"refs/heads/a".to_vec());
         assert_eq!((log.rows.len(), log.scroll), (2, 1), "same branch keeps");
-        log.begin(3, "b".into());
+        log.begin(3, b"refs/remotes/a".to_vec());
         assert_eq!((log.rows.len(), log.scroll), (0, 0));
         log.apply(2, Ok(vec![row("stale")]));
         assert!(log.rows.is_empty());
@@ -211,9 +262,35 @@ mod tests {
     }
 
     #[test]
+    fn the_log_names_its_branch_as_the_user_writes_it() {
+        let mut log = BranchLog::default();
+        assert_eq!(log.name(), None);
+        log.begin(1, b"refs/heads/feature/x".to_vec());
+        assert_eq!(log.name().as_deref(), Some("feature/x"));
+        log.begin(2, b"refs/remotes/origin/\x1bmain".to_vec());
+        assert_eq!(log.name().as_deref(), Some("origin/\u{FFFD}main"));
+        log.begin(3, b"refs/tags/v1.0".to_vec());
+        assert_eq!(log.name().as_deref(), Some("v1.0"));
+    }
+
+    #[test]
+    fn the_tabs_cycle_forward_and_back() {
+        use BranchesTab::*;
+        assert_eq!(BranchesTab::default(), Local);
+        assert_eq!(
+            [Local.next(), Remotes.next(), Tags.next()],
+            [Remotes, Tags, Local]
+        );
+        assert_eq!(
+            [Local.prev(), Remotes.prev(), Tags.prev()],
+            [Tags, Local, Remotes]
+        );
+    }
+
+    #[test]
     fn the_log_scrolls_by_lines_and_pages_inside_its_rows() {
         let mut log = BranchLog::default();
-        log.begin(1, "a".into());
+        log.begin(1, b"refs/heads/a".to_vec());
         log.apply(1, Ok((0..5).map(|i| row(&i.to_string())).collect()));
         log.scroll(Scroll::PageDown, 3);
         assert_eq!(log.scroll, 3);
