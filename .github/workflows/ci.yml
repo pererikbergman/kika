@@ -17,13 +17,15 @@ concurrency:
 jobs:
   check:
     name: check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # macos-self-hosted runs on the owner's Mac runner (labels self-hosted, mac),
+    # which is not billed; the other legs use GitHub-hosted runners.
+    runs-on: ${{ matrix.os == 'macos-self-hosted' && fromJSON('["self-hosted","mac"]') || matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # Draft PRs run Linux only to keep billed macOS/Windows minutes low.
-        os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-latest"]' || '["ubuntu-latest","macos-latest","windows-latest"]') }}
+        # Draft PRs run only the unbilled self-hosted Mac; ready PRs add Linux and Windows.
+        os: ${{ fromJSON(github.event.pull_request.draft && '["macos-self-hosted"]' || '["macos-self-hosted","ubuntu-latest","windows-latest"]') }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
