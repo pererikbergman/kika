@@ -2,7 +2,6 @@ mod app;
 mod bisect;
 mod cli;
 mod clipboard;
-mod commit_editor;
 mod commit_files;
 mod commit_graph;
 mod commits;

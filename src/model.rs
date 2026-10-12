@@ -5,7 +5,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::clipboard::{self, CopyWhat};
-use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
@@ -19,6 +18,7 @@ use crate::features::branches::remotes::RemotePending;
 use crate::features::branches::tags::PendingTag;
 use crate::features::branches::{BranchesPanel, BranchesTab};
 use crate::features::command_log::CommandLog;
+use crate::features::commit::CommitEditor;
 use crate::features::commits::compare::{MARK_CLEARED, PendingDiff};
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
@@ -7202,8 +7202,8 @@ mod tests {
     fn without_a_bisect_head_moves_are_not_refused_for_one() {
         let state = ready_to_bisect();
         let guards: [fn(&AppState) -> Option<Reason>; 6] = [
-            keymap::commit_disabled,
-            keymap::amend_disabled,
+            crate::features::commit::keys::commit_disabled,
+            crate::features::commit::keys::amend_disabled,
             keymap::checkout_commit_disabled,
             keymap::reset_disabled,
             crate::features::operation::keys::merge_disabled,
