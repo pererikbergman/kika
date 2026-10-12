@@ -54,6 +54,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::ApplyCached { .. }
         | GitOp::DiscardWorktree(_)
         | GitOp::DeleteUntracked(_)
+        | GitOp::DiscardFiles { .. }
         | GitOp::ApplyWorktree { .. }
         | GitOp::ApplyEdited { .. } => (&[Scope::Files][..], Selection::KeepPath),
         // Ahead/behind moves with a commit, and so does the log.

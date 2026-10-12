@@ -22,6 +22,7 @@ mod conflict_view;
 mod copied;
 mod custom_command;
 mod diff_pane;
+mod diff_search;
 mod diff_stream;
 mod diff_tool;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod hunk_view;
 mod intent;
 mod keymap;
 mod layout;
+mod list_filter;
 mod menu;
 mod model;
 mod popup;
