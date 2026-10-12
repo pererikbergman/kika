@@ -681,24 +681,31 @@ struct Glyph {
 }
 
 /// For each char of `line`, whether it continues the glyph before it
-/// instead of starting one: a zero-width char, or an emoji that a ZWJ or a
-/// skin tone joins to a glyph starting with an emoji. `clip` lays glyphs out
-/// by it and the search marks snap to it, so a mark never cuts a glyph the
-/// terminal draws as one. A zero-width char with no glyph before it
+/// instead of starting one: a zero-width char, an emoji that a ZWJ or a
+/// skin tone joins to a glyph starting with an emoji, or a regional
+/// indicator that pairs with a lone one before it into a flag. Indicators
+/// pair left to right, so an odd one out stands alone. `clip` lays glyphs
+/// out by it and the search marks snap to it, so a mark never cuts a glyph
+/// the terminal draws as one. A zero-width char with no glyph before it
 /// continues nothing.
 fn continues_glyph(line: &str) -> Vec<bool> {
     let mut glyph_is_emoji = None;
     let mut before = None;
+    // The glyph so far is a single regional indicator, waiting for its pair.
+    let mut open_flag = false;
     line.chars()
         .map(|c| {
+            let flag = emoji::is_regional_indicator(c);
             let joins = glyph_is_emoji == Some(true)
                 && (emoji::is_pictographic(c) && before == Some('\u{200D}')
                     || emoji::is_modifier(c) && before.is_some_and(emoji::is_pictographic));
+            let pairs = open_flag && flag;
             let zero = width_of(c.encode_utf8(&mut [0; 4])) == 0;
-            let continues = glyph_is_emoji.is_some() && (joins || zero);
+            let continues = glyph_is_emoji.is_some() && (joins || pairs || zero);
             if !continues && !zero {
                 glyph_is_emoji = Some(emoji::is_pictographic(c));
             }
+            open_flag = flag && !continues;
             before = Some(c);
             continues
         })
@@ -1855,7 +1862,8 @@ pub(crate) const CURRENT_MATCH: Style = Style::new()
 /// clipped text are cut to it. Each range widens to whole glyphs: the
 /// buffer measures each span on its own, so a span that ended inside an
 /// emoji sequence or before a combining mark would split what `clip` laid
-/// out as one glyph, and shift the rest of the row.
+/// out as one glyph, and shift the rest of the row. A glyph holding the
+/// current match keeps its style even when another match shares it.
 fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
     if marks.is_empty() {
         return vec![Span::styled(text, style)];
@@ -1870,6 +1878,8 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
     };
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
+    // The mark the last marked span carries.
+    let mut last_mark = None;
     for &(start, end, mark) in marks {
         let mut start = start.min(chars.len()).max(at);
         while start > at && inside(start) {
@@ -1880,17 +1890,22 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
             end += 1;
         }
         // A match in the glyph the last one widened to: that span already
-        // holds it, and takes this match's style on top.
+        // holds it, and takes this match's style on top, unless it holds
+        // the current match, which keeps its own look so `n` and `N` always
+        // show where they stopped.
         if end <= start {
             if at > 0
+                && last_mark != Some(CURRENT_MATCH)
                 && let Some(last) = spans.last_mut()
             {
                 last.style = last.style.patch(mark);
+                last_mark = Some(mark);
             }
             continue;
         }
         spans.push(Span::styled(piece(at, start), style));
         spans.push(Span::styled(piece(start, end), style.patch(mark)));
+        last_mark = Some(mark);
         at = end;
     }
     spans.push(Span::styled(piece(at, chars.len()), style));
@@ -3692,6 +3707,33 @@ mod tests {
     }
 
     #[test]
+    fn regional_indicators_pair_left_to_right() {
+        assert_eq!(
+            continues_glyph("a🇺🇸🇺🇸🇺"),
+            [false, false, true, false, true, false]
+        );
+        // Anything between two indicators leaves each one alone.
+        assert_eq!(continues_glyph("🇺x🇸"), [false, false, false]);
+    }
+
+    #[test]
+    fn clip_keeps_a_flag_as_one_glyph() {
+        assert_eq!(clip("🇺🇸x", 0, 10), "🇺🇸x");
+        let lone = |s: &str| s.chars().any(emoji::is_regional_indicator);
+        // Cut by the right edge, then by the left: the flag blanks out whole.
+        for (line, from, width, expected) in [
+            ("a🇺🇸", 0, 2, "a…"),
+            ("a🇺🇸b", 0, 3, "a …"),
+            ("🇺🇸x", 1, 3, "…x"),
+            ("🇺🇸xy", 1, 2, "……"),
+        ] {
+            let out = clip(line, from, width);
+            assert_eq!(out, expected, "{line:?} {from} {width}");
+            assert!(!lone(&out), "{line:?} {from} {width}: {out:?}");
+        }
+    }
+
+    #[test]
     fn clip_never_joins_letters_across_a_script_joiner() {
         // The consonant after `क्‍` still counts its own column.
         assert_eq!(clip("क्\u{200D}षabc", 0, 4), "क्\u{200D}षa…");
@@ -4134,6 +4176,71 @@ mod tests {
         // A combining mark stays with its letter too.
         let accented = marked_spans("e\u{301}x".into(), plain, &[(0, 1, MATCH)]);
         assert_eq!(accented[0].content, "e\u{301}");
+    }
+
+    #[test]
+    fn the_current_match_keeps_its_style_when_a_later_match_shares_its_glyph() {
+        let text = "e\u{301}\u{301}x".to_string();
+        let spans = marked_spans(text, Style::new(), &[(1, 2, CURRENT_MATCH), (2, 3, MATCH)]);
+        assert_eq!(spans[0].content, "e\u{301}\u{301}");
+        assert_eq!(spans[0].style, CURRENT_MATCH);
+        assert_eq!(spans[0].style.bg, CURRENT_MATCH.bg);
+        let bold_underlined = Modifier::BOLD | Modifier::UNDERLINED;
+        assert!(spans[0].style.add_modifier.contains(bold_underlined));
+        assert_eq!(spans[1].content, "x");
+    }
+
+    #[test]
+    fn a_current_match_sharing_a_glyph_with_another_draws_as_current() {
+        let family = "👨\u{200D}👦\u{200D}👦";
+        let diff = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+Q{family}X\n"
+        );
+        for (width, height) in [(80, 24), (20, 10)] {
+            let mut state = joined_keep(&diff);
+            if let Focus::Diff(view) = &mut state.focus {
+                view.set_search("👦", EmojiZwj::Keep);
+                let search = view.search.as_ref().unwrap();
+                assert_eq!((search.matches.len(), search.current), (2, Some(0)));
+            }
+            let buffer = draw_buffer(&state, width, height);
+            let at = format!("{width}x{height}");
+            let (x, y) = added_row(&buffer, 'Q');
+            assert_eq!(buffer[(x + 2, y)].symbol(), family, "{at}");
+            assert_eq!(buffer[(x + 2, y)].style().bg, CURRENT_MATCH.bg, "{at}");
+            assert_eq!(buffer[(x + 4, y)].symbol(), "X", "{at}");
+        }
+    }
+
+    #[test]
+    fn a_search_for_half_a_flag_marks_the_whole_flag() {
+        let flag = "🇺🇸";
+        let diff = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{flag} ok\n"
+        );
+        for (width, height) in [(80, 24), (20, 10)] {
+            let mut state = hunks(DiffSide::Worktree, diff.as_bytes());
+            if let Focus::Diff(view) = &mut state.focus {
+                view.set_search("🇺", EmojiZwj::Escape);
+            }
+            let buffer = draw_buffer(&state, width, height);
+            let at = format!("{width}x{height}");
+            let (x, y) = added_row(&buffer, '🇺');
+            let cell = &buffer[(x + 1, y)];
+            assert_eq!(cell.symbol(), flag, "{at}");
+            assert_eq!(cell.style().bg, CURRENT_MATCH.bg, "{at}");
+            assert_eq!(cell.style().fg, CURRENT_MATCH.fg, "{at}");
+            assert!(
+                cell.style()
+                    .add_modifier
+                    .contains(Modifier::BOLD | Modifier::UNDERLINED),
+                "{at}"
+            );
+            // The flag's second column, the space, then `o`.
+            assert_eq!(buffer[(x + 2, y)].symbol(), " ", "{at}");
+            assert_eq!(buffer[(x + 1 + 3, y)].symbol(), "o", "{at}");
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{at}");
+        }
     }
 
     #[test]
