@@ -283,12 +283,14 @@ pub enum Effect {
     /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
     /// `PullRequestsFetched`. With no `hosts` it only answers `ForgeRepoNone`.
     /// A `known` repository is used as is, without reading the remote.
+    /// A host in `limited` is not asked before its second has passed.
     LoadPullRequests {
         tag: Tag,
         hosts: Vec<ForgeHost>,
         branches: Vec<BranchName>,
         refresh: bool,
         known: Option<ForgeRepo>,
+        limited: Vec<(ForgeHost, i64)>,
     },
     /// Put `text` on the system clipboard. Run by the loop, between draws,
     /// never by a task; a failure comes back as `CopyFailed`.
@@ -957,6 +959,7 @@ impl Runtime {
                 branches,
                 refresh,
                 known,
+                limited,
             } => match self.forge.clone().filter(|_| !hosts.is_empty()) {
                 // Off: nothing is read, run or written.
                 None => {
@@ -972,6 +975,7 @@ impl Runtime {
                                 branches: &branches,
                                 refresh,
                                 known: known.as_ref(),
+                                limited: &limited,
                                 top: std::fs::canonicalize(runner.workdir()).ok(),
                                 now: unix_now(),
                             };
@@ -985,6 +989,7 @@ impl Runtime {
                             let _ = tx.send(AppIntent::PullRequestsFetched {
                                 tag,
                                 result: Err(ForgeStatus::Failed),
+                                limited_until: None,
                             });
                         }
                     });
@@ -1146,6 +1151,7 @@ mod tests {
             branches: vec!["main".into()],
             refresh: true,
             known: None,
+            limited: vec![],
         };
         runtime.spawn(load(vec![]));
         assert_eq!(
@@ -1167,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
-        use crate::forge::github::fixtures::STATES;
+        use crate::forge::github::fixtures::{PROBE_200, STATES};
         use crate::forge::github::{FakeGh, answer};
         use crate::git::recording::{CommandEvent, CommandSink, RecordingRunner};
 
@@ -1185,7 +1191,12 @@ mod tests {
                 ),
         );
         let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
-        let gh = Arc::new(FakeGh::new().reply(answer(STATES)).reply(answer(STATES)));
+        let gh = Arc::new(
+            FakeGh::new()
+                .reply(answer(PROBE_200))
+                .reply(answer(STATES))
+                .reply(answer(STATES)),
+        );
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(git, tx).with_forge(Some(ForgeContext {
             gh: gh.clone(),
@@ -1199,6 +1210,7 @@ mod tests {
             branches,
             refresh: true,
             known: None,
+            limited: vec![],
         });
         assert!(matches!(
             rx.recv().await,
@@ -1209,7 +1221,7 @@ mod tests {
             Some(AppIntent::PullRequestsFetched { result: Ok(_), .. })
         ));
         fake.assert_done();
-        assert_eq!(gh.calls().len(), 2);
+        assert_eq!(gh.calls().len(), 3);
 
         let events = events.lock().unwrap();
         let started: Vec<(u64, &str)> = events
@@ -1219,20 +1231,24 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let gh_line = "gh api graphql --hostname github.com --input -";
+        let probe_line = "gh api --include --hostname github.com \
+            -H \"Accept: application/vnd.github+json\" \
+            repos/acme/widgets/pulls?state=all&sort=updated&direction=desc&per_page=1";
+        let gh_line = "gh api graphql --include --hostname github.com --input -";
         let lines: Vec<&str> = started.iter().map(|(_, line)| *line).collect();
         assert_eq!(
             lines,
             [
                 "git remote",
                 "git config -z --get remote.origin.url",
+                probe_line,
                 gh_line,
                 gh_line
             ]
         );
         let mut ids: Vec<u64> = started.iter().map(|(id, _)| *id).collect();
         ids.dedup();
-        assert_eq!(ids.len(), 4, "{events:?}");
+        assert_eq!(ids.len(), 5, "{events:?}");
         // One finish per start, with the same id.
         for (id, _) in &started {
             let finished = events

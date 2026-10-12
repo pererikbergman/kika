@@ -1,0 +1,10 @@
+HTTP/2.0 200 OK
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Type: application/json; charset=utf-8
+Etag: W/"5f1e0c2b9a7d"
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4999
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: core
+
+[{"number":7,"state":"open","updated_at":"2026-10-12T08:00:00Z"}]

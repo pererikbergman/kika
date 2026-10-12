@@ -676,10 +676,12 @@ pub enum AppIntent {
         repo: ForgeRepo,
         badges: Option<HashMap<BranchName, PrBadge>>,
     },
-    /// The forge answered, or why it could not.
+    /// The forge answered, or why it could not. `limited_until` is set
+    /// when GitHub rate limited the host: no call is made before it.
     PullRequestsFetched {
         tag: Tag,
         result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+        limited_until: Option<i64>,
     },
 }
 

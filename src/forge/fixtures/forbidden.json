@@ -1,1 +1,10 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+X-Github-Media-Type: github.v4; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4987
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: graphql
+X-Ratelimit-Used: 13
+
 {"data":{"repository":null},"errors":[{"type":"FORBIDDEN","path":["repository"],"extensions":{"saml_failure":false},"locations":[{"line":1,"column":88}],"message":"Resource not accessible by integration"}]}
