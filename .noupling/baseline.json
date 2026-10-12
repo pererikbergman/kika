@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791811486",
-  "issue_count": 18,
+  "timestamp": "1791811891",
+  "issue_count": 20,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/forge",
     "coupling_violation:src/e2e -> src/git",
@@ -17,7 +17,9 @@
     "low_cohesion:src/features/branches",
     "low_cohesion:src/features/branches/remotes",
     "low_cohesion:src/features/branches/tags",
+    "low_cohesion:src/features/commits",
     "low_cohesion:src/features/commits/bisect",
+    "low_cohesion:src/features/commits/copy",
     "low_cohesion:src/features/operation",
     "low_cohesion:src/features/repos",
     "low_cohesion:src/model"
