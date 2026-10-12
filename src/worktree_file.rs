@@ -116,10 +116,38 @@ fn plain_file(file: &Path) -> Result<(), String> {
 /// The bytes of `file`, or `None` when there are more than `max`.
 fn read_capped(file: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
-    File::open(file)?
+    open_plain(file)?
         .take(max.saturating_add(1))
         .read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= max).then_some(bytes))
+}
+
+/// Open `file` for reading only if it is a regular file, checked on the
+/// open handle. The earlier path checks give the friendly messages, but a
+/// local process could swap in a symlink or a FIFO after them; this open
+/// neither follows the one nor waits on the other.
+fn open_plain(file: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK keeps a FIFO from stalling the open; it changes
+        // nothing for reads of a regular file.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_OPEN_REPARSE_POINT: open a symlink itself, not its target.
+        options.custom_flags(0x0020_0000);
+    }
+    let handle = options.open(file)?;
+    let meta = handle.metadata()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    Ok(handle)
 }
 
 /// Write `content` to `path` under `root`, which must not exist yet;
@@ -796,6 +824,37 @@ mod tests {
             assert_eq!(fs::read(root.join("ro/a.txt")).unwrap(), b"old\n");
         }
         assert_eq!(temps(&root.join("ro")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_open_itself_refuses_a_symlink_swapped_in_after_the_check() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        fs::write(root.join("secret"), "secret\n").unwrap();
+        symlink(root.join("secret"), root.join("link")).unwrap();
+
+        // Straight to the open, as if the link appeared after `plain_file`.
+        assert!(open_plain(&root.join("link")).is_err());
+        assert!(read_capped(&root.join("link"), 1024).is_err());
+        assert!(open_plain(&root.join("secret")).is_ok());
+    }
+
+    #[test]
+    fn the_open_refuses_a_fifo_at_once_instead_of_blocking() {
+        let tmp = TempDir::new("worktree-file");
+        let fifo = tmp.path().join("fifo");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the call.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_capped(&fifo, 1024).map_err(|e| e.to_string()));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO must not block");
+        assert_eq!(result, Err("not a regular file".to_string()));
     }
 }
 
