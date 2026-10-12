@@ -18,6 +18,7 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! tool = "difft --color=always"    # a display-only tool, run on OLD NEW
 //! [commit]
 //! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
 //! ```
@@ -109,6 +110,8 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
+    /// The global `[diff] tool` command, checked by `parse_command`.
+    pub diff_tool: Option<String>,
     /// The global `[commit] hooks_detached`: hooks alone do not hand a
     /// commit the terminal.
     pub commit_hooks_detached: bool,
@@ -121,6 +124,7 @@ struct GlobalSettings {
     keymap: Keymap,
     watch: WatchConfig,
     diff_pager: Option<String>,
+    diff_tool: Option<String>,
     commit_hooks_detached: bool,
 }
 
@@ -151,6 +155,7 @@ struct CommitTable {
 #[serde(deny_unknown_fields)]
 struct DiffTable {
     pager: Option<String>,
+    tool: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -179,6 +184,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
         diff_pager: None,
+        diff_tool: None,
         commit_hooks_detached: false,
         errors: Vec::new(),
     };
@@ -190,11 +196,13 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
             loaded.keymap,
             loaded.watch,
             loaded.diff_pager,
+            loaded.diff_tool,
             loaded.commit_hooks_detached,
         ) = (
             global.keymap,
             global.watch,
             global.diff_pager,
+            global.diff_tool,
             global.commit_hooks_detached,
         );
     }
@@ -275,7 +283,8 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
         .map_err(|_| "not UTF-8 text".to_string())
 }
 
-/// `keymap` and `watch` with the global file's text applied, and its pager.
+/// `keymap` and `watch` with the global file's text applied, and its
+/// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
     let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
@@ -293,10 +302,14 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(pager) = &file.diff.pager {
         parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
     }
+    if let Some(tool) = &file.diff.tool {
+        parse_command(tool).map_err(|e| format!("diff.tool: {e}"))?;
+    }
     Ok(GlobalSettings {
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        diff_tool: file.diff.tool,
         commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
     })
 }
@@ -514,6 +527,7 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                diff_tool: None,
                 commit_hooks_detached: false,
                 errors: vec![],
             }
@@ -827,5 +841,44 @@ output = "none"
         assert!(loaded.commit_hooks_detached);
         assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
         assert_eq!(loaded.errors[0].path, path);
+    }
+
+    #[test]
+    fn the_global_file_names_a_diff_tool_and_a_bad_one_is_refused() {
+        let tool =
+            |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.diff_tool);
+        assert_eq!(
+            tool("[diff]\ntool = \"difft --color=always\"\n"),
+            Ok(Some("difft --color=always".into()))
+        );
+        assert_eq!(tool(""), Ok(None));
+        assert_eq!(
+            tool("[diff]\ntool = \"difft | less\"\n"),
+            Err("diff.tool: The command needs a shell, which is never used".into())
+        );
+        let files = Files::new("tool");
+        files.global("[diff]\ntool = \"difft --color=always\"\n");
+        assert_eq!(files.load().diff_tool, Some("difft --color=always".into()));
+        files.global("[diff]\ntool = \"difft | less\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn only_the_global_file_names_a_diff_tool() {
+        let files = Files::new("repo-tool");
+        files
+            .global("[diff]\ntool = \"difft\"\n")
+            .repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, Some("difft".into()));
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+
+        files.global("").repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
     }
 }

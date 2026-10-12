@@ -236,7 +236,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
     let mut app = Harness::start(&repo).await;
 
     // Collapsed, the panel shows only the branch; expanded, the rest.
-    app.assert_screen_contains("│work ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("work "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃base ↑2 ↓1 ");
 }
@@ -245,7 +246,8 @@ async fn the_status_panel_shows_the_branch_its_upstream_and_counts() {
 async fn a_branch_without_upstream_says_so() {
     let repo = on_main();
     let mut app = Harness::start(&repo).await;
-    app.assert_screen_contains("│main ");
+    let status = app.screen()[1].clone();
+    assert!(status.starts_with("main "), "{status:?}");
     app.press(KeyCode::Char('1')).await;
     app.assert_screen_contains("┃no upstream ");
 }
@@ -258,7 +260,11 @@ async fn a_detached_head_shows_its_short_hash() {
 
     let mut app = Harness::start(&repo).await;
 
-    app.assert_screen_contains(&format!("│detached {} ", &head[..7]));
+    let status = app.screen()[1].clone();
+    assert!(
+        status.starts_with(&format!("detached {} ", &head[..7])),
+        "{status:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1171,6 +1177,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.use_renderers(vec![ExternalRenderer {
         label: "cat".into(),
         argv: vec!["cat".into()],
+        kind: crate::external_diff::RendererKind::Pager,
     }])
     .await;
 
@@ -1289,7 +1296,7 @@ async fn space_in_the_branches_panel_checks_out_the_selected_branch() {
     app.assert_screen_contains("* side");
     // The Status panel follows, collapsed to its branch row.
     let status = app.screen()[1].clone();
-    assert!(status.contains("│side "), "{status:?}");
+    assert!(status.starts_with("side "), "{status:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1980,7 +1987,7 @@ async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
     app.press(KeyCode::Enter).await;
     assert_eq!(app.state().repo.as_deref(), Some(wt.as_path()));
     let status = app.screen()[1].clone();
-    assert!(status.contains("│feature "), "{status:?}");
+    assert!(status.starts_with("feature "), "{status:?}");
 
     // Back in the main worktree, d then y removes the clean one.
     app.press_with(KeyCode::Char('W'), KeyModifiers::SHIFT)
@@ -2051,4 +2058,37 @@ async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone(
         std::fs::read_dir(repo.path().join("full")).unwrap().count(),
         1
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn i_ignores_an_untracked_file_and_y_copies_the_head_hash() {
+    let repo = TestRepo::new()
+        .write("a.txt", "one\n")
+        .commit("init")
+        .write("a.txt", "one\ntwo\n")
+        .write("build.log", "noise\n");
+    let mut app = Harness::start(&repo).await;
+
+    app.press(KeyCode::Char('2')).await;
+    select_file(&mut app, "build.log").await;
+    app.press(KeyCode::Char('i')).await;
+    app.assert_screen_contains(" Add to .gitignore ");
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(repo.read(".gitignore"), "/build.log\n");
+    let files = listed(&app);
+    assert!(!files.contains(&"build.log".to_string()), "{files:?}");
+    assert!(files.contains(&"a.txt".to_string()), "{files:?}");
+    assert!(repo.git(["diff", "--cached"]).is_empty());
+    app.assert_screen_contains("Added /build.log to .gitignore");
+
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('y')).await;
+    app.assert_screen_contains(" Copy ");
+    app.press(KeyCode::Enter).await;
+
+    let head = repo.head();
+    let expected = crate::clipboard::osc52(head.trim_end()).unwrap();
+    assert_eq!(app.clipboard(), [expected]);
+    assert!(app.state().popups.is_empty());
 }

@@ -7,22 +7,24 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ansi;
 use crate::captured_command::run_captured;
+use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::diff_stream::DiffStreamer;
-use crate::external_diff::{ExternalRenderer, discover, read_diff, run_renderer};
+use crate::diff_tool;
+use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
-use crate::git::commit_files::{CommitRange, commit_files};
-use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
+use crate::git::commit_files::{CommitId, CommitRange, commit_files};
+use crate::git::diff::{DiffRequest, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
-use crate::git::head::read_head_message;
+use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::log::{log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
@@ -36,6 +38,7 @@ use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
 use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
+use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::recent;
@@ -190,10 +193,12 @@ pub enum Effect {
         oid: String,
     },
     /// Find the configured diff renderers: the global `[diff] pager`, then
-    /// git's global pagers. Answered by one `RenderersFound`.
+    /// git's global pagers, then the global `[diff] tool`. Answered by one
+    /// `RenderersFound`.
     FindRenderers,
-    /// Run `renderer` on the diff for `request` at `cols` columns; always
-    /// answered by one `DiffRendered`.
+    /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
+    /// a tool on both sides of its file. Always answered by one
+    /// `DiffRendered`.
     RenderDiff {
         tag: Tag,
         request: DiffRequest,
@@ -259,6 +264,21 @@ pub enum Effect {
     /// Hand the answer to the question the running remote operation
     /// asked; `None` cancels it. Does nothing when no question waits.
     AnswerCredential(Option<Secret>),
+    /// Put `text` on the system clipboard. Run by the loop, between draws,
+    /// never by a task; a failure comes back as `CopyFailed`.
+    Clipboard(String),
+    /// Read commit `oid`'s full message to copy it; always answered by
+    /// one `CommitMessageLoaded`.
+    LoadCommitMessage {
+        tag: Tag,
+        oid: CommitId,
+    },
+    /// Add `line` to the worktree's top-level `.gitignore`, creating it if
+    /// need be; always answered by one `IgnoreWritten`.
+    AppendIgnore {
+        tag: Tag,
+        line: Vec<u8>,
+    },
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -285,10 +305,14 @@ pub struct Runtime {
     recent_store: Option<PathBuf>,
     /// The global config's `[diff] pager`, read once at startup.
     diff_pager: Option<String>,
+    /// The global config's `[diff] tool`, read once at startup.
+    diff_tool: Option<String>,
     /// Stops the last captured command; aborting a finished one is a no-op.
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
     credential: AnswerSlot,
+    /// Where copied text goes: the terminal, unless a test records it.
+    clipboard: Arc<dyn ClipboardSink>,
 }
 
 impl Runtime {
@@ -300,14 +324,38 @@ impl Runtime {
             global_config: None,
             recent_store: None,
             diff_pager: None,
+            diff_tool: None,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
+            clipboard: Arc::new(TerminalSink),
         }
+    }
+
+    /// Send copies to `clipboard` instead of the terminal.
+    // Only the headless harness swaps it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_clipboard(self, clipboard: Arc<dyn ClipboardSink>) -> Self {
+        Self { clipboard, ..self }
+    }
+
+    /// Put `text` on the clipboard now, on the caller's thread, so the
+    /// bytes never land inside a frame being drawn.
+    pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        let bytes = clipboard::osc52(text)?;
+        self.clipboard
+            .copy(&bytes)
+            .map_err(|e| format!("Could not write to the terminal: {e}"))
     }
 
     /// The renderer the global config names, offered first by `FindRenderers`.
     pub fn with_diff_pager(self, diff_pager: Option<String>) -> Self {
         Self { diff_pager, ..self }
+    }
+
+    /// The display-only tool the global config names, offered last by
+    /// `FindRenderers`.
+    pub fn with_diff_tool(self, diff_tool: Option<String>) -> Self {
+        Self { diff_tool, ..self }
     }
 
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
@@ -570,10 +618,11 @@ impl Runtime {
             }
             Effect::FindRenderers => {
                 let pager = self.diff_pager.clone();
+                let tool = self.diff_tool.clone();
                 tokio::spawn(async move {
                     // A panic finds nothing; the built-in view still works.
                     let found =
-                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager))
+                        tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager, tool))
                             .await
                             .unwrap_or_default();
                     let _ = tx.send(AppIntent::RenderersFound(found));
@@ -591,8 +640,20 @@ impl Runtime {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
                     let result = tokio::task::spawn_blocking(move || {
-                        let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
-                        run_renderer(&renderer, &workdir, &diff, cols).map(|out| ansi::parse(&out))
+                        let out = match renderer.kind {
+                            RendererKind::Pager => {
+                                let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
+                                run_renderer(&renderer, &workdir, &diff, cols)?
+                            }
+                            RendererKind::Tool => diff_tool::render(
+                                runner.as_ref(),
+                                &workdir,
+                                &request,
+                                &renderer,
+                                cols,
+                            )?,
+                        };
+                        Ok(ansi::parse(&out))
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -787,6 +848,39 @@ impl Runtime {
                     let _ = tx.send(AppIntent::RemoteFinished { tag, op, result });
                 });
             }
+            Effect::LoadCommitMessage { tag, oid } => {
+                tokio::spawn(async move {
+                    let read = oid.clone();
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_commit_message(runner.as_ref(), &read)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
+                    });
+                    let _ = tx.send(AppIntent::CommitMessageLoaded { tag, oid, result });
+                });
+            }
+            Effect::AppendIgnore { tag, line } => {
+                // Where git runs now, inside an entered submodule too.
+                let workdir = self.runner.workdir();
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || append_ignore(&workdir, &line))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("Writing .gitignore crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::IgnoreWritten { tag, result });
+                });
+            }
+            // The loop takes these out and copies itself, between draws.
+            // Without a loop there is no terminal to copy through.
+            Effect::Clipboard(_) => {}
             Effect::AnswerCredential(answer) => {
                 if let Some(answers) = lock(&self.credential).as_ref() {
                     // Gone means the operation ended; nobody is asking.
@@ -821,6 +915,23 @@ impl Runtime {
             let _ = tx.send(AppIntent::RecentLoaded { seq, list });
         });
     }
+}
+
+/// The largest `.gitignore` read to add a line to it.
+const MAX_GITIGNORE: u64 = 1024 * 1024;
+
+/// Add `line` to the `.gitignore` at the top of `workdir`, unless it is a
+/// line there already. Nothing but that one file is touched: no git
+/// command runs and the index stays as it is.
+fn append_ignore(workdir: &std::path::Path, line: &[u8]) -> Result<IgnoreAdded, String> {
+    let file = RepoPath::from(".gitignore");
+    let added = worktree_file::update(workdir, &file, MAX_GITIGNORE, |old| {
+        gitignore::appended(old, line)
+    })?;
+    Ok(IgnoreAdded {
+        pattern: sanitize(line),
+        added,
+    })
 }
 
 /// Where a running remote operation waits for the user's answer.
@@ -956,6 +1067,60 @@ mod tests {
         assert_eq!(first, [parse_key("x").unwrap(), parse_key("c").unwrap()]);
         assert_eq!(second, [parse_key("y").unwrap(), parse_key("c").unwrap()]);
         assert_eq!(in_repo, [stage.keys[0], parse_key("C").unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn the_message_read_is_logged_and_a_clipboard_copy_is_not() {
+        use crate::clipboard::RecordingSink;
+        use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink, RecordingRunner};
+
+        let oid = CommitId::parse("0123abcd").unwrap();
+        let fake = Arc::new(FakeRunner::new().expect(
+            &["log", "-1", "--format=%B", "0123abcd", "--"],
+            ok(b"subj\n"),
+        ));
+        let sink = CommandSink::new();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        sink.connect(move |event| seen.lock().unwrap().push(event));
+        let runner = Arc::new(RecordingRunner::new(fake.clone(), sink));
+        let clipboard = Arc::new(RecordingSink::default());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner, tx).with_clipboard(clipboard.clone());
+
+        assert_eq!(runtime.copy_to_clipboard("clip secret"), Ok(()));
+        assert_eq!(clipboard.copies().len(), 1);
+        assert!(events.lock().unwrap().is_empty(), "a copy runs no command");
+
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        runtime.spawn(Effect::LoadCommitMessage {
+            tag,
+            oid: oid.clone(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::CommitMessageLoaded {
+                tag,
+                oid,
+                result: Ok("subj".into()),
+            })
+        );
+        fake.assert_done();
+        let events = events.lock().unwrap().clone();
+        let [
+            CommandEvent::Started { line, .. },
+            CommandEvent::Finished { outcome, .. },
+        ] = events.as_slice()
+        else {
+            panic!("expected one started and finished command, got {events:?}");
+        };
+        assert!(line.ends_with("log -1 --format=%B 0123abcd --"), "{line:?}");
+        assert!(!line.contains("clip"), "{line:?}");
+        assert_eq!(outcome, &CommandOutcome::Ok);
     }
 
     #[tokio::test]
@@ -2407,6 +2572,7 @@ mod tests {
             renderer: ExternalRenderer {
                 label: "cat".into(),
                 argv: vec!["cat".into()],
+                kind: crate::external_diff::RendererKind::Pager,
             },
             cols: 40,
         });
@@ -2423,6 +2589,86 @@ mod tests {
             other => panic!("expected rendered rows, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    /// Run `RenderDiff` with tool `argv` on `request` and take its rows.
+    #[cfg(unix)]
+    async fn tool_rows(
+        runner: Arc<dyn GitRunner>,
+        request: DiffRequest,
+        argv: &[&str],
+    ) -> Vec<String> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner, tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 3,
+            user: true,
+        };
+        runtime.spawn(Effect::RenderDiff {
+            tag,
+            request,
+            renderer: ExternalRenderer {
+                label: argv[0].into(),
+                argv: argv.iter().map(OsString::from).collect(),
+                kind: crate::external_diff::RendererKind::Tool,
+            },
+            cols: 40,
+        });
+        match rx.recv().await {
+            Some(AppIntent::DiffRendered {
+                tag: got,
+                result: Ok(rows),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(rx.try_recv().is_err(), "one answer only");
+                rows.iter().map(|r| r.text()).collect()
+            }
+            other => panic!("expected rendered rows, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn render_diff_runs_a_tool_on_both_sides_of_a_worktree_change() {
+        use crate::git::fake::{TempDir, git};
+        let tmp = TempDir::new("effect-tool");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "old \x1b]0;title\x07one\n").unwrap();
+        git(dir, &["add", "a.txt"]);
+        std::fs::write(dir.join("a.txt"), "new \x1b[2J\x08two\n").unwrap();
+        let runner: Arc<dyn GitRunner> = Arc::new(crate::git::CliRunner::isolated(dir));
+        let request = DiffRequest {
+            path: "a.txt".into(),
+            orig_path: None,
+            side: DiffSide::Worktree,
+            options: Default::default(),
+            commit: None,
+        };
+
+        let rows = tool_rows(Arc::clone(&runner), request.clone(), &["cat"]).await;
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(
+            rows[0].starts_with("old ") && rows[0].ends_with("one"),
+            "{rows:?}"
+        );
+        assert!(
+            rows[1].starts_with("new ") && rows[1].ends_with("two"),
+            "{rows:?}"
+        );
+        for row in &rows {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+        }
+
+        // The tool's arguments name the temp files, gone once it is done.
+        let rows = tool_rows(runner, request, &["echo"]).await;
+        let args: Vec<&str> = rows[0].split(' ').collect();
+        assert_eq!(args.len(), 3, "{rows:?}");
+        assert_eq!(args[0], "--");
+        let old = std::path::Path::new(args[1]);
+        assert_eq!(old.file_name().unwrap(), "old.txt");
+        assert!(!old.parent().unwrap().exists(), "{old:?}");
     }
 
     #[tokio::test]
