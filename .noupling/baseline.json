@@ -1,11 +1,12 @@
 {
   "version": 3,
-  "timestamp": "1791810016",
-  "issue_count": 17,
+  "timestamp": "1791810087",
+  "issue_count": 18,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/forge",
     "coupling_violation:src/e2e -> src/git",
     "coupling_violation:src/features -> src/git",
+    "coupling_violation:src/features -> src/forge",
     "coupling_violation:src/forge -> src/git",
     "coupling_violation:src/model -> src/git",
     "coupling_violation:src/model -> src/forge",

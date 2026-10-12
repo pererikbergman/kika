@@ -22,6 +22,7 @@ use crate::features::blame::BlameView;
 use crate::features::command_log::CommandLog;
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
+use crate::features::pull_requests::{self, PrCreating, PrDraft, REFRESH_LIMITED, same_repo};
 use crate::features::repos::ParkedRepo;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
@@ -296,9 +297,9 @@ pub struct AppState {
     pub browser: Option<Vec<OsString>>,
     /// The pull request being put together, from its first picker to the
     /// question.
-    pub pr_draft: Option<pull_request::PrDraft>,
+    pub pr_draft: Option<PrDraft>,
     /// The pull request being created on GitHub; one at a time.
-    pub pr_create: Option<pull_request::PrCreating>,
+    pub pr_create: Option<PrCreating>,
     /// The pull request being merged on GitHub; one at a time.
     pub pr_merge: Option<merge_pr::PrMerging>,
     /// The message read to copy it; any other answer is stale.
@@ -412,23 +413,6 @@ impl AppState {
     pub fn with_git_version(self, git_version: Option<GitVersion>) -> Self {
         Self {
             git_version,
-            ..self
-        }
-    }
-
-    /// The forge hosts the global config lets Kika contact; none is off.
-    pub fn with_forge_hosts(self, hosts: Vec<ForgeHost>) -> Self {
-        Self {
-            forge: ForgeState::new(hosts),
-            ..self
-        }
-    }
-
-    /// The global config's GitLab hosts and browser, for forge links.
-    pub fn with_forge_links(self, gitlab: Vec<ForgeHost>, browser: Option<Vec<OsString>>) -> Self {
-        Self {
-            forge_gitlab_hosts: gitlab,
-            browser,
             ..self
         }
     }
@@ -1985,7 +1969,7 @@ impl AppState {
             (ConfirmKind::Abort(Operation::Bisect), _) => {
                 Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
             }
-            (ConfirmKind::CreatePullRequest, _) => match pull_request::question(self) {
+            (ConfirmKind::CreatePullRequest, _) => match pull_requests::question(self) {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
@@ -3619,7 +3603,7 @@ impl AppState {
                 self.pending_copy = Some((tag, id.clone()));
                 return vec![Effect::LoadCommitMessage { tag, oid: id }];
             }
-            CopyWhat::ForgeUrl => match pull_request::commit_page(self, &id) {
+            CopyWhat::ForgeUrl => match pull_requests::commit_page(self, &id) {
                 Ok(url) => url,
                 Err(reason) => {
                     self.notice = Some(reason);
@@ -3632,7 +3616,7 @@ impl AppState {
 
     /// Send `text` to the clipboard and say so; a failure replaces the
     /// notice with an error.
-    fn copy_text(&mut self, what: CopyWhat, text: String) -> Vec<Effect> {
+    pub(crate) fn copy_text(&mut self, what: CopyWhat, text: String) -> Vec<Effect> {
         self.notice_text = Some(format!(
             "Copied {}: {}",
             what.label(),
@@ -5038,11 +5022,9 @@ mod branch_lists;
 mod confirm_guard;
 mod custom_patch;
 mod fixup;
-pub(crate) mod forge_load;
 mod leave_commits;
 mod log_query;
 pub(crate) mod merge_pr;
-pub(crate) mod pull_request;
 pub(crate) mod review;
 pub(crate) mod review_files;
 mod rewrite_range;
