@@ -98,9 +98,10 @@ and lists the keys it should answer to:
   binding or a global command when the clash is in `.kika.toml`, always stays
   where it is. Kika shows one error per dropped entry, naming the key and both
   bindings. Every other problem, such as an unknown id, a key that does not
-  parse, `global.quit = []`, or a `.kika.toml` that touches a locked binding,
-  still ignores the whole file, even when the same file has a droppable
-  clash.
+  parse, `global.quit = []`, a `.kika.toml` that touches a locked binding,
+  or a key the global file gives both a binding and one of its own
+  `[[commands]]`, still ignores the whole file, even when the same file has a
+  droppable clash.
 
 Key names:
 
@@ -703,8 +704,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   and is an error.
 - A repository's `.kika.toml` cannot move a binding onto a command's key:
   that entry is dropped, and the command keeps the key.
-- A command key that clashes in the global file still ignores the whole
-  global file.
+- In the global file, a command key that clashes with a binding (a default
+  one, or one the same file's `[keys]` moved there) or with another command
+  ignores the whole global file. Nothing is dropped on its own in that case.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
 - A `"popup"` or `"none"` command that is still running can be stopped with

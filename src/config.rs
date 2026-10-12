@@ -943,6 +943,24 @@ output = "none"
     }
 
     #[test]
+    fn a_global_binding_moved_onto_its_own_command_key_ignores_the_file() {
+        let files = Files::new("global-onto-command");
+        files.global(&format!(
+            "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n{COPY_COMMAND}"
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: r#"key "ctrl-t" is bound to both "files.stage" and command 1"#.into(),
+                dropped_binding: false,
+            }]
+        );
+        assert_eq!(loaded.keymap, Keymap::default());
+    }
+
+    #[test]
     fn a_repository_file_cannot_move_a_binding_onto_a_command_key() {
         let files = Files::new("repo-onto-command");
         files
