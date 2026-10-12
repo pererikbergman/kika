@@ -587,6 +587,18 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_file_may_move_the_command_log_filter_but_not_its_escape() {
+        let keymap = repo("[keys]\n\"command_log.filter\" = [\"f\"]\n").unwrap();
+        assert_eq!(keys_of(&keymap, "command_log.filter"), [key("f")]);
+        let locked = repo("[keys]\n\"command_log.escape\" = [\"x\"]\n").unwrap_err();
+        assert_eq!(
+            locked,
+            r#""command_log.escape" can only be changed in the global config file"#
+        );
+        assert!(global("[keys]\n\"command_log.escape\" = [\"x\"]\n").is_ok());
+    }
+
+    #[test]
     fn a_repository_file_may_move_the_worktrees_filter_but_not_its_escape() {
         let keymap = repo("[keys]\n\"worktrees.filter\" = [\"f\"]\n").unwrap();
         assert_eq!(keys_of(&keymap, "worktrees.filter"), [key("f")]);

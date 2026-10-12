@@ -1,55 +1,57 @@
 //! Draws the Command log popup. Reads state only.
 
-use std::time::Duration;
-
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::command_log::{CommandLog, CommandLogView, LogEntry};
+use crate::command_log::{CommandLog, CommandLogView, LogEntry, row_text};
+use crate::git::diff::sanitize;
 use crate::git::recording::CommandOutcome;
-use crate::view::{clip, pad};
+use crate::view::{clip, elide_right, pad, width_of};
 
-/// Wide enough for `not started`, so the times line up.
-const STATE_WIDTH: usize = 11;
-/// Wide enough for `999ms` and `99.9s`.
-const ELAPSED_WIDTH: usize = 5;
-
-/// The whole of `area`, since command lines are long: one row per command,
-/// oldest at the top, scrolled so the cursor row is in view. The cursor
-/// row is reversed while the log is on top, and failures are red.
+/// The whole of `area`, since command lines are long: one row per shown
+/// command, oldest at the top, scrolled so the cursor row is in view. The
+/// cursor row is reversed while the log is on top and its row is shown,
+/// and failures are red.
 pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, area);
     let room = usize::from(area.width.saturating_sub(2));
     let shown = usize::from(area.height.saturating_sub(2)).max(1);
     let entries = log.entries();
-    let mut title = " Command log ".to_string();
+    let visible = view.visible(log);
+    let hidden = view.selected_hidden(log);
+    // Where the cursor sits among the shown rows. A hidden one scrolls
+    // from the top; one past the end, as in an empty log, is on the last.
+    let at = match visible.iter().position(|&i| i == view.cursor) {
+        Some(at) => at,
+        None if hidden => 0,
+        None => visible.len().saturating_sub(1),
+    };
+    let title = title(&view.filter, visible.len(), log.len(), at, shown, room);
     let lines: Vec<Line> = if log.is_empty() {
         vec![Line::raw(" No git commands yet.")]
+    } else if visible.is_empty() {
+        vec![Line::raw(" No matches")]
     } else {
-        let cursor = view.cursor.min(entries.len() - 1);
-        let first = cursor.saturating_sub(shown - 1);
-        if shown < entries.len() {
-            title = format!(" Command log {}/{} ", cursor + 1, entries.len());
-        }
-        entries
+        let first = at.saturating_sub(shown - 1);
+        visible
             .iter()
-            .enumerate()
             .skip(first)
             .take(shown)
-            .map(|(i, entry)| {
+            .map(|&i| {
+                let entry = &entries[i];
                 let mut style = if failed(entry) {
                     Style::new().fg(Color::Red)
                 } else {
                     Style::new()
                 };
-                if top && i == cursor {
+                if top && !hidden && i == visible[at] {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
                 // Padded, so the cursor's reversed bar fills the row.
-                Line::styled(pad(&clip(&row(entry), 0, room), room), style)
+                Line::styled(pad(&clip(&row_text(entry), 0, room), room), style)
             })
             .collect()
     };
@@ -59,26 +61,30 @@ pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Fr
     );
 }
 
-/// ` <state> <elapsed> [terminal] <line>`, the columns padded to line up.
-fn row(entry: &LogEntry) -> String {
-    let marker = if entry.attached { "[terminal] " } else { "" };
-    let elapsed = entry.elapsed.map(elapsed).unwrap_or_default();
-    format!(
-        " {:<STATE_WIDTH$} {elapsed:>ELAPSED_WIDTH$} {marker}{}",
-        state(entry),
-        entry.line
-    )
-}
-
-fn state(entry: &LogEntry) -> String {
-    match &entry.outcome {
-        None => "running".into(),
-        Some(CommandOutcome::Ok) => "ok".into(),
-        Some(CommandOutcome::Failed(None)) => "failed".into(),
-        Some(CommandOutcome::Failed(Some(exit))) => format!("failed {exit}"),
-        Some(CommandOutcome::NotStarted) => "not started".into(),
-        Some(CommandOutcome::Stopped) => "stopped".into(),
+/// ` Command log `, with ` <at>/<len> ` when the rows do not fit. With a
+/// filter, ` Command log · /<filter> <shown> of <total> `: the filter is
+/// drawn sanitised and loses its end so the title fits `room` columns.
+fn title(
+    filter: &str,
+    matched: usize,
+    total: usize,
+    at: usize,
+    shown: usize,
+    room: usize,
+) -> String {
+    if filter.is_empty() {
+        return if shown < total {
+            format!(" Command log {}/{total} ", at + 1)
+        } else {
+            " Command log ".to_string()
+        };
     }
+    let fixed = format!(" Command log · / {matched} of {total} ");
+    let query = elide_right(
+        &sanitize(filter.as_bytes()),
+        room.saturating_sub(width_of(&fixed)),
+    );
+    format!(" Command log · /{query} {matched} of {total} ")
 }
 
 /// A stopped command was given up on by Kika, which is not a failure.
@@ -89,19 +95,12 @@ fn failed(entry: &LogEntry) -> bool {
     )
 }
 
-/// `12ms` under a second, `1.4s` above.
-fn elapsed(time: Duration) -> String {
-    if time < Duration::from_secs(1) {
-        format!("{}ms", time.as_millis())
-    } else {
-        format!("{:.1}s", time.as_secs_f64())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    use std::time::Duration;
 
     use super::*;
     use crate::git::recording::CommandEvent;
@@ -346,17 +345,94 @@ mod tests {
         }
     }
 
-    #[test]
-    fn times_read_in_milliseconds_then_seconds() {
-        assert_eq!(elapsed(Duration::from_micros(400)), "0ms");
-        assert_eq!(elapsed(Duration::from_millis(12)), "12ms");
-        assert_eq!(elapsed(Duration::from_millis(999)), "999ms");
-        assert_eq!(elapsed(Duration::from_millis(1400)), "1.4s");
-        assert_eq!(elapsed(Duration::from_secs(75)), "75.0s");
+    /// [`short_log`] with `filter` set on the open log.
+    fn filtered(n: u64, filter: &str) -> AppState {
+        let mut state = short_log(n);
+        let log = state.command_log.clone();
+        if let Some(Popup::CommandLog(view)) = state.popups.last_mut() {
+            view.filter = filter.into();
+            view.reconcile(&log);
+        }
+        state
+    }
+
+    /// The text of the one reversed row, if any.
+    fn reversed_row(buffer: &ratatui::buffer::Buffer, rows: &[String]) -> Option<String> {
+        rows.iter()
+            .enumerate()
+            .find(|(y, _)| reversed(buffer, 1, *y))
+            .map(|(_, row)| row.clone())
     }
 
     #[test]
-    fn every_outcome_has_a_state_word() {
+    fn a_filter_draws_only_its_rows_and_counts_them_in_the_title() {
+        let state = filtered(12, "cmd1");
+        let (buffer, rows) = draw(&state, 80, 24);
+        line_with(&rows, "┌ Command log · /cmd1 3 of 12 ─");
+        for shown in ["git cmd1 ", "git cmd10", "git cmd11"] {
+            line_with(&rows, shown);
+        }
+        for gone in ["git cmd0", "git cmd2", "git cmd9"] {
+            assert!(!rows.iter().any(|r| r.contains(gone)), "{gone} drawn");
+        }
+        let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
+        assert!(cursor.contains("git cmd11"), "{cursor}");
+
+        // The cursor bar sits on the filtered row it is on.
+        let mut state = state;
+        state.update(AppIntent::CommandLogPrev);
+        let (buffer, rows) = draw(&state, 80, 24);
+        let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
+        assert!(cursor.contains("git cmd10"), "{cursor}");
+    }
+
+    #[test]
+    fn a_filtered_log_scrolls_among_its_shown_rows() {
+        // `cmd1`, `cmd10`..`cmd19`: 11 rows in 6 lines.
+        let mut state = filtered(20, "cmd1");
+        for _ in 0..10 {
+            state.update(AppIntent::CommandLogPrev);
+        }
+        let (buffer, rows) = draw(&state, 60, 8);
+        line_with(&rows, " Command log · /cmd1 11 of 20 ");
+        let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
+        assert!(cursor.contains("git cmd1 "), "{cursor}");
+    }
+
+    #[test]
+    fn nothing_matching_says_so_and_marks_no_row() {
+        let state = filtered(3, "zzz");
+        let (buffer, rows) = draw(&state, 80, 24);
+        line_with(&rows, " Command log · /zzz 0 of 3 ");
+        line_with(&rows, " No matches");
+        assert_eq!(reversed_row(&buffer, &rows), None);
+    }
+
+    #[test]
+    fn a_hostile_filter_is_drawn_escaped_in_the_title() {
+        let state = filtered(3, "x\u{202E}y\x1b[31m");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\x1b') && !row.contains('\u{202E}')),
+            "{rows:#?}"
+        );
+        let (_, title) = line_with(&rows, " Command log · /x");
+        assert!(title.contains("[31m"), "{title}");
+        assert!(title.contains(" 0 of 3 "), "{title}");
+    }
+
+    #[test]
+    fn a_long_filter_fits_the_title_inside_the_border() {
+        let state = filtered(3, &"c".repeat(200));
+        let (_, rows) = draw(&state, 40, 8);
+        let (_, title) = line_with(&rows, " Command log · /");
+        assert!(title.contains(" 0 of 3 "), "{title}");
+        assert_eq!(crate::view::width_of(title), 40, "{title}");
+    }
+
+    #[test]
+    fn failed_and_unstarted_commands_are_failures() {
         let entry = |outcome| LogEntry {
             id: 0,
             line: "git x".into(),
@@ -378,7 +454,6 @@ mod tests {
         ];
         for (outcome, word, failure) in cases {
             let entry = entry(outcome);
-            assert_eq!(state(&entry), word);
             assert_eq!(failed(&entry), failure, "{word}");
         }
     }

@@ -1530,7 +1530,9 @@ reaches GitHub, so `enter` does not answer it.
 Every git command Kika ran this session, oldest first, with how it ended and
 how long it took. Lines never show env, stdin, credentials in URLs, secret
 config values or message bodies. `@` opens it with any modifiers, since
-layouts type it with Shift, AltGr or Option.
+layouts type it with Shift, AltGr or Option. `/` narrows it to the rows that
+match, as drawn: state, time, `[terminal]` marker and the cleaned line. Esc
+clears the filter first and closes the log on the next press.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1538,7 +1540,9 @@ layouts type it with Shift, AltGr or Option.
 | `command_log.prev` | `k`, `up` | Select the previous command | |
 | `command_log.page_down` | `pgdn` | Move a page down | |
 | `command_log.page_up` | `pgup` | Move a page up | |
-| `command_log.close` | `esc`, `q` | Close the log | |
+| `command_log.filter` | `/` | Filter the commands shown | |
+| `command_log.escape` | `esc` | Clear the filter, else close the log | locked |
+| `command_log.close` | `q` | Close the log | |
 | `command_log.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Remove this worktree?
