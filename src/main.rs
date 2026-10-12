@@ -49,6 +49,8 @@ mod remotes;
 mod remotes_view;
 mod rendered_view;
 mod sequence_editor;
+mod stash;
+mod stash_view;
 mod submodule_list;
 mod tags;
 mod tags_view;
