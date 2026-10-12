@@ -74,6 +74,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::DeleteRange(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::ResetHard(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),

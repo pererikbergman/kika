@@ -5,6 +5,7 @@
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::terminal_safe;
 use crate::intent::Scroll;
+use crate::list_filter;
 use crate::remotes::RemotesList;
 use crate::tags::{PendingTag, TagsList};
 
@@ -56,6 +57,11 @@ pub struct BranchesPanel {
     pub tags: TagsList,
     /// The tag the open name or message prompt will make.
     pub pending_tag: Option<PendingTag>,
+    /// What the Local tab is narrowed to, kept for the session.
+    pub filter: String,
+    /// The branch a range selection started on, so a reload keeps the
+    /// range on the same branches.
+    pub range_anchor: Option<BranchName>,
 }
 
 /// The selected branch's newest commits.
@@ -95,19 +101,84 @@ impl BranchesPanel {
                 .or_else(|| self.selected.map(|i| i.min(last)))
                 .or(Some(0))
         };
+        self.reconcile();
     }
 
-    /// Move the selection by `delta`, stopping at either end. Says whether
-    /// it moved.
+    /// Move the selection by `delta` over the rows the filter shows,
+    /// stopping at either end. Says whether it moved.
     pub fn move_by(&mut self, delta: isize) -> bool {
         let Some(current) = self.selected else {
             return false;
         };
-        let next = current
-            .saturating_add_signed(delta)
-            .min(self.branches.len().saturating_sub(1));
+        let Some(next) = list_filter::step(&self.visible(), current, delta) else {
+            return false;
+        };
         self.selected = Some(next);
         next != current
+    }
+
+    /// The indexes of the branches the filter shows, in list order.
+    pub fn visible(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.branches.len()).collect();
+        }
+        let names: Vec<String> = self.branches.iter().map(|b| b.name.display()).collect();
+        list_filter::visible(&self.filter, names.iter().map(String::as_str))
+    }
+
+    /// The filter hides the selected branch, which happens only when it
+    /// hides every branch.
+    pub fn selected_hidden(&self) -> bool {
+        self.selected_branch()
+            .is_some_and(|b| !list_filter::matches(&self.filter, &b.name.display()))
+    }
+
+    /// The branches the range covers, in list order; empty without one.
+    pub fn range(&self) -> Vec<usize> {
+        let anchor = self
+            .range_anchor
+            .as_ref()
+            .and_then(|anchor| self.branches.iter().position(|b| &b.name == anchor));
+        match (anchor, self.selected) {
+            (Some(anchor), Some(cursor)) => list_filter::range(&self.visible(), anchor, cursor),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Narrow the list to `text`. A changed filter drops the range, which
+    /// was made over the rows shown before; says whether it did.
+    pub fn set_filter(&mut self, text: String) -> bool {
+        let mut cleared = false;
+        if text != self.filter {
+            self.filter = text;
+            cleared = self.range_anchor.take().is_some();
+        }
+        self.reconcile();
+        cleared
+    }
+
+    /// Start a range at the selected branch, or clear the one there is. A
+    /// branch the filter hides starts none.
+    pub fn toggle_range(&mut self) {
+        if self.range_anchor.take().is_none() && !self.selected_hidden() {
+            self.range_anchor = self.selected_branch().map(|b| b.name.clone());
+        }
+    }
+
+    /// After the filter or the list changed: a range whose first branch is
+    /// gone is cleared, and a hidden selection moves to the first branch
+    /// shown.
+    pub fn reconcile(&mut self) {
+        if let Some(anchor) = &self.range_anchor
+            && !self.branches.iter().any(|b| &b.name == anchor)
+        {
+            self.range_anchor = None;
+        }
+        if self.selected_hidden()
+            && let Some(&first) = self.visible().first()
+        {
+            self.selected = Some(first);
+        }
     }
 
     pub fn selected_branch(&self) -> Option<&Branch> {
@@ -117,6 +188,16 @@ impl BranchesPanel {
     /// The branch `HEAD` is on, if it is listed.
     pub fn current(&self) -> Option<&Branch> {
         self.branches.iter().find(|b| b.head)
+    }
+
+    /// Drop the range on `tab`, which does not outlive the tab or the op
+    /// it was asked for. The filter stays.
+    pub fn clear_range(&mut self, tab: BranchesTab) {
+        match tab {
+            BranchesTab::Local => self.range_anchor = None,
+            BranchesTab::Remotes => self.remotes.range_anchor = None,
+            BranchesTab::Tags => self.tags.range_anchor = None,
+        }
     }
 }
 
@@ -243,6 +324,63 @@ mod tests {
         assert!(!panel.move_by(1));
         assert!(panel.move_by(-5));
         assert_eq!(panel.selected, Some(0));
+    }
+
+    #[test]
+    fn moving_skips_the_branches_the_filter_hides() {
+        let mut panel = BranchesPanel::default();
+        panel.loaded(Ok(list(&["main", "a1", "b", "a2"])));
+        panel.filter = "a".into();
+        panel.reconcile();
+        assert_eq!(panel.visible(), [0, 1, 3], "main matches a too");
+        panel.selected = Some(1);
+        assert!(panel.move_by(1));
+        assert_eq!(panel.selected, Some(3), "b is hidden");
+        assert!(!panel.move_by(1));
+        assert!(panel.move_by(-1));
+        assert_eq!(panel.selected, Some(1));
+    }
+
+    #[test]
+    fn a_filter_that_hides_the_selection_moves_it_to_the_first_shown() {
+        let mut panel = BranchesPanel::default();
+        panel.loaded(Ok(list(&["main", "x", "y1", "y2"])));
+        panel.selected = Some(1);
+        panel.filter = "y".into();
+        assert!(panel.selected_hidden());
+        panel.reconcile();
+        assert_eq!(panel.selected, Some(2));
+        // A filter that hides every branch leaves the selection alone.
+        panel.filter = "zzz".into();
+        panel.reconcile();
+        assert_eq!(panel.selected, Some(2));
+        assert!(panel.selected_hidden());
+        assert!(!panel.move_by(1));
+    }
+
+    #[test]
+    fn a_range_runs_over_shown_branches_and_a_reload_without_its_anchor_clears_it() {
+        let mut panel = BranchesPanel::default();
+        panel.loaded(Ok(list(&["a", "b", "c", "d"])));
+        panel.range_anchor = Some("b".into());
+        panel.selected = Some(3);
+        assert_eq!(panel.range(), [1, 2, 3]);
+        // A reload that keeps the anchor keeps the range on the same names.
+        panel.loaded(Ok(list(&["0", "a", "b", "c", "d"])));
+        assert_eq!(panel.range(), [2, 3, 4]);
+        panel.loaded(Ok(list(&["a", "c", "d"])));
+        assert_eq!(panel.range_anchor, None);
+        assert!(panel.range().is_empty());
+    }
+
+    #[test]
+    fn a_reload_moves_a_selection_the_filter_hides_to_the_first_shown() {
+        let mut panel = BranchesPanel {
+            filter: "t".into(),
+            ..Default::default()
+        };
+        panel.loaded(Ok(list(&["main", "topic", "wip"])));
+        assert_eq!(panel.selected, Some(1));
     }
 
     #[test]

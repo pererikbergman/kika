@@ -273,6 +273,9 @@ pub enum KeyScope {
     RemoveRemote,
     /// "Delete this tag?" on top of the popup stack.
     DeleteTag,
+    /// "Delete these branches, tags or remotes?" over a range, on top of
+    /// the popup stack.
+    DeleteRange,
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
@@ -348,6 +351,7 @@ impl KeyScope {
             | KeyScope::DeleteBranch
             | KeyScope::RemoveRemote
             | KeyScope::DeleteTag
+            | KeyScope::DeleteRange
             | KeyScope::ResetHard
             | KeyScope::LeaveCommits
             | KeyScope::DropStash
@@ -401,6 +405,7 @@ impl KeyScope {
             KeyScope::DeleteBranch => "Delete branch",
             KeyScope::RemoveRemote => "Remove remote",
             KeyScope::DeleteTag => "Delete tag",
+            KeyScope::DeleteRange => "Delete selection",
             KeyScope::ResetHard => "Reset hard",
             KeyScope::LeaveCommits => "Leave commits behind",
             KeyScope::DropStash => "Drop stash",
@@ -563,6 +568,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "delete_tag.yes",
     "delete_tag.no",
     "delete_tag.quit",
+    "delete_range.yes",
+    "delete_range.no",
+    "delete_range.quit",
     "commits.squash",
     "commits.fixup",
     "commits.drop",
@@ -609,6 +617,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "commits.paste",
     "files.escape",
     "commits.escape",
+    "branches.escape",
+    "remotes.escape",
+    "tags.escape",
     "input.quit",
 ];
 
@@ -1334,9 +1345,14 @@ pub(crate) fn init_repo_disabled(state: &AppState) -> Option<Reason> {
     }
 }
 
-/// Why no branch action can run right now: one needs a selected branch,
-/// and git one operation at a time.
+/// Why no branch action can run right now: one needs a selected branch
+/// the filter shows and no range, and git one operation at a time.
 pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| branch_selected_disabled(state))
+}
+
+/// [`branch_action_disabled`] without the filter and range guard.
+fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING.into())
     } else if state.branches.selected_branch().is_none() {
@@ -1355,13 +1371,25 @@ pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
+/// Over a range, `d` asks about the range, which skips the current
+/// branch itself; only the one-at-a-time rule is left to check.
 pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<Reason> {
-    branch_action_disabled(state).or_else(|| {
-        let selected = state.branches.selected_branch();
-        selected
-            .is_some_and(|b| b.head)
-            .then_some("Cannot delete the current branch".into())
+    list_guard(state, true).or_else(|| {
+        if state.branches.range_anchor.is_some() {
+            return op_running(state);
+        }
+        branch_selected_disabled(state).or_else(|| {
+            let selected = state.branches.selected_branch();
+            selected
+                .is_some_and(|b| b.head)
+                .then_some("Cannot delete the current branch".into())
+        })
     })
+}
+
+/// Why nothing can start now: git one operation at a time.
+fn op_running(state: &AppState) -> Option<Reason> {
+    state.op_seq.is_some().then_some(OP_RUNNING.into())
 }
 
 /// Why the selected local branch's upstream cannot be removed: it needs
@@ -1383,6 +1411,9 @@ pub(crate) fn add_remote_disabled(state: &AppState) -> Option<Reason> {
 /// Why the selected remote branch cannot be checked out: a header row
 /// is a remote, not a branch.
 pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = list_guard(state, false) {
+        return Some(reason);
+    }
     if state.op_seq.is_some() {
         Some(OP_RUNNING.into())
     } else if state.branches.remotes.selected_branch().is_none() {
@@ -1392,10 +1423,28 @@ pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
     }
 }
 
+/// Why the selected remote cannot be removed. Over a range, `d` asks
+/// about the range, which skips the remotes this would refuse; only the
+/// one-at-a-time rule is left to check.
+pub(crate) fn change_remote_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, true).or_else(|| {
+        if state.branches.remotes.range_anchor.is_some() {
+            op_running(state)
+        } else {
+            remote_selected_disabled(state)
+        }
+    })
+}
+
+/// Why the selected remote cannot be renamed.
+pub(crate) fn rename_remote_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| remote_selected_disabled(state))
+}
+
 /// Why the selected remote cannot be renamed or removed. `remote rename`
 /// and `remote remove` take no `--` in older git, so a name like an option
 /// is never passed; nor is a group of refs no configured remote owns.
-pub(crate) fn change_remote_disabled(state: &AppState) -> Option<Reason> {
+fn remote_selected_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
     }
@@ -1428,20 +1477,25 @@ pub(crate) fn tag_selected_disabled(state: &AppState) -> Option<Reason> {
         .then_some("No tag".into())
 }
 
-/// Why the selected tag cannot be deleted now: git one operation at a
-/// time.
+/// Why the selected tag, or the range, cannot be deleted now: git one
+/// operation at a time.
 pub(crate) fn delete_tag_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else {
-        tag_selected_disabled(state)
-    }
+    list_guard(state, true).or_else(|| {
+        if state.op_seq.is_some() {
+            Some(OP_RUNNING.into())
+        } else if state.branches.tags.range_anchor.is_some() {
+            None
+        } else {
+            tag_selected_disabled(state)
+        }
+    })
 }
 
 /// Why the selected tag cannot be pushed: a push needs the slot, a tag,
 /// and a remote Kika can choose without asking.
 pub(crate) fn push_tag_disabled(state: &AppState) -> Option<Reason> {
-    remote_disabled(state)
+    list_guard(state, false)
+        .or_else(|| remote_disabled(state))
         .or_else(|| tag_selected_disabled(state))
         .or_else(|| push_tag_remote(state).err().map(Reason::from))
 }
@@ -2041,12 +2095,22 @@ pub(crate) const FILTER_HIDES_ROW: &str = "No row matches the filter";
 /// Why an action on one row cannot run while a range is selected.
 pub(crate) const CLEAR_RANGE_FIRST: &str = "Clear the selection first (esc)";
 
-/// Why a Files or Commits action on the selected row cannot run now: the
-/// filter hides that row, or a range is selected and the action is not one
-/// that applies to a range (`range_ok`). Chained in front of the action's
-/// own reason, so these come first.
+/// Why an action on a list's selected row cannot run now: the filter
+/// hides that row, or a range is selected and the action is not one that
+/// applies to a range (`range_ok`). Chained in front of the action's own
+/// reason, so these come first.
 pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
+    let branches = &state.branches;
     let (hidden, range) = match state.panel_focus() {
+        KeyScope::Branches => (branches.selected_hidden(), branches.range_anchor.is_some()),
+        KeyScope::Remotes => (
+            branches.remotes.selected_hidden(),
+            branches.remotes.range_anchor.is_some(),
+        ),
+        KeyScope::Tags => (
+            branches.tags.selected_hidden(),
+            branches.tags.range_anchor.is_some(),
+        ),
         KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
         // The filter hides log rows only; a todo row above the log shows.
         KeyScope::Commits => (
@@ -2202,8 +2266,10 @@ fn files_log_disabled(state: &AppState) -> Option<Reason> {
 }
 
 fn no_branch_selected(state: &AppState) -> Option<Reason> {
-    let selected = state.branches.selected_branch();
-    selected.is_none().then_some("No branch selected".into())
+    list_guard(state, false).or_else(|| {
+        let selected = state.branches.selected_branch();
+        selected.is_none().then_some("No branch selected".into())
+    })
 }
 
 /// A comparison needs a mark, and another branch or commit than it.
@@ -4293,7 +4359,7 @@ static REGISTRY: &[Binding] = &[
         description: "Rename the selected remote",
         label: "rename",
         bar: true,
-        disabled: change_remote_disabled,
+        disabled: rename_remote_disabled,
     },
     Binding {
         id: "remotes.remove",
@@ -4545,6 +4611,40 @@ static REGISTRY: &[Binding] = &[
         id: "delete_tag.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DeleteTag,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Only `y` deletes a range: Enter is left unbound, as for one branch.
+    Binding {
+        id: "delete_range.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DeleteRange,
+        intent: AppIntent::ConfirmDeleteRange,
+        description: "Yes, delete what the question names",
+        label: "delete",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "delete_range.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DeleteRange,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep them all",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "delete_range.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DeleteRange,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -5328,6 +5428,96 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Commits,
         intent: AppIntent::ListEscape,
         description: "Clear the selection, else the filter, else the diff mark, else the log filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the local branches by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range from here, for delete; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "branches.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the remotes and their branches by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range from here, for remove; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "remotes.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Remotes,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Tags,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the tags by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Tags,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range from here, for delete; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "tags.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Tags,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
         label: "clear",
         bar: false,
         disabled: never,
@@ -8169,6 +8359,174 @@ mod tests {
     }
 
     #[test]
+    fn the_branch_lists_new_keys_are_remappable_but_escape_and_the_range_question_are_locked() {
+        for id in [
+            "delete_range.yes",
+            "delete_range.no",
+            "delete_range.quit",
+            // Esc with nothing to clear quits, as files.escape does.
+            "branches.escape",
+            "remotes.escape",
+            "tags.escape",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
+        }
+        for scope in ["branches", "remotes", "tags"] {
+            for action in ["filter", "range"] {
+                let id = format!("{scope}.{action}");
+                assert!(!REPO_LOCKED.contains(&id.as_str()), "{id}");
+                assert!(build(&[(&id, &["Z"])], Trust::Repo).is_ok(), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_y_answers_the_range_question() {
+        let state = AppState::new(Context::Workspace);
+        let scope = KeyScope::DeleteRange;
+        assert_eq!(scope.parent(), None);
+        let ran = |k| run(registry(), scope, &state, k);
+        assert_eq!(ran(plain('y')), AppIntent::ConfirmDeleteRange);
+        assert_eq!(ran(plain('n')), AppIntent::ConfirmNo);
+        assert_eq!(
+            ran(key(KeyCode::Esc, KeyModifiers::NONE)),
+            AppIntent::ConfirmNo
+        );
+        assert_eq!(
+            ran(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            AppIntent::Quit
+        );
+        for k in [
+            key(KeyCode::Enter, KeyModifiers::NONE),
+            key(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            key(KeyCode::Char('D'), KeyModifiers::SHIFT),
+            plain('q'),
+        ] {
+            assert!(
+                matches!(
+                    resolve(registry(), &Keymap::default(), scope, &state, k),
+                    Resolution::Unbound
+                ),
+                "{k:?}"
+            );
+        }
+    }
+
+    /// The Branches panel focused on `tab`, with a branch, a remote with
+    /// a branch, and a tag loaded, and nothing running.
+    fn branch_lists(tab: crate::branches::BranchesTab) -> AppState {
+        use crate::git::branches::{Branch, Track};
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Branches;
+        state.branches.tab = tab;
+        state.diff_mark = Some(crate::diff_mark::DiffMark::Branch("other".into()));
+        state.branches.loaded(Ok(vec![Branch {
+            name: "topic".into(),
+            head: false,
+            upstream: Some("origin/topic".into()),
+            track: Track::None,
+            merged: true,
+        }]));
+        state
+            .branches
+            .remotes
+            .loaded(Ok(vec![crate::git::remotes::Remote {
+                name: "origin".into(),
+                url: Some("/srv/origin".into()),
+                configured: true,
+                branches: vec![crate::git::remotes::RemoteBranch {
+                    remote: "origin".into(),
+                    short: b"topic".to_vec(),
+                    refname: b"refs/remotes/origin/topic".to_vec(),
+                }],
+            }]));
+        let oid = "a".repeat(40);
+        state
+            .branches
+            .tags
+            .loaded(Ok(vec![crate::git::tags::TagRef {
+                name: "v1".into(),
+                target: CommitId::parse(&oid).unwrap(),
+                target_short: oid[..7].into(),
+                ref_oid: oid,
+                annotated: false,
+                date: "2026-10-01".into(),
+                subject: "s".into(),
+            }]));
+        state
+    }
+
+    /// The row actions of `scope` and the range delete it has.
+    fn row_actions(scope: KeyScope) -> (Vec<&'static str>, &'static str) {
+        match scope {
+            KeyScope::Branches => (
+                vec![
+                    "branches.checkout",
+                    "branches.new",
+                    "branches.rename",
+                    "branches.merge",
+                    "branches.pull_request",
+                    "branches.set_upstream",
+                    "branches.unset_upstream",
+                    "branches.mark",
+                    "branches.diff",
+                ],
+                "branches.delete",
+            ),
+            KeyScope::Remotes => (vec!["remotes.checkout", "remotes.rename"], "remotes.remove"),
+            _ => (vec!["tags.push"], "tags.delete"),
+        }
+    }
+
+    #[test]
+    fn a_range_in_the_branch_lists_leaves_only_d_and_a_free_of_row_actions() {
+        use crate::branches::BranchesTab;
+        for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
+            let mut state = branch_lists(tab);
+            let scope = state.panel_focus();
+            let (actions, delete) = row_actions(scope);
+            // A row action may be off for its own reason without a range;
+            // with one, the range is the reason given.
+            let reason = |state: &AppState, id: &str| (binding(id).disabled)(state);
+            state.update(AppIntent::ToggleRange);
+            for id in &actions {
+                assert_eq!(
+                    reason(&state, id).as_deref(),
+                    Some(CLEAR_RANGE_FIRST),
+                    "{id}"
+                );
+            }
+            assert_eq!(reason(&state, delete), None, "{delete} works on a range");
+            assert_eq!(reason(&state, "remotes.add"), None);
+            state.op_seq = Some(1);
+            assert_eq!(reason(&state, delete).as_deref(), Some(OP_RUNNING));
+        }
+    }
+
+    #[test]
+    fn a_filter_that_hides_every_row_in_the_branch_lists_refuses_row_actions() {
+        use crate::branches::BranchesTab;
+        for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
+            let mut state = branch_lists(tab);
+            match tab {
+                BranchesTab::Local => state.branches.filter = "zzz".into(),
+                BranchesTab::Remotes => state.branches.remotes.filter = "zzz".into(),
+                BranchesTab::Tags => state.branches.tags.filter = "zzz".into(),
+            }
+            let (actions, delete) = row_actions(state.panel_focus());
+            for id in actions.iter().chain([&delete]) {
+                assert_eq!(
+                    (binding(id).disabled)(&state).as_deref(),
+                    Some(FILTER_HIDES_ROW),
+                    "{id}"
+                );
+            }
+            assert_eq!((binding("remotes.add").disabled)(&state), None);
+        }
+    }
+
+    #[test]
     fn paste_is_locked_and_copy_and_clear_are_not() {
         assert!(REPO_LOCKED.contains(&"commits.paste"));
         assert!(build(&[("commits.paste", &["Z"])], Trust::Repo).is_err());
@@ -8495,6 +8853,7 @@ mod tests {
             KeyScope::DeleteBranch => "delete_branch",
             KeyScope::RemoveRemote => "remove_remote",
             KeyScope::DeleteTag => "delete_tag",
+            KeyScope::DeleteRange => "delete_range",
             KeyScope::ResetHard => "reset_hard",
             KeyScope::LeaveCommits => "leave_commits",
             KeyScope::DropStash => "drop_stash",
@@ -8777,6 +9136,7 @@ mod tests {
                     | ConfirmDropStash
                     | RemoveRemote
                     | ConfirmRemoveRemote
+                    | ConfirmDeleteRange
                     | DeleteTag
                     | ConfirmDeleteTag
                     | PushTag

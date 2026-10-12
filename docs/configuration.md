@@ -799,6 +799,9 @@ this way.
 | `branches.prev_tab` | `[` | Show the tags | |
 | `branches.mark` | `M` | Mark the selected branch to diff against (enter on another); again to clear | |
 | `branches.diff` | `enter` | Show what changed from the diff mark to the selected branch | |
+| `branches.filter` | `/` | Filter the local branches by typed text | |
+| `branches.range` | `V` | Select a range from here, for delete; again to clear it | |
+| `branches.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -812,6 +815,13 @@ command line.
 `u` asks for the upstream as `remote/branch`, starting from the current one,
 or else the same name on `origin` (or the first remote). It must name a
 remote branch Kika has listed; fetch first if it is new.
+
+`/` narrows the tab shown as you type, as in the Files panel, and each tab
+keeps its own filter. `V` starts a range; `d` over it asks once about every
+branch in it. `y` deletes only the merged ones: the current branch and any
+branch with unmerged commits are kept and counted in the question, and `D`
+still deletes one unmerged branch at a time. Every other row key waits until
+`esc` clears the range. Switching tabs clears the range, not the filter.
 
 ### Remotes
 
@@ -833,6 +843,9 @@ branches below it.
 | `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
 | `remotes.switch_tab` | `]` | Show the tags | |
 | `remotes.prev_tab` | `[` | Show the local branches | |
+| `remotes.filter` | `/` | Filter the remotes and their branches by typed text | |
+| `remotes.range` | `V` | Select a range from here, for remove; again to clear it | |
+| `remotes.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 None of these reaches the network. A remote you add shows no branches until
 you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
@@ -840,6 +853,11 @@ transport (`ext::…`, `ext://…`, `fd::…`, `fd://…`), since those run a co
 or use a file descriptor on every fetch; add such a remote with git directly. A remote named like an option
 (starting with `-`), or refs left under a name no remote has, cannot be
 renamed or removed from Kika.
+
+The filter matches a branch row as `remote/branch`, and a remote's row shows
+whenever its name matches or one of its branches shows. `d` over a range
+removes the configured remotes whose own rows are in it; branch rows in the
+range are left alone, since deleting a branch on a remote needs the network.
 
 ### Tags
 
@@ -855,6 +873,9 @@ diff pane shows the selected tag's commits.
 | `tags.push` | `P` | Push the selected tag to the upstream's remote, or the only remote | locked |
 | `tags.switch_tab` | `]` | Show the local branches | |
 | `tags.prev_tab` | `[` | Show the remotes and their branches | |
+| `tags.filter` | `/` | Filter the tags by typed text | |
+| `tags.range` | `V` | Select a range from here, for delete; again to clear it | |
+| `tags.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 `d` deletes only the local tag, and only if it still points where it did when
 it was listed. `P` pushes the one tag, never forced, to the current branch's
@@ -1349,6 +1370,17 @@ not answer it.
 | `delete_tag.yes` | `y` | Yes, delete the tag here | locked |
 | `delete_tag.no` | `n`, `esc` | No, keep the tag | locked |
 | `delete_tag.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Delete the selection?
+
+`d` over a range in the Branches panel asks once, naming how many go and the
+first few names. Only `y` answers it; `enter` does not.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `delete_range.yes` | `y` | Yes, delete what the question names | locked |
+| `delete_range.no` | `n`, `esc` | No, keep them all | locked |
+| `delete_range.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Reset hard?
 
