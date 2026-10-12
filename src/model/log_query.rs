@@ -549,6 +549,29 @@ mod tests {
     }
 
     #[test]
+    fn a_comparison_opens_with_no_filter_whatever_the_last_list_had() {
+        let mut state = with_branches();
+        let range = CommitRange {
+            oid: id(1),
+            parent: Some(id(0)),
+        };
+        let mut before = CommitFilesList::begin(range.clone(), "old".into(), 1);
+        before.filter = "lib".into();
+        state.commits.open = Some(before);
+        type_text(&mut state, "Mj");
+
+        let (tag, ..) = resolve(&press(&mut state, KeyCode::Enter));
+        state.update(AppIntent::DiffResolved {
+            tag,
+            result: Ok(range),
+        });
+
+        let open = state.commits.open.as_ref().unwrap();
+        assert_eq!(open.against.as_deref(), Some("main"));
+        assert_eq!(open.filter, "");
+    }
+
+    #[test]
     fn enter_in_branches_needs_a_mark_on_another_branch() {
         let mut state = with_branches();
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);

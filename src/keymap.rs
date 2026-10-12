@@ -1074,13 +1074,13 @@ fn no_command_running(state: &AppState) -> Option<Reason> {
 /// selected working-tree file's.
 fn focus_diff_disabled(state: &AppState) -> Option<Reason> {
     match &state.commits.open {
-        Some(open) if state.focus == Focus::Commits => {
-            commit_source_disabled(state, open).or_else(|| {
+        Some(open) if state.focus == Focus::Commits => list_guard(state, false)
+            .or_else(|| commit_source_disabled(state, open))
+            .or_else(|| {
                 open.selected_file()
                     .is_none()
                     .then_some("No file selected".into())
-            })
-        }
+            }),
         _ => no_file_selected(state),
     }
 }
@@ -1116,8 +1116,9 @@ pub(crate) fn patch_file_disabled(state: &AppState) -> Option<Reason> {
     let Some(open) = &state.commits.open else {
         return Some("No commit open".into());
     };
-    if let Some(reason) =
-        commit_source_disabled(state, open).or_else(|| other_commit_disabled(state, &open.range))
+    if let Some(reason) = list_guard(state, false)
+        .or_else(|| commit_source_disabled(state, open))
+        .or_else(|| other_commit_disabled(state, &open.range))
     {
         return Some(reason);
     }
@@ -2122,6 +2123,15 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
         KeyScope::Commits => (
             state.commits.todo_selected.is_none() && state.commits.selected_hidden(),
             state.commits.range_anchor.is_some(),
+        ),
+        // No range: nothing acts on a range of a commit's files.
+        KeyScope::CommitFiles => (
+            state
+                .commits
+                .open
+                .as_ref()
+                .is_some_and(CommitFilesList::selected_hidden),
+            false,
         ),
         _ => return None,
     };
@@ -5717,11 +5727,21 @@ static REGISTRY: &[Binding] = &[
         disabled: preview_step_disabled,
     },
     Binding {
+        id: "commit_files.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the commit's files by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "commit_files.escape",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitFiles,
         intent: AppIntent::PaneEscape,
-        description: "Clear the diff search, else go back to the log, at the same commit",
+        description: "Clear the filter, else the diff search, else go back to the log, at the same commit",
         label: "back",
         bar: true,
         disabled: never,
@@ -8599,6 +8619,7 @@ mod tests {
             ("commits.mark", &[Commits, Workspace, Global]),
             ("reflog.filter_path", &[Reflog, Workspace, Global]),
             ("reflog.filter_author", &[Reflog, Workspace, Global]),
+            ("commit_files.filter", &[CommitFiles, Workspace, Global]),
             ("branches.mark", &[Branches, Workspace, Global]),
             ("branches.diff", &[Branches, Workspace, Global]),
             ("files.log", &[Files, Workspace, Global]),
@@ -8793,6 +8814,63 @@ mod tests {
             from(KeyScope::Reflog, plain('V')),
             Some(AppIntent::ToggleRange)
         );
+    }
+
+    #[test]
+    fn the_commit_files_filter_is_remappable_but_its_escape_is_locked() {
+        // Esc with nothing to clear goes back to the log; unbound it would
+        // fall through to quit.
+        assert!(REPO_LOCKED.contains(&"commit_files.escape"));
+        assert!(build(&[("commit_files.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"commit_files.filter"));
+        assert!(build(&[("commit_files.filter", &["Z"])], Trust::Repo).is_ok());
+        assert_eq!(
+            from(KeyScope::CommitFiles, plain('/')),
+            Some(AppIntent::OpenFilter)
+        );
+        // No range: nothing acts on a range of a commit's files.
+        assert_ne!(
+            from(KeyScope::CommitFiles, plain('V')),
+            Some(AppIntent::ToggleRange)
+        );
+    }
+
+    #[test]
+    fn a_filter_hiding_the_commit_file_disables_picking_it_and_focusing_its_diff() {
+        use crate::git::commit_files::CommitFile;
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        let range = CommitRange {
+            oid: CommitId::parse("abc").unwrap(),
+            parent: CommitId::parse("def"),
+        };
+        let mut open = CommitFilesList::begin(range, "abc".into(), 1);
+        let file = CommitFile {
+            status: 'M',
+            path: "src/lib.rs".into(),
+            orig_path: None,
+        };
+        open.loaded(1, Ok(vec![file]));
+        state.commits.open = Some(open);
+        assert_eq!(state.panel_focus(), KeyScope::CommitFiles);
+        assert_eq!(patch_file_disabled(&state), None);
+        assert_eq!(focus_diff_disabled(&state), None);
+
+        state
+            .commits
+            .open
+            .as_mut()
+            .unwrap()
+            .set_filter("zzz".into());
+        assert_eq!(
+            patch_file_disabled(&state).as_deref(),
+            Some(FILTER_HIDES_ROW)
+        );
+        assert_eq!(
+            focus_diff_disabled(&state).as_deref(),
+            Some(FILTER_HIDES_ROW)
+        );
+        assert_eq!(list_guard(&state, true).as_deref(), Some(FILTER_HIDES_ROW));
     }
 
     #[test]
