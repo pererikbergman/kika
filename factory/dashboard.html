@@ -98,6 +98,32 @@
   .verdict.ok { background: var(--pass-bg); color: var(--pass); }
   .verdict.no { background: var(--changes-bg); color: var(--changes); }
   .verdict.esc { background: var(--human-bg); color: var(--human); }
+  /* CI runner panel (runner.json, written by runner_status.py) */
+  .ci { margin: 4px 24px 0; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: var(--shadow); }
+  .ci > summary { list-style: none; cursor: pointer; padding: 10px 14px; display: flex; gap: 14px;
+    align-items: center; flex-wrap: wrap; font-size: 12px; }
+  .ci > summary::-webkit-details-marker { display: none; }
+  .ci > summary::after { content: "▸"; margin-left: auto; color: var(--muted); }
+  .ci[open] > summary::after { content: "▾"; }
+  .ci .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .ci .body { border-top: 1px solid var(--line); padding: 10px 14px 14px; display: grid; gap: 12px;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  @media (max-width: 900px) { .ci .body { grid-template-columns: 1fr; } }
+  .ci h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 6px; }
+  .ci table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ci td { padding: 3px 6px 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .ci td.t { max-width: 0; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ci td.n, .ci td.w { white-space: nowrap; color: var(--muted); }
+  .ci a { color: inherit; }
+  .ci pre { margin: 0; font: 11px/1.4 ui-monospace, Menlo, monospace; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px; overflow: auto; max-height: 220px;
+    white-space: pre-wrap; word-break: break-all; }
+  .ci code { font: 11px ui-monospace, Menlo, monospace; }
+  .ci .err { color: var(--stop); font-size: 12px; }
+  .st-ok { color: var(--pass); } .st-bad { color: var(--stop); } .st-run { color: var(--changes); }
+  .st-dim { color: var(--muted); }
+  @media (max-width: 700px) { .ci { margin-left: 16px; margin-right: 16px; } }
   @media (max-width: 700px) { header, .board { padding-left: 16px; padding-right: 16px; } }
 </style>
 </head>
@@ -112,6 +138,8 @@
     <span><span class="dot" style="background:var(--human)"></span> needs human</span>
   </div>
 </header>
+<details class="ci" id="ci"><summary id="ci-summary"><span class="label">CI runner</span>
+  <span class="st-dim">loading runner.json…</span></summary><div class="body" id="ci-body"></div></details>
 <main class="board" id="board"></main>
 <div class="scrim" id="scrim"></div>
 <aside id="drawer" aria-hidden="true">
@@ -142,6 +170,54 @@ async function poll() {
   } catch (e) {
     document.getElementById("status").textContent = "can't read board.json (serve this folder with python3 -m http.server)";
   }
+}
+
+// CI runner panel. runner.json is written by runner_status.py; without it the panel says how to start it.
+const RUN_ICON = { success: ["✓", "st-ok"], failure: ["✗", "st-bad"], cancelled: ["⊘", "st-dim"],
+  skipped: ["–", "st-dim"], timed_out: ["⏱", "st-bad"], action_required: ["!", "st-bad"] };
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+async function pollRunner() {
+  const sum = document.getElementById("ci-summary"), body = document.getElementById("ci-body");
+  let d;
+  try {
+    const res = await fetch("runner.json", { cache: "no-store" });
+    if (!res.ok) throw 0;
+    d = await res.json();
+  } catch {
+    sum.innerHTML = `<span class="label">CI runner</span><span class="st-dim">no runner.json yet: run
+      <code>python3 runner_status.py</code> in this folder</span>`;
+    body.innerHTML = "";
+    return;
+  }
+  const stale = (Date.now() - Date.parse(d.updated)) / 1000 > 90;
+  const pills = (d.runners || []).map(r => {
+    const on = r.status === "online";
+    const cls = !on ? "st-bad" : r.busy ? "st-run" : "st-ok";
+    return `<span class="${cls}">● ${esc(r.name)} · ${esc(r.status)}${on ? (r.busy ? " · busy" : " · idle") : ""}</span>`;
+  }).join("") || `<span class="st-bad">no runners registered</span>`;
+  const svc = (d.local || []).map(l => `<span class="${l.running ? "st-ok" : "st-bad"}">service ${
+    l.running ? "running" : l.loaded ? "loaded, not running" : "not loaded"}</span>`).join("");
+  const queued = (d.runs || []).filter(r => r.status === "queued").length;
+  const active = (d.runs || []).filter(r => r.status === "in_progress").length;
+  sum.innerHTML = `<span class="label">CI runner</span>${pills}${svc}
+    <span class="st-dim">${active} running · ${queued} queued</span>
+    <span class="${stale ? "st-bad" : "st-dim"}">updated ${ago(d.updated)} ago${stale ? " (is runner_status.py running?)" : ""}</span>`;
+  const rows = (d.runs || []).map(r => {
+    const [icon, cls] = r.status === "completed" ? (RUN_ICON[r.conclusion] || ["?", "st-dim"])
+      : r.status === "in_progress" ? ["◐", "st-run"] : ["○", "st-dim"];
+    return `<tr><td class="${cls}" title="${esc(r.status)} ${esc(r.conclusion || "")}">${icon}</td>
+      <td class="n"><a href="${esc(r.url)}" target="_blank">#${esc(r.number)}</a></td>
+      <td class="t" title="${esc(r.displayTitle)}">${esc(r.displayTitle)}</td>
+      <td class="w">${esc(r.event === "push" ? r.headBranch : "PR")}</td>
+      <td class="w">${ago(r.createdAt)}</td></tr>`;
+  }).join("");
+  const logs = (d.local || []).map(l => `<h3>${esc(l.log || "no log")} · ${esc(l.folder)}</h3>
+    <pre>${esc((l.tail || []).join("\n"))}</pre>`).join("");
+  const errs = (d.errors || []).map(e => `<div class="err">${esc(e)}</div>`).join("");
+  body.innerHTML = `<div><h3>Latest runs</h3>${errs}<table>${rows}</table></div><div>${logs}</div>`;
 }
 
 function prLink(job) {
@@ -280,6 +356,8 @@ function markdown(src) {
 
 poll();
 setInterval(poll, 2000);
+pollRunner();
+setInterval(pollRunner, 5000);
 </script>
 </body>
 </html>
