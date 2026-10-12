@@ -6,7 +6,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::git::diff::sanitize_body;
+use crate::git::diff::{EmojiZwj, sanitize_body};
 
 /// One line of renderer output: styled runs of terminal-safe text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -68,7 +68,7 @@ struct Parser {
 impl Parser {
     fn flush(&mut self) {
         if !self.text.is_empty() {
-            let text = sanitize_body(&std::mem::take(&mut self.text));
+            let text = sanitize_body(&std::mem::take(&mut self.text), EmojiZwj::Escape);
             match self.row.runs.last_mut() {
                 Some((style, run)) if *style == self.style => run.push_str(&text),
                 _ => self.row.runs.push((self.style, text)),

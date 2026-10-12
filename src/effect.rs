@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -22,21 +22,24 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
+use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
-use crate::git::diff::{DiffRequest, load_patch, sanitize, terminal_safe};
+use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
 use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::log::{log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
+use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::remotes::list_remotes;
 use crate::git::repo_root::init_repo;
+use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
@@ -45,7 +48,9 @@ use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
+use crate::rebase_todo::{TodoFile, nothing_done};
 use crate::recent;
+use crate::sequence_editor::MAX_TODO;
 use crate::worktree_file;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
@@ -244,6 +249,25 @@ pub enum Effect {
     LoadMarkers {
         tag: Tag,
     },
+    /// Read where every local branch points; always answered by one
+    /// `BranchTipsLoaded`.
+    LoadBranchTips {
+        tag: Tag,
+    },
+    /// Read the stopped rebase's todo list and what it has done; always
+    /// answered by one `RebaseTodoLoaded`.
+    LoadRebaseTodo {
+        tag: Tag,
+    },
+    /// Check `content` as an edit of `expected`, then write it over the
+    /// todo list at `path` only while it still holds `expected`; always
+    /// answered by one `RebaseTodoWritten`.
+    WriteRebaseTodo {
+        tag: Tag,
+        path: PathBuf,
+        expected: Vec<u8>,
+        content: Vec<u8>,
+    },
     /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
     /// `ReflogLoaded`.
     LoadReflog {
@@ -309,6 +333,49 @@ pub enum Effect {
     },
 }
 
+/// The todo list of the rebase in progress and its `done` list, from
+/// `<git dir>/rebase-merge/`. `None` when there is no todo file: a rebase
+/// that is not interactive, or one between steps.
+fn read_rebase_todo(runner: &dyn GitRunner) -> Result<Option<TodoFile>, String> {
+    let output = runner
+        .run(&git_dir_command())
+        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    if !output.success {
+        return Err(terminal_safe(&output.stderr));
+    }
+    let dir = git_dir_from(&output.stdout).join("rebase-merge");
+    let path = dir.join("git-rebase-todo");
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Ok(None);
+    }
+    let todo = worktree_file::read_file(&path, MAX_TODO)?;
+    let done = worktree_file::read_file(&dir.join("done"), MAX_TODO).ok();
+    Ok(Some(TodoFile { path, todo, done }))
+}
+
+/// Write an edited todo list, once it is sure to be git's todo file and a
+/// safe edit of what was read. The model checked the same; this is the
+/// check that counts.
+fn write_rebase_todo(path: &Path, expected: &[u8], content: &[u8]) -> Result<(), String> {
+    let dir = path.parent();
+    let is_todo = path
+        .file_name()
+        .is_some_and(|name| name == "git-rebase-todo")
+        && dir
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "rebase-merge");
+    if !is_todo {
+        return Err(format!("Not a rebase todo list: {}", path.display()));
+    }
+    let before = parse_todo(expected)?;
+    let after = parse_todo(content)?;
+    let done_empty = dir
+        .and_then(|dir| worktree_file::read_file(&dir.join("done"), MAX_TODO).ok())
+        .is_some_and(|done| nothing_done(&done));
+    validate_edit(&before, &after, done_empty)?;
+    worktree_file::replace_file(path, expected, content)
+}
+
 /// Seconds since the epoch, which relative commit dates count from.
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -335,6 +402,9 @@ pub struct Runtime {
     diff_pager: Option<String>,
     /// The global config's `[diff] tool`, read once at startup.
     diff_tool: Option<String>,
+    /// How diff and blame body lines draw emoji ZWJ sequences, resolved
+    /// once at startup for the running terminal.
+    emoji_zwj: EmojiZwj,
     /// Stops the last captured command; aborting a finished one is a no-op.
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
@@ -355,6 +425,7 @@ impl Runtime {
             recent_store: None,
             diff_pager: None,
             diff_tool: None,
+            emoji_zwj: EmojiZwj::Escape,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
             forge: None,
@@ -392,6 +463,16 @@ impl Runtime {
     /// `FindRenderers`.
     pub fn with_diff_tool(self, diff_tool: Option<String>) -> Self {
         Self { diff_tool, ..self }
+    }
+
+    /// Draw emoji ZWJ sequences in streamed diffs, blame and blamed
+    /// commits as `emoji` says, for the whole session.
+    pub fn with_emoji_zwj(mut self, emoji: EmojiZwj) -> Self {
+        self.diff.set_emoji_zwj(emoji);
+        Self {
+            emoji_zwj: emoji,
+            ..self
+        }
     }
 
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
@@ -586,14 +667,16 @@ impl Runtime {
                 });
             }
             Effect::LoadBlame { tag, path } => {
+                let emoji = self.emoji_zwj;
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_blame(runner.as_ref(), &path))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
-                            });
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_blame(runner.as_ref(), &path, emoji)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
+                    });
                     let _ = tx.send(AppIntent::BlameLoaded { tag, result });
                 });
             }
@@ -641,14 +724,16 @@ impl Runtime {
                 });
             }
             Effect::LoadCommit { tag, oid } => {
+                let emoji = self.emoji_zwj;
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_commit(runner.as_ref(), &oid))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
-                            });
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_commit(runner.as_ref(), &oid, emoji)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
+                    });
                     let _ = tx.send(AppIntent::CommitLoaded { tag, result });
                 });
             }
@@ -814,6 +899,53 @@ impl Runtime {
                             ))
                         });
                     let _ = tx.send(AppIntent::MarkersLoaded { tag, result });
+                });
+            }
+            Effect::LoadBranchTips { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result = tokio::task::spawn_blocking(move || read_tips(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git for-each-ref crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::BranchTipsLoaded { tag, result });
+                });
+            }
+            Effect::LoadRebaseTodo { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_rebase_todo(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("Reading the todo list crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::RebaseTodoLoaded { tag, result });
+                });
+            }
+            Effect::WriteRebaseTodo {
+                tag,
+                path,
+                expected,
+                content,
+            } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the todo would stay locked.
+                    let result = tokio::task::spawn_blocking(move || {
+                        write_rebase_todo(&path, &expected, &content)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("Writing the todo list crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::RebaseTodoWritten { tag, result });
                 });
             }
             Effect::LoadReflog { tag } => {
@@ -3030,6 +3162,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_emoji_policy_reaches_blame_and_the_blamed_commit() {
+        let family = "👨\u{200D}👩";
+        let oid = "a".repeat(40);
+        let blame = format!("{oid} 1 1 1\nauthor Ann\n\t{family}\n");
+        let show = format!("commit {oid}\n\ndiff --git a/a b/a\n@@ -1 +1 @@\n+{family}\n");
+        for (emoji, text) in [
+            (EmojiZwj::Keep, family.to_string()),
+            (EmojiZwj::Escape, "👨<U+200D>👩".to_string()),
+        ] {
+            let runner = Arc::new(
+                FakeRunner::new()
+                    .expect(&["blame", "--porcelain", "--", "a"], ok(blame.as_bytes()))
+                    .expect(
+                        &[
+                            "show",
+                            "--no-color",
+                            "--no-ext-diff",
+                            "--pretty=medium",
+                            "--date=iso",
+                            &oid,
+                            "--",
+                        ],
+                        ok(show.as_bytes()),
+                    ),
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let runtime = Runtime::new(runner.clone(), tx).with_emoji_zwj(emoji);
+            let tag = Tag {
+                generation: 0,
+                seq: 1,
+                user: false,
+            };
+
+            runtime.spawn(Effect::LoadBlame {
+                tag,
+                path: "a".into(),
+            });
+            match rx.recv().await {
+                Some(AppIntent::BlameLoaded {
+                    result: Ok(lines), ..
+                }) => assert_eq!(lines[0].text, text, "{emoji:?}"),
+                other => panic!("expected a blame, got {other:?}"),
+            }
+            runtime.spawn(Effect::LoadCommit {
+                tag,
+                oid: oid.clone(),
+            });
+            match rx.recv().await {
+                Some(AppIntent::CommitLoaded {
+                    result: Ok(lines), ..
+                }) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
+                other => panic!("expected a commit, got {other:?}"),
+            }
+            runner.assert_done();
+        }
+    }
+
+    #[tokio::test]
     async fn a_remote_op_reports_back_with_the_same_tag_and_op() {
         // With the bridge (unix), the user's own askpass is looked for first.
         let fake = if cfg!(unix) {
@@ -3164,6 +3354,93 @@ mod tests {
         }
         // With nothing running, an answer goes nowhere.
         runtime.spawn(Effect::AnswerCredential(None));
+    }
+
+    /// A `rebase-merge` dir in a temp git dir, with `todo` and `done`.
+    fn rebase_dir(tmp: &crate::git::fake::TempDir, todo: &[u8], done: &[u8]) -> PathBuf {
+        let dir = tmp.path().join("rebase-merge");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("git-rebase-todo"), todo).unwrap();
+        std::fs::write(dir.join("done"), done).unwrap();
+        dir.join("git-rebase-todo")
+    }
+
+    const TODO: &[u8] = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\n# help\n";
+
+    #[test]
+    fn a_todo_write_checks_the_file_and_the_edit_before_writing() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let path = rebase_dir(&tmp, TODO, b"pick 0000 z\n");
+        for bad in [
+            &b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\npick 3333 more\n"[..],
+            b"pick 2222 two\nupdate-ref refs/heads/x\npick 1111 one\n",
+            b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\nexec rm -rf /\n",
+            b"pick 1111 one\npick 2222 two\n",
+        ] {
+            assert!(write_rebase_todo(&path, TODO, bad).is_err(), "{bad:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), TODO);
+        }
+        // A line git rejects is not a comment: a list holding one is not
+        // edited, whatever the edit.
+        for odd in [&b"\xef\xbb\xbf"[..], b"-", b"\x0b"] {
+            let mut listed = TODO.to_vec();
+            listed.extend_from_slice(odd);
+            listed.extend_from_slice(b"pick 3333 three\n");
+            std::fs::write(&path, &listed).unwrap();
+            let edit = b"pick 1111 one\nupdate-ref refs/heads/x\ndrop 2222 two\n";
+            assert!(write_rebase_todo(&path, &listed, edit).is_err(), "{odd:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), listed);
+        }
+        // Git stops at a NUL; a list holding one is not edited.
+        let nul = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\0\n";
+        std::fs::write(&path, nul).unwrap();
+        let moved = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\n";
+        assert!(write_rebase_todo(&path, nul, moved).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), nul);
+        std::fs::write(&path, TODO).unwrap();
+        let other = tmp.path().join("git-rebase-todo");
+        std::fs::write(&other, TODO).unwrap();
+        let edit = b"pick 1111 one\nbreak\nupdate-ref refs/heads/x\ndrop 2222 two\n";
+        assert!(write_rebase_todo(&other, TODO, edit).is_err());
+        assert_eq!(
+            // The same commands, but not the bytes on disk.
+            write_rebase_todo(&path, &TODO[..TODO.len() - 7], edit),
+            Err(crate::worktree_file::CHANGED_ON_DISK.to_string())
+        );
+        assert_eq!(write_rebase_todo(&path, TODO, edit), Ok(()));
+        assert_eq!(std::fs::read(&path).unwrap(), edit);
+    }
+
+    #[test]
+    fn a_todo_write_refuses_a_first_fold_only_when_nothing_is_done() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let todo = b"pick 1111 one\npick 2222 two\n";
+        let path = rebase_dir(&tmp, todo, b"");
+        let fold = b"fixup 1111 one\npick 2222 two\n";
+        assert!(write_rebase_todo(&path, todo, fold).is_err());
+        std::fs::write(path.with_file_name("done"), "pick 0000 z\n").unwrap();
+        assert_eq!(write_rebase_todo(&path, todo, fold), Ok(()));
+    }
+
+    #[test]
+    fn the_todo_is_read_from_git_s_dir_and_none_without_one() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
+        git_dir.push(b'\n');
+        let runner = FakeRunner::new()
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir));
+        assert_eq!(read_rebase_todo(&runner), Ok(None));
+        let path = rebase_dir(&tmp, TODO, b"pick 0000 z\n");
+        assert_eq!(
+            read_rebase_todo(&runner),
+            Ok(Some(TodoFile {
+                path,
+                todo: TODO.to_vec(),
+                done: Some(b"pick 0000 z\n".to_vec()),
+            }))
+        );
+        runner.assert_done();
     }
 
     #[tokio::test]

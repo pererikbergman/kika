@@ -191,11 +191,11 @@ impl AppState {
         };
         let message = text.trim();
         if message.is_empty() {
-            self.notice = Some("A stash message cannot be empty");
+            self.notice = Some("A stash message cannot be empty".into());
             return vec![];
         }
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         self.start_op(Ok(Some(GitOp::StashRename {
@@ -230,7 +230,7 @@ impl AppState {
 
     fn ask_stash_draft(
         &mut self,
-        disabled: fn(&AppState) -> Option<&'static str>,
+        disabled: fn(&AppState) -> Option<crate::keymap::Reason>,
         draft: impl FnOnce(&AppState) -> Option<StashDraft>,
     ) {
         if self.context != Context::Workspace {
@@ -257,7 +257,7 @@ impl AppState {
             return vec![];
         };
         if self.op_seq.is_some() {
-            self.notice = Some(keymap::OP_RUNNING);
+            self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
         let message = Some(text.trim())

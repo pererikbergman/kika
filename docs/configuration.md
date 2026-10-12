@@ -3,14 +3,15 @@
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
 made outside it, choose a program to draw the Diff pane, keep commits whose
-hooks never ask anything in the background, and show GitHub pull requests
-beside your branches.
+hooks never ask anything in the background, show GitHub pull requests
+beside your branches, and say which terminals draw emoji sequences as one
+picture.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -40,6 +41,9 @@ hooks_detached = true   # commits that only run hooks stay in the background
 
 [forge]
 github = ["github.com"]   # leave out to keep pull requests off
+
+[display]
+emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
@@ -84,7 +88,9 @@ Key names:
   case-sensitive: `J` is Shift+J;
 - or one of `space`, `esc`, `enter`, `tab`, `shift-tab`, `bksp`, `up`, `down`,
   `left`, `right`, `pgup`, `pgdn`, `home`, `end`;
-- either with an optional `ctrl-` prefix, written in lower case: `ctrl-s`.
+- either with an optional `ctrl-` or `alt-` prefix, written in lower case:
+  `ctrl-s`, `alt-k`. Some macOS terminals send Option as Alt only once
+  "Use Option as Meta" is turned on.
 
 Key changes are picked up when Kika regains focus and when you switch
 repository, so you can edit a file in another window and come back.
@@ -291,6 +297,49 @@ github = ["github.com", "github.example.com"]
   while Kika runs.
 
 **Changes to `[forge]` take effect after a restart.**
+
+## `[display]` (global file only)
+
+Some emoji are a sequence of several emoji joined by a zero-width joiner
+(ZWJ, U+200D): a family, a person at a laptop, a heart on fire. A terminal
+that clusters them draws the sequence as one picture, two columns wide.
+Others draw each part, which takes more columns than Kika reserved and
+pushes the row out of its pane. Kika cannot tell which kind of terminal it
+runs in, so by default it shows every such joiner as `<U+200D>`.
+
+`emoji_zwj_terminals` lists the terminals that draw these sequences as one
+picture. In a listed terminal, diff and blame body lines show the picture.
+
+```toml
+[display]
+emoji_zwj_terminals = ["WezTerm", "ghostty"]
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `emoji_zwj_terminals` | Terminal names, each matched exactly (case counts) against `$TERM_PROGRAM`, or against `$TERM` when `$TERM_PROGRAM` is unset or empty | empty: emoji joiners stay escaped everywhere |
+
+- To find the name to list, run `echo "$TERM_PROGRAM"` in the terminal, or
+  `echo "$TERM"` if that prints nothing. An empty name is refused, and the
+  whole file is ignored with an error.
+- Inside tmux, `$TERM_PROGRAM` is `tmux`, and tmux decides the width there.
+  List `tmux` only if your tmux draws these sequences as one picture.
+- Only a well-formed sequence of at most four emoji that measures two
+  columns is drawn as a picture, and each emoji in it must be two columns
+  wide on its own. A longer chain stays escaped. A
+  symbol drawn as text, one column wide, such as `©`, `™`, `→` or a `❤`
+  without U+FE0F, never counts as an emoji here, so a joiner next to one
+  stays escaped. So does a joiner next to a letter, at the start or end of a
+  line, in a run of joiners, or next to a hidden or direction-changing
+  character.
+- If joiners still show as `<U+200D>`, check the name with the commands
+  above, capitals included. If rows run past the pane's edge instead, the
+  terminal does not draw these sequences as one picture: take it off the
+  list.
+- File names, authors, commit headers, hunk headers, the conflict view and a
+  `[diff]` program's output always escape emoji joiners.
+
+**Changes to `[display]` take effect after a restart.**
 
 ## Custom commands
 
@@ -508,6 +557,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
+- **`[display]` is allowed only in the global file.** It is off by default.
+  A `[display]` table in `.kika.toml` is an error, and the whole file is
+  ignored.
 - **`[commit]` is allowed only in the global file**, since it decides whether
   hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
   the whole file is ignored.
@@ -758,6 +810,11 @@ can be reset, but not marked from Kika.
 | `commits.fixup` | `F` | Fold the selected commit into the one below, keeping that one's message | locked |
 | `commits.drop` | `d` | Drop the selected commit and its change from the history | locked |
 | `commits.reword` | `e` | Write a new message for the selected commit | locked |
+| `commits.move_up` | `alt-k`, `alt-up` | Move the selected commit or todo row up, above the newer one | locked |
+| `commits.move_down` | `alt-j`, `alt-down` | Move the selected commit or todo row down, below the older one | locked |
+| `commits.edit` | `E` | Stop the rebase at the selected commit, to amend it, then continue from Status | locked |
+| `commits.break` | `b` | Stop the rebase right after the selected commit, or toggle the stop after a todo row | locked |
+| `commits.pick` | `u` | Pick the selected todo row as it is, undoing its other action | locked |
 | `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
 | `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
 | `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
@@ -812,6 +869,36 @@ for squash and fixup the commit below must be loaded: moving down to the end of
 the log loads it. A rebase that stops on conflicts can be
 continued, skipped or aborted from the Status panel. Drop does not ask first;
 the dropped commit stays in git's reflog.
+
+`alt-k` and `alt-j` move the selected commit above the newer one or below the
+older one, the same way (as do `alt-up` and `alt-down`; in this panel only
+plain arrows move the cursor, so Shift+arrow does nothing). `E` stops the rebase at the selected commit so you
+can amend it, and `b` stops it right after the selected commit (`b` needs Git
+2.20 or newer); continue from the Status panel to finish. With Git 2.38 or
+newer every rewrite passes `--update-refs`, so other branches that point at
+rewritten commits move to their new copies; a move that would change which
+commits such a branch holds is refused. With an older Git, a rewrite that
+would leave another branch behind is refused and names the branch.
+
+While a rebase is stopped, its remaining steps show above the log under
+"Rebase todo", the last to run at the top. `j` and `k` move through them and
+on into the log. On a todo row, `alt-k` and `alt-j` move it, `s`, `F`, `d`,
+`e`, `E` and `u` (pick) change its action, and `b` adds or removes a stop
+after it. Each change is checked and written to git's todo list at once,
+only if the list on disk is still the one shown; git's help comments are not
+kept. A commit never moves past another branch's update line. A todo list
+holding a line Kika does not edit, such as `exec` or a comment written with a
+`core.commentChar` other than `#`, is shown as it is under "Rebase todo
+(read-only)"; an edit key then names the line and its number. Edit such a list
+with `git rebase --edit-todo`, or continue or abort from the Status panel.
+Rebases Kika starts itself always use `#` for comments, whatever
+`core.commentChar` says, so their todo list stays editable.
+
+Moves, edit, break and pick act on one row: they wait while a range is
+selected (`esc` clears it), and on a log row the filter hides. While the log is
+filtered, `alt-k` and `alt-j` do not move log commits at all, since the commit
+next to the selected one may be hidden; clear the filter first. The filter
+leaves the todo rows above the log alone, so they stay editable.
 
 `c` copies the selected commit, or takes it out of the copied set; mark each
 commit you want in turn. Copied rows show `+` before their hash, and the

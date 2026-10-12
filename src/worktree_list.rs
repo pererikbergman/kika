@@ -5,7 +5,7 @@
 use crate::branches::BranchesTab;
 use crate::git::branches::BranchName;
 use crate::git::worktrees::Worktree;
-use crate::keymap::OP_RUNNING;
+use crate::keymap::{OP_RUNNING, Reason};
 use crate::model::AppState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,11 +73,11 @@ impl WorktreeList {
 
 /// Why the Worktrees popup cannot open: it lists the top-level
 /// repository's worktrees, so not from inside a submodule.
-pub(crate) fn worktrees_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn worktrees_disabled(state: &AppState) -> Option<Reason> {
     if !state.repo_stack.is_empty() {
-        Some("Leave the submodule first")
+        Some("Leave the submodule first".into())
     } else if state.repo.is_none() {
-        Some("Not in a repository")
+        Some("Not in a repository".into())
     } else {
         None
     }
@@ -91,52 +91,52 @@ pub(crate) fn is_current(state: &AppState, worktree: &Worktree) -> bool {
 const UNSURE: &str = "Path cannot be read safely with this Git";
 
 /// Why Kika cannot switch to the selected worktree.
-pub(crate) fn open_worktree_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn open_worktree_disabled(state: &AppState) -> Option<Reason> {
     let Some(worktree) = state.worktree_list().and_then(WorktreeList::selected) else {
-        return Some("No worktree selected");
+        return Some("No worktree selected".into());
     };
     if is_current(state, worktree) {
-        Some("Already here")
+        Some("Already here".into())
     } else if worktree.prunable {
-        Some("Worktree is missing")
+        Some("Worktree is missing".into())
     } else if worktree.bare {
-        Some("Bare repository")
+        Some("Bare repository".into())
     } else if worktree.unsure {
-        Some(UNSURE)
+        Some(UNSURE.into())
     } else {
         None
     }
 }
 
 /// Why no worktree can be added for the Branches panel's selection.
-pub(crate) fn add_worktree_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn add_worktree_disabled(state: &AppState) -> Option<Reason> {
     let branch = (state.branches.tab == BranchesTab::Local)
         .then(|| state.branches.selected_branch())
         .flatten();
     let Some(branch) = branch else {
-        return Some("Select a local branch in the Branches panel");
+        return Some("Select a local branch in the Branches panel".into());
     };
     state
         .worktree_list()
         .is_some_and(|list| list.has_branch(&branch.name))
-        .then_some("Branch is already checked out in a worktree")
+        .then_some("Branch is already checked out in a worktree".into())
 }
 
 /// Why the selected worktree cannot be removed.
-pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<&'static str> {
+pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
     let Some(worktree) = state.worktree_list().and_then(WorktreeList::selected) else {
-        return Some("No worktree selected");
+        return Some("No worktree selected".into());
     };
     if worktree.main {
-        Some("The main worktree cannot be removed")
+        Some("The main worktree cannot be removed".into())
     } else if is_current(state, worktree) {
-        Some("Switch to another worktree first")
+        Some("Switch to another worktree first".into())
     } else if worktree.locked {
-        Some("Worktree is locked")
+        Some("Worktree is locked".into())
     } else if worktree.unsure {
-        Some(UNSURE)
+        Some(UNSURE.into())
     } else if state.op_seq.is_some() {
-        Some(OP_RUNNING)
+        Some(OP_RUNNING.into())
     } else {
         None
     }
