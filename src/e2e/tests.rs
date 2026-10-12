@@ -2317,6 +2317,56 @@ async fn stashing_from_the_files_menu_then_applying_and_dropping_from_the_stash_
     app.assert_screen_contains("No stashes");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stashing_a_range_of_files_takes_those_two_and_leaves_the_others() {
+    let repo = on_main()
+        .write("b.txt", "two\n")
+        .commit("b")
+        .write("a.txt", "changed a\n")
+        .write("b.txt", "changed b\n")
+        .write("c.txt", "new c\n")
+        .write("d.txt", "new d\n");
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let paths: Vec<String> = app
+        .state()
+        .files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+    assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+    // Mark b.txt (tracked) through c.txt (untracked).
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("2 selected");
+    app.press(KeyCode::Char('s')).await;
+    app.assert_screen_contains("Stash selected files");
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.type_text("two of them").await;
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(stash_count(&repo), 1);
+    assert_eq!(repo.read("b.txt"), "two\n");
+    assert!(!repo.exists("c.txt"));
+    assert_eq!(repo.read("a.txt"), "changed a\n");
+    assert_eq!(repo.read("d.txt"), "new d\n");
+    let status = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(status, " M a.txt\n?? d.txt\n");
+    assert_eq!(app.state().files_anchor, None, "the range is done with");
+
+    // The stash holds exactly the two: b.txt's change and c.txt untracked.
+    let tracked =
+        String::from_utf8(repo.git(["stash", "show", "--name-only", "stash@{0}"])).unwrap();
+    assert_eq!(tracked, "b.txt\n");
+    let untracked = String::from_utf8(repo.git(["ls-tree", "--name-only", "stash@{0}^3"])).unwrap();
+    assert_eq!(untracked, "c.txt\n");
+}
+
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
     let rows = &app.state().commits.rows;

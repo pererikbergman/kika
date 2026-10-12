@@ -3892,6 +3892,8 @@ impl AppState {
                     .selected
                     .and_then(|i| self.files.get(i))
                     .map(|f| f.path.clone());
+                let old_range = self.files_range_paths();
+                let had_range = !old_range.is_empty();
                 self.files = status.files;
                 let rebasing = status.branch.in_progress.contains(&Operation::Rebase);
                 if let Some(anchor) = &self.files_anchor
@@ -3905,6 +3907,13 @@ impl AppState {
                 let mut effects = match self.status_selection {
                     Selection::KeepPath => self.reselect(old_path),
                 };
+                // A range whose files changed is not the set the user
+                // marked, so nothing may act on it.
+                // That includes a range whose first file went, cleared above.
+                if had_range && self.files_range_paths() != old_range {
+                    self.files_anchor = None;
+                    self.notice = Some(RANGE_FILES_CHANGED.into());
+                }
                 // The todo list shows while a rebase is stopped, and only then.
                 if rebasing && self.context == Context::Workspace {
                     effects.extend(self.reload_rebase_todo());
@@ -5613,6 +5622,8 @@ impl AppState {
 
 /// Said when a changed filter drops the range made over the old rows.
 const SELECTION_CLEARED: &str = "Selection cleared";
+/// Said when a reload changed which files the Files range covers.
+const RANGE_FILES_CHANGED: &str = "Selection cleared: the file list changed";
 
 /// The bottom-bar input for a search, starting from its query.
 fn search_input(target: InputTarget, search: &Option<DiffSearch>) -> ListInput {
@@ -5658,6 +5669,27 @@ impl AppState {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The files a Files action on "the selected files" takes: the range
+    /// when one is set there, else the file under the cursor. Says which.
+    pub(crate) fn files_marked(&self) -> (Vec<&FileEntry>, bool) {
+        let from_range = self.files_anchor.is_some() && self.focus == Focus::Files;
+        let marked = if from_range {
+            self.files_range()
+        } else {
+            self.selected.into_iter().collect()
+        };
+        let entries = marked.iter().filter_map(|&i| self.files.get(i)).collect();
+        (entries, from_range)
+    }
+
+    /// The paths of the files the range covers, in order.
+    fn files_range_paths(&self) -> Vec<RepoPath> {
+        self.files_range()
+            .into_iter()
+            .map(|i| self.files[i].path.clone())
+            .collect()
     }
 
     /// Type into the focused list's filter, starting from its text.
@@ -19647,6 +19679,7 @@ mod tests {
         state.stash_draft = Some(crate::stash::StashDraft {
             mode: StashMode::All,
             paths: vec![],
+            from_range: false,
         });
         state.switch_repo();
         assert_eq!(state.stash, crate::stash::StashList::default());
@@ -19672,15 +19705,221 @@ mod tests {
     }
 
     #[test]
-    fn stashing_this_file_is_refused_over_a_range() {
+    fn stashing_selected_files_is_offered_over_a_range_but_waits_for_ops_and_conflicts() {
         let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        state.op_seq = Some(1);
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(keymap::OP_RUNNING.into())
+        );
+
+        let files = vec![changed("a.rs", '.', 'M'), conflicted("c.rs")];
+        let (mut state, _) = with_files(files, 24);
         press_char(&mut state, 'V');
         assert_eq!(
             crate::menu::stash_file_disabled(&state),
-            Some(keymap::CLEAR_RANGE_FIRST.into())
+            Some("Resolve conflicts first".into())
         );
-        press(&mut state, KeyCode::Esc);
+    }
+
+    #[test]
+    fn a_range_with_a_rename_and_an_untracked_file_is_refused_with_a_reason() {
+        let renamed = FileEntry {
+            orig_path: Some("old.rs".into()),
+            kind: EntryKind::Renamed,
+            ..changed("new.rs", 'R', '.')
+        };
+        let (mut state, _) = with_files(vec![renamed, untracked("u.txt")], 24);
+        press_char(&mut state, 'V');
         assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        press_char(&mut state, 'j');
+        let reason = "Stash renamed files apart from untracked ones";
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(reason.into())
+        );
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, Some(reason.into()));
+        assert_eq!(state.stash_draft, None);
+        assert!(state.files_anchor.is_some());
+    }
+
+    #[test]
+    fn stashing_a_range_pushes_its_files_and_drops_the_range() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(state.files_range(), [0, 1]);
+        stash_menu_item(&mut state, 3);
+        let draft = state.stash_draft.clone().unwrap();
+        assert!(draft.from_range);
+        type_text(&mut state, "pair");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::All,
+                message: Some("pair".into()),
+                paths: vec!["a.rs".into(), "b.rs".into()],
+            }
+        );
+        assert_eq!(state.files_anchor, None, "the range is done with");
+    }
+
+    #[test]
+    fn a_range_with_an_untracked_file_stashes_with_untracked_and_cancel_keeps_it() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.stash_draft, None);
+        assert!(
+            state.files_anchor.is_some(),
+            "a cancelled prompt keeps the range"
+        );
+
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::IncludeUntracked,
+                message: None,
+                paths: vec!["b.rs".into(), "c.txt".into()],
+            }
+        );
+        assert_eq!(state.files_anchor, None);
+    }
+
+    #[test]
+    fn a_filtered_range_stashes_only_the_files_shown_and_never_the_filter_text() {
+        let files = vec![
+            changed("src/model.rs", '.', 'M'),
+            changed("src/view.rs", '.', 'M'),
+            changed("docs/mode.md", '.', 'M'),
+            changed("src/main.rs", '.', 'M'),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        type_text(&mut state, "/mod");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(state.files_visible(), [0, 2]);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(state.files_range(), [0, 2]);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        let GitOp::StashPush { mode, paths, .. } = op else {
+            panic!("{op:?}")
+        };
+        assert_eq!(mode, StashMode::All);
+        assert_eq!(
+            paths,
+            [RepoPath::from("src/model.rs"), "docs/mode.md".into()]
+        );
+    }
+
+    #[test]
+    fn with_no_range_the_stash_takes_only_the_file_under_the_cursor() {
+        let (mut state, _) = with_files(three_files(), 24);
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        assert!(!state.stash_draft.as_ref().unwrap().from_range);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::All,
+                message: None,
+                paths: vec!["b.rs".into()],
+            }
+        );
+    }
+
+    /// `files` loaded again, as a refresh would.
+    fn reload(state: &mut AppState, files: Vec<FileEntry>) {
+        let tag = refresh_tag(state);
+        state.update(AppIntent::StatusLoaded {
+            tag,
+            result: Ok(repo(files)),
+        });
+    }
+
+    #[test]
+    fn a_reload_that_drops_a_file_inside_the_range_clears_it() {
+        let files = vec![
+            changed("a.rs", '.', 'M'),
+            changed("b.rs", '.', 'M'),
+            changed("c.rs", '.', 'M'),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(state.files_range(), [0, 1, 2]);
+        reload(
+            &mut state,
+            vec![changed("a.rs", '.', 'M'), changed("c.rs", '.', 'M')],
+        );
+        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
+    }
+
+    #[test]
+    fn a_reload_that_drops_the_ranges_first_file_clears_it_and_says_so() {
+        let files = vec![changed("a.rs", '.', 'M'), changed("b.rs", '.', 'M')];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        reload(&mut state, vec![changed("b.rs", '.', 'M')]);
+        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
+    }
+
+    #[test]
+    fn a_reload_that_adds_a_file_inside_the_range_clears_it() {
+        let files = vec![changed("a.rs", '.', 'M'), changed("c.rs", '.', 'M')];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        reload(
+            &mut state,
+            vec![
+                changed("a.rs", '.', 'M'),
+                untracked("b.rs"),
+                changed("c.rs", '.', 'M'),
+            ],
+        );
+        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
+    }
+
+    #[test]
+    fn a_reload_that_keeps_the_ranges_files_keeps_the_range() {
+        let files = vec![
+            changed("a.rs", '.', 'M'),
+            changed("b.rs", '.', 'M'),
+            changed("z.rs", '.', 'M'),
+        ];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        // A file outside the range comes and goes; one inside is staged.
+        reload(
+            &mut state,
+            vec![
+                changed("a.rs", '.', 'M'),
+                changed("b.rs", 'M', '.'),
+                untracked("y.rs"),
+            ],
+        );
+        assert_eq!(state.files_anchor, Some("a.rs".into()));
+        assert_eq!(state.files_range(), [0, 1]);
+        assert_eq!(state.notice, None);
     }
 
     // --- Moves, edit, break and the stopped rebase's todo list ---

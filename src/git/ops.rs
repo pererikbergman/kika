@@ -442,6 +442,37 @@ impl GitOp {
             .collect();
         Some((mode, paths))
     }
+
+    /// What stashing the marked `entries` puts aside: every path each one
+    /// takes, once, in the order first seen, with `-u` if any of them is
+    /// untracked. Nothing marked, or any conflict among them, stashes
+    /// nothing, so a push never runs on a set the user did not mean. Nor
+    /// does a rename beside an untracked file: with `-u`, current git saves the
+    /// stash and then fails to clean up the rename's old path, leaving the
+    /// files in place as well as in the stash.
+    pub fn stash_files_for(entries: &[&FileEntry]) -> Option<(StashMode, Vec<RepoPath>)> {
+        if entries.is_empty() {
+            return None;
+        }
+        let mut mode = StashMode::All;
+        let mut paths: Vec<RepoPath> = Vec::new();
+        for entry in entries {
+            let (entry_mode, entry_paths) = Self::stash_file_for(entry)?;
+            if entry_mode == StashMode::IncludeUntracked {
+                mode = StashMode::IncludeUntracked;
+            }
+            for path in entry_paths {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        let renamed = entries.iter().any(|e| e.orig_path.is_some());
+        if renamed && mode == StashMode::IncludeUntracked {
+            return None;
+        }
+        Some((mode, paths))
+    }
 }
 
 /// The command for `op`. Unlike reads, these need `index.lock`, so
@@ -3690,6 +3721,61 @@ mod tests {
             );
         }
         assert_eq!(GitOp::stash_file_for(&conflicted), None);
+    }
+
+    #[test]
+    fn stashing_a_set_takes_every_path_once_and_u_if_any_is_untracked() {
+        let changed = entry("a.rs", '.', 'M', EntryKind::Changed);
+        let untracked = entry("new.rs", '?', '?', EntryKind::Untracked);
+        let mut renamed = entry("new name.rs", 'R', '.', EntryKind::Renamed);
+        renamed.orig_path = Some("old.rs".into());
+        let paths = |ps: &[&str]| ps.iter().map(|&p| RepoPath::from(p)).collect::<Vec<_>>();
+
+        assert_eq!(
+            GitOp::stash_files_for(&[&changed, &renamed]),
+            Some((StashMode::All, paths(&["a.rs", "old.rs", "new name.rs"])))
+        );
+        assert_eq!(
+            GitOp::stash_files_for(&[&changed, &untracked]),
+            Some((StashMode::IncludeUntracked, paths(&["a.rs", "new.rs"])))
+        );
+        // A rename's old path that is also listed on its own goes once,
+        // where it was first seen.
+        let deleted_old = entry("old.rs", 'D', '.', EntryKind::Changed);
+        assert_eq!(
+            GitOp::stash_files_for(&[&renamed, &deleted_old, &renamed]),
+            Some((StashMode::All, paths(&["old.rs", "new name.rs"])))
+        );
+        // A rename beside an untracked file is refused rather than half
+        // done.
+        assert_eq!(GitOp::stash_files_for(&[&renamed, &untracked]), None);
+        // Nothing, or any conflict, stashes nothing.
+        let conflicted = entry("both.rs", 'U', 'U', EntryKind::Conflicted);
+        assert_eq!(GitOp::stash_files_for(&[]), None);
+        assert_eq!(
+            GitOp::stash_files_for(&[&changed, &conflicted, &untracked]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stash_of_several_files_names_them_all_after_the_separator() {
+        let changed = entry("-a.rs", '.', 'M', EntryKind::Changed);
+        let untracked = entry("*.txt", '?', '?', EntryKind::Untracked);
+        let (mode, paths) = GitOp::stash_files_for(&[&changed, &untracked]).unwrap();
+        let cmd = op_command(&GitOp::StashPush {
+            mode,
+            message: Some("m".into()),
+            paths,
+        });
+        assert_eq!(
+            argv(&cmd),
+            ["stash", "push", "-u", "-m", "m", "--", "-a.rs", "*.txt"]
+        );
+        assert_eq!(
+            literal_env(&cmd),
+            [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")]
+        );
     }
 
     #[cfg(unix)]
