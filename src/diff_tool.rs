@@ -136,8 +136,15 @@ fn records_of<'a>(stdout: &'a [u8], path: &'a RepoPath) -> impl Iterator<Item = 
 impl Entry {
     /// The entry `source` listed. A bad id fails the whole read: skipping
     /// the record would show the file as absent and give a wrong diff.
-    fn new(mode: &[u8], oid: &[u8], source: &str) -> Result<Self, String> {
-        let oid = ObjectId::parse(oid).ok_or_else(|| format!("{source} gave a bad object id"))?;
+    /// The message names the file in its terminal-safe form and never
+    /// echoes the id, which is untrusted bytes.
+    fn new(mode: &[u8], oid: &[u8], path: &RepoPath, source: &str) -> Result<Self, String> {
+        let oid = ObjectId::parse(oid).ok_or_else(|| {
+            format!(
+                "{source} gave a bad object id for {}; the repository may be damaged",
+                path.display()
+            )
+        })?;
         Ok(Self {
             mode: mode.to_vec(),
             oid,
@@ -170,7 +177,7 @@ fn index_entry(
         if stage != b"0" {
             return Err(format!("{label} cannot show a conflicted file"));
         }
-        found = Some(Entry::new(mode, oid, "git ls-files")?);
+        found = Some(Entry::new(mode, oid, path, "git ls-files")?);
     }
     Ok(found)
 }
@@ -194,7 +201,7 @@ fn head_entry(runner: &dyn GitRunner, path: &RepoPath) -> Result<Option<Entry>, 
     // `<mode> <type> <oid>\t<path>`
     records_of(&output.stdout, path)
         .find_map(|fields| match fields[..] {
-            [mode, _, oid] => Some(Entry::new(mode, oid, "git ls-tree")),
+            [mode, _, oid] => Some(Entry::new(mode, oid, path, "git ls-tree")),
             _ => None,
         })
         .transpose()
@@ -643,11 +650,37 @@ mod tests {
             );
             assert_eq!(
                 out,
-                Err("git ls-files gave a bad object id".into()),
+                Err(
+                    "git ls-files gave a bad object id for a; the repository may be damaged".into()
+                ),
                 "{bad:?}"
             );
             runner.assert_done();
         }
+    }
+
+    #[test]
+    fn a_bad_id_names_the_file_made_terminal_safe() {
+        let base = TempDir::new("tool-base");
+        let path = "a\x1bb";
+        let runner = FakeRunner::new().expect(&ls_files(path), ok(&entry("100644", "-p", 0, path)));
+        let out = run_in(
+            &runner,
+            Path::new("/"),
+            &request(path, DiffSide::Worktree),
+            &tool(&["cat"]),
+            LIMITS,
+            &base,
+        );
+        let message = out.unwrap_err();
+        assert!(!message.contains('\x1b'), "{message:?}");
+        assert!(!message.contains("-p"), "{message:?}");
+        let shown = crate::git::path::RepoPath::from(path).display().to_string();
+        assert_eq!(
+            message,
+            format!("git ls-files gave a bad object id for {shown}; the repository may be damaged")
+        );
+        runner.assert_done();
     }
 
     #[test]
@@ -668,7 +701,7 @@ mod tests {
             );
             assert_eq!(
                 out,
-                Err("git ls-tree gave a bad object id".into()),
+                Err("git ls-tree gave a bad object id for a; the repository may be damaged".into()),
                 "{bad:?}"
             );
             runner.assert_done();

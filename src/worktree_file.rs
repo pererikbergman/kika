@@ -142,12 +142,29 @@ fn open_plain(file: &Path) -> std::io::Result<File> {
         // FILE_FLAG_OPEN_REPARSE_POINT: open a symlink itself, not its target.
         options.custom_flags(0x0020_0000);
     }
-    let handle = options.open(file)?;
+    let handle = options.open(file).map_err(open_error)?;
     let meta = handle.metadata()?;
     if meta.file_type().is_symlink() || !meta.is_file() {
         return Err(std::io::Error::other("not a regular file"));
     }
     Ok(handle)
+}
+
+/// O_NOFOLLOW refuses a symlink with ELOOP; say what the type check in
+/// [`open_plain`] would, not "Too many levels of symbolic links".
+#[cfg(unix)]
+fn open_error(e: std::io::Error) -> std::io::Error {
+    if e.raw_os_error() == Some(libc::ELOOP) {
+        std::io::Error::other("not a regular file")
+    } else {
+        e
+    }
+}
+
+/// Off unix a symlink opens as itself and the type check refuses it.
+#[cfg(not(unix))]
+fn open_error(e: std::io::Error) -> std::io::Error {
+    e
 }
 
 /// Write `content` to `path` under `root`, which must not exist yet;
@@ -833,9 +850,14 @@ mod tests {
         fs::write(root.join("secret"), "secret\n").unwrap();
         symlink(root.join("secret"), root.join("link")).unwrap();
 
-        // Straight to the open, as if the link appeared after `plain_file`.
-        assert!(open_plain(&root.join("link")).is_err());
-        assert!(read_capped(&root.join("link"), 1024).is_err());
+        // Straight to the open, as if the link appeared after `plain_file`:
+        // the refusal reads like any other, not like the OS's loop error.
+        let link = root.join("link");
+        let opened = open_plain(&link).map(|_| ()).map_err(|e| e.to_string());
+        assert_eq!(opened, Err("not a regular file".to_string()));
+        let read = read_capped(&link, 1024).map_err(|e| e.to_string());
+        assert_eq!(read, Err("not a regular file".to_string()));
+        assert!(!read.unwrap_err().contains("symbolic links"));
         assert!(open_plain(&root.join("secret")).is_ok());
     }
 
