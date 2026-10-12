@@ -1,0 +1,47 @@
+{
+  "thresholds": {
+    "score_green": 90.0,
+    "score_yellow": 70.0,
+    "critical_severity": 0.5,
+    "minimum_severity": 0.2,
+    "hotspot_fan_in": 10,
+    "min_cohesion": 0.1,
+    "coupling_mode": "strict"
+  },
+  "ignore_patterns": [
+    "**/.git/**",
+    "**/target/**",
+    "**/node_modules/**",
+    "**/.noupling/**",
+    "**/.agent/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/.gradle/**",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/zig-cache/**",
+    "**/zig-out/**",
+    "**/generated/**",
+    "**/.idea/**",
+    "**/.vscode/**",
+    "**/factory/**",
+    "**/docs/**"
+  ],
+  "source_extensions": [
+    "rs"
+  ],
+  "dependency_rules": [],
+  "layers": [],
+  "allow_inline_suppression": true,
+  "modules": [],
+  "risk_weights": {
+    "downward": 2.0,
+    "sibling": 4.0,
+    "upward": 6.0,
+    "external": 8.0,
+    "transitive": 9.0,
+    "circular": 10.0
+  },
+  "coupling_mode": null,
+  "infer_layers": true
+}
