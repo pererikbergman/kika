@@ -1452,8 +1452,8 @@ mod tests {
 
     #[test]
     fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
+        use crate::features::commits::reflog::{Direction, Expected, Step};
         use crate::git::commit_files::CommitId;
-        use crate::git::undo::{Direction, Expected, Step};
         use crate::popup::TravelConfirm;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Travel(TravelConfirm {

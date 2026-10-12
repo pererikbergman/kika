@@ -8,6 +8,7 @@
 pub(crate) mod bisect;
 pub(crate) mod copy;
 pub(crate) mod custom_patch;
+pub(crate) mod reflog;
 
 use crate::git::rebase_plan::{self, RebasePlan};
 use crate::git::status::Head;

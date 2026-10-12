@@ -1111,8 +1111,8 @@ mod tests {
 
     #[test]
     fn the_travel_question_is_the_preview_then_y_or_n() {
+        use crate::features::commits::reflog::{Direction, Expected, Step};
         use crate::git::commit_files::CommitId;
-        use crate::git::undo::{Direction, Expected, Step};
         let ask = TravelConfirm {
             title: "Undo",
             preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],

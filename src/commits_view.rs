@@ -13,12 +13,12 @@ use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::diff_mark::DiffMark;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::{CustomPatch, FilePick};
+use crate::features::commits::reflog::view::reflog_lines;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::{sanitize, terminal_safe};
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
-use crate::reflog_view::reflog_lines;
 use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::view::{
     PanelLook, elide_right, filter_title, no_matches, query_title, range_row, reversed, scrolled,
