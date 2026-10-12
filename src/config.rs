@@ -41,8 +41,10 @@
 //! run one, and it cannot change the bindings in
 //! [`REPO_LOCKED`](crate::keymap::REPO_LOCKED), and it must be a plain
 //! file, not a symlink. Either file must be a regular file of at most
-//! 64 KiB. A file with any error is ignored as a whole, and the layer below
-//! it applies.
+//! 64 KiB. A `[keys]` entry that binds a key twice in one scope is dropped
+//! alone: its binding keeps the keys of the layer below, and the rest of the
+//! file applies. A file with any other error is ignored as a whole, and the
+//! layer below it applies.
 //!
 //! The user's guide to both files, with every binding id, is
 //! `docs/configuration.md`.
@@ -103,11 +105,15 @@ fn global_path(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) 
     base.map(|b| b.join("kika").join("config.toml"))
 }
 
-/// A config file that was ignored, and why.
+/// A config file that was ignored, or one of its `[keys]` entries that
+/// was dropped, and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     pub path: String,
     pub message: String,
+    /// Only one key change was dropped and the rest of the file applied;
+    /// `false` means the whole file was ignored.
+    pub dropped_binding: bool,
 }
 
 impl fmt::Display for ConfigError {
@@ -148,6 +154,8 @@ pub struct Loaded {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GlobalSettings {
     keymap: Keymap,
+    /// One message per `[keys]` entry dropped for a key clash.
+    dropped: Vec<String>,
     watch: WatchConfig,
     diff_pager: Option<String>,
     forge_hosts: Vec<ForgeHost>,
@@ -263,6 +271,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
     if let Some(global) = global {
+        dropped(&paths.global, global.dropped, &mut loaded.errors);
         (
             loaded.keymap,
             loaded.watch,
@@ -285,10 +294,24 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
     });
-    if let Some(keymap) = repo {
+    if let Some((keymap, messages)) = repo {
+        dropped(&paths.repo, messages, &mut loaded.errors);
         loaded.keymap = keymap;
     }
     loaded
+}
+
+/// Record each of `messages`, a `[keys]` entry of the file at `path`
+/// dropped while the rest of the file applied.
+fn dropped(path: &Option<PathBuf>, messages: Vec<String>, errors: &mut Vec<ConfigError>) {
+    let Some(path) = path.as_deref() else {
+        return;
+    };
+    errors.extend(messages.into_iter().map(|message| ConfigError {
+        path: path.display().to_string(),
+        message,
+        dropped_binding: true,
+    }));
 }
 
 /// `apply` run on the file at `path`, if there is one. A failure is
@@ -306,6 +329,7 @@ fn layer<T>(
             errors.push(ConfigError {
                 path: path.display().to_string(),
                 message,
+                dropped_binding: false,
             });
             None
         }
@@ -363,7 +387,8 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
 /// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
-    let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
+    let (keymap, dropped) = Keymap::build(keymap, &file.keys, Trust::Global)?;
+    let keymap = keymap.with_commands(&file.commands)?;
     let seconds = |name: &str, value: Option<u64>| match value {
         // A zero interval would poll without pause.
         Some(0) => Err(format!("watch.{name} must be at least 1 second")),
@@ -406,6 +431,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     }
     Ok(GlobalSettings {
         keymap,
+        dropped,
         watch,
         diff_pager: file.diff.pager,
         diff_tool: file.diff.tool,
@@ -431,8 +457,9 @@ pub fn emoji_zwj(terminals: &[String], term_program: Option<&str>, term: Option<
     }
 }
 
-/// `keymap` with a repository file's text applied.
-fn apply_repo(text: &str, keymap: &Keymap) -> Result<Keymap, String> {
+/// `keymap` with a repository file's text applied, and one message per
+/// `[keys]` entry dropped for a key clash.
+fn apply_repo(text: &str, keymap: &Keymap) -> Result<(Keymap, Vec<String>), String> {
     let file = parse_repo(text)?;
     Keymap::build(keymap, &file.keys, Trust::Repo)
 }
@@ -478,7 +505,7 @@ mod tests {
         apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| (g.keymap, g.watch))
     }
 
-    fn repo(text: &str) -> Result<Keymap, String> {
+    fn repo(text: &str) -> Result<(Keymap, Vec<String>), String> {
         apply_repo(text, &Keymap::default())
     }
 
@@ -563,10 +590,6 @@ mod tests {
             "{bad}"
         );
         assert_eq!(
-            err("[keys]\n\"files.stage\" = [\"c\"]\n"),
-            r#"key "c" is bound to both "files.stage" and "files.commit""#
-        );
-        assert_eq!(
             err("[keys]\n\"global.quit\" = []\n"),
             r#""global.quit" needs at least one key"#
         );
@@ -581,7 +604,7 @@ mod tests {
 
     #[test]
     fn a_repository_file_can_remap_keys_but_never_set_the_watch() {
-        let keymap = repo("[keys]\n\"files.stage\" = [\"y\"]\n").unwrap();
+        let keymap = repo("[keys]\n\"files.stage\" = [\"y\"]\n").unwrap().0;
         assert_eq!(keys_of(&keymap, "files.stage"), [key("y")]);
         let watch = repo("[watch]\nfetch = 60\n").unwrap_err();
         assert!(watch.contains("unknown field `watch`"), "{watch}");
@@ -605,14 +628,16 @@ mod tests {
         for scope in ["branches", "remotes", "tags"] {
             let text =
                 format!("[keys]\n\"{scope}.filter\" = [\"F\"]\n\"{scope}.range\" = [\"Z\"]\n");
-            let keymap = repo(&text).unwrap();
+            let keymap = repo(&text).unwrap().0;
             assert_eq!(keys_of(&keymap, &format!("{scope}.filter")), [key("F")]);
         }
     }
 
     #[test]
     fn a_repository_file_may_move_the_command_log_filter_but_not_its_escape() {
-        let keymap = repo("[keys]\n\"command_log.filter\" = [\"f\"]\n").unwrap();
+        let keymap = repo("[keys]\n\"command_log.filter\" = [\"f\"]\n")
+            .unwrap()
+            .0;
         assert_eq!(keys_of(&keymap, "command_log.filter"), [key("f")]);
         let locked = repo("[keys]\n\"command_log.escape\" = [\"x\"]\n").unwrap_err();
         assert_eq!(
@@ -624,7 +649,7 @@ mod tests {
 
     #[test]
     fn a_repository_file_may_move_the_worktrees_filter_but_not_its_escape() {
-        let keymap = repo("[keys]\n\"worktrees.filter\" = [\"f\"]\n").unwrap();
+        let keymap = repo("[keys]\n\"worktrees.filter\" = [\"f\"]\n").unwrap().0;
         assert_eq!(keys_of(&keymap, "worktrees.filter"), [key("f")]);
         let locked = repo("[keys]\n\"worktrees.escape\" = [\"x\"]\n").unwrap_err();
         assert_eq!(
@@ -725,6 +750,7 @@ mod tests {
             [ConfigError {
                 path: path.clone(),
                 message: r#"unknown binding "files.nope""#.into(),
+                dropped_binding: false,
             }]
         );
         assert_eq!(
@@ -917,18 +943,125 @@ output = "none"
     }
 
     #[test]
+    fn a_global_binding_moved_onto_its_own_command_key_ignores_the_file() {
+        let files = Files::new("global-onto-command");
+        files.global(&format!(
+            "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n{COPY_COMMAND}"
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: r#"key "ctrl-t" is bound to both "files.stage" and command 1"#.into(),
+                dropped_binding: false,
+            }]
+        );
+        assert_eq!(loaded.keymap, Keymap::default());
+    }
+
+    #[test]
     fn a_repository_file_cannot_move_a_binding_onto_a_command_key() {
         let files = Files::new("repo-onto-command");
         files
             .global(COPY_COMMAND)
-            .repo("[keys]\n\"files.stage\" = [\"ctrl-t\"]\n");
+            .repo("[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n");
         let loaded = files.load();
         assert_eq!(
-            loaded.errors[0].message,
-            r#"key "ctrl-t" is bound to both "files.stage" and command 1"#
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join(".kika.toml").display().to_string(),
+                message: r#"key "ctrl-t" is bound to both "files.stage" and command 1; the change to "files.stage" was dropped"#.into(),
+                dropped_binding: true,
+            }]
         );
         assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("space")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("C")]);
         assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-t")]);
+    }
+
+    #[test]
+    fn a_clashing_global_entry_is_dropped_and_the_rest_of_the_file_applies() {
+        let files = Files::new("global-clash");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"s\"]\n\"files.commit\" = [\"C\"]\n[watch]\nfetch = 300\n",
+        );
+        let loaded = files.load();
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("space")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.stash"), [key("s")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("C")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        let [error] = loaded.errors.as_slice() else {
+            panic!("expected one error, got {:?}", loaded.errors);
+        };
+        assert!(error.dropped_binding);
+        assert_eq!(
+            error.path,
+            files.dir.join("config.toml").display().to_string()
+        );
+        for name in [r#""s""#, r#""files.stash""#, r#""files.stage""#] {
+            assert!(error.message.contains(name), "{name}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_clashing_repository_entry_falls_back_to_the_global_keys() {
+        let files = Files::new("repo-clash");
+        files
+            .global("[keys]\n\"files.stage\" = [\"x\"]\n")
+            .repo("[keys]\n\"files.stage\" = [\"s\"]\n\"files.commit\" = [\"C\"]\n");
+        let loaded = files.load();
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.stash"), [key("s")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("C")]);
+        let [error] = loaded.errors.as_slice() else {
+            panic!("expected one error, got {:?}", loaded.errors);
+        };
+        assert!(error.dropped_binding);
+        assert_eq!(
+            error.path,
+            files.dir.join(".kika.toml").display().to_string()
+        );
+        assert!(
+            error
+                .message
+                .ends_with(r#"the change to "files.stage" was dropped"#)
+        );
+    }
+
+    #[test]
+    fn a_repository_file_with_a_clash_and_a_locked_id_is_still_ignored_whole() {
+        let files = Files::new("repo-clash-locked");
+        let path = files.dir.join(".kika.toml").display().to_string();
+        let only_error = |files: &Files| {
+            let loaded = files.load();
+            assert_eq!(loaded.keymap, Keymap::default());
+            match loaded.errors.as_slice() {
+                [error] => {
+                    assert_eq!(error.path, path);
+                    assert!(!error.dropped_binding, "{error:?}");
+                    error.message.clone()
+                }
+                other => panic!("expected one error, got {other:?}"),
+            }
+        };
+        let clash = "[keys]\n\"files.stage\" = [\"s\"]\n\"files.commit\" = [\"C\"]\n";
+        files.repo(&format!("{clash}\"files.open\" = [\"x\"]\n"));
+        assert_eq!(
+            only_error(&files),
+            r#""files.open" can only be changed in the global config file"#
+        );
+        files.repo(&format!("{clash}\"files.blame\" = [\"q\"]\n"));
+        assert_eq!(
+            only_error(&files),
+            r#""files.blame": key "q" would hide "global.quit""#
+        );
+        files.repo(&format!("{clash}\"global.quit\" = []\n"));
+        assert_eq!(
+            only_error(&files),
+            r#""global.quit" can only be changed in the global config file"#
+        );
     }
 
     #[test]

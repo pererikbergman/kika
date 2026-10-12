@@ -1331,11 +1331,13 @@ impl AppState {
             .collect::<Vec<_>>()
             .join("\n");
         if self.config_error.as_deref() != Some(text.as_str()) {
-            self.push_error(ErrorPopup::new(
-                "Config error",
-                &text,
-                "Kika ignored this file. Fix it, then come back to Kika to reload it.",
-            ));
+            let hint = if errors.iter().all(|e| e.dropped_binding) {
+                "Kika dropped these key changes and used the rest of the file. \
+                 Fix it, then come back to Kika to reload it."
+            } else {
+                "Kika ignored this file. Fix it, then come back to Kika to reload it."
+            };
+            self.push_error(ErrorPopup::new("Config error", &text, hint));
             self.config_error = Some(text);
         }
     }
@@ -11835,6 +11837,7 @@ mod tests {
         ConfigError {
             path: "/home/me/.config/kika/config.toml".into(),
             message: message.into(),
+            dropped_binding: false,
         }
     }
 
@@ -11905,6 +11908,33 @@ mod tests {
         assert_eq!(state.config_error, None);
         state.update(config_loaded(Keymap::default(), errors));
         assert_eq!(state.popups.len(), 1);
+    }
+
+    #[test]
+    fn dropped_key_changes_say_the_rest_of_the_file_was_used() {
+        let dropped = |message: &str| ConfigError {
+            dropped_binding: true,
+            ..config_error(message)
+        };
+        let hint = |errors: Vec<ConfigError>| {
+            let mut state = idle_with_files();
+            state.update(config_loaded(Keymap::default(), errors));
+            match state.popups.as_slice() {
+                [Popup::Error(error)] => {
+                    assert_eq!(error.title, "Config error");
+                    error.next.clone()
+                }
+                other => panic!("expected one config error, got {other:?}"),
+            }
+        };
+        let only_dropped = hint(vec![dropped("a"), dropped("b")]);
+        assert!(
+            only_dropped.contains("used the rest of the file"),
+            "{only_dropped}"
+        );
+        assert!(!only_dropped.contains("ignored"), "{only_dropped}");
+        let mixed = hint(vec![dropped("a"), config_error("b")]);
+        assert!(mixed.contains("ignored this file"), "{mixed}");
     }
 
     #[test]
