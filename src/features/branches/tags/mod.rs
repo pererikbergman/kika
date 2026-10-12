@@ -20,8 +20,8 @@
 //! - `commits.rows` and `commits.selected` (commits), to take the commit a
 //!   new tag points at;
 //! - `push_tag` calls sync's `start_remote` on `AppState`;
-//! - `branches.*` (the parent, still in core): the tab, its tags and the
-//!   pending tag, and `load_branch_log`.
+//! - `branches.*` (the parent, `features/branches`): the tab, its tags and
+//!   the pending tag, and `load_branch_log`.
 //!
 //! What stays in core: the push and selection guards `push_tag_disabled`,
 //! `push_tag_remote` and `tag_selected_disabled` in `keymap.rs`, which
@@ -29,7 +29,8 @@
 //! their steps, refusals and refresh plan; and the tag branches of shared
 //! dispatch: the range delete arm, `key_focus`, `open_filter`,
 //! `toggle_range`, the `TagName` prompt submit, `Popup::DeleteTag`,
-//! `DeleteTagConfirm`, `BranchesPanel` and `branch_lists.rs`.
+//! `DeleteTagConfirm` and `range_delete.rs`. The parent owns
+//! `BranchesPanel` and the range question's builder (`lists.rs`).
 
 pub(crate) mod effects;
 pub(crate) mod git;
