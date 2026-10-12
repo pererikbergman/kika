@@ -8,9 +8,11 @@
 //! capped at [`MAX_COPY`], since several terminals drop larger ones
 //! without a word. No DCS passthrough wrapping is sent.
 //!
-//! There is no fallback to a clipboard program: with no reply, a failed
-//! copy cannot be detected, and over SSH such a program would fill the
-//! remote machine's clipboard, not the user's.
+//! Where OSC 52 does not work, the global config's `[clipboard] command`
+//! names a program to copy with instead; it gets [`command_payload`] on
+//! stdin. It is off by default and never tried after OSC 52: with no
+//! reply, a failed OSC 52 copy cannot be detected. Over SSH such a program
+//! fills the remote machine's clipboard, not the user's.
 
 use std::io::{self, Write};
 
@@ -62,14 +64,21 @@ pub fn clean(text: &str) -> String {
 /// The OSC 52 sequence that sets the clipboard to `clean(text)`. The
 /// payload is base64, whose alphabet cannot end the sequence early.
 pub fn osc52(text: &str) -> Result<Vec<u8>, &'static str> {
+    let text = command_payload(text)?;
+    let mut out = b"\x1b]52;c;".to_vec();
+    out.extend(base64(&text).bytes());
+    out.push(0x07);
+    Ok(out)
+}
+
+/// The bytes a clipboard program is given on stdin: `clean(text)`, so a
+/// copy holds the same text whichever way it is made, within [`MAX_COPY`].
+pub fn command_payload(text: &str) -> Result<Vec<u8>, &'static str> {
     let text = clean(text);
     if text.len() > MAX_COPY {
         return Err(TOO_LONG);
     }
-    let mut out = b"\x1b]52;c;".to_vec();
-    out.extend(base64(text.as_bytes()).bytes());
-    out.push(0x07);
-    Ok(out)
+    Ok(text.into_bytes())
 }
 
 /// The start of `text` as one line, for a notice: cleaned, with newlines
@@ -180,6 +189,13 @@ mod tests {
         assert_eq!(osc52(&"x".repeat(MAX_COPY + 1)), Err(TOO_LONG));
         // Measured after cleaning: control characters do not count.
         assert!(osc52(&format!("{}\x1b", "x".repeat(MAX_COPY))).is_ok());
+    }
+
+    #[test]
+    fn a_command_gets_the_same_cleaned_text_as_osc52() {
+        assert_eq!(command_payload("hi\x1b\r\n"), Ok(b"hi".to_vec()));
+        assert!(command_payload(&"x".repeat(MAX_COPY)).is_ok());
+        assert_eq!(command_payload(&"x".repeat(MAX_COPY + 1)), Err(TOO_LONG));
     }
 
     #[test]
