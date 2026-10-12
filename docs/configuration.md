@@ -753,7 +753,10 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.menu` | `m` | Open the actions menu | |
 | `files.filter` | `/` | Filter the files by typed text | |
 | `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
-| `files.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+| `files.escape` | `esc` | Clear the selection, else the filter, else the diff search, else quit Kika | locked |
+| `files.search_diff` | `ctrl-f` | Search the selected file's diff for typed text | |
+| `files.search_next` | `n` | Go to the next match of the diff search | |
+| `files.search_prev` | `N` | Go to the previous match of the diff search | |
 | `files.log` | `L` | Show the selected file's history in the Commits panel | |
 
 The filter matches each word you type, in order but not necessarily side by
@@ -763,6 +766,13 @@ it. `space` then stages the whole range in one go (or unstages it, when
 nothing in it is left to stage), skipping conflicted files, and `d` asks
 once before discarding the range; only `y` answers that question. Keys that
 act on one file are refused while a range is selected.
+
+`ctrl-f` searches the diff beside the list without focusing it, as `/` does
+in the Diff pane: each key you type searches again, Enter scrolls to the
+match, and `n` and `N` step through the matches. A diff still streaming in is
+searched as far as it has loaded; the pane's title says `of 7+` until the
+rest arrives. The commit files and stash files lists search their diff the
+same way. Esc clears the search before it does anything else.
 
 | `files.stash` | `s` | Stash changes: all, with untracked files, staged only, or this file | locked |
 
@@ -1100,7 +1110,11 @@ goes back to the log.
 | `commit_files.next` | `j`, `down` | Select the next file and show its change | |
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
 | `commit_files.patch` | `space` | Pick the selected file's whole change for the custom patch, or drop it | |
-| `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
+| `commit_files.back` | `h`, `left` | Back to the log, at the same commit | |
+| `commit_files.search` | `ctrl-f` | Search the selected file's change for typed text | |
+| `commit_files.search_next` | `n` | Go to the next match of the diff search | |
+| `commit_files.search_prev` | `N` | Go to the previous match of the diff search | |
+| `commit_files.escape` | `esc` | Clear the diff search, else go back to the log, at the same commit | locked |
 
 #### Custom patches
 
@@ -1171,7 +1185,11 @@ another panel goes back to the list.
 |---|---|---|---|
 | `stash_files.next` | `j`, `down` | Select the next file and show its change | |
 | `stash_files.prev` | `k`, `up` | Select the previous file and show its change | |
-| `stash_files.close` | `esc`, `bksp` | Back to the stash list, at the same stash | |
+| `stash_files.close` | `bksp` | Back to the stash list, at the same stash | |
+| `stash_files.search` | `ctrl-f` | Search the selected file's change for typed text | |
+| `stash_files.search_next` | `n` | Go to the next match of the diff search | |
+| `stash_files.search_prev` | `N` | Go to the previous match of the diff search | |
+| `stash_files.escape` | `esc` | Clear the diff search, else go back to the stash list, at the same stash | locked |
 
 ### Diff (hunks)
 
@@ -1214,7 +1232,14 @@ another panel goes back to the list.
 | `blame.page_down` | `pgdn` | Move down a page | |
 | `blame.page_up` | `pgup` | Move up a page | |
 | `blame.commit` | `enter` | Show the commit that last changed this line | |
-| `blame.back` | `esc`, `h`, `left` | Back to the file list | |
+| `blame.back` | `h`, `left` | Back to the file list | |
+| `blame.search` | `/` | Search the blamed lines' text for typed text | |
+| `blame.search_next` | `n` | Go to the next match of the search | |
+| `blame.search_prev` | `N` | Go to the previous match of the search | |
+| `blame.escape` | `esc` | Clear the search, else go back to the file list | locked |
+
+The search reads each line's text, not its commit, author or date. Enter on
+the bar puts the cursor on the match, so a second Enter shows its commit.
 
 ### Commit opened from a blame line
 
@@ -1224,7 +1249,14 @@ another panel goes back to the list.
 | `blame_commit.scroll_up` | `k`, `up` | Scroll the commit up a line | |
 | `blame_commit.page_down` | `pgdn` | Scroll the commit down a page | |
 | `blame_commit.page_up` | `pgup` | Scroll the commit up a page | |
-| `blame_commit.back` | `esc`, `h`, `left` | Back to the blame, at the same line | |
+| `blame_commit.back` | `h`, `left` | Back to the blame, at the same line | |
+| `blame_commit.search` | `/` | Search the commit for typed text | |
+| `blame_commit.search_next` | `n` | Go to the next match of the search | |
+| `blame_commit.search_prev` | `N` | Go to the previous match of the search | |
+| `blame_commit.escape` | `esc` | Clear the search, else go back to the blame, at the same line | locked |
+
+The commit's search is its own: the blame's search is still there when you
+go back to it.
 
 ### Conflict view
 

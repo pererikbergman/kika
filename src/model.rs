@@ -19,6 +19,7 @@ use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::custom_patch::CustomPatch;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
+use crate::diff_search::DiffSearch;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, RendererKind, map_rows};
 use crate::forge::{ForgeHost, ForgeState};
@@ -1246,14 +1247,9 @@ impl AppState {
             AppIntent::Redo => return self.travel(undo::Direction::Redo),
             AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
-            AppIntent::OpenSearch => {
-                if let Focus::Diff(view) = &self.focus {
-                    let text = view.search.as_ref().map_or("", |s| s.query.as_str());
-                    self.input = Some(ListInput {
-                        target: InputTarget::DiffSearch,
-                        line: LineInput::with_text(text),
-                    });
-                }
+            AppIntent::OpenSearch => self.open_search(),
+            AppIntent::OpenPreviewSearch => {
+                self.input = Some(search_input(InputTarget::PreviewSearch, &self.diff.search));
             }
             AppIntent::InputAccept => return self.input_accept(),
             AppIntent::InputCancel => {
@@ -1270,8 +1266,9 @@ impl AppState {
                 Focus::Diff(view) if view.search.is_some() => view.search = None,
                 _ => return self.update(AppIntent::FocusLeft),
             },
-            AppIntent::SearchNext => self.step_search(false),
-            AppIntent::SearchPrev => self.step_search(true),
+            AppIntent::PaneEscape => return self.pane_escape(),
+            AppIntent::SearchNext => return self.step_search(false),
+            AppIntent::SearchPrev => return self.step_search(true),
             AppIntent::OpenLogFilter(field) => self.open_log_filter(field),
             AppIntent::LogOfFile => return self.log_of_file(),
             AppIntent::ToggleDiffMark => self.toggle_diff_mark(),
@@ -5519,6 +5516,20 @@ impl AppState {
 /// Said when a changed filter drops the range made over the old rows.
 const SELECTION_CLEARED: &str = "Selection cleared";
 
+/// The bottom-bar input for a search, starting from its query.
+fn search_input(target: InputTarget, search: &Option<DiffSearch>) -> ListInput {
+    let text = search.as_ref().map_or("", |s| s.query.as_str());
+    ListInput {
+        target,
+        line: LineInput::with_text(text),
+    }
+}
+
+/// A search is open and found nothing, so there is no match to go to.
+fn no_matches(search: &Option<DiffSearch>) -> bool {
+    search.as_ref().is_some_and(|s| s.current.is_none())
+}
+
 /// List filters, range selections and the diff search.
 impl AppState {
     /// The indexes of the files the filter shows, in order.
@@ -5621,6 +5632,21 @@ impl AppState {
                     view.set_search(&text, self.emoji_zwj);
                 }
             }
+            InputTarget::PreviewSearch => self.diff.set_search(&text),
+            InputTarget::BlameSearch => {
+                if let Focus::Blame(view) = &mut self.focus {
+                    view.set_search(&text);
+                }
+            }
+            InputTarget::BlameCommitSearch => {
+                if let Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }) = &mut self.focus
+                {
+                    commit.set_search(&text);
+                }
+            }
             InputTarget::ReviewFilter => {
                 self.review.filter = text;
                 self.review.reconcile();
@@ -5648,27 +5674,125 @@ impl AppState {
             return self.accept_log_query(input);
         }
         let rows = self.pane_rows();
-        if input.target == InputTarget::DiffSearch
-            && let Focus::Diff(view) = &mut self.focus
-        {
-            match &view.search {
-                Some(search) if search.current.is_none() => self.notice = Some("No matches".into()),
-                _ => view.jump_to_match(rows),
+        let mut effects = vec![];
+        let found = match (input.target, &mut self.focus) {
+            (InputTarget::DiffSearch, Focus::Diff(view)) => {
+                let found = !no_matches(&view.search);
+                if found {
+                    view.jump_to_match(rows);
+                }
+                found
             }
+            (InputTarget::BlameSearch, Focus::Blame(view)) => {
+                let found = !no_matches(&view.search);
+                if found {
+                    view.jump_to_match(rows);
+                }
+                found
+            }
+            (
+                InputTarget::BlameCommitSearch,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => {
+                let found = !no_matches(&commit.search);
+                if found {
+                    commit.jump_to_match(rows);
+                }
+                found
+            }
+            (InputTarget::PreviewSearch, _) => {
+                let found = !no_matches(&self.diff.search);
+                if found {
+                    effects = self.diff.jump_to_match(rows);
+                }
+                found
+            }
+            _ => true,
+        };
+        if !found {
+            self.notice = Some("No matches".into());
         }
-        vec![]
+        effects
     }
 
-    /// `n` or `N`: the next or previous match, saying so when it wrapped.
-    fn step_search(&mut self, back: bool) {
+    /// Type a search for the focused pane, starting from its query.
+    fn open_search(&mut self) {
+        let (target, search) = match &self.focus {
+            Focus::Diff(view) => (InputTarget::DiffSearch, &view.search),
+            Focus::Blame(view) => match &view.commit {
+                Some(commit) => (InputTarget::BlameCommitSearch, &commit.search),
+                None => (InputTarget::BlameSearch, &view.search),
+            },
+            _ => return,
+        };
+        self.input = Some(search_input(target, search));
+    }
+
+    /// `n` or `N`: the next or previous match of the search the key focus
+    /// owns, saying so when it wrapped. A side panel steps its preview's.
+    fn step_search(&mut self, back: bool) -> Vec<Effect> {
         let rows = self.pane_rows();
-        if let Focus::Diff(view) = &mut self.focus {
-            if view.search.as_ref().is_some_and(|s| s.current.is_none()) {
-                self.notice = Some("No matches".into());
-            } else if view.step_search(back, rows) {
-                self.notice = Some("Search wrapped".into());
+        let mut effects = vec![];
+        // `None` when the search found nothing to step to.
+        let wrapped = match (self.panel_focus(), &mut self.focus) {
+            (KeyScope::Diff, Focus::Diff(view)) if no_matches(&view.search) => None,
+            (KeyScope::Diff, Focus::Diff(view)) => Some(view.step_search(back, rows)),
+            (KeyScope::Blame, Focus::Blame(view)) if no_matches(&view.search) => None,
+            (KeyScope::Blame, Focus::Blame(view)) => Some(view.step_search(back, rows)),
+            (
+                KeyScope::BlameCommit,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => (!no_matches(&commit.search)).then(|| commit.step_search(back, rows)),
+            (KeyScope::Files | KeyScope::CommitFiles | KeyScope::StashFiles, _) => {
+                (!no_matches(&self.diff.search)).then(|| {
+                    let (wrapped, demand) = self.diff.step_search(back, rows);
+                    effects = demand;
+                    wrapped
+                })
             }
+            _ => Some(false),
+        };
+        match wrapped {
+            None => self.notice = Some("No matches".into()),
+            Some(true) => self.notice = Some("Search wrapped".into()),
+            Some(false) => {}
         }
+        effects
+    }
+
+    /// Esc in the blame, its commit, or a commit's or a stash's files:
+    /// clear that pane's search, else close the pane as Esc did before.
+    fn pane_escape(&mut self) -> Vec<Effect> {
+        let scope = self.panel_focus();
+        let cleared = match (scope, &mut self.focus) {
+            (
+                KeyScope::BlameCommit,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => commit.search.take().is_some(),
+            (KeyScope::Blame, Focus::Blame(view)) => view.search.take().is_some(),
+            (KeyScope::CommitFiles | KeyScope::StashFiles, _) => self.diff.search.take().is_some(),
+            _ => false,
+        };
+        if cleared {
+            return vec![];
+        }
+        let close = match scope {
+            KeyScope::Blame => AppIntent::CloseBlame,
+            KeyScope::BlameCommit => AppIntent::CloseBlameCommit,
+            KeyScope::CommitFiles => AppIntent::CloseCommitFiles,
+            KeyScope::StashFiles => AppIntent::CloseStashFiles,
+            _ => return vec![],
+        };
+        self.update(close)
     }
 
     /// Start a range at the cursor, or clear the one there is.
@@ -5695,10 +5819,11 @@ impl AppState {
         }
     }
 
-    /// Esc in a list: clear the range, else the filter, else (in Commits)
-    /// the diff mark, else the log query, else quit as Esc always has. In
-    /// the Worktrees popup: clear the filter, else close the popup. The
-    /// Reflog tab has no range: clear the filter, else quit.
+    /// Esc in a list: clear the range, else the filter, else (in Files)
+    /// the preview's search, else (in Commits) the diff mark, else the log
+    /// query, else quit as Esc always has. In the Worktrees popup: clear
+    /// the filter, else close the popup. The Reflog tab has no range: clear
+    /// the filter, else quit.
     fn list_escape(&mut self) -> Vec<Effect> {
         if self.key_focus() == KeyScope::Worktrees {
             if let Some(list) = self.worktree_list_mut()
@@ -5734,6 +5859,9 @@ impl AppState {
         }
         if !filter.is_empty() {
             filter.clear();
+            return vec![];
+        }
+        if focus == KeyScope::Files && self.diff.search.take().is_some() {
             return vec![];
         }
         if self.panel_focus() == KeyScope::Commits {
@@ -17350,6 +17478,300 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.focus, Focus::Files);
         assert!(!state.should_quit);
+    }
+
+    // --- Search in the diff preview, the blame and its commit ---
+
+    /// The tag of the diff load among `effects`.
+    fn load_diff_tag(effects: &[Effect]) -> Tag {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::LoadDiff { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a LoadDiff in {effects:?}"))
+    }
+
+    /// 60 preview lines, "foo" on rows 30 and 50, more still to come.
+    fn preview_loaded(state: &mut AppState, tag: Tag) {
+        let lines = (0..60)
+            .map(|i| line(if i == 30 || i == 50 { "+foo" } else { " x" }))
+            .collect();
+        state.update(AppIntent::DiffLoaded {
+            tag,
+            result: Ok(DiffChunk { lines, done: false }),
+        });
+    }
+
+    fn preview_current(state: &AppState) -> Option<usize> {
+        state.diff.search.as_ref().and_then(|s| s.current)
+    }
+
+    /// ctrl-f, `foo`, Enter: the preview scrolls to the first match, and
+    /// `n` and `N` cycle round both ways.
+    fn search_the_preview_for_foo(state: &mut AppState) {
+        ctrl(state, 'f');
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        type_text(state, "foo");
+        assert_eq!(state.diff.scroll, 0, "typing does not jump");
+        press(state, KeyCode::Enter);
+        assert_eq!(state.input, None);
+        // 21 rows: row 30 is the bottom one.
+        assert_eq!(state.diff.scroll, 10);
+        assert_eq!(preview_current(state), Some(0));
+
+        press_char(state, 'n');
+        assert_eq!((preview_current(state), state.diff.scroll), (Some(1), 30));
+        assert_eq!(state.notice, None);
+        press_char(state, 'n');
+        assert_eq!((preview_current(state), state.diff.scroll), (Some(0), 30));
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(state, 'N');
+        assert_eq!(preview_current(state), Some(1));
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(state, 'N');
+        assert_eq!(preview_current(state), Some(0));
+    }
+
+    #[test]
+    fn ctrl_f_searches_the_files_preview_and_esc_clears_range_filter_search_then_quits() {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        type_text(&mut state, "/a\n");
+        press_char(&mut state, 'V');
+        search_the_preview_for_foo(&mut state);
+        assert_eq!(state.diff.path, Some("a.rs".into()));
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_anchor, None, "the range goes first");
+        assert!(state.diff.search.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_filter, "", "then the filter");
+        assert!(state.diff.search.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None, "then the search");
+        assert!(!state.should_quit);
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("Nothing searched yet (ctrl-f)".into()));
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit, "then Esc quits as before");
+    }
+
+    #[test]
+    fn a_preview_search_with_no_match_says_so_on_enter_and_n() {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        ctrl(&mut state, 'f');
+        type_text(&mut state, "zzz\n");
+        assert_eq!(state.notice, Some("No matches".into()));
+        state.notice = None;
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("No matches".into()));
+    }
+
+    #[test]
+    fn the_preview_search_waits_for_a_file() {
+        let (mut state, _) = with_files(vec![], 24);
+        state.focus = Focus::Files;
+        assert_eq!(state.diff.path, None);
+        ctrl(&mut state, 'f');
+        assert_eq!(state.input, None);
+        assert_eq!(state.notice, Some("No file selected".into()));
+    }
+
+    #[test]
+    fn a_commits_files_preview_is_searched_and_esc_clears_it_before_going_back() {
+        let mut state = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
+        preview_loaded(&mut state, tag);
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        search_the_preview_for_foo(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles, "still open");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn a_stashs_files_preview_is_searched_and_esc_clears_it_before_going_back() {
+        let mut state = on_stash_one();
+        let tag = load_diff_tag(&stash_opened(&mut state));
+        preview_loaded(&mut state, tag);
+        assert_eq!(state.key_focus(), KeyScope::StashFiles);
+        search_the_preview_for_foo(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.key_focus(), KeyScope::StashFiles, "still open");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.stash.open, None);
+        assert_eq!(state.key_focus(), KeyScope::Stash);
+        assert!(!state.should_quit);
+    }
+
+    /// A loaded blame of five committed lines, "foo" on lines 2 and 4.
+    fn blamed_foo() -> AppState {
+        let (mut state, tag) = blaming(24);
+        let lines = ["fn a", "foo", "x", "foo bar", "y"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| crate::git::blame::BlameLine {
+                text: text.to_string(),
+                ..blame_line(OID, i + 1)
+            })
+            .collect();
+        state.update(AppIntent::BlameLoaded {
+            tag,
+            result: Ok(lines),
+        });
+        state
+    }
+
+    #[test]
+    fn the_blame_and_its_commit_each_search_on_their_own() {
+        let mut state = blamed_foo();
+        type_text(&mut state, "/foo");
+        assert_eq!(blame(&state).cursor, 0, "typing does not move the cursor");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(blame(&state).cursor, 1);
+        press_char(&mut state, 'n');
+        assert_eq!(blame(&state).cursor, 3);
+        press_char(&mut state, 'n');
+        assert_eq!(blame(&state).cursor, 1);
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(&mut state, 'N');
+        assert_eq!(blame(&state).cursor, 3);
+
+        // Enter opens the match's line's commit.
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, oid }] => {
+                assert_eq!(oid, OID);
+                *tag
+            }
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        press_char(&mut state, '/');
+        assert_eq!(state.input, None, "nothing to search while it loads");
+        assert_eq!(state.notice, Some("Loading…".into()));
+        state.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("commit abc"), line("+foo"), line(" ctx")]),
+        });
+        press_char(&mut state, '/');
+        assert_eq!(
+            state
+                .input
+                .as_ref()
+                .map(|i| (i.target, i.line.text.as_str())),
+            Some((InputTarget::BlameCommitSearch, "")),
+            "the commit's own search, not the blame's"
+        );
+        type_text(&mut state, "ctx\n");
+        let commit = blame(&state).commit.as_ref().unwrap();
+        let found = commit.search.as_ref().unwrap();
+        assert_eq!((found.query.as_str(), found.current), ("ctx", Some(0)));
+        assert_eq!(blame(&state).search.as_ref().unwrap().query, "foo");
+
+        press(&mut state, KeyCode::Esc);
+        let commit = blame(&state).commit.as_ref().expect("still open");
+        assert_eq!(commit.search, None);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(blame(&state).commit, None);
+        assert_eq!(state.panel_focus(), KeyScope::Blame);
+        assert!(blame(&state).search.is_some(), "the blame kept its search");
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(blame(&state).search, None);
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("Nothing searched yet (/)".into()));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn keys_typed_into_each_new_search_are_only_text() {
+        let typed = "q?d\u{202E}";
+        let check = |mut state: AppState, open: &dyn Fn(&mut AppState), target| {
+            open(&mut state);
+            assert_eq!(state.input.as_ref().map(|i| i.target), Some(target));
+            let mut effects = Vec::new();
+            for c in typed.chars() {
+                effects.extend(press_char(&mut state, c));
+            }
+            assert_eq!(state.input.as_ref().unwrap().line.text, typed);
+            assert!(!state.should_quit && !state.help_open, "{target:?}");
+            assert!(state.popups.is_empty(), "{target:?}");
+            effects.extend(press(&mut state, KeyCode::Enter));
+            for effect in &effects {
+                assert!(
+                    !matches!(
+                        effect,
+                        Effect::RunOp { .. }
+                            | Effect::ProbeCommit { .. }
+                            | Effect::CheckLeftBehind { .. }
+                    ),
+                    "{target:?}: {effect:?}"
+                );
+                let shown = format!("{effect:?}");
+                assert!(!shown.contains("q?d"), "{target:?}: {shown}");
+            }
+        };
+        let ctrl_f = |state: &mut AppState| {
+            ctrl(state, 'f');
+        };
+        let slash = |state: &mut AppState| {
+            press_char(state, '/');
+        };
+
+        let (mut files, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut files, diff_tag(&effects));
+        check(files, &ctrl_f, InputTarget::PreviewSearch);
+
+        let mut commit_files = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut commit_files, two_commit_files()));
+        preview_loaded(&mut commit_files, tag);
+        check(commit_files, &ctrl_f, InputTarget::PreviewSearch);
+
+        let mut stash_files = on_stash_one();
+        let tag = load_diff_tag(&stash_opened(&mut stash_files));
+        preview_loaded(&mut stash_files, tag);
+        check(stash_files, &ctrl_f, InputTarget::PreviewSearch);
+
+        check(blamed_foo(), &slash, InputTarget::BlameSearch);
+
+        let mut commit = blamed_foo();
+        let tag = match press(&mut commit, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, .. }] => *tag,
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        commit.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("+foo")]),
+        });
+        check(commit, &slash, InputTarget::BlameCommitSearch);
+    }
+
+    #[test]
+    fn the_focused_commit_file_diff_is_still_searched_with_slash() {
+        let mut state = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
+        preview_loaded(&mut state, tag);
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
+        let Focus::Diff(view) = &state.focus else {
+            panic!("expected the commit file's hunks, got {:?}", state.focus);
+        };
+        assert!(view.commit.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::DiffSearch)
+        );
     }
 
     #[test]
