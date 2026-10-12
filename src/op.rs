@@ -8,12 +8,13 @@ use crate::features::branches::{remotes, tags};
 use crate::features::commits::bisect::git::run_bisect_start;
 use crate::features::commits::custom_patch::{CustomPatch, PatchAction};
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
+use crate::features::commits::rewrite;
 use crate::git::bisect::BisectMark;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
-use crate::git::rebase_plan::{RebasePlan, encode};
+use crate::git::rebase_plan::RebasePlan;
 use crate::git::remote::redact_userinfo;
 use crate::git::remotes::{RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
@@ -22,7 +23,6 @@ use crate::git::stash::StashRef;
 use crate::git::status::{EntryKind, FileEntry};
 use crate::git::tags::{TagName, validate_tag_name};
 use crate::git::version::{GitVersion, parse_version, version_command};
-use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
 /// in argv order.
@@ -717,36 +717,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                     cmd.arg(pick.as_str())
                 });
         }
-        // The plan goes to the sequence editor, which `handoff` names; the
-        // base is hex digits only. The keys are newer config that an older
-        // git ignores; they keep the todo list to what the sequence editor
-        // accepts. `--update-refs` (git 2.38) or the key turning it off
-        // always wins over the user's `rebase.updateRefs`. Comments in the
-        // todo use `#`, which the sequence editor reads them by, whatever
-        // the user's `core.commentChar` or `core.commentString`; the
-        // command line's `-c` wins over every config file. A stopped
-        // rebase's todo is read with the user's own prefix, as git will.
-        GitOp::InteractiveRebase(plan) => {
-            let mut cmd = GitCommand::new("-c");
-            if !plan.update_refs {
-                cmd = cmd.arg("rebase.updateRefs=false").arg("-c");
-            }
-            cmd = cmd
-                .arg("rebase.rebaseMerges=false")
-                .arg("-c")
-                .arg("core.commentChar=#")
-                .arg("rebase")
-                .arg("-i");
-            if plan.update_refs {
-                cmd = cmd.arg("--update-refs");
-            }
-            return cmd
-                .arg("--autostash")
-                .arg("--no-autosquash")
-                .arg("--keep-empty")
-                .arg(plan.base.as_str())
-                .env(PLAN_ENV, encode(&plan.steps));
-        }
+        GitOp::InteractiveRebase(plan) => return rewrite::git::rebase_command(plan),
         // Its first step; the rest run from
         // `crate::features::commits::custom_patch::git::run`.
         GitOp::CustomPatch { plan, .. } => {
@@ -1614,62 +1585,6 @@ mod tests {
                 "{op:?}"
             );
         }
-    }
-
-    #[test]
-    fn an_interactive_rebase_passes_only_the_plan_in_its_env() {
-        let plan = crate::git::rebase_plan::sample();
-        let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
-        assert_eq!(
-            argv(&cmd),
-            [
-                "-c",
-                "rebase.updateRefs=false",
-                "-c",
-                "rebase.rebaseMerges=false",
-                "-c",
-                "core.commentChar=#",
-                "rebase",
-                "-i",
-                "--autostash",
-                "--no-autosquash",
-                "--keep-empty",
-                plan.base.as_str(),
-            ]
-        );
-        let envs: Vec<_> = cmd
-            .envs()
-            .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
-            .collect();
-        let encoded = format!("drop {}\npick {}\n", "b".repeat(40), "a".repeat(40));
-        assert_eq!(envs, [("KIKA_REBASE_PLAN", encoded.as_str())]);
-        assert_eq!(cmd.input(), None);
-        assert_eq!(cmd.subcommand(), "rebase");
-    }
-
-    #[test]
-    fn with_update_refs_the_rebase_passes_the_flag_and_not_the_key() {
-        let mut plan = crate::git::rebase_plan::sample();
-        plan.update_refs = true;
-        let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
-        assert_eq!(
-            argv(&cmd),
-            [
-                "-c",
-                "rebase.rebaseMerges=false",
-                "-c",
-                "core.commentChar=#",
-                "rebase",
-                "-i",
-                "--update-refs",
-                "--autostash",
-                "--no-autosquash",
-                "--keep-empty",
-                plan.base.as_str(),
-            ]
-        );
-        assert_eq!(cmd.subcommand(), "rebase");
     }
 
     #[test]

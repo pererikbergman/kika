@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::commit_files::CommitFilesList;
 use crate::external_diff::NO_RENDERER;
 use crate::features::branches::{remotes, tags};
+use crate::features::commits::rewrite::{FILTER_HIDES_NEIGHBOUR, Rewrite, rewrite_disabled};
 use crate::features::commits::{Crossing, with_stacked_branches};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::{
@@ -17,11 +18,10 @@ use crate::features::{
 };
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
-use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
+use crate::git::rebase_plan::{self, Edit, RebasePlan};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
-use crate::git::version;
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
@@ -29,7 +29,6 @@ use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
-use crate::rebase_todo::Rewrite;
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
 /// fixed text; some name a branch or a commit.
@@ -1628,33 +1627,6 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<Reason> {
         })
 }
 
-/// Why the selected commit or todo row cannot be rewritten now. On a log
-/// row: one operation at a time, none in progress, and a history the
-/// planner can rewrite. On a todo row: one write at a time, and an edit
-/// the list allows.
-pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<Reason> {
-    // Each acts on one row: not over a range, nor on a row the filter hides.
-    if let Some(reason) = list_guard(state, false) {
-        return Some(reason);
-    }
-    if state.commits.todo_selected.is_some() {
-        return todo_disabled(state, rewrite);
-    }
-    // A narrowed log skips commits: the row below need not be the parent,
-    // nor the one a move swaps with, and a plan made from its rows would
-    // leave commits out.
-    if state.commits.query.is_active() {
-        return Some(CLEAR_LOG_FILTER.into());
-    }
-    // The neighbour a move swaps with may be one the filter hides.
-    if matches!(rewrite, Rewrite::Move(_)) && !state.commits.filter.is_empty() {
-        return Some(FILTER_HIDES_NEIGHBOUR.into());
-    }
-    commit_action_disabled(state)
-        .or_else(|| in_progress_disabled(state))
-        .or_else(|| log_plan(state, rewrite).err())
-}
-
 /// A range spans log rows; the todo list above the log has none.
 pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
     state
@@ -1663,15 +1635,6 @@ pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
         .is_some()
         .then_some("Select a commit in the log first".into())
 }
-
-/// Why a log commit does not move while the log is filtered: it swaps
-/// with the commit next to it in the history, which may be hidden.
-pub(crate) const FILTER_HIDES_NEIGHBOUR: &str =
-    "Clear the filter to move commits: the one next to it may be hidden";
-
-/// Why `break` cannot be used: the todo command is newer than Kika's
-/// minimum git.
-pub(crate) const NEEDS_BREAK: &str = "Needs Git 2.20 or newer";
 
 /// Why a rewrite waits: the branches are still being read, so whether
 /// one sits on its commits is not known yet.
@@ -1682,40 +1645,6 @@ pub(crate) const TIPS_UNKNOWN: &str = "Reading the branches; try again in a mome
 pub(crate) fn tips_failed(error: &str) -> String {
     let first = error.lines().next().unwrap_or_default();
     format!("Could not read the branches ({first}); press r to retry")
-}
-
-/// Why a todo edit waits for the last one to be written.
-pub(crate) const TODO_SAVING: &str = "Saving the todo list";
-
-/// The plan for `rewrite` on the selected log row, as it will run. With
-/// git 2.38 or newer branches stacked on the rewritten commits move along
-/// (`--update-refs`), so only a move that would change what one holds is
-/// refused; with an older git any stacked branch would be left behind, so
-/// the rewrite is refused.
-pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan, Reason> {
-    if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
-        return Err(NEEDS_BREAK.into());
-    }
-    let commits = &state.commits;
-    let (rows, selected) = (commits.rows.as_slice(), commits.selected);
-    let plan = match rewrite {
-        Rewrite::Edit(edit) => rebase_plan::plan(rows, selected, edit),
-        Rewrite::Move(direction) => rebase_plan::plan_move(rows, selected, direction),
-        Rewrite::Break => rebase_plan::plan_break(rows, selected),
-    }?;
-    // A branch on the older of the two would end up holding the other.
-    let crossings: &[Crossing] = match rewrite {
-        Rewrite::Move(direction) => &[Crossing {
-            moved: selected,
-            from: match direction {
-                Direction::Up => selected,
-                Direction::Down => selected + 1,
-            },
-            len: 1,
-        }],
-        _ => &[],
-    };
-    with_stacked_branches(state, plan, crossings)
 }
 
 /// The plan that folds every `fixup!` commit in the log into its target,
@@ -1785,33 +1714,6 @@ fn nothing_staged(state: &AppState) -> Option<Reason> {
 /// Why a fixup cannot be made or looked for: nothing is staged.
 pub(crate) const STAGE_THE_FIX: &str = "Stage the fix first";
 
-/// The todo list after `rewrite` on the selected todo row, and where the
-/// cursor goes, or why it cannot be made.
-pub(crate) fn todo_edit(
-    state: &AppState,
-    rewrite: Rewrite,
-) -> Result<(Vec<TodoEntry>, usize), Reason> {
-    let commits = &state.commits;
-    let (Some(todo), Some(i)) = (&commits.todo, commits.todo_selected) else {
-        return Err("No todo row selected".into());
-    };
-    todo.edit(i, rewrite).map_err(Reason::from)
-}
-
-fn todo_disabled(state: &AppState, rewrite: Rewrite) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    // The list shown is what was written only once it is read back.
-    if state.commits.todo_write_seq.is_some() || state.commits.todo_seq.is_some() {
-        return Some(TODO_SAVING.into());
-    }
-    if rewrite == Rewrite::Break && !state.git_has(version::BREAK) {
-        return Some(NEEDS_BREAK.into());
-    }
-    todo_edit(state, rewrite).err()
-}
-
 fn squash_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Squash))
 }
@@ -1826,26 +1728,6 @@ fn drop_disabled(state: &AppState) -> Option<Reason> {
 
 fn reword_disabled(state: &AppState) -> Option<Reason> {
     rewrite_disabled(state, Rewrite::Edit(Edit::Reword))
-}
-
-fn stop_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Stop))
-}
-
-fn todo_pick_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Pick))
-}
-
-fn break_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Break)
-}
-
-fn move_up_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Move(Direction::Up))
-}
-
-fn move_down_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Move(Direction::Down))
 }
 
 pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
@@ -2538,64 +2420,6 @@ static REWRITE_COMMITS: &[Binding] = &[
         label: "reword",
         bar: true,
         disabled: commits_reword_disabled,
-    },
-    // `J` and `K` scroll the diff from the Workspace.
-    Binding {
-        id: "commits.move_up",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), KeyModifiers::ALT),
-            KeyPattern::exact(KeyCode::Up, KeyModifiers::ALT),
-        ],
-        scope: KeyScope::Commits,
-        intent: AppIntent::MoveCommit(Direction::Up),
-        description: "Move the selected commit or todo row up, above the newer one",
-        label: "move up",
-        bar: true,
-        disabled: move_up_disabled,
-    },
-    Binding {
-        id: "commits.move_down",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), KeyModifiers::ALT),
-            KeyPattern::exact(KeyCode::Down, KeyModifiers::ALT),
-        ],
-        scope: KeyScope::Commits,
-        intent: AppIntent::MoveCommit(Direction::Down),
-        description: "Move the selected commit or todo row down, below the older one",
-        label: "move down",
-        bar: true,
-        disabled: move_down_disabled,
-    },
-    Binding {
-        id: "commits.edit",
-        keys: &[KeyPattern::any(KeyCode::Char('E'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Stop),
-        description: "Stop the rebase at the selected commit, to amend it, then continue from Status",
-        label: "edit",
-        bar: true,
-        disabled: stop_disabled,
-    },
-    Binding {
-        id: "commits.break",
-        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::InsertBreak,
-        description: "Stop the rebase right after the selected commit, or toggle the stop after a todo row",
-        label: "break",
-        bar: true,
-        disabled: break_disabled,
-    },
-    // `p` is pull; a pick is git's "use commit".
-    Binding {
-        id: "commits.pick",
-        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Pick),
-        description: "Pick the selected todo row as it is, undoing its other action",
-        label: "pick",
-        bar: true,
-        disabled: todo_pick_disabled,
     },
 ];
 
@@ -4243,6 +4067,7 @@ static CHUNKS: &[&[Binding]] = &[
     FILES_NAV,
     COMMITS_KEYS,
     REWRITE_COMMITS,
+    commits::rewrite::keys::REWRITE_TODO_COMMITS,
     COMMITS_SWITCH_TAB,
     commits::copy::keys::COPY_COMMITS,
     commits::reflog::keys::REFLOG_KEYS,
@@ -4329,10 +4154,13 @@ mod tests {
     use super::*;
     use crate::features::commits::compare::keys::commits_mark_disabled;
     use crate::features::commits::custom_patch::keys::patch_file_disabled;
+    use crate::features::commits::rewrite::keys::stop_disabled;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::git::bisect::BisectMark;
     use crate::git::branch_tips;
     use crate::git::commit_files::{CommitId, CommitRange};
+    use crate::git::rebase_plan::Direction;
+    use crate::git::version;
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
 
