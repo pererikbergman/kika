@@ -115,6 +115,10 @@ pub struct Cached {
     /// Validated on read and write; an invalid one is dropped.
     pub etag: Option<String>,
     pub queried: Vec<BranchName>,
+    /// When GitHub last answered with these badges, in seconds since the
+    /// epoch. A 304 does not move it, so its age bounds how long a
+    /// probe alone may vouch for them.
+    pub fetched_at: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,13 +226,14 @@ pub fn read(dir: &Path, key: &CacheKey) -> Option<Cached> {
             .iter()
             .map(|name| BranchName::from(name.as_str()))
             .collect(),
+        fetched_at: stored.fetched_at,
     })
 }
 
 /// Store `cached` for `key` in `dir`, replacing the file in one rename.
 /// Names that are not UTF-8 are left out; they are never fetched. An
 /// invalid ETag is not stored.
-pub fn write(dir: &Path, key: &CacheKey, cached: &Cached, fetched_at: i64) -> io::Result<()> {
+pub fn write(dir: &Path, key: &CacheKey, cached: &Cached) -> io::Result<()> {
     ensure_dir(dir)?;
     let path = dir.join(key.file_name());
     if is_link(&path) {
@@ -243,7 +248,7 @@ pub fn write(dir: &Path, key: &CacheKey, cached: &Cached, fetched_at: i64) -> io
     let file = CacheFile {
         version: VERSION,
         key: key.clone(),
-        fetched_at,
+        fetched_at: cached.fetched_at,
         etag: cached.etag.as_deref().and_then(valid_etag),
         queried: cached.queried.iter().filter_map(utf8).collect(),
         prs,
@@ -360,6 +365,7 @@ mod tests {
             badges: badges(),
             etag: Some("W/\"abc\"".into()),
             queried: vec!["main".into(), "feature/x".into(), "no-pr".into()],
+            fetched_at: 1_700_000_000,
         }
     }
 
@@ -376,7 +382,7 @@ mod tests {
         let tmp = TempDir::new("forge-cache");
         let dir = tmp.path().join("kika").join("forge");
         assert_eq!(read(&dir, &key("/r")), None);
-        write(&dir, &key("/r"), &cached(), 1_700_000_000).unwrap();
+        write(&dir, &key("/r"), &cached()).unwrap();
         assert_eq!(read(&dir, &key("/r")), Some(cached()));
         // Only the file is left, no temp.
         let names: Vec<_> = fs::read_dir(&dir)
@@ -401,14 +407,14 @@ mod tests {
         assert_ne!(key("/a").file_name(), shifted.file_name());
         assert_eq!(key("/a").file_name().len(), 16 + ".json".len());
 
-        write(tmp.path(), &key("/a"), &cached(), 0).unwrap();
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
         assert_eq!(read(tmp.path(), &key("/b")), None);
     }
 
     #[test]
     fn a_stored_key_that_differs_is_a_miss() {
         let tmp = TempDir::new("forge-cache");
-        write(tmp.path(), &key("/a"), &cached(), 0).unwrap();
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
         // Another repository's entry planted under this one's name.
         fs::rename(
             tmp.path().join(key("/a").file_name()),
@@ -456,7 +462,7 @@ mod tests {
     #[test]
     fn the_etag_and_queried_branches_round_trip_and_a_bad_etag_is_dropped() {
         let tmp = TempDir::new("forge-cache");
-        write(tmp.path(), &key("/a"), &cached(), 0).unwrap();
+        write(tmp.path(), &key("/a"), &cached()).unwrap();
         let back = read(tmp.path(), &key("/a")).unwrap();
         assert_eq!(back.etag.as_deref(), Some("W/\"abc\""));
         assert_eq!(back.queried, cached().queried);
@@ -467,7 +473,7 @@ mod tests {
                 etag: Some(bad.into()),
                 ..cached()
             };
-            write(tmp.path(), &key("/a"), &with_bad, 0).unwrap();
+            write(tmp.path(), &key("/a"), &with_bad).unwrap();
             let text = fs::read_to_string(tmp.path().join(key("/a").file_name())).unwrap();
             assert!(text.contains("\"etag\":null"), "{text}");
             assert_eq!(read(tmp.path(), &key("/a")).unwrap().etag, None);
@@ -495,14 +501,14 @@ mod tests {
 
         let tmp = TempDir::new("forge-cache");
         let dir = tmp.path().join("forge");
-        write(&dir, &key("/a"), &cached(), 0).unwrap();
+        write(&dir, &key("/a"), &cached()).unwrap();
         let file = dir.join(key("/a").file_name());
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&file), 0o600);
 
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
-        write(&dir, &key("/a"), &cached(), 0).unwrap();
+        write(&dir, &key("/a"), &cached()).unwrap();
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&file), 0o600);
     }
@@ -512,13 +518,13 @@ mod tests {
     fn symlinked_files_and_dirs_are_refused() {
         let tmp = TempDir::new("forge-cache");
         let real = tmp.path().join("real");
-        write(&real, &key("/a"), &cached(), 0).unwrap();
+        write(&real, &key("/a"), &cached()).unwrap();
 
         // A linked directory is neither read nor written.
         let linked = tmp.path().join("linked");
         std::os::unix::fs::symlink(&real, &linked).unwrap();
         assert_eq!(read(&linked, &key("/a")), None);
-        assert!(write(&linked, &key("/a"), &cached(), 0).is_err());
+        assert!(write(&linked, &key("/a"), &cached()).is_err());
 
         // A linked file is a miss, and is never written through.
         let dir = tmp.path().join("dir");
@@ -526,7 +532,7 @@ mod tests {
         let file = dir.join(key("/a").file_name());
         std::os::unix::fs::symlink(real.join(key("/a").file_name()), &file).unwrap();
         assert_eq!(read(&dir, &key("/a")), None);
-        assert!(write(&dir, &key("/a"), &Cached::default(), 0).is_err());
+        assert!(write(&dir, &key("/a"), &Cached::default()).is_err());
         assert_eq!(read(&real, &key("/a")), Some(cached()));
     }
 

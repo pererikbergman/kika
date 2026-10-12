@@ -111,19 +111,12 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     };
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
     let sent = cached.as_ref().and_then(|c| c.etag.clone());
-    let store = |cached: &Cached| {
-        if let Some((dir, key)) = place {
-            // A cache that cannot be written only costs the next startup.
-            let _ = cache::write(dir, key, cached, load.now);
-        }
-    };
     let etag = match gh.probe(&repo, sent.as_deref()) {
         Answer::Limited { until } => return limited(until),
-        Answer::NotModified => match cached.filter(|c| reusable(c, branches)) {
-            Some(cached) => {
-                store(&cached);
-                return fetched(Ok(cached.badges), None);
-            }
+        // The cache is left as it is: its `fetched_at` stays the time of
+        // the last GraphQL answer, which bounds how long 304s may reuse it.
+        Answer::NotModified => match cached.filter(|c| reusable(c, branches, load.now)) {
+            Some(cached) => return fetched(Ok(cached.badges), None),
             None => sent,
         },
         Answer::Body { etag, .. } => etag,
@@ -132,11 +125,16 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     };
     match gh.fetch_badges(&repo, branches) {
         Ok(badges) => {
-            store(&Cached {
-                badges: badges.clone(),
-                etag,
-                queried: branches.to_vec(),
-            });
+            if let Some((dir, key)) = place {
+                let fresh = Cached {
+                    badges: badges.clone(),
+                    etag,
+                    queried: branches.to_vec(),
+                    fetched_at: load.now,
+                };
+                // A cache that cannot be written only costs the next startup.
+                let _ = cache::write(dir, key, &fresh);
+            }
             fetched(Ok(badges), None);
         }
         Err(Refusal::Limited { until }) => limited(until),
@@ -144,16 +142,24 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     }
 }
 
-/// Whether `cached` still answers for `branches` when the pull requests
-/// did not change: the same branches were asked, and no open PR waits on
-/// CI, which can finish without changing the pull-request list.
-fn reusable(cached: &Cached, branches: &[BranchName]) -> bool {
+/// How long, in seconds, a GraphQL answer may be reused on 304s alone.
+/// CI can finish or re-run without changing the pull-request list, so a
+/// green badge is asked about again at least this often.
+const MAX_REUSE: i64 = 15 * 60;
+
+/// Whether `cached` still answers for `branches` at `now` when the pull
+/// requests did not change: the same branches were asked, less than
+/// [`MAX_REUSE`] ago, and no open PR waits on CI, which can finish
+/// without changing the pull-request list.
+fn reusable(cached: &Cached, branches: &[BranchName], now: i64) -> bool {
     let waiting = cached.badges.values().any(|badge| {
         matches!(badge.state, PrState::Open | PrState::Draft)
             && matches!(badge.ci, Some(CiState::Pending | CiState::Failure))
     });
     let set = |names: &[BranchName]| names.iter().cloned().collect::<HashSet<_>>();
-    set(&cached.queried) == set(branches) && !waiting
+    // A time ahead of the clock is not trusted either.
+    let young = (0..MAX_REUSE).contains(&(now - cached.fetched_at));
+    set(&cached.queried) == set(branches) && young && !waiting
 }
 
 #[cfg(test)]
@@ -278,10 +284,11 @@ mod tests {
     /// A cache dir under `tmp` holding `cached` for the repository at `tmp`.
     fn seed(tmp: &TempDir, cached: &Cached) -> PathBuf {
         let dir = tmp.path().join("forge");
-        cache::write(&dir, &key(tmp.path()), cached, 1).unwrap();
+        cache::write(&dir, &key(tmp.path()), cached).unwrap();
         dir
     }
 
+    /// One open PR with green CI, asked about a minute ago.
     fn green(queried: &[BranchName]) -> Cached {
         Cached {
             badges: HashMap::from([(
@@ -290,6 +297,7 @@ mod tests {
             )]),
             etag: Some("\"abc\"".into()),
             queried: queried.to_vec(),
+            fetched_at: NOW - 60,
         }
     }
 
@@ -473,10 +481,48 @@ mod tests {
         }
         assert_eq!(state.forge.status, ForgeView::Fresh);
         assert_eq!(state.forge.badges, green.badges);
-        // The cache is rewritten at this time, the ETag unchanged.
+        // The cache is left alone: `fetched_at` stays the last GraphQL
+        // answer's time, so 304s cannot keep it young.
+        let file = dir.join(key(tmp.path()).file_name());
+        let before = std::fs::read(&file).unwrap();
         assert_eq!(cache::read(&dir, &key(tmp.path())), Some(green));
-        let text = std::fs::read_to_string(dir.join(key(tmp.path()).file_name())).unwrap();
-        assert!(text.contains(&format!("\"fetched_at\":{NOW}")), "{text}");
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn a_304_on_an_old_answer_asks_graphql_again() {
+        let tmp = TempDir::new("forge-304-old");
+        let (hosts, branches): (_, Vec<BranchName>) = (hosts(), vec!["main".into()]);
+        let old = Cached {
+            fetched_at: NOW - 16 * 60,
+            ..green(&branches)
+        };
+        let dir = seed(&tmp, &old);
+        let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)).reply(answer(STATES)));
+        let ctx = context(Arc::clone(&gh), Some(dir.clone()));
+        let sent = run_known(&ctx, refresh(&hosts, &branches, tmp.path()));
+        let calls = gh.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(is_graphql(&calls[1]));
+        let (Ok(badges), None) = fetched(&sent) else {
+            panic!("{sent:?}");
+        };
+        assert_eq!(badges[&branches[0]].number, 101);
+        let stored = cache::read(&dir, &key(tmp.path())).unwrap();
+        assert_eq!(stored.fetched_at, NOW);
+        assert_eq!(stored.etag.as_deref(), Some("\"abc\""));
+
+        // Just inside the bound, the 304 alone still answers.
+        let tmp = TempDir::new("forge-304-young");
+        let young = Cached {
+            fetched_at: NOW - 15 * 60 + 1,
+            ..green(&branches)
+        };
+        let dir = seed(&tmp, &young);
+        let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)));
+        let ctx = context(Arc::clone(&gh), Some(dir));
+        run_known(&ctx, refresh(&hosts, &branches, tmp.path()));
+        assert_eq!(gh.calls().len(), 1);
     }
 
     #[test]

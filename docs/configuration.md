@@ -275,8 +275,11 @@ github = ["github.com", "github.example.com"]
   conditional request for free (it does not count against your rate
   limit), and the cached badges are kept without the GraphQL query. The
   query still runs when the branches differ from the ones last asked about,
-  or when an open pull request's checks were still running or had failed,
-  since checks can finish without changing the pull request.
+  when an open pull request's checks were still running or had failed, or
+  when the last query is 15 minutes old or more, since checks can finish or
+  re-run without changing the pull request. So a check that turns red on
+  the same commit shows at the first refresh after those 15 minutes, at
+  the latest.
 - The last result is cached so it shows at once on the next start, in
   `$XDG_CACHE_HOME/kika/forge`, else `~/Library/Caches/kika/forge` (macOS),
   `~/.cache/kika/forge` (Linux) or `%LOCALAPPDATA%\kika\cache\forge`
@@ -290,7 +293,8 @@ github = ["github.com", "github.example.com"]
   the panel is wide enough, the line also says what to do, such as
   `run gh auth login --hostname github.com`. Nothing else waits on it.
 - When GitHub rate limits you, the line says `GitHub: rate limited`, and,
-  where it fits, `until HH:MM UTC`. Kika then runs no `gh` call to that
+  where it fits, `until HH:MM UTC` (the badges shown are the cached ones,
+  though the line leaves out `· cached` to keep room for the time). Kika then runs no `gh` call to that
   host until the limit resets (at least a minute, at most an hour), even
   for another repository. It does not retry by itself: the next open,
   fetch, pull or push after the reset asks again. The wait is kept only

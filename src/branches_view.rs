@@ -225,7 +225,10 @@ fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
                 .map(|until| format!("until {} UTC", clock(until))),
         ),
     };
-    let cached = (!forge.badges.is_empty()).then_some("cached");
+    // A rate limit leaves no room for `cached`: when it ends matters more,
+    // and the line says no new answer came anyway.
+    let cached =
+        (!forge.badges.is_empty() && problem != ForgeStatus::RateLimited).then_some("cached");
     let join = |parts: &[Option<&str>]| {
         std::iter::once(what)
             .chain(parts.iter().flatten().copied())
@@ -459,10 +462,14 @@ pub(crate) mod tests {
             // With no reset known, no time is given.
             (ForgeStatus::RateLimited, "GitHub: rate limited"),
         ];
-        // With old badges still drawn, every problem says they are cached.
+        // With old badges still drawn, every problem but a rate limit says
+        // they are cached.
         for (problem, want) in cases {
             state.forge.status = ForgeView::Problem(problem);
-            let cached = format!("{want} · cached");
+            let cached = match problem {
+                ForgeStatus::RateLimited => want.to_string(),
+                _ => format!("{want} · cached"),
+            };
             assert_eq!(
                 line(&state).as_deref(),
                 Some(cached.as_str()),
@@ -535,8 +542,15 @@ pub(crate) mod tests {
         state.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
         // 2023-11-14 22:13:20 UTC.
         state.forge.limited_until = Some(1_700_000_000);
-        let full = "GitHub: rate limited · until 22:13 UTC · cached";
+        // Badges are drawn, but the line gives its room to the time.
+        assert!(!state.forge.badges.is_empty());
+        let full = "GitHub: rate limited · until 22:13 UTC";
         assert_eq!(forge_line(&state.forge, 80).as_deref(), Some(full));
+        assert_eq!(forge_line(&state.forge, 38).as_deref(), Some(full));
+        assert_eq!(
+            forge_line(&state.forge, 37).as_deref(),
+            Some("GitHub: rate limited")
+        );
         assert_eq!(
             forge_line(&state.forge, 22).as_deref(),
             Some("GitHub: rate limited")
