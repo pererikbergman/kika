@@ -2,11 +2,11 @@
 //! staged lines come from, committing them as a `fixup!` of the selected
 //! commit, and folding every `fixup!` commit into its target.
 
-use super::{AppState, Context};
+use super::fixup_base::{FixupBase, candidates_notice};
+use super::{autosquash_disabled, autosquash_plan, create_fixup_disabled, find_base_disabled};
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
-use crate::git::fixup_base::{FixupBase, candidates_notice};
-use crate::keymap;
+use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{ConfirmKind, ErrorPopup, Popup};
 
@@ -14,11 +14,11 @@ impl AppState {
     /// Commit the staged change as a `fixup!` of the selected commit. Git
     /// writes the message from the raw subject; hooks and signing apply as
     /// for any commit, so it is probed like one.
-    pub(super) fn create_fixup(&mut self) -> Vec<Effect> {
+    pub(crate) fn create_fixup(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        if let Some(reason) = keymap::create_fixup_disabled(self) {
+        if let Some(reason) = create_fixup_disabled(self) {
             self.notice = Some(reason);
             return vec![];
         }
@@ -38,11 +38,11 @@ impl AppState {
     }
 
     /// Ask before folding the fixups: they may be far from the cursor.
-    pub(super) fn ask_autosquash(&mut self) {
+    pub(crate) fn ask_autosquash(&mut self) {
         if self.context != Context::Workspace {
             return;
         }
-        if let Some(reason) = keymap::autosquash_disabled(self) {
+        if let Some(reason) = autosquash_disabled(self) {
             self.notice = Some(reason);
             return;
         }
@@ -51,13 +51,13 @@ impl AppState {
 
     /// Fold the fixups, as the question asked. The plan is made again from
     /// the log as it is now, so a reload while asking is safe.
-    pub(super) fn autosquash(&mut self) -> Vec<Effect> {
+    pub(crate) fn autosquash(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        let plan = match keymap::autosquash_disabled(self) {
+        let plan = match autosquash_disabled(self) {
             Some(reason) => Err(reason),
-            None => keymap::autosquash_plan(self),
+            None => autosquash_plan(self),
         };
         match plan {
             Ok(plan) => self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan)),
@@ -69,11 +69,11 @@ impl AppState {
     }
 
     /// Look for the commits the staged lines come from.
-    pub(super) fn find_fixup_base(&mut self) -> Vec<Effect> {
+    pub(crate) fn find_fixup_base(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        if let Some(reason) = keymap::find_base_disabled(self) {
+        if let Some(reason) = find_base_disabled(self) {
             self.notice = Some(reason);
             return vec![];
         }
@@ -92,7 +92,7 @@ impl AppState {
     /// Move the cursor to the one commit the staged lines come from, or
     /// say which commits they come from when there are several, since
     /// picking one would be a guess.
-    pub(super) fn fixup_base_found(&mut self, tag: Tag, result: Result<FixupBase, String>) {
+    pub(crate) fn fixup_base_found(&mut self, tag: Tag, result: Result<FixupBase, String>) {
         if tag.user {
             self.busy = self.busy.saturating_sub(1);
         }

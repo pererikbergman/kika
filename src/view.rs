@@ -2169,7 +2169,7 @@ mod tests {
 
     #[test]
     fn the_fixup_candidates_notice_fits_80_columns_and_elides_when_narrow() {
-        use crate::git::fixup_base::candidates_notice;
+        use crate::features::commits::rewrite::fixup_base::candidates_notice;
         let shorts: Vec<String> = (0..20).map(|i| format!("abc{i:04}")).collect();
         let notice = candidates_notice(&shorts);
         let mut state = loaded(vec![file("a.rs")]);

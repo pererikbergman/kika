@@ -13,7 +13,6 @@ pub mod diff;
 pub(crate) mod emoji;
 #[cfg(test)]
 pub mod fake;
-pub mod fixup_base;
 pub mod forge_remote;
 pub mod head;
 mod joiner;

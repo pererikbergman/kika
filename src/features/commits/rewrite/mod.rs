@@ -1,51 +1,71 @@
 //! History rewrites from the Commits panel. This part owns the stopped
 //! rebase's todo list (read, edited in place, written back) and the
-//! move, edit, break and pick rewrites: the second half of chunk 12
-//! (`commits.move_up`, `commits.move_down`, `commits.edit`,
-//! `commits.break`, `commits.pick`), the guards every rewrite key shares,
-//! `Effect::LoadRebaseTodo`/`WriteRebaseTodo` and the
-//! `GitOp::InteractiveRebase` argv. #304 (squash, fixup, drop, reword,
-//! autosquash, fixup base) and #305 (commits left behind) add to this
-//! folder.
+//! rewrites themselves: squash, fixup, drop and reword, on one row or over
+//! a range (`range.rs`), creating a `fixup!` commit, autosquash and
+//! finding the fixup base (`fixup.rs`, `fixup_base.rs`), and move, edit,
+//! break and pick. With them go all of chunk 12, the autosquash and
+//! drop-range questions (chunks 62 and 64), the guards and plans those
+//! keys and handlers share, `Effect::LoadRebaseTodo`/`WriteRebaseTodo`/
+//! `FindFixupBase` and the `GitOp::InteractiveRebase` argv. Only the
+//! commits-left-behind question (chunk 59) is left for #305.
 //!
 //! Its `pub(crate)` API:
-//! - the todo types `RebaseTodo`, `Rewrite` and `TodoFile` (`todo.rs`);
-//! - the shared guards here: `rewrite_disabled`, `log_plan`, `todo_edit`,
-//!   `NEEDS_BREAK`, `TODO_SAVING` and `FILTER_HIDES_NEIGHBOUR`, which core
-//!   `keymap.rs` still uses for the squash, fixup, drop, reword and
-//!   autosquash guards;
-//! - `keys::REWRITE_TODO_COMMITS` and `keys::stop_disabled`;
-//! - the handlers in `update.rs`: `rewrite`, `rebase_todo_written`,
-//!   `reload_rebase_todo` and `rebase_todo_loaded`;
-//! - `effects::{load_todo, write_todo}` and `git::rebase_command`.
+//! - the todo types `RebaseTodo`, `Rewrite` and `TodoFile` (`todo.rs`),
+//!   and `FixupBase`, which `intent.rs` carries;
+//! - the shared guards and plans here: `rewrite_disabled`, `log_plan`,
+//!   `todo_edit`, `autosquash_plan`, `autosquash_disabled`,
+//!   `create_fixup_disabled`, `find_base_disabled`,
+//!   `range_rewrite_disabled`, `range_log_plan`, and the reasons
+//!   `NEEDS_BREAK`, `TODO_SAVING`, `FILTER_HIDES_NEIGHBOUR` and
+//!   `STAGE_THE_FIX`;
+//! - `keys::{REWRITE_COMMITS, REWRITE_TODO_COMMITS,
+//!   REWRITE_AUTOSQUASH_CONFIRM, REWRITE_DROP_RANGE_CONFIRM}`,
+//!   `keys::stop_disabled` and the `keys::commits_*_disabled` row guards;
+//! - the handlers in `update.rs` (`rewrite`, `rebase_todo_written`,
+//!   `reload_rebase_todo`, `rebase_todo_loaded`), `range.rs`
+//!   (`rewrite_range`, `confirm_drop_range`) and `fixup.rs`
+//!   (`create_fixup`, `ask_autosquash`, `autosquash`, `find_fixup_base`,
+//!   `fixup_base_found`);
+//! - `effects::{load_todo, write_todo, find_base}`, `git::rebase_command`
+//!   and `fixup_base::candidates_notice`.
 //!
 //! Kept cross-feature reads: `commits.todo`, `todo_selected`, `todo_seq`,
-//! `todo_write_seq`, `rows`, `selected`, `query`, `filter` and `tips`
-//! (the commits panel, still in core); `op_seq`, `branch` and
-//! `generation` (core).
+//! `todo_write_seq`, `rows`, `selected`, `query`, `filter`, `tips`,
+//! `range_anchor`, `range()` and `fixup_base_seq` (the commits panel,
+//! still in core); `files` (the Files panel, core); `op_seq`, `branch`,
+//! `busy` and `generation` (core).
 //!
 //! What stays in core, and why:
-//! - `CommitsPanel.todo`/`set_todo` and the todo rows in
-//!   `commits_view.rs`: the commits panel shows and navigates them;
+//! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`, `range_anchor` and
+//!   the todo rows in `commits_view.rs`: the commits panel shows and
+//!   navigates them;
 //! - `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
-//! - the `AppIntent` and `Effect` variants and `GitOp::InteractiveRebase`,
-//!   which the custom patch's rewrite also builds through `op_command`;
-//! - the first half of chunk 12 and its guards, until #304 moves them.
+//! - the `AppIntent` and `Effect` variants, `ConfirmKind::{Autosquash,
+//!   DropRange}` with its question, the popup key scopes and
+//!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
+//!   builds through `op_command`;
+//! - `commits_range_disabled`, `CLEAR_RANGE_FIRST` and `CLEAR_LOG_FILTER`,
+//!   which other features' guards use too.
 
 pub(crate) mod effects;
+mod fixup;
+pub(crate) mod fixup_base;
 pub(crate) mod git;
 pub(crate) mod keys;
+mod range;
 mod todo;
 mod update;
 
+pub(crate) use fixup_base::FixupBase;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
 
 use super::{Crossing, with_stacked_branches};
-use crate::git::rebase_plan::{self, Direction, RebasePlan, TodoEntry};
+use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
 use crate::git::version;
 use crate::keymap::{
-    CLEAR_LOG_FILTER, OP_RUNNING, Reason, commit_action_disabled, in_progress_disabled, list_guard,
+    CLEAR_LOG_FILTER, OP_RUNNING, Reason, commit_action_disabled, commits_range_disabled,
+    in_progress_disabled, list_guard,
 };
 use crate::model::AppState;
 
@@ -117,6 +137,99 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
         _ => &[],
     };
     with_stacked_branches(state, plan, crossings)
+}
+
+/// The plan that folds every `fixup!` commit in the log into its target,
+/// as it will run. Each fixup moves down past the commits between it and
+/// its target, so with `--update-refs` a branch on the fixup or on one of
+/// those is refused.
+pub(crate) fn autosquash_plan(state: &AppState) -> Result<RebasePlan, Reason> {
+    let rows = state.commits.rows.as_slice();
+    let pairs = rebase_plan::fixup_targets(rows)?;
+    let plan = rebase_plan::plan_autosquash(rows)?;
+    let crossings: Vec<Crossing> = pairs
+        .into_iter()
+        .map(|(fixup, target)| Crossing {
+            moved: fixup,
+            from: fixup,
+            len: target - fixup,
+        })
+        .collect();
+    with_stacked_branches(state, plan, &crossings)
+}
+
+/// Why the fixups cannot be folded now. Like any rewrite of the log: one
+/// operation at a time, none in progress, and the whole log in view, as
+/// the plan is made from its rows.
+pub(crate) fn autosquash_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false)
+        .or_else(|| commits_range_disabled(state))
+        .or_else(|| {
+            state
+                .commits
+                .query
+                .is_active()
+                .then_some(CLEAR_LOG_FILTER.into())
+        })
+        .or_else(|| (!state.commits.filter.is_empty()).then_some(FILTER_HIDES_NEIGHBOUR.into()))
+        .or_else(|| commit_action_disabled(state))
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| autosquash_plan(state).err())
+}
+
+/// Why the staged change cannot become a `fixup!` of the selected commit
+/// now. The target is named by its id, so a narrowed log is fine.
+pub(crate) fn create_fixup_disabled(state: &AppState) -> Option<Reason> {
+    fixup_target_disabled(state)
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| nothing_staged(state))
+}
+
+/// Why the commit the staged lines come from cannot be looked for now.
+/// It only reads, so an operation in progress does not stop it.
+pub(crate) fn find_base_disabled(state: &AppState) -> Option<Reason> {
+    fixup_target_disabled(state).or_else(|| nothing_staged(state))
+}
+
+/// One log commit selected, shown, and free to act on.
+fn fixup_target_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false)
+        .or_else(|| commits_range_disabled(state))
+        .or_else(|| commit_action_disabled(state))
+}
+
+fn nothing_staged(state: &AppState) -> Option<Reason> {
+    let staged = state.files.iter().any(|f| !matches!(f.index, '.' | '?'));
+    (!staged).then_some(STAGE_THE_FIX.into())
+}
+
+/// Why a fixup cannot be made or looked for: nothing is staged.
+pub(crate) const STAGE_THE_FIX: &str = "Stage the fix first";
+
+/// Why `edit` cannot run over the selected log range now: the range is
+/// in the log, the log is not narrowed (the plan is made from its rows),
+/// one operation at a time with none in progress, and a plan for the
+/// whole range.
+pub(crate) fn range_rewrite_disabled(state: &AppState, edit: Edit) -> Option<Reason> {
+    commits_range_disabled(state)
+        .or_else(|| {
+            state
+                .commits
+                .query
+                .is_active()
+                .then_some(CLEAR_LOG_FILTER.into())
+        })
+        .or_else(|| commit_action_disabled(state))
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| range_log_plan(state, edit).err())
+}
+
+/// The plan for `edit` over the selected log range, as it will run,
+/// checked against stacked branches like a single-row rewrite.
+pub(crate) fn range_log_plan(state: &AppState, edit: Edit) -> Result<RebasePlan, Reason> {
+    let rows = state.commits.rows.as_slice();
+    let plan = rebase_plan::plan_range(rows, &state.commits.range(), edit)?;
+    with_stacked_branches(state, plan, &[])
 }
 
 /// The todo list after `rewrite` on the selected todo row, and where the

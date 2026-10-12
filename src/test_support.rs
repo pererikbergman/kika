@@ -1365,6 +1365,30 @@ pub(crate) fn two_tags() -> Vec<TagRef> {
     vec![tag_ref("v2", 'b'), tag_ref("v1", 'a')]
 }
 
+/// `on_linear_log` with `a` = `fixup! C` on `b` = `B` on `c` = `C`,
+/// short ids `a1`, `b1`, `c1`, `b` selected and `x.txt` staged.
+pub(crate) fn with_a_fixup() -> AppState {
+    let mut state = on_linear_log();
+    for (row, (subject, short)) in
+        state
+            .commits
+            .rows
+            .iter_mut()
+            .zip([("fixup! C", "a1"), ("B", "b1"), ("C", "c1")])
+    {
+        row.subject = subject.into();
+        row.short_oid = short.into();
+    }
+    state.files = vec![FileEntry {
+        path: "x.txt".into(),
+        orig_path: None,
+        index: 'M',
+        worktree: '.',
+        kind: EntryKind::Changed,
+    }];
+    state
+}
+
 /// Screen helpers for view tests: draw a state into a test terminal and
 /// find text in it, plus the states the view tests draw. Apart from the
 /// model-test builders above, as some share their names.
