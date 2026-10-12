@@ -4,10 +4,10 @@
 //! the headers only the ETag (validated) and the rate-limit numbers are read.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -180,7 +180,7 @@ pub struct CliGh;
 
 impl GhRunner for CliGh {
     fn run(&self, cmd: &GhCommand) -> io::Result<GhOutput> {
-        let mut command = Command::new("gh");
+        let mut command = crate::program::command(OsStr::new("gh"))?;
         command
             .args(cmd.args())
             .current_dir(&cmd.cwd)
