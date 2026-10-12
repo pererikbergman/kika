@@ -424,6 +424,9 @@ pub enum ConfirmKind {
     /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
     /// is lost and Enter may answer.
     DetachedCheckout,
+    /// Fold every `fixup!` commit into its target. It rewrites commits
+    /// the user may not be looking at, so only `y` answers.
+    Autosquash,
     /// Open the pull request `AppState::pr_draft` describes. It reaches
     /// GitHub, so only `y` answers it: never Enter.
     CreatePullRequest,
@@ -441,6 +444,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
+            ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
         }
     }
@@ -486,6 +490,7 @@ impl ConfirmKind {
                  branch; new commits there belong to no branch until you \
                  create one. (y/n)"
             }
+            ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
             // `AppState::confirm_question` names the repository, branches
             // and title; this is the fallback when it cannot.
             ConfirmKind::CreatePullRequest => {
@@ -502,6 +507,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
+            ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
         }
     }
@@ -513,6 +519,7 @@ impl ConfirmKind {
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout
+            | ConfirmKind::Autosquash
             | ConfirmKind::CreatePullRequest => None,
         }
     }

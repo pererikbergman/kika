@@ -236,6 +236,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: format!("commit {i}"),
+                subject_altered: false,
             })
             .collect();
         LogPage { rows, done }

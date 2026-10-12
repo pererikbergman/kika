@@ -40,14 +40,17 @@ pub enum GitOp {
     /// stdin.
     ///
     /// With `amend`, the staged changes are folded into `HEAD` instead; a
-    /// `None` message keeps `HEAD`'s, and is only valid with `amend`. With
-    /// `no_verify`, git skips the pre-commit and commit-msg hooks, and only
-    /// then, since a hook is the user's own check.
+    /// `None` message keeps `HEAD`'s. With `fixup`, the commit is a
+    /// `fixup!` of that commit and git writes its message from the raw
+    /// subject, so a `None` message is valid there too. With `no_verify`,
+    /// git skips the pre-commit and commit-msg hooks, and only then, since
+    /// a hook is the user's own check.
     Commit {
         message: Option<String>,
         stage_all: bool,
         amend: bool,
         no_verify: bool,
+        fixup: Option<CommitId>,
     },
     /// Apply `patch` to the index only, from stdin; with `reverse`, take it
     /// back out. How a hunk or some lines are staged or unstaged.
@@ -694,12 +697,18 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             message,
             amend,
             no_verify,
+            fixup,
             ..
         } => {
+            let source = match (message, fixup) {
+                (Some(_), _) => MessageSource::File(Path::new("-")),
+                (None, Some(target)) => MessageSource::Fixup(target),
+                (None, None) => MessageSource::Keep,
+            };
+            let cmd = commit_command(*amend, *no_verify, source);
             return match message {
-                Some(message) => commit_command(*amend, *no_verify, Some(Path::new("-")))
-                    .stdin(message.clone().into_bytes()),
-                None => commit_command(*amend, *no_verify, None),
+                Some(message) => cmd.stdin(message.clone().into_bytes()),
+                None => cmd,
             };
         }
     };
@@ -752,10 +761,22 @@ fn detached_checkout(oid: &CommitId) -> GitCommand {
         .arg("--")
 }
 
-/// `git commit` taking its message from `message_file` (`-` is stdin), or
-/// keeping `HEAD`'s with none. Shared by the detached run and the one on
-/// the terminal, whose stdin is the user's, so the two differ only there.
-pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>) -> GitCommand {
+/// Where `git commit` takes its message from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageSource<'a> {
+    /// This file, `-` being stdin.
+    File(&'a Path),
+    /// `HEAD`'s own, when amending.
+    Keep,
+    /// `fixup! ` and the raw subject of this commit, written by git. The
+    /// id is hex digits only, so it cannot be read as an option.
+    Fixup(&'a CommitId),
+}
+
+/// `git commit` taking its message from `source`. Shared by the detached
+/// run and the one on the terminal, whose stdin is the user's, so the two
+/// differ only there.
+pub fn commit_command(amend: bool, no_verify: bool, source: MessageSource) -> GitCommand {
     let cmd = GitCommand::new("commit");
     let cmd = if amend { cmd.arg("--amend") } else { cmd };
     let cmd = if no_verify {
@@ -763,9 +784,10 @@ pub fn commit_command(amend: bool, no_verify: bool, message_file: Option<&Path>)
     } else {
         cmd
     };
-    match message_file {
-        Some(file) => cmd.arg("-F").arg(file),
-        None => cmd.arg("--no-edit"),
+    match source {
+        MessageSource::File(file) => cmd.arg("-F").arg(file),
+        MessageSource::Keep => cmd.arg("--no-edit"),
+        MessageSource::Fixup(target) => cmd.arg(format!("--fixup={}", target.as_str())),
     }
 }
 
@@ -2632,6 +2654,7 @@ mod tests {
             stage_all,
             amend: false,
             no_verify: false,
+            fixup: None,
         }
     }
 
@@ -2642,6 +2665,7 @@ mod tests {
             stage_all: false,
             amend,
             no_verify,
+            fixup: None,
         };
         /// The op, its argv and its stdin.
         type Case = (GitOp, &'static [&'static str], Option<&'static [u8]>);
@@ -2717,6 +2741,7 @@ mod tests {
             stage_all: false,
             amend: true,
             no_verify: false,
+            fixup: None,
         };
 
         run_op(&runner, &amend(None)).unwrap();
@@ -2752,6 +2777,7 @@ mod tests {
             stage_all: false,
             amend: false,
             no_verify,
+            fixup: None,
         };
 
         let blocked = run_op(&runner, &commit(false));
@@ -2764,6 +2790,65 @@ mod tests {
         run_op(&runner, &commit(true)).unwrap();
         assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"2\n");
         assert_eq!(git(dir, &["log", "-1", "--format=%B"]), b"second\n\n");
+    }
+
+    fn fixup_of(target: &str, no_verify: bool) -> GitOp {
+        GitOp::Commit {
+            message: None,
+            stage_all: false,
+            amend: false,
+            no_verify,
+            fixup: Some(CommitId::parse(target).unwrap()),
+        }
+    }
+
+    #[test]
+    fn a_fixup_commit_names_its_target_by_full_id_with_no_stdin() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let fixup = format!("--fixup={oid}");
+        for (no_verify, argv) in [
+            (false, vec!["commit", fixup.as_str()]),
+            (true, vec!["commit", "--no-verify", fixup.as_str()]),
+        ] {
+            let op = fixup_of(oid, no_verify);
+            let cmd = op_command(&op);
+            assert_eq!(
+                cmd.args(),
+                argv.iter().map(OsString::from).collect::<Vec<_>>()
+            );
+            assert_eq!(cmd.input(), None);
+            assert_eq!(cmd.envs(), []);
+            let runner = FakeRunner::new().expect(&argv, ok(b""));
+            assert_eq!(run_op(&runner, &op), Ok(()));
+            runner.assert_done();
+            assert_eq!(runner.inputs(), [None]);
+        }
+    }
+
+    #[test]
+    fn a_fixup_commit_takes_its_target_s_raw_subject_in_real_git() {
+        use crate::git::fake::git;
+
+        let tmp = committed_and_staged_repo();
+        let dir = tmp.path();
+        // Bytes the log would make terminal-safe; git must copy them as is.
+        let subject = "caf\u{e9} \x1b[1mbold\x1b[0m\ttab";
+        git(dir, &["commit", "-q", "-m", subject]);
+        let target = git(dir, &["rev-parse", "HEAD"]);
+        let target = String::from_utf8(target).unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "B"]);
+        std::fs::write(dir.join("a.txt"), "fixed\n").unwrap();
+        git(dir, &["add", "-A"]);
+        let runner = crate::git::CliRunner::isolated(dir);
+
+        run_op(&runner, &fixup_of(target.trim(), false)).unwrap();
+
+        let made = git(dir, &["log", "-1", "--format=%s"]);
+        assert_eq!(made, format!("fixup! {subject}\n").into_bytes());
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"4\n");
+        assert_eq!(git(dir, &["diff", "--cached"]), b"");
     }
 
     #[test]

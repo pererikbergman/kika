@@ -14,7 +14,7 @@ use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::cherry_pick;
 use crate::git::diff::terminal_safe;
-use crate::git::ops::{GitOp, commit_command, op_command, run_op};
+use crate::git::ops::{GitOp, MessageSource, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
@@ -204,6 +204,7 @@ fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> R
         stage_all,
         amend,
         no_verify,
+        fixup,
     } = op
     else {
         // Only commits are handed over; anything else runs as usual.
@@ -225,7 +226,12 @@ fn commit_on_terminal(op: &GitOp, runner: &dyn GitRunner, pause: &dyn Fn()) -> R
         }
         None => None,
     };
-    let cmd = commit_command(*amend, *no_verify, file.as_ref().map(|f| f.path.as_path()));
+    let source = match (&file, fixup) {
+        (Some(file), _) => MessageSource::File(&file.path),
+        (None, Some(target)) => MessageSource::Fixup(target),
+        (None, None) => MessageSource::Keep,
+    };
+    let cmd = commit_command(*amend, *no_verify, source);
     run_on_terminal(cmd, runner, pause)
 }
 
@@ -714,6 +720,7 @@ mod tests {
             stage_all,
             amend,
             no_verify,
+            fixup: None,
         }
     }
 
@@ -878,6 +885,23 @@ mod tests {
             FakeRunner::new().expect_attached(&["commit", "--no-verify", "-F", ANY_ARG], true);
         assert_eq!(commit_with(&runner, &skip), (finished(&skip, Ok(())), 0));
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_fixup_on_the_terminal_names_its_target_and_writes_no_message_file() {
+        let oid = "0123456789abcdef0123456789abcdef01234567";
+        let op = GitOp::Commit {
+            message: None,
+            stage_all: false,
+            amend: false,
+            no_verify: true,
+            fixup: crate::git::commit_files::CommitId::parse(oid),
+        };
+        let fixup = format!("--fixup={oid}");
+        let runner = FakeRunner::new().expect_attached(&["commit", "--no-verify", &fixup], true);
+        assert_eq!(commit_with(&runner, &op), (finished(&op, Ok(())), 0));
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [None]);
     }
 
     #[test]

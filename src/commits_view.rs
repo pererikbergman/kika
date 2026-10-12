@@ -609,6 +609,7 @@ mod tests {
             author: author.into(),
             time: NOW - ago,
             subject: subject.into(),
+            subject_altered: false,
         }
     }
 
