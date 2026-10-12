@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::diff::{Classifier, DiffLine, sanitize, sanitize_body, terminal_safe};
+use super::diff::{Classifier, DiffLine, EmojiZwj, sanitize, sanitize_body, terminal_safe};
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
 
@@ -50,8 +50,9 @@ struct CommitInfo {
 
 /// Parse `git blame --porcelain`. Each line is a `<oid> <orig> <final>
 /// [<count>]` header, then `key value` rows (only on a commit's first
-/// line), then the line itself after a tab.
-pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>, String> {
+/// line), then the line itself after a tab. `emoji` applies to the line
+/// text only; the author name always escapes.
+pub fn parse_blame(out: &[u8], emoji: EmojiZwj) -> Result<Vec<BlameLine>, String> {
     let mut commits: HashMap<String, CommitInfo> = HashMap::new();
     let mut lines = Vec::new();
     let mut current: Option<(String, usize)> = None;
@@ -66,7 +67,7 @@ pub fn parse_blame(out: &[u8]) -> Result<Vec<BlameLine>, String> {
                 date: info.map(CommitInfo::date).unwrap_or_default(),
                 oid,
                 line_no,
-                text: sanitize_body(text),
+                text: sanitize_body(text, emoji),
             });
             continue;
         }
@@ -157,9 +158,13 @@ fn ymd(seconds: i64) -> String {
 
 /// Blame `path` as it is in the worktree. Errors are made safe to draw,
 /// since git's message can quote repo-controlled paths.
-pub fn read_blame(runner: &dyn GitRunner, path: &RepoPath) -> Result<Vec<BlameLine>, String> {
+pub fn read_blame(
+    runner: &dyn GitRunner,
+    path: &RepoPath,
+    emoji: EmojiZwj,
+) -> Result<Vec<BlameLine>, String> {
     let stdout = run(runner, &blame_command(path), "git blame failed")?;
-    parse_blame(&stdout)
+    parse_blame(&stdout, emoji)
 }
 
 /// One commit's message and full diff, in plain text we classify ourselves.
@@ -177,13 +182,17 @@ pub fn show_command(oid: &str) -> GitCommand {
 
 /// The commit `oid` as diff lines: everything before the first `@@`, the
 /// message included, comes out as a header.
-pub fn read_commit(runner: &dyn GitRunner, oid: &str) -> Result<Vec<DiffLine>, String> {
+pub fn read_commit(
+    runner: &dyn GitRunner,
+    oid: &str,
+    emoji: EmojiZwj,
+) -> Result<Vec<DiffLine>, String> {
     let stdout = run(runner, &show_command(oid), "git show failed")?;
     let body = stdout.strip_suffix(b"\n").unwrap_or(&stdout);
     if body.is_empty() {
         return Ok(vec![]);
     }
-    let mut classifier = Classifier::new();
+    let mut classifier = Classifier::new(emoji);
     Ok(body
         .split(|&b| b == b'\n')
         .map(|line| classifier.classify(line))
@@ -269,7 +278,7 @@ mod tests {
     fn every_line_gets_its_commit_author_local_date_and_sanitized_text() {
         let ann = "Ann \u{FFFD}[31mA";
         assert_eq!(
-            parse_blame(&fixture()),
+            parse_blame(&fixture(), EmojiZwj::Escape),
             Ok(vec![
                 line(A, ann, "2023-11-15", 1, "one"),
                 line(A, ann, "2023-11-15", 2, "two\u{FFFD}[2J"),
@@ -282,16 +291,44 @@ mod tests {
     #[test]
     fn line_text_keeps_a_joiner_that_the_author_name_escapes() {
         let out = format!("{A} 1 1 1\nauthor می\u{200C}خواهم\n\tمی\u{200C}خواهم\n");
-        let lines = parse_blame(out.as_bytes()).unwrap();
+        let lines = parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
         assert_eq!(lines[0].author, "می<U+200C>خواهم");
         assert_eq!(lines[0].text, "می\u{200C}خواهم");
     }
 
     #[test]
+    fn line_text_keeps_an_emoji_joiner_only_with_keep_and_the_author_never() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let escaped = "👨<U+200D>👩<U+200D>👧";
+        let out = format!("{A} 1 1 1\nauthor {family}\n\t{family}\n");
+        for (emoji, text) in [(EmojiZwj::Keep, family), (EmojiZwj::Escape, escaped)] {
+            let lines = parse_blame(out.as_bytes(), emoji).unwrap();
+            assert_eq!(lines[0].author, escaped, "{emoji:?}");
+            assert_eq!(lines[0].text, text, "{emoji:?}");
+        }
+    }
+
+    #[test]
+    fn read_blame_and_read_commit_pass_the_emoji_policy_on() {
+        let family = "👨\u{200D}👩";
+        let blame = format!("{A} 1 1 1\nauthor Ann\n\t{family}\n");
+        let runner = FakeRunner::new().expect(
+            &["blame", "--porcelain", "--", "a.txt"],
+            ok(blame.as_bytes()),
+        );
+        let lines = read_blame(&runner, &"a.txt".into(), EmojiZwj::Keep).unwrap();
+        assert_eq!(lines[0].text, family);
+        let show = format!("commit {A}\n\ndiff --git a/a b/a\n@@ -1 +1 @@\n+{family}\n");
+        let runner = FakeRunner::new().expect(SHOW, ok(show.as_bytes()));
+        let lines = read_commit(&runner, A, EmojiZwj::Keep).unwrap();
+        assert_eq!(lines.last().unwrap().text, format!("+{family}"));
+    }
+
+    #[test]
     fn empty_output_is_an_empty_file_and_garbage_is_an_error() {
-        assert_eq!(parse_blame(b""), Ok(vec![]));
-        assert!(parse_blame(b"\torphan line\n").is_err());
-        assert!(parse_blame(b"nothex 1 1 1\n\tx\n").is_err());
+        assert_eq!(parse_blame(b"", EmojiZwj::Escape), Ok(vec![]));
+        assert!(parse_blame(b"\torphan line\n", EmojiZwj::Escape).is_err());
+        assert!(parse_blame(b"nothex 1 1 1\n\tx\n", EmojiZwj::Escape).is_err());
     }
 
     #[test]
@@ -300,7 +337,7 @@ mod tests {
             "{A} 1 1 1\nauthor X\nauthor-time -86400\nauthor-tz +0530\n\tx\n\
              {B} 1 2 1\nauthor Y\nauthor-time 1700000000\nauthor-tz -0930\n\ty\n"
         );
-        let lines = parse_blame(out.as_bytes()).unwrap();
+        let lines = parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
         assert_eq!(lines[0].date, "1969-12-31");
         assert_eq!(lines[1].date, "2023-11-14");
     }
@@ -339,7 +376,7 @@ mod tests {
             &["blame", "--porcelain", "--", ":(top)a*.txt"],
             ok(&fixture()),
         );
-        let lines = read_blame(&runner, &":(top)a*.txt".into()).unwrap();
+        let lines = read_blame(&runner, &":(top)a*.txt".into(), EmojiZwj::Escape).unwrap();
         assert_eq!(lines.len(), 4);
         runner.assert_done();
         assert_eq!(
@@ -365,12 +402,12 @@ mod tests {
         const ARGV: &[&str] = &["blame", "--porcelain", "--", "a.txt"];
         let runner = FakeRunner::new().expect(ARGV, fail("fatal: no such \x1b[31mpath\n"));
         assert_eq!(
-            read_blame(&runner, &"a.txt".into()),
+            read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape),
             Err("fatal: no such \u{FFFD}[31mpath".into())
         );
         let runner = FakeRunner::new().expect(ARGV, fail(""));
         assert_eq!(
-            read_blame(&runner, &"a.txt".into()),
+            read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape),
             Err("git blame failed".into())
         );
     }
@@ -393,7 +430,7 @@ mod tests {
         std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\n").unwrap();
 
         let runner = crate::git::CliRunner::isolated(dir);
-        let lines = read_blame(&runner, &"a.txt".into()).unwrap();
+        let lines = read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape).unwrap();
         let seen: Vec<(&str, bool, usize, &str)> = lines
             .iter()
             .map(|l| {
@@ -436,7 +473,7 @@ mod tests {
              +new\n"
         );
         let runner = FakeRunner::new().expect(SHOW, ok(out.as_bytes()));
-        let lines = read_commit(&runner, A).unwrap();
+        let lines = read_commit(&runner, A, EmojiZwj::Escape).unwrap();
         runner.assert_done();
         assert_eq!(
             env(&show_command(A)),
@@ -467,8 +504,14 @@ mod tests {
     #[test]
     fn a_failed_show_returns_gits_message_made_safe() {
         let runner = FakeRunner::new().expect(SHOW, fail("fatal: bad object\n"));
-        assert_eq!(read_commit(&runner, A), Err("fatal: bad object".into()));
+        assert_eq!(
+            read_commit(&runner, A, EmojiZwj::Escape),
+            Err("fatal: bad object".into())
+        );
         let runner = FakeRunner::new().expect(SHOW, fail(""));
-        assert_eq!(read_commit(&runner, A), Err("git show failed".into()));
+        assert_eq!(
+            read_commit(&runner, A, EmojiZwj::Escape),
+            Err("git show failed".into())
+        );
     }
 }

@@ -9,7 +9,8 @@ use crate::diff_pane::DiffPane;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
 use crate::git::blame::BlameLine;
-use crate::git::diff::{DiffLine, DiffOptions, DiffSide, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, DiffSide, EmojiZwj, LineKind, sanitize};
+use crate::git::emoji;
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
@@ -147,9 +148,11 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
             // Short, so it fits the pane's title at 80 columns.
             let suffix = format!("{label} (unmapped)");
-            render_hunk_view(view, options, &suffix, &look, frame, area)
+            render_hunk_view(view, options, state.emoji_zwj, &suffix, &look, frame, area)
         }
-        (Focus::Diff(view), ..) => render_hunk_view(view, options, "", &look, frame, area),
+        (Focus::Diff(view), ..) => {
+            render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
+        }
         (Focus::Conflict(view), ..) => {
             conflict_view::render(view, &state.keymap, &look, frame, area)
         }
@@ -660,30 +663,100 @@ enum Cell {
     Rest,
 }
 
+/// The glyph `clip` is building: what joins it may make it wider.
+struct Glyph {
+    start: usize,
+    width: usize,
+    text: String,
+}
+
+/// For each char of `line`, whether it continues the glyph before it
+/// instead of starting one: a zero-width char, or an emoji that a ZWJ or a
+/// skin tone joins to a glyph starting with an emoji. `clip` lays glyphs out
+/// by it and the search marks snap to it, so a mark never cuts a glyph the
+/// terminal draws as one. A zero-width char with no glyph before it
+/// continues nothing.
+fn continues_glyph(line: &str) -> Vec<bool> {
+    let mut glyph_is_emoji = None;
+    let mut before = None;
+    line.chars()
+        .map(|c| {
+            let joins = glyph_is_emoji == Some(true)
+                && (emoji::is_pictographic(c) && before == Some('\u{200D}')
+                    || emoji::is_modifier(c) && before.is_some_and(emoji::is_pictographic));
+            let zero = width_of(c.encode_utf8(&mut [0; 4])) == 0;
+            let continues = glyph_is_emoji.is_some() && (joins || zero);
+            if !continues && !zero {
+                glyph_is_emoji = Some(emoji::is_pictographic(c));
+            }
+            before = Some(c);
+            continues
+        })
+        .collect()
+}
+
+impl Glyph {
+    /// The cells it covers in `cells`, which show columns from `from`.
+    fn span(&self, cells: &[Cell], from: usize) -> Option<std::ops::Range<usize>> {
+        let at = self.start.checked_sub(from)?;
+        (at < cells.len()).then(|| at..(at + self.width).min(cells.len()))
+    }
+
+    /// Draw it into `cells` if it fits whole; a glyph cut by the edge
+    /// leaves its cells blank.
+    fn place(&self, cells: &mut [Cell], from: usize) {
+        let Some(span) = self.span(cells, from) else {
+            return;
+        };
+        if span.len() < self.width {
+            cells[span].fill(Cell::Blank);
+            return;
+        }
+        cells[span.start] = Cell::Glyph(self.text.clone());
+        cells[span.start + 1..span.end].fill(Cell::Rest);
+    }
+
+    fn blank(&self, cells: &mut [Cell], from: usize) {
+        if let Some(span) = self.span(cells, from) {
+            cells[span].fill(Cell::Blank);
+        }
+    }
+}
+
 /// Columns `from..from + width` of `line`. A wide glyph cut by an edge
 /// becomes blank, and a `…` replaces the edge cell where text is cut off.
+/// An emoji ZWJ sequence, or an emoji with a skin-tone modifier, is one
+/// glyph, as the terminal buffer clusters it: what follows the first emoji
+/// joins it. Script joiners do not join that way. A glyph is as wide as
+/// ratatui measures all of it, so `❤` grows from one column to two when a
+/// U+FE0F joins it.
 pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
     let mut cells = vec![Cell::Blank; width];
     let mut col: usize = 0;
-    for c in line.chars() {
+    let mut last: Option<Glyph> = None;
+    for (c, continues) in line.chars().zip(continues_glyph(line)) {
         let w = width_of(c.encode_utf8(&mut [0; 4]));
-        if w == 0 {
-            // A combining mark stays with the glyph before it.
-            if let Some(Cell::Glyph(glyph)) = col
-                .checked_sub(1)
-                .and_then(|last| last.checked_sub(from))
-                .and_then(|i| cells.get_mut(i))
-            {
-                glyph.push(c);
-            }
+        if let Some(glyph) = last.as_mut().filter(|_| continues) {
+            // A combining mark or a joined emoji stays with the glyph before it.
+            // It is redrawn at its new width: `🏳️‍⚧` measures 3 until the
+            // last U+FE0F brings it back to 2.
+            glyph.blank(&mut cells, from);
+            glyph.text.push(c);
+            glyph.width = width_of(&glyph.text);
+            col = glyph.start + glyph.width;
+            glyph.place(&mut cells, from);
             continue;
         }
-        if col >= from && col + w <= from + width {
-            cells[col - from] = Cell::Glyph(c.to_string());
-            for rest in &mut cells[col - from + 1..col - from + w] {
-                *rest = Cell::Rest;
-            }
+        if w == 0 {
+            continue;
         }
+        let glyph = Glyph {
+            start: col,
+            width: w,
+            text: c.to_string(),
+        };
+        glyph.place(&mut cells, from);
+        last = Some(glyph);
         col += w;
     }
     if width > 0 && from > 0 && col > 0 {
@@ -1382,6 +1455,7 @@ fn render_diff_pane(
 fn render_hunk_view(
     view: &HunkView,
     options: DiffOptions,
+    emoji: EmojiZwj,
     suffix: &str,
     look: &PanelLook,
     frame: &mut Frame,
@@ -1425,7 +1499,7 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&drawn_text(&row), 0, width.saturating_sub(1));
+                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(1));
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
                     spans.extend(marked_spans(text, style, &search_marks(view, at)));
                     let line = Line::from(spans);
@@ -1482,20 +1556,43 @@ pub(crate) const CURRENT_MATCH: Style = Style::new()
 
 /// `text` in `style`, split so each char range in `marks` (in order, not
 /// overlapping) takes its own style on top. Ranges past the end of a
-/// clipped text are cut to it.
+/// clipped text are cut to it. Each range widens to whole glyphs: the
+/// buffer measures each span on its own, so a span that ended inside an
+/// emoji sequence or before a combining mark would split what `clip` laid
+/// out as one glyph, and shift the rest of the row.
 fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
     if marks.is_empty() {
         return vec![Span::styled(text, style)];
     }
+    let continues = continues_glyph(&text);
     let chars: Vec<char> = text.chars().collect();
+    let inside = |i: usize| continues.get(i).copied().unwrap_or(false);
     let piece = |from: usize, to: usize| {
         chars[from.min(chars.len())..to.min(chars.len())]
             .iter()
             .collect::<String>()
     };
-    let mut spans = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for &(start, end, mark) in marks {
+        let mut start = start.min(chars.len()).max(at);
+        while start > at && inside(start) {
+            start -= 1;
+        }
+        let mut end = end.min(chars.len());
+        while inside(end) {
+            end += 1;
+        }
+        // A match in the glyph the last one widened to: that span already
+        // holds it, and takes this match's style on top.
+        if end <= start {
+            if at > 0
+                && let Some(last) = spans.last_mut()
+            {
+                last.style = last.style.patch(mark);
+            }
+            continue;
+        }
         spans.push(Span::styled(piece(at, start), style));
         spans.push(Span::styled(piece(start, end), style.patch(mark)));
         at = end;
@@ -3160,6 +3257,73 @@ mod tests {
     }
 
     #[test]
+    fn clip_keeps_an_emoji_sequence_as_one_glyph() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(clip(&format!("{family}X"), 0, 3), format!("{family}X"));
+        // Cut after the sequence: the sequence never splits.
+        assert_eq!(clip(&format!("ab{family}"), 0, 3), "ab…");
+        assert_eq!(clip(&format!("ab{family}"), 0, 4), format!("ab{family}"));
+        assert_eq!(clip(&format!("a{family}b"), 0, 3), "a …");
+        // A `from` inside it blanks it like a split wide glyph.
+        assert_eq!(clip(&format!("{family}ab"), 1, 3), "…ab");
+        assert_eq!(clip(&format!("x{family}ab"), 2, 3), "…ab");
+        // A skin tone and U+FE0F join the emoji before them too.
+        let coder = "👩\u{1F3FD}\u{200D}💻";
+        assert_eq!(clip(&format!("{coder}X"), 0, 3), format!("{coder}X"));
+        let fire = "❤\u{FE0F}\u{200D}🔥";
+        assert_eq!(clip(&format!("{fire}X"), 0, 3), format!("{fire}X"));
+        // An escaped joiner leaves each emoji its own two columns.
+        assert_eq!(clip("👨<U+200D>👩", 0, 12), "👨<U+200D>👩");
+        assert_eq!(clip("👨<U+200D>👩", 0, 11), "👨<U+200D>…");
+    }
+
+    #[test]
+    fn clip_counts_a_sequence_that_starts_narrow_as_two_columns() {
+        // `❤` and `🏳` are one column alone; U+FE0F makes them two, and the
+        // terminal buffer draws the whole sequence in those two.
+        for start in [
+            "❤\u{FE0F}\u{200D}🔥",
+            "🏳\u{FE0F}\u{200D}⚧\u{FE0F}",
+            "❤\u{FE0F}",
+        ] {
+            let line = format!("{start}ab");
+            for (from, width, expected) in [
+                (0, 1, "…".to_string()),
+                (0, 2, " …".to_string()),
+                (0, 3, format!("{start}…")),
+                (0, 4, format!("{start}ab")),
+                (1, 3, "…ab".to_string()),
+                // Cut at both edges: each edge cell is a `…`.
+                (1, 2, "……".to_string()),
+                (2, 2, "…b".to_string()),
+            ] {
+                assert_eq!(
+                    clip(&line, from, width),
+                    expected,
+                    "{start:?} {from} {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clip_of_a_sequence_into_one_or_two_columns_never_panics() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        assert_eq!(clip(family, 0, 1), "…");
+        assert_eq!(clip(family, 0, 2), family);
+        assert_eq!(clip(family, 1, 1), "…");
+        assert_eq!(clip(family, 1, 2), "…");
+        assert_eq!(clip("❤\u{FE0F}\u{200D}🔥", 0, 1), "…");
+    }
+
+    #[test]
+    fn clip_never_joins_letters_across_a_script_joiner() {
+        // The consonant after `क्‍` still counts its own column.
+        assert_eq!(clip("क्\u{200D}षabc", 0, 4), "क्\u{200D}षa…");
+        assert_eq!(clip("a\u{200D}👨bc", 0, 4), "a\u{200D}👨…");
+    }
+
+    #[test]
     fn the_focused_box_is_marked_in_text_not_only_colour() {
         let state = with_commit(CommitFlow::Editing(commit_editor("s", &[""])));
         let rows = draw(&state, 80, 24);
@@ -3377,6 +3541,246 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `JOINED` drawn where the terminal clusters emoji ZWJ sequences.
+    fn joined_keep(diff: &str) -> AppState {
+        let mut state = hunks(DiffSide::Worktree, diff.as_bytes());
+        state.emoji_zwj = EmojiZwj::Keep;
+        state
+    }
+
+    /// No cell holds part of an emoji sequence: each holds all of `family`
+    /// or none of it, and no cell starts with a joiner or a virama.
+    fn assert_no_split_cluster(buffer: &ratatui::buffer::Buffer, family: &str, at: &str) {
+        let parts: Vec<char> = family.chars().filter(|&c| c != '\u{200D}').collect();
+        for cell in buffer.content() {
+            let symbol = cell.symbol();
+            let lead = symbol.chars().next();
+            assert!(
+                !matches!(lead, Some('\u{200C}' | '\u{200D}' | '\u{094D}')),
+                "{at}: a cell starts with {lead:?}"
+            );
+            if symbol.chars().any(|c| parts.contains(&c)) {
+                assert_eq!(symbol, family, "{at}: a split sequence");
+            }
+        }
+    }
+
+    #[test]
+    fn with_keep_an_emoji_sequence_is_one_cell_and_the_row_stays_aligned() {
+        let width = 100;
+        let buffer = draw_buffer(&joined_keep(JOINED), width, 20);
+        let (x, y) = added_row(&buffer, '👨');
+        assert_eq!(buffer[(x + 1, y)].symbol(), "👨\u{200D}👩\u{200D}👧");
+        assert_eq!(buffer[(x + 1 + 2, y)].symbol(), "X");
+        assert_eq!(buffer[(width - 1, y)].symbol(), "┃");
+        let rows = buffer_rows(&buffer);
+        assert!(!contains(&rows, "👨<U+200D>"), "{rows:#?}");
+        // The script joiners and the header escape are as with `Escape`.
+        assert!(contains(&rows, "+می\u{200C}خواهمX"), "{rows:#?}");
+        assert!(contains(&rows, "+क्\u{200D}षX"), "{rows:#?}");
+        assert!(contains(&rows, "+++ b/می<U+200C>خواهم.rs"), "{rows:#?}");
+        for (first, columns) in [('م', 1 + 7), ('क', 1 + 2)] {
+            let (x, y) = added_row(&buffer, first);
+            assert_eq!(buffer[(x + columns, y)].symbol(), "X", "{first:?}");
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{first:?}");
+        }
+    }
+
+    #[test]
+    fn with_keep_a_clipped_joined_row_keeps_its_border_and_never_splits_a_cluster() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let long = format!("می\u{200C}خواهم क्\u{200D}ष {family} ").repeat(8);
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{long}\n");
+        // The tiny sizes are the smallest that still show the row, and one
+        // that does not, to show nothing splits or panics there.
+        let sizes = (30..=60)
+            .map(|w| (w, 12))
+            .chain([(24, 9), (16, 9), (12, 5)]);
+        for (width, height) in sizes {
+            let buffer = draw_buffer(&joined_keep(&diff), width, height);
+            let at = format!("{width}x{height}");
+            // At 12x5 the pane is too short to reach the row.
+            if let Some((_, y)) = find_added_row(&buffer, 'م') {
+                assert_cut_row(&buffer, width, y, &at);
+            } else {
+                let rows = buffer_rows(&buffer);
+                assert_eq!((width, height), (12, 5), "{at}: no row {rows:#?}");
+            }
+            assert_no_split_cluster(&buffer, family, &at);
+        }
+    }
+
+    /// Where the `+` of the added row starting with `first` is drawn, if it is.
+    fn find_added_row(buffer: &ratatui::buffer::Buffer, first: char) -> Option<(u16, u16)> {
+        let area = buffer.area;
+        (0..area.height)
+            .flat_map(|y| (0..area.width.saturating_sub(1)).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                buffer[(x, y)].symbol() == "+" && buffer[(x + 1, y)].symbol().starts_with(first)
+            })
+    }
+
+    /// Row `y` was cut: it ends in a `…` just inside the focused pane's border.
+    fn assert_cut_row(buffer: &ratatui::buffer::Buffer, width: u16, y: u16, at: &str) {
+        assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{at}");
+        assert_eq!(buffer[(width - 2, y)].symbol(), "…", "{at}");
+    }
+
+    #[test]
+    fn with_keep_a_sequence_that_starts_narrow_takes_two_columns() {
+        let fire = "❤\u{FE0F}\u{200D}🔥";
+        let flag = "🏳\u{FE0F}\u{200D}⚧\u{FE0F}";
+        let diff = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1,2 @@\n-x\n\
+             +{fire}X\n+{flag}X\n"
+        );
+        let width = 100;
+        let buffer = draw_buffer(&joined_keep(&diff), width, 20);
+        for (first, sequence) in [('❤', fire), ('🏳', flag)] {
+            let (x, y) = added_row(&buffer, first);
+            assert_eq!(buffer[(x + 1, y)].symbol(), sequence);
+            assert_eq!(buffer[(x + 1 + 2, y)].symbol(), "X", "{first:?}");
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{first:?}");
+        }
+
+        // Cut at every width: the `…` and the border hold, and nothing splits.
+        let long = format!("{fire}a{flag}b ").repeat(12);
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{long}\n");
+        for width in (12..=60).chain([80]) {
+            let buffer = draw_buffer(&joined_keep(&diff), width, 12);
+            let at = width.to_string();
+            let (x, y) = added_row(&buffer, '❤');
+            assert_cut_row(&buffer, width, y, &at);
+            // Each sequence is one 2-column cell, so the letters after them
+            // land on the columns a terminal draws them at.
+            let row: Vec<&str> = (x + 1..width - 2)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            for (i, symbol) in row.iter().enumerate() {
+                if *symbol == fire || *symbol == flag {
+                    let after = row.get(i + 2).copied();
+                    assert!(
+                        after.is_none_or(|s| s == "a" || s == "b"),
+                        "{at}: {after:?} two columns after {symbol:?}"
+                    );
+                }
+            }
+            for cell in buffer.content() {
+                let symbol = cell.symbol();
+                if symbol.contains('\u{200D}') {
+                    assert!(symbol == fire || symbol == flag, "{at}: split {symbol:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_keep_a_search_match_never_splits_an_emoji_sequence() {
+        let family = "👨\u{200D}👩";
+        let tail: String = ('a'..='z').collect();
+        let diff = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n\
+             +Q{family}X{family}{tail}\n"
+        );
+        for query in ["👨", "👩", "\u{200D}", family, "Q👨", "👩X", "X👨"] {
+            for width in [100, 24, 20] {
+                let mut state = joined_keep(&diff);
+                if let Focus::Diff(view) = &mut state.focus {
+                    view.set_search(query, EmojiZwj::Keep);
+                }
+                let buffer = draw_buffer(&state, width, 12);
+                let at = format!("{query:?} at {width}");
+                let (x, y) = added_row(&buffer, 'Q');
+                // `+Q`, the sequence in one 2-column cell, then `X`.
+                assert_eq!(buffer[(x + 2, y)].symbol(), family, "{at}");
+                assert_eq!(buffer[(x + 4, y)].symbol(), "X", "{at}");
+                assert_eq!(buffer[(x + 5, y)].symbol(), family, "{at}");
+                // The match is marked on the whole sequence.
+                let marked = |x: u16| buffer[(x, y)].style().bg.is_some();
+                if query != "X👨" {
+                    assert!(marked(x + 2), "{at}: not marked");
+                }
+                if width == 100 {
+                    assert_eq!(buffer[(x + 7, y)].symbol(), "a", "{at}");
+                } else {
+                    assert_cut_row(&buffer, width, y, &at);
+                }
+                assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{at}");
+                for cell in buffer.content() {
+                    let symbol = cell.symbol();
+                    assert!(
+                        !symbol.ends_with('\u{200D}') && !symbol.starts_with('\u{200D}'),
+                        "{at}: a cell {symbol:?}"
+                    );
+                    if symbol.contains('👨') || symbol.contains('👩') {
+                        assert_eq!(symbol, family, "{at}: a split sequence");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn marks_widen_to_whole_glyphs_and_a_second_mark_in_one_glyph_restyles_it() {
+        let family = "👨\u{200D}👩";
+        let text = format!("Q{family}X");
+        let spans = |marks: &[(usize, usize, Style)]| -> Vec<(String, Style)> {
+            marked_spans(text.clone(), Style::new(), marks)
+                .into_iter()
+                .map(|span| (span.content.into_owned(), span.style))
+                .collect()
+        };
+        let plain = Style::new();
+        // `👩` (chars 3..4) and the ZWJ (2..3) both widen to the sequence.
+        for range in [(3, 4), (2, 3), (1, 2), (1, 4)] {
+            assert_eq!(
+                spans(&[(range.0, range.1, MATCH)]),
+                [
+                    ("Q".to_string(), plain),
+                    (family.to_string(), MATCH),
+                    ("X".to_string(), plain),
+                ],
+                "{range:?}"
+            );
+        }
+        // Two matches in the one sequence: the current one wins.
+        assert_eq!(
+            spans(&[(1, 2, MATCH), (3, 4, CURRENT_MATCH)]),
+            [
+                ("Q".to_string(), plain),
+                (family.to_string(), MATCH.patch(CURRENT_MATCH)),
+                ("X".to_string(), plain),
+            ]
+        );
+        // A combining mark stays with its letter too.
+        let accented = marked_spans("e\u{301}x".into(), plain, &[(0, 1, MATCH)]);
+        assert_eq!(accented[0].content, "e\u{301}");
+    }
+
+    #[test]
+    fn at_80_by_24_a_keep_row_of_emoji_sequences_stays_aligned() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let coder = "👩\u{1F3FD}\u{200D}💻";
+        let fire = "❤\u{FE0F}\u{200D}🔥";
+        let flag = "🏳\u{FE0F}\u{200D}⚧\u{FE0F}";
+        let row = format!("{family}A{coder}B{fire}C{flag}D");
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{row}\n");
+        let buffer = draw_buffer(&joined_keep(&diff), 80, 24);
+        let (x, y) = added_row(&buffer, '👨');
+        for (i, (sequence, letter)) in [(family, "A"), (coder, "B"), (fire, "C"), (flag, "D")]
+            .into_iter()
+            .enumerate()
+        {
+            let at = x + 1 + 3 * i as u16;
+            assert_eq!(buffer[(at, y)].symbol(), sequence, "{letter}");
+            assert_eq!(buffer[(at + 2, y)].symbol(), letter);
+        }
+        assert_eq!(buffer[(79, y)].symbol(), "┃");
     }
 
     #[test]
@@ -4223,7 +4627,7 @@ mod tests {
     #[test]
     fn a_blamed_word_keeps_its_zwnj() {
         let out = format!("{OID} 1 1 1\nauthor Ann\n\tمی\u{200C}خواهمX\n");
-        let lines = crate::git::blame::parse_blame(out.as_bytes()).unwrap();
+        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Escape).unwrap();
         let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "می\u{200C}خواهمX"), "{rows:#?}");
@@ -4231,6 +4635,32 @@ mod tests {
         // Seven letters, one column each; the ZWNJ takes none.
         let (x, y) = find(&buffer, "م");
         assert_eq!(buffer[(x + 7, y)].symbol(), "X");
+    }
+
+    #[test]
+    fn with_keep_a_blamed_emoji_sequence_is_one_cell_and_the_border_holds() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let out = format!("{OID} 1 1 1\nauthor Ann\n\t{family}X\n");
+        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
+        let buffer = draw_buffer(&blamed(lines, 0), 120, 20);
+        let area = buffer.area;
+        let (x, y) = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buffer[(x, y)].symbol() == family)
+            .expect("the sequence in one cell");
+        assert_eq!(buffer[(x + 2, y)].symbol(), "X");
+        assert_eq!(buffer[(119, y)].symbol(), "┃");
+
+        let long = format!("می\u{200C}خواهم क्\u{200D}ष {family} ").repeat(8);
+        let out = format!("{OID} 1 1 1\nauthor Ann\n\t{long}\n");
+        let lines = crate::git::blame::parse_blame(out.as_bytes(), EmojiZwj::Keep).unwrap();
+        let state = blamed(lines, 0);
+        for width in 30..=60 {
+            let buffer = draw_buffer(&state, width, 12);
+            let (_, y) = find(&buffer, "abcdef1 Ann");
+            assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{width}");
+            assert_no_split_cluster(&buffer, family, &width.to_string());
+        }
     }
 
     #[test]
@@ -4678,7 +5108,7 @@ mod tests {
     fn diff_matches_are_marked_and_the_current_one_stands_out() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
         if let Focus::Diff(view) = &mut state.focus {
-            view.set_search("one");
+            view.set_search("one", EmojiZwj::Escape);
         }
         let buffer = draw_buffer(&state, 100, 20);
         assert!(contains(&buffer_rows(&buffer), "match 1 of 2"));
@@ -4991,7 +5421,7 @@ mod tests {
         let wide = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+日本x\n";
         let mut state = hunks(DiffSide::Worktree, wide.as_bytes());
         if let Focus::Diff(view) = &mut state.focus {
-            view.set_search("x");
+            view.set_search("x", EmojiZwj::Escape);
         }
         let buffer = draw_buffer(&state, 100, 20);
         let rows = buffer_rows(&buffer);
@@ -5020,7 +5450,7 @@ mod tests {
         );
         let mut search = hunks(DiffSide::Worktree, TWO_HUNKS);
         if let Focus::Diff(view) = &mut search.focus {
-            view.set_search("one");
+            view.set_search("one", EmojiZwj::Escape);
         }
         for state in [&files, &typing_files, &search] {
             for (w, h) in [(80, 24), (40, 10), (10, 3), (2, 2), (1, 1), (0, 0)] {
@@ -5048,7 +5478,7 @@ mod tests {
         let rows = draw(&search, 120, 20);
         assert!(rows[19].contains("/ search"), "{:?}", rows[19]);
         if let Focus::Diff(view) = &mut search.focus {
-            view.set_search("one");
+            view.set_search("one", EmojiZwj::Escape);
         }
         let rows = draw(&search, 120, 20);
         assert!(

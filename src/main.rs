@@ -122,16 +122,24 @@ fn main() -> color_eyre::Result<ExitCode> {
     let global_config = config::global_path_from_env();
     // Read once here; the loop reloads the keys on focus-in.
     let config = config::load(&ConfigPaths::new(global_config.clone(), repo.as_deref()));
+    // Once, for the terminal Kika runs in; it cannot change mid-session.
+    let env = |name| std::env::var(name).ok();
+    let emoji_zwj = config::emoji_zwj(
+        &config.emoji_zwj_terminals,
+        env("TERM_PROGRAM").as_deref(),
+        env("TERM").as_deref(),
+    );
     let cli_runner = CliRunner::new(workdir);
     // Every process is logged, each retry too; the loop connects the sink.
     let sink = CommandSink::new();
     let recording = RecordingRunner::new(Arc::new(cli_runner), sink.clone());
     // Another process holding a lock for a moment is not worth an error.
     let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
-    let state = AppState::new(cli.context())
+    let mut state = AppState::new(cli.context())
         .with_location(repo, launch)
         .with_git_version(git_version)
         .with_forge_hosts(config.forge_hosts.clone());
+    state.emoji_zwj = emoji_zwj;
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 

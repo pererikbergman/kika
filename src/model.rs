@@ -27,7 +27,8 @@ use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{
-    DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, MAX_CONTEXT, MIN_CONTEXT, sanitize,
+    DiffChunk, DiffLine, DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT,
+    sanitize,
 };
 use crate::git::log::LogQuery;
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode, StashMode};
@@ -245,6 +246,9 @@ pub struct AppState {
     /// How diffs are drawn. Kept in memory for the session: it outlives file
     /// selection, focus changes and reloads.
     pub diff_options: DiffOptions,
+    /// How diff body rows draw emoji ZWJ sequences: resolved once at
+    /// startup for the running terminal, and fixed for the session.
+    pub emoji_zwj: EmojiZwj,
     /// Background loads that notice changes made outside Kika.
     pub watch: WatchState,
     /// The repositories entered from, outermost first; the current one is
@@ -361,6 +365,7 @@ impl AppState {
             notice: None,
             popups: Vec::new(),
             diff_options: DiffOptions::default(),
+            emoji_zwj: EmojiZwj::Escape,
             watch: WatchState::default(),
             repo_stack: Vec::new(),
             renderers: Vec::new(),
@@ -5360,7 +5365,7 @@ impl AppState {
             }
             InputTarget::DiffSearch => {
                 if let Focus::Diff(view) = &mut self.focus {
-                    view.set_search(&text);
+                    view.set_search(&text, self.emoji_zwj);
                 }
             }
             // Git runs the query on Enter, not on every key.

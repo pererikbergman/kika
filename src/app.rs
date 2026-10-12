@@ -55,7 +55,9 @@ pub async fn run(
         .with_global_config(global_config)
         .with_diff_pager(config.diff_pager.clone())
         .with_diff_tool(config.diff_tool.clone())
-        .with_forge(forge);
+        .with_forge(forge)
+        // Resolved by `main` for this terminal; the view reads the same value.
+        .with_emoji_zwj(state.emoji_zwj);
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);
