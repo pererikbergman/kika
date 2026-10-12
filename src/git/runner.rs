@@ -71,7 +71,11 @@ impl GitCommand {
         {
             args = rest;
         }
-        args.first().unwrap_or(&self.args[0])
+        // Only `-c` pairs: name the first argument. Never index, so an
+        // empty argv cannot panic the terminal hand-off.
+        args.first()
+            .or(self.args.first())
+            .map_or(OsStr::new(""), OsString::as_os_str)
     }
 
     pub fn envs(&self) -> &[(OsString, OsString)] {
@@ -455,6 +459,24 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_subcommand_skips_config_pairs_and_never_panics_without_one() {
+        let rebase = GitCommand::new("-c")
+            .arg("core.editor=true")
+            .arg("rebase")
+            .arg("--continue");
+        assert_eq!(rebase.subcommand(), "rebase");
+        assert_eq!(GitCommand::new("status").subcommand(), "status");
+
+        let only_config = GitCommand::new("-c").arg("key=value");
+        assert_eq!(only_config.subcommand(), "-c");
+        let empty = GitCommand {
+            args: Vec::new(),
+            ..GitCommand::new("unused")
+        };
+        assert_eq!(empty.subcommand(), "");
+    }
 
     /// What `command` does with `key`: `None` if it leaves the parent's
     /// value, `Some(None)` if it removes it, `Some(Some(v))` if it sets it.
