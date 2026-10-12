@@ -1,0 +1,10 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+X-Github-Media-Type: github.v4; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4986
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: graphql
+X-Ratelimit-Used: 14
+
+{"data":{"repository":{"b0":{"nodes":[{"number":3,"state":"OPEN","isDraft":false,"headRepositoryOwner":{"login":"someone"},"commits":{"nodes":[]}}]},"parent":{"b0":{"nodes":[{"number":58,"state":"CLOSED","isDraft":false,"headRepositoryOwner":null,"commits":{"nodes":[]}},{"number":31,"state":"OPEN","isDraft":true,"headRepositoryOwner":{"login":"me"},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}]}}}}}

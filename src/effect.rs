@@ -528,12 +528,14 @@ fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppInten
         let _ = tx.send(AppIntent::OpenUrlFailed("No browser is configured".into()));
         return;
     };
-    let spawned = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let spawned = crate::program::command(program).and_then(|mut command| {
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    });
     match spawned {
         Ok(mut child) => {
             std::thread::spawn(move || {
@@ -561,87 +563,127 @@ const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Copy with `argv`, the global config's clipboard program, given `bytes`
 /// on stdin; never in argv or the Command log. Spawning is quick, and
-/// writing and waiting run on threads of their own, so a program that does
-/// not read or does not exit holds nothing up: past `timeout` it is killed.
-/// Any failure comes back as `CopyFailed`.
+/// writing and waiting run on a worker thread, so a program that does not
+/// read or does not exit holds nothing up: past `timeout` it is stopped
+/// with everything it started. Any failure comes back as `CopyFailed`.
+/// Returns the worker, if the program started, so tests can see it end.
 fn run_clipboard_command(
     argv: Vec<OsString>,
     bytes: Vec<u8>,
     sink: CommandSink,
     tx: UnboundedSender<AppIntent>,
     timeout: Duration,
-) {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
+) -> Option<std::thread::JoinHandle<()>> {
+    use std::process::Stdio;
 
     let start = std::time::Instant::now();
     let finished = log_program(&argv, sink);
     // `check_argv` refuses an empty command, so this is only a guard.
     let Some((program, args)) = argv.split_first() else {
         finished(CommandOutcome::NotStarted);
-        return;
+        return None;
     };
     let name = terminal_safe(program.as_encoded_bytes());
     let fail = move |why: String| {
-        let _ = tx.send(AppIntent::CopyFailed(format!(
-            "{why}. Check clipboard.command in the global config."
-        )));
+        let _ = tx.send(AppIntent::CopyFailed(copy_failure(&why)));
     };
-    let spawned = Command::new(program)
+    let mut command = match crate::program::command(program) {
+        Ok(command) => command,
+        Err(e) => {
+            finished(CommandOutcome::NotStarted);
+            fail(format!("Could not start {name}: {e}"));
+            return None;
+        }
+    };
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let mut child = match spawned {
+        .stderr(Stdio::null());
+    // Its own process group, so a stop reaches whatever it starts.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             finished(CommandOutcome::NotStarted);
             fail(format!("Could not start {name}: {e}"));
-            return;
+            return None;
         }
     };
-    let stdin = child.stdin.take();
-    std::thread::spawn(move || {
-        // On a thread of its own: a program that never reads would block
-        // the write once the pipe is full. Dropping stdin closes it.
-        let (wrote_tx, wrote) = std::sync::mpsc::channel();
-        if let Some(mut stdin) = stdin {
-            std::thread::spawn(move || {
-                let _ = wrote_tx.send(stdin.write_all(&bytes));
-            });
-        }
+    let mut writer = child
+        .stdin
+        .take()
+        .map(|stdin| StdinWriter::new(stdin, bytes));
+    Some(std::thread::spawn(move || {
         let deadline = start + timeout;
+        let mut write = if writer.is_none() {
+            Sending::Sent
+        } else {
+            Sending::Ongoing
+        };
+        let mut exited = None;
         let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
+            let mut progressed = false;
+            if let Some(w) = writer.as_mut() {
+                match w.poll() {
+                    WritePoll::Pending { progressed: p } => progressed = p,
+                    WritePoll::Done(result) => {
+                        // Dropping stdin closes our end of the pipe.
+                        writer = None;
+                        write = result.map_or_else(Sending::Failed, |()| Sending::Sent);
+                    }
                 }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
+            }
+            if exited.is_none() {
+                match child.try_wait() {
+                    Ok(status) => exited = status,
+                    Err(e) => {
+                        crate::external_diff::kill_group(&mut child);
+                        break Err(format!("Could not wait for {name}: {e}"));
+                    }
+                }
+            }
+            match exited {
+                // A failed exit says more than the write, so it need not wait.
+                Some(status) if !matches!(write, Sending::Ongoing) || !status.success() => {
+                    break Ok(status);
+                }
+                _ if std::time::Instant::now() < deadline => {
+                    if !progressed {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                // It exited, but something it started holds stdin without
+                // reading. Its group is never signalled once the program is
+                // reaped, as its id may be reused; closing our end of the
+                // pipe is enough to hold nothing here.
+                Some(status) => {
+                    writer = None;
+                    write = Sending::Abandoned;
+                    break Ok(status);
+                }
+                None => {
+                    crate::external_diff::kill_group(&mut child);
                     break Err(format!(
                         "{name} did not finish within {}s",
                         timeout.as_secs_f32()
                     ));
                 }
-                Err(e) => break Err(format!("Could not wait for {name}: {e}")),
             }
         };
-        // The pipe is closed once it exits, so the write ends at once.
-        let write = wrote.recv_timeout(Duration::from_secs(1));
+        drop(writer);
         match (status, write) {
             (Ok(status), _) if !status.success() => {
                 finished(CommandOutcome::Failed(Some(status.to_string())));
                 fail(format!("{name} failed: {status}"));
             }
-            (Ok(_), Ok(Ok(()))) => finished(CommandOutcome::Ok),
-            (Ok(_), Ok(Err(e))) => {
+            (Ok(_), Sending::Sent) => finished(CommandOutcome::Ok),
+            (Ok(_), Sending::Failed(e)) => {
                 finished(CommandOutcome::Failed(None));
                 fail(format!("Could not send the text to {name}: {e}"));
             }
-            (Ok(_), Err(_)) => {
+            (Ok(_), Sending::Ongoing | Sending::Abandoned) => {
                 finished(CommandOutcome::Failed(None));
                 fail(format!("Could not send the text to {name}"));
             }
@@ -650,7 +692,119 @@ fn run_clipboard_command(
                 fail(why);
             }
         }
-    });
+    }))
+}
+
+/// `why` a copy failed, as the popup says it: one sentence, then where to
+/// look, with no doubled period when `why` already ends in one.
+fn copy_failure(why: &str) -> String {
+    let stop = if why.ends_with('.') { "" } else { "." };
+    format!("{why}{stop} Check clipboard.command in the global config.")
+}
+
+/// Where sending the text to a clipboard program stands.
+enum Sending {
+    Ongoing,
+    Sent,
+    Failed(std::io::Error),
+    /// Still unsent at the timeout, after the program had exited.
+    Abandoned,
+}
+
+/// What one step of sending the text did.
+enum WritePoll {
+    /// More to send; `progressed` if some bytes went this step.
+    Pending { progressed: bool },
+    /// All sent, or the write failed and was given up.
+    Done(std::io::Result<()>),
+}
+
+/// Sends the text to a clipboard program's stdin a step at a time, from
+/// the thread that waits for it, so a program (or a helper it started)
+/// that holds stdin without reading parks no thread: the pipe is
+/// non-blocking and a full one is tried again on the next step.
+#[cfg(unix)]
+struct StdinWriter {
+    stdin: std::process::ChildStdin,
+    bytes: Vec<u8>,
+    sent: usize,
+    /// Set if the pipe could not be made non-blocking; the first step
+    /// reports it.
+    broken: Option<std::io::Error>,
+}
+
+#[cfg(unix)]
+impl StdinWriter {
+    fn new(stdin: std::process::ChildStdin, bytes: Vec<u8>) -> Self {
+        use std::os::fd::AsRawFd;
+        let fd = stdin.as_raw_fd();
+        // SAFETY: `fd` is the open pipe `stdin` owns; F_GETFL and F_SETFL
+        // only read and set its status flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let set = flags != -1
+            // SAFETY: as above.
+            && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != -1;
+        let broken = (!set).then(std::io::Error::last_os_error);
+        Self {
+            stdin,
+            bytes,
+            sent: 0,
+            broken,
+        }
+    }
+
+    fn poll(&mut self) -> WritePoll {
+        use std::io::{ErrorKind, Write};
+        if let Some(e) = self.broken.take() {
+            return WritePoll::Done(Err(e));
+        }
+        let mut progressed = false;
+        while self.sent < self.bytes.len() {
+            match self.stdin.write(&self.bytes[self.sent..]) {
+                Ok(0) => return WritePoll::Done(Err(ErrorKind::WriteZero.into())),
+                Ok(n) => {
+                    self.sent += n;
+                    progressed = true;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    return WritePoll::Pending { progressed };
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return WritePoll::Done(Err(e)),
+            }
+        }
+        WritePoll::Done(Ok(()))
+    }
+}
+
+/// Without non-blocking pipes, the text is sent from a thread of its own,
+/// deliberately detached: one that never finishes because nothing reads
+/// ends when the program's last holder of stdin exits.
+#[cfg(not(unix))]
+struct StdinWriter {
+    wrote: std::sync::mpsc::Receiver<std::io::Result<()>>,
+}
+
+#[cfg(not(unix))]
+impl StdinWriter {
+    fn new(mut stdin: std::process::ChildStdin, bytes: Vec<u8>) -> Self {
+        use std::io::Write;
+        let (wrote_tx, wrote) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = wrote_tx.send(stdin.write_all(&bytes));
+        });
+        Self { wrote }
+    }
+
+    fn poll(&mut self) -> WritePoll {
+        match self.wrote.try_recv() {
+            Ok(result) => WritePoll::Done(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => WritePoll::Pending { progressed: false },
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                WritePoll::Done(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
+        }
+    }
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -759,7 +913,8 @@ impl Runtime {
     pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
         if let Some(argv) = &self.clipboard_command {
             let bytes = clipboard::command_payload(text)?;
-            run_clipboard_command(
+            // Detached: the worker ends by itself, at the latest at the timeout.
+            let _ = run_clipboard_command(
                 argv.clone(),
                 bytes,
                 self.sink.clone(),
@@ -1473,8 +1628,10 @@ impl Runtime {
                 base,
                 title,
             } => {
-                let Some(forge) = self.forge.clone() else {
-                    // No forge client: nothing may reach the network.
+                // No forge client, or a repository `[forge.allow]` leaves
+                // out (the model never asks for one): nothing may reach
+                // the network.
+                let Some(forge) = self.forge.clone().filter(|_| host.allows(&repo)) else {
                     let _ = tx.send(AppIntent::PullRequestCreated {
                         tag,
                         result: Err(CreateError::Status(ForgeStatus::Failed)),
@@ -1971,6 +2128,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_create_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
+        use crate::forge::allow::AllowRule;
+        use crate::forge::github::FakeGh;
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        let other = AllowRule::parse("other").unwrap();
+        runtime.spawn(Effect::CreatePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![other]),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            head: "me:topic".into(),
+            base: "main".into(),
+            title: "Add login".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestCreated {
+                tag: forge_tag(),
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
+    }
+
+    #[tokio::test]
     async fn a_browser_that_cannot_start_says_why_and_is_logged() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = CommandSink::new();
@@ -2038,7 +2234,8 @@ mod tests {
                 .expect(
                     &["config", "-z", "--get", "remote.origin.url"],
                     ok(b"git@github.com:acme/widgets.git\0"),
-                ),
+                )
+                .expect(&crate::git::forge_remote::UPSTREAMS_ARGV, ok(b"")),
         );
         let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
         let gh = Arc::new(
@@ -2091,6 +2288,8 @@ mod tests {
             [
                 "git remote",
                 "git config -z --get remote.origin.url",
+                "git for-each-ref \
+                 --format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref) refs/heads",
                 probe_line,
                 gh_line,
                 gh_line
@@ -2098,7 +2297,7 @@ mod tests {
         );
         let mut ids: Vec<u64> = started.iter().map(|(id, _)| *id).collect();
         ids.dedup();
-        assert_eq!(ids.len(), 5, "{events:?}");
+        assert_eq!(ids.len(), 6, "{events:?}");
         // One finish per start, with the same id.
         for (id, _) in &started {
             let finished = events
@@ -4522,6 +4721,39 @@ mod tests {
         assert!(rx.try_recv().is_err(), "a copy that worked sends nothing");
     }
 
+    /// Hidden: run by `program`'s decoy test, from a directory of decoys
+    /// with only relative and empty `PATH` entries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decoy_child_open_url_and_clipboard() {
+        if !crate::program::in_decoy_child() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let url = vec!["kika-decoy".into(), "https://example.com".into()];
+        open_url(url, CommandSink::new(), tx.clone());
+        let copy = vec!["kika-decoy".into()];
+        run_clipboard_command(
+            copy,
+            b"x".to_vec(),
+            CommandSink::new(),
+            tx,
+            CLIPBOARD_TIMEOUT,
+        );
+        let clear = |notice: &str| {
+            assert!(notice.contains(crate::program::NOT_FOUND), "{notice}");
+            assert!(!notice.chars().any(char::is_control), "{notice:?}");
+        };
+        match rx.recv().await {
+            Some(AppIntent::OpenUrlFailed(notice)) => clear(&notice),
+            other => panic!("{other:?}"),
+        }
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(notice)) => clear(&notice),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_clipboard_command_that_cannot_start_says_so_later() {
         let (runtime, osc, log, mut rx) = clipboard_runtime(&["/nonexistent/kika-clip"]);
@@ -4571,21 +4803,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_clipboard_command_that_hangs_is_stopped_and_reported() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let sink = CommandSink::new();
-        let (log_tx, log) = std::sync::mpsc::channel();
-        sink.connect(move |ev| {
-            let _ = log_tx.send(ev);
-        });
+        let (sink, log, tx, mut rx) = clipboard_sink();
         let start = std::time::Instant::now();
         // It never reads its input, so a large text would fill the pipe too.
-        run_clipboard_command(
+        let worker = run_clipboard_command(
             vec!["sleep".into(), "30".into()],
             vec![b'x'; crate::clipboard::MAX_COPY],
             sink,
             tx,
             Duration::from_millis(200),
-        );
+        )
+        .expect("the program started");
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "it returns at once"
@@ -4605,6 +4833,179 @@ mod tests {
                 ..
             }
         ));
+        assert!(
+            ends_within(worker, Duration::from_millis(200) + Duration::from_secs(2)),
+            "the worker thread is gone"
+        );
+    }
+
+    /// The pid a test's fake program wrote to `path`.
+    #[cfg(unix)]
+    fn read_pid(path: &std::path::Path) -> libc::pid_t {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Whether no process, not even an unreaped one, has `pid`.
+    #[cfg(unix)]
+    fn gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks whether the process exists.
+        let result = unsafe { libc::kill(pid, 0) };
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// Wait up to `within` for `pid` to be gone. A killed orphan is reaped
+    /// by the system, not by Kika, so it may linger for a moment.
+    #[cfg(unix)]
+    fn assert_gone_within(pid: libc::pid_t, within: Duration) {
+        let deadline = std::time::Instant::now() + within;
+        while !gone(pid) {
+            assert!(std::time::Instant::now() < deadline, "{pid} still exists");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Whether `worker` has ended within `within`; joined if it has.
+    #[cfg(unix)]
+    fn ends_within(worker: std::thread::JoinHandle<()>, within: Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while !worker.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        worker.join().expect("the clipboard worker did not panic");
+        true
+    }
+
+    /// A clipboard program's log and where its intents land.
+    #[cfg(unix)]
+    fn clipboard_sink() -> (
+        CommandSink,
+        std::sync::mpsc::Receiver<CommandEvent>,
+        mpsc::UnboundedSender<AppIntent>,
+        mpsc::UnboundedReceiver<AppIntent>,
+    ) {
+        let sink = CommandSink::new();
+        let (log_tx, log) = std::sync::mpsc::channel();
+        sink.connect(move |ev| {
+            let _ = log_tx.send(ev);
+        });
+        let (tx, rx) = mpsc::unbounded_channel();
+        (sink, log, tx, rx)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clipboard_command_that_times_out_is_reaped_with_all_it_started() {
+        let tmp = crate::git::fake::TempDir::new("clipboard-group");
+        let helper = tmp.path().join("helper");
+        let leader = tmp.path().join("leader");
+        // The test's own fake clipboard program; Kika itself never builds a shell line.
+        let script = format!(
+            "sleep 30 & echo $! > '{}'; echo $$ > '{}'; wait",
+            helper.display(),
+            leader.display()
+        );
+        let (sink, log, tx, mut rx) = clipboard_sink();
+        // Long enough that the shell has surely written both pids first.
+        let timeout = Duration::from_secs(1);
+        let worker = run_clipboard_command(
+            vec!["sh".into(), "-c".into(), script.into()],
+            b"abc".to_vec(),
+            sink,
+            tx,
+            timeout,
+        )
+        .expect("the program started");
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(message)) => {
+                assert!(message.starts_with("sh did not finish within"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            ends_within(worker, timeout + Duration::from_secs(2)),
+            "the worker thread is gone"
+        );
+        assert!(gone(read_pid(&leader)), "the program is reaped");
+        assert_gone_within(read_pid(&helper), Duration::from_secs(2));
+        assert!(matches!(next_event(&log), CommandEvent::Started { .. }));
+        assert!(matches!(
+            next_event(&log),
+            CommandEvent::Finished {
+                outcome: CommandOutcome::Failed(_),
+                ..
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_clipboard_program_reaps_it() {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        crate::external_diff::kill_group(&mut child);
+        assert!(gone(pid), "{pid} is neither running nor a zombie");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_helper_holding_stdin_open_leaves_no_thread_behind() {
+        let tmp = crate::git::fake::TempDir::new("clipboard-stdin");
+        let helper = tmp.path().join("helper");
+        // The program exits at once; its helper keeps stdin open, unread.
+        let script = format!("sleep 30 0<&0 & echo $! > '{}'; exit 0", helper.display());
+        let (sink, log, tx, mut rx) = clipboard_sink();
+        // Long enough that the shell has surely exited first.
+        let timeout = Duration::from_secs(1);
+        let worker = run_clipboard_command(
+            vec!["sh".into(), "-c".into(), script.into()],
+            // More than any pipe buffer holds.
+            vec![b'x'; 1024 * 1024],
+            sink,
+            tx,
+            timeout,
+        )
+        .expect("the program started");
+        let message = match rx.recv().await {
+            Some(AppIntent::CopyFailed(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        let ended = ends_within(worker, timeout + Duration::from_secs(2));
+        let helper = read_pid(&helper);
+        // SAFETY: only sends a signal to the test's own helper.
+        unsafe { libc::kill(helper, libc::SIGKILL) };
+        assert!(ended, "the worker thread is gone");
+        assert!(
+            message.starts_with("Could not send the text to sh"),
+            "{message}"
+        );
+        assert!(matches!(next_event(&log), CommandEvent::Started { .. }));
+        assert!(matches!(
+            next_event(&log),
+            CommandEvent::Finished {
+                outcome: CommandOutcome::Failed(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_copy_failure_never_doubles_the_period() {
+        let expected = "x. Check clipboard.command in the global config.";
+        for why in ["x", "x."] {
+            let message = copy_failure(why);
+            assert_eq!(message, expected);
+            assert!(!message.contains(".."), "{message}");
+        }
     }
 
     #[test]

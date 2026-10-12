@@ -23,10 +23,15 @@ const LOG_AUTHOR: usize = 16;
 /// or one row per branch with the selection reversed. Collapsed, the
 /// current branch stands in for the list; with only a title row, the
 /// title names it. `spinner` names the branch a fetch, pull or push runs
-/// for, and the frame to draw in place of its marker.
+/// for, and the frame to draw in place of its marker. `now` is the
+/// loop's clock, which the forge line judges a rate limit's reset by.
+// The panel's state, the forge's and the clock are separate parts of
+// `AppState`; bundling them only for this call would hide which it reads.
+#[allow(clippy::too_many_arguments)]
 pub fn render_panel(
     panel: &BranchesPanel,
     forge: &ForgeState,
+    now: i64,
     look: &PanelLook,
     expanded: bool,
     marks: RowMarks,
@@ -72,7 +77,7 @@ pub fn render_panel(
     let mut block = look.block(title);
     let inner = block.inner(area);
     let width = usize::from(inner.width);
-    if let Some(line) = forge_line(forge, width) {
+    if let Some(line) = forge_line(forge, now, width) {
         block = block.title_bottom(Line::from(line));
     }
     let body = if expanded && panel.tab == BranchesTab::Remotes {
@@ -265,9 +270,11 @@ fn badge_text(badge: &PrBadge) -> String {
 /// when it is off, the repository is not on a configured host, or all is
 /// well. What went wrong comes first; the hint and ` · cached` (old
 /// badges are still drawn) follow only where they fit, and what still
-/// does not fit ends in `…`. Fixed words and the configured host only;
-/// nothing the forge or `gh` said.
-fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
+/// does not fit ends in `…`. A rate limit whose reset is at or before
+/// `now` (the loop's clock, never read here) says to fetch to retry,
+/// since nothing asks the forge again by itself. Fixed words and the
+/// configured host only; nothing the forge or `gh` said.
+fn forge_line(forge: &ForgeState, now: i64, width: usize) -> Option<String> {
     let repo = forge.repo.as_ref()?;
     let problem = match forge.status {
         ForgeView::Off | ForgeView::Cached | ForgeView::Fresh => return None,
@@ -289,15 +296,20 @@ fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
         ForgeStatus::Offline => ("GitHub: offline", None),
         ForgeStatus::NoAccess => ("GitHub: repository not found or no access", None),
         ForgeStatus::Failed => ("GitHub: could not load pull requests", None),
-        ForgeStatus::RateLimited => (
-            "GitHub: rate limited",
-            forge
-                .limited_until
-                .map(|until| format!("until {} UTC", clock(until))),
-        ),
+        // Over once `now` reaches the reset, as the load task judges it.
+        ForgeStatus::RateLimited => match forge.limited_until {
+            Some(until) if now >= until => (
+                "GitHub: rate limit over",
+                Some("fetch to retry".to_string()),
+            ),
+            until => (
+                "GitHub: rate limited",
+                until.map(|until| format!("until {} UTC", clock(until))),
+            ),
+        },
     };
-    // A rate limit leaves no room for `cached`: when it ends matters more,
-    // and the line says no new answer came anyway.
+    // A rate limit leaves no room for `cached`: when it ends, or that it
+    // has, matters more, and the line says no new answer came anyway.
     let cached =
         (!forge.badges.is_empty() && problem != ForgeStatus::RateLimited).then_some("cached");
     let join = |parts: &[Option<&str>]| {
@@ -635,11 +647,11 @@ pub(crate) mod tests {
         // A little wider, `cached` comes back before the long hint.
         state.forge.status = ForgeView::Problem(ForgeStatus::NotLoggedIn);
         assert_eq!(
-            forge_line(&state.forge, 30).as_deref(),
+            forge_line(&state.forge, state.now, 30).as_deref(),
             Some("GitHub: not logged in · cached")
         );
         assert_eq!(
-            forge_line(&state.forge, 63).as_deref(),
+            forge_line(&state.forge, state.now, 63).as_deref(),
             Some("GitHub: not logged in · run gh auth login --hostname github.com")
         );
         // Collapsed, at the same size, the line is the same.
@@ -651,7 +663,7 @@ pub(crate) mod tests {
         );
         // However narrow, it never runs past the panel.
         for width in 0..30 {
-            let line = forge_line(&state.forge, width).unwrap();
+            let line = forge_line(&state.forge, state.now, width).unwrap();
             assert!(crate::view::width_of(&line) <= width, "{width}: {line:?}");
         }
     }
@@ -662,17 +674,25 @@ pub(crate) mod tests {
         state.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
         // 2023-11-14 22:13:20 UTC.
         state.forge.limited_until = Some(1_700_000_000);
+        // The reset is still a second away.
+        state.now = 1_700_000_000 - 1;
         // Badges are drawn, but the line gives its room to the time.
         assert!(!state.forge.badges.is_empty());
         let full = "GitHub: rate limited · until 22:13 UTC";
-        assert_eq!(forge_line(&state.forge, 80).as_deref(), Some(full));
-        assert_eq!(forge_line(&state.forge, 38).as_deref(), Some(full));
         assert_eq!(
-            forge_line(&state.forge, 37).as_deref(),
+            forge_line(&state.forge, state.now, 80).as_deref(),
+            Some(full)
+        );
+        assert_eq!(
+            forge_line(&state.forge, state.now, 38).as_deref(),
+            Some(full)
+        );
+        assert_eq!(
+            forge_line(&state.forge, state.now, 37).as_deref(),
             Some("GitHub: rate limited")
         );
         assert_eq!(
-            forge_line(&state.forge, 22).as_deref(),
+            forge_line(&state.forge, state.now, 22).as_deref(),
             Some("GitHub: rate limited")
         );
         // Drawn: whole where the panel is wide, what is wrong first in the
@@ -686,17 +706,70 @@ pub(crate) mod tests {
         assert_eq!(state.op_error, None);
         // Midnight and the last minute of a day.
         state.forge.limited_until = Some(1_699_920_000);
+        state.now = 1_699_920_000 - 1;
         assert!(
-            forge_line(&state.forge, 80)
+            forge_line(&state.forge, state.now, 80)
                 .unwrap()
                 .contains("until 00:00 UTC")
         );
         state.forge.limited_until = Some(1_699_920_000 + 86_399);
+        state.now = 1_699_920_000 + 86_399 - 1;
         assert!(
-            forge_line(&state.forge, 80)
+            forge_line(&state.forge, state.now, 80)
                 .unwrap()
                 .contains("until 23:59 UTC")
         );
+    }
+
+    #[test]
+    fn a_passed_rate_limit_says_fetch_to_retry() {
+        const T: i64 = 1_700_000_000;
+        let mut state = with_badges(&[("main", Some(pr(1, PrState::Open, None)))]);
+        state.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
+        state.forge.limited_until = Some(T);
+        let full = "GitHub: rate limit over · fetch to retry";
+        // At the reset and an hour on, the clock handed to the view says
+        // the limit is over; badges are drawn, yet no `cached` is added.
+        for now in [T, T + 3600] {
+            state.now = now;
+            assert!(!state.forge.badges.is_empty());
+            assert_eq!(forge_line_at(&state, 240).as_deref(), Some(full));
+            assert_eq!(forge_line(&state.forge, now, 80).as_deref(), Some(full));
+            assert_eq!(forge_line(&state.forge, now, 40).as_deref(), Some(full));
+            assert_eq!(
+                forge_line(&state.forge, now, 39).as_deref(),
+                Some("GitHub: rate limit over")
+            );
+            assert_eq!(
+                forge_line(&state.forge, now, 23).as_deref(),
+                Some("GitHub: rate limit over")
+            );
+            // The default 80 x 24 side panel keeps what is wrong.
+            assert_eq!(
+                forge_line_at(&state, 80).as_deref(),
+                Some("GitHub: rate limit over")
+            );
+            // However narrow, it never runs past the panel.
+            for width in 0..45 {
+                let line = forge_line(&state.forge, now, width).unwrap();
+                assert!(crate::view::width_of(&line) <= width, "{width}: {line:?}");
+            }
+        }
+        // A second before the reset, the time is still given.
+        state.now = T - 1;
+        assert_eq!(
+            forge_line_at(&state, 240).as_deref(),
+            Some("GitHub: rate limited · until 22:13 UTC")
+        );
+        // With no reset known, the clock changes nothing.
+        state.forge.limited_until = None;
+        for now in [0, T, T + 3600] {
+            state.now = now;
+            assert_eq!(
+                forge_line_at(&state, 240).as_deref(),
+                Some("GitHub: rate limited")
+            );
+        }
     }
 
     #[test]

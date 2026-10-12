@@ -46,6 +46,7 @@ mod model;
 mod pick_list;
 mod popup;
 mod popup_view;
+mod program;
 mod rebase_todo;
 mod recent;
 mod recent_list;

@@ -458,10 +458,10 @@ fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, ar
         ..answer
     };
     let line = prompt.input.line();
-    let shown = if prompt.masked {
-        "•".repeat(line.text.chars().count())
-    } else {
+    let shown = if prompt.shows_typed_text() {
         line.text.clone()
+    } else {
+        "•".repeat(line.text.chars().count())
     };
     render_input_line(&shown, line.col, top, frame, answer);
 }
@@ -741,6 +741,48 @@ mod tests {
                 assert!(contains(&rows, "used the rest of"), "{rows:#?}");
             }
         }
+    }
+
+    #[test]
+    fn a_dropped_command_is_named_with_its_description_made_safe() {
+        use crate::config::ConfigError;
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::intent::AppIntent;
+        use crate::keymap::{Keymap, KeysTable, Trust};
+        let keys: KeysTable = [("files.stage".to_string(), vec!["ctrl-t".to_string()])].into();
+        let (keymap, _, kept) =
+            Keymap::build_layer(&Keymap::default(), &keys, Trust::Global).unwrap();
+        let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::None);
+        table.description = "wipe\u{1b}[2J".into();
+        let (keymap, dropped) = keymap.with_commands(&[table], &kept).unwrap();
+        assert!(keymap.commands.is_empty());
+        let [message] = dropped.as_slice() else {
+            panic!("expected one drop: {dropped:?}");
+        };
+        assert!(message.contains('\u{1b}'), "the message keeps the raw text");
+
+        let mut state = workspace(&["a.rs"]);
+        state.update(AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![ConfigError {
+                path: "/home/me/.config/kika/config.toml".into(),
+                message: message.clone(),
+                dropped_binding: true,
+            }],
+        });
+        let (buffer, rows) = draw(&state, 120, 24);
+        assert!(contains(&rows, " Config error "), "{rows:#?}");
+        assert!(contains(&rows, r#""files.stage""#), "{rows:#?}");
+        assert!(contains(&rows, "command 1"), "{rows:#?}");
+        assert!(contains(&rows, "wipe"), "{rows:#?}");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\u{1b}')),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -1891,6 +1933,46 @@ mod tests {
             assert!(contains(&rows, line), "{line:?} missing: {rows:#?}");
         }
         assert!(!contains(&rows, "•"), "{rows:#?}");
+    }
+
+    const HOST_KEY_QUESTION: &str = "The authenticity of host 'h' can't be established.\n\
+         Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    #[test]
+    fn a_secret_typed_into_a_host_key_question_is_drawn_as_dots() {
+        let state = asked(HOST_KEY_QUESTION, "hunter2");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " ••••••• "), "{rows:#?}");
+        assert!(!contains(&rows, "hunter2"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_fingerprint_typed_into_a_host_key_question_is_drawn_as_typed() {
+        let fingerprint = "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s";
+        let state = asked(HOST_KEY_QUESTION, fingerprint);
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, fingerprint), "{rows:#?}");
+        assert!(!contains(&rows, "•"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_host_key_answer_turns_to_dots_once_it_is_no_longer_an_answer() {
+        use crate::keymap::KeyPress;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut state = asked(HOST_KEY_QUESTION, "yes");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " yes "), "{rows:#?}");
+
+        let Some(Popup::Credential(credential)) = state.popups.last_mut() else {
+            panic!("no credential popup");
+        };
+        credential
+            .input
+            .edit(KeyPress::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " •••• "), "{rows:#?}");
+        assert!(!contains(&rows, "yesx"), "{rows:#?}");
     }
 
     #[test]

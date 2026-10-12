@@ -1336,7 +1336,7 @@ impl AppState {
             .join("\n");
         if self.config_error.as_deref() != Some(text.as_str()) {
             let hint = if errors.iter().all(|e| e.dropped_binding) {
-                "Kika dropped these key changes and used the rest of the file. \
+                "Kika dropped these entries and used the rest of the file. \
                  Fix it, then come back to Kika to reload it."
             } else {
                 "Kika ignored this file. Fix it, then come back to Kika to reload it."
@@ -2339,6 +2339,11 @@ impl AppState {
                     effects.extend(self.close_stash_files());
                 }
                 self.focus = Focus::side(side);
+                // Another panel has no keys to step or clear the preview
+                // search, so it would stay marked with no way out.
+                if side != self.expanded {
+                    self.diff.search = None;
+                }
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
                 effects.extend(self.render_if_stale());
@@ -6365,6 +6370,7 @@ fn failure_title(op: &GitOp) -> &'static str {
 mod branch_lists;
 mod custom_patch;
 mod fixup;
+pub(crate) mod forge_load;
 mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
@@ -11937,7 +11943,7 @@ mod tests {
         };
         let only_dropped = hint(vec![dropped("a"), dropped("b")]);
         assert!(
-            only_dropped.contains("used the rest of the file"),
+            only_dropped.starts_with("Kika dropped these entries and used the rest of the file."),
             "{only_dropped}"
         );
         assert!(!only_dropped.contains("ignored"), "{only_dropped}");
@@ -12510,7 +12516,9 @@ mod tests {
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
-        let keymap = Keymap::default().with_commands(tables).unwrap();
+        let (keymap, _) = Keymap::default()
+            .with_commands(tables, &Default::default())
+            .unwrap();
         let repo = state.repo.clone();
         state.update(AppIntent::ConfigLoaded {
             repo,
@@ -18388,6 +18396,98 @@ mod tests {
         assert!(state.should_quit, "then Esc quits as before");
     }
 
+    /// Files with a found preview search for "foo".
+    fn files_searching_foo() -> AppState {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        ctrl(&mut state, 'f');
+        type_text(&mut state, "foo\n");
+        assert!(state.diff.search.is_some());
+        assert_eq!(state.focus, Focus::Files);
+        state
+    }
+
+    #[test]
+    fn switching_the_side_panel_clears_the_preview_search() {
+        for (key, side) in [('1', SidePanel::Status), ('4', SidePanel::Commits)] {
+            let mut state = files_searching_foo();
+            press_char(&mut state, key);
+            assert_eq!(state.expanded, side, "{key}");
+            assert_eq!(state.diff.search, None, "{key}");
+        }
+        for back in [false, true] {
+            let mut state = files_searching_foo();
+            state.update(AppIntent::CycleFocus { back });
+            assert_ne!(state.expanded, SidePanel::Files, "back: {back}");
+            assert_eq!(state.diff.search, None, "back: {back}");
+        }
+    }
+
+    #[test]
+    fn the_diff_pane_and_back_to_files_keeps_the_preview_search() {
+        let mut state = files_searching_foo();
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
+        assert!(matches!(state.focus, Focus::Diff(_)), "{:?}", state.focus);
+        state.update(AppIntent::FocusLeft);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+        // Files again by its number: the side panel did not change.
+        press_char(&mut state, '2');
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+    }
+
+    #[test]
+    fn esc_in_the_preview_search_input_clears_it_and_stays_in_files() {
+        let mut state = files_searching_foo();
+        ctrl(&mut state, 'f');
+        assert!(state.input.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn esc_in_the_blame_search_input_clears_it_and_keeps_the_blame() {
+        let mut state = blamed_foo();
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(blame(&state).search, None);
+    }
+
+    #[test]
+    fn esc_in_the_blame_commit_search_input_clears_it_and_keeps_the_commit() {
+        let mut state = blamed_foo();
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, .. }] => *tag,
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        state.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("+foo")]),
+        });
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).commit.as_ref().unwrap().search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameCommitSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        let commit = blame(&state).commit.as_ref().expect("still open");
+        assert_eq!(commit.search, None);
+    }
+
     #[test]
     fn a_preview_search_with_no_match_says_so_on_enter_and_n() {
         let (mut state, effects) = with_files(three_files(), 24);
@@ -19766,6 +19866,7 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("wip".into()),
                 paths: vec!["b.rs".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.stash_draft, None);
@@ -19787,6 +19888,7 @@ mod tests {
                     mode,
                     message: None,
                     paths: vec![],
+                    restore: vec![],
                 },
                 "{index}"
             );
@@ -19805,6 +19907,7 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["c.txt".into()],
+                restore: vec![],
             }
         );
     }
@@ -19846,6 +19949,7 @@ mod tests {
             mode: StashMode::All,
             message: None,
             paths: vec![],
+            restore: vec![],
         };
         let cases = [
             (push, "Could not stash", files),
@@ -19886,6 +19990,7 @@ mod tests {
         state.stash_draft = Some(crate::stash::StashDraft {
             mode: StashMode::All,
             paths: vec![],
+            restore: vec![],
             from_range: false,
         });
         state.switch_repo();
@@ -19932,18 +20037,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_range_with_a_rename_and_an_untracked_file_is_refused_with_a_reason() {
-        let renamed = FileEntry {
-            orig_path: Some("old.rs".into()),
+    fn renamed(path: &str, old: &str) -> FileEntry {
+        FileEntry {
+            orig_path: Some(old.into()),
             kind: EntryKind::Renamed,
-            ..changed("new.rs", 'R', '.')
-        };
-        let (mut state, _) = with_files(vec![renamed, untracked("u.txt")], 24);
+            ..changed(path, 'R', '.')
+        }
+    }
+
+    #[test]
+    fn a_range_with_a_rename_and_an_untracked_file_stashes_the_rename_whole() {
+        let files = vec![renamed("new.rs", "old.rs"), untracked("u.txt")];
+        let (mut state, _) = with_files(files, 24);
         press_char(&mut state, 'V');
-        assert_eq!(crate::menu::stash_file_disabled(&state), None);
         press_char(&mut state, 'j');
-        let reason = crate::menu::STASH_APART;
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::IncludeUntracked,
+                message: None,
+                paths: vec!["new.rs".into(), "u.txt".into()],
+                restore: vec!["old.rs".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_rename_whose_old_path_is_taken_again_is_refused_with_a_reason() {
+        // The file at the old path is listed but not marked.
+        let files = vec![renamed("new.rs", "old.rs"), untracked("old.rs")];
+        let (mut state, _) = with_files(files, 24);
+        let reason = crate::menu::STASH_RENAME_TAKEN;
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(reason.into())
+        );
+        // Marked too, it is refused for the same reason.
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
         assert_eq!(
             crate::menu::stash_file_disabled(&state),
             Some(reason.into())
@@ -19952,6 +20086,27 @@ mod tests {
         assert_eq!(state.notice, Some(reason.into()));
         assert_eq!(state.stash_draft, None);
         assert!(state.files_anchor.is_some());
+    }
+
+    #[test]
+    fn a_rename_whose_old_directory_is_now_a_file_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_RENAME_TAKEN.into());
+        for taken in ["d", "d/e"] {
+            let files = vec![renamed("new.rs", "d/e/old.rs"), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A case-insensitive filesystem would fold these onto the old path
+        // or its directory, so they are refused too.
+        for (old, taken) in [("Old.rs", "old.rs"), ("D/old.rs", "d")] {
+            let files = vec![renamed("new.rs", old), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A file beside the old path, inside its directory, is fine.
+        let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
+        let (state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
     }
 
     #[test]
@@ -19971,6 +20126,7 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("pair".into()),
                 paths: vec!["a.rs".into(), "b.rs".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.files_anchor, None, "the range is done with");
@@ -19998,6 +20154,7 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["b.rs".into(), "c.txt".into()],
+                restore: vec![],
             }
         );
         assert_eq!(state.files_anchor, None);
@@ -20043,6 +20200,7 @@ mod tests {
                 mode: StashMode::All,
                 message: None,
                 paths: vec!["b.rs".into()],
+                restore: vec![],
             }
         );
     }

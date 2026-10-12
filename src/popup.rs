@@ -68,31 +68,81 @@ pub enum Popup {
 pub struct CredentialPrompt {
     /// Git's or ssh's words, terminal-safe.
     pub prompt: String,
-    /// Typed text is drawn as dots, unless the answer is a name or a yes/no.
-    pub masked: bool,
+    /// When the typed text is drawn as it is rather than as dots.
+    pub echo: Echo,
     /// Ssh's yes/no kind, answered with y or n instead of text.
     pub confirm: bool,
     pub input: SecretInput,
 }
 
+/// How a credential prompt draws what is typed. On older ssh a server can
+/// end its own prompt with ssh's host-key sentence, so the words of a
+/// prompt cannot prove it is the real host-key question; there the typed
+/// text itself decides, and only a plausible answer is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    /// Always dots: passwords, passphrases and any prompt a server chose.
+    Masked,
+    /// Always as typed: git's username question.
+    Clear,
+    /// As typed only while the text could be a host-key answer: a start of
+    /// `yes` or `no`, or an ssh SHA256 fingerprint. Anything else is dots.
+    HostKeyAnswer,
+}
+
 impl CredentialPrompt {
-    /// Only git's username question and ssh's new-host-key question are
-    /// shown as typed, matched on their exact words (the start of git's,
-    /// the whole closing sentence of ssh's), so a prompt a server chose
-    /// cannot ask for a secret with the text in sight. Ssh puts
-    /// `(user@host) ` before a server's own prompts, so one starting with
-    /// `(` stays masked however it ends. A bare `Username:` is not git's
-    /// question and stays masked on purpose.
+    /// Only git's username question is always shown as typed, and ssh's
+    /// new-host-key question shows a plausible answer; both are matched on
+    /// their exact words (the start of git's, the whole closing sentence of
+    /// ssh's), so a prompt a server chose cannot ask for a secret with the
+    /// text in sight. Ssh puts `(user@host) ` before a server's own prompts,
+    /// so one starting with `(` stays masked however it ends. A bare
+    /// `Username:` is not git's question and stays masked on purpose.
     pub fn new(prompt: String, confirm: bool) -> Self {
-        let in_clear = prompt.starts_with("Username for '") || is_host_key_question(&prompt);
-        let masked = !in_clear;
+        let echo = if prompt.starts_with("Username for '") {
+            Echo::Clear
+        } else if is_host_key_question(&prompt) {
+            Echo::HostKeyAnswer
+        } else {
+            Echo::Masked
+        };
         Self {
             prompt,
-            masked,
+            echo,
             confirm,
             input: SecretInput::default(),
         }
     }
+
+    /// Whether the text typed so far is drawn as it is. Decided per frame,
+    /// so a host-key answer turns to dots as soon as it stops being one.
+    pub fn shows_typed_text(&self) -> bool {
+        match self.echo {
+            Echo::Masked => false,
+            Echo::Clear => true,
+            Echo::HostKeyAnswer => is_host_key_answer(&self.input.line().text),
+        }
+    }
+}
+
+/// A start of an answer to ssh's host-key question: exactly a prefix of
+/// `yes` or `no`, or of an ssh SHA256 fingerprint (`SHA256:` and at most 43
+/// base64 chars, one `=` allowed after them). Case and whitespace are not
+/// forgiven, as showing less is the safe side.
+fn is_host_key_answer(text: &str) -> bool {
+    const TAG: &str = "SHA256:";
+    const HASH_CHARS: usize = 43;
+    if "yes".starts_with(text) || "no".starts_with(text) || TAG.starts_with(text) {
+        return true;
+    }
+    let Some(hash) = text.strip_prefix(TAG) else {
+        return false;
+    };
+    let hash = hash.strip_suffix('=').unwrap_or(hash);
+    (1..=HASH_CHARS).contains(&hash.len())
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
 /// Ssh's new-host-key question: it ends with ssh's whole closing sentence,
@@ -1266,7 +1316,7 @@ mod tests {
 
     #[test]
     fn a_credential_prompt_masks_all_but_names_and_yes_no_questions() {
-        let masked = |prompt: &str| CredentialPrompt::new(prompt.into(), false).masked;
+        let masked = |prompt: &str| !CredentialPrompt::new(prompt.into(), false).shows_typed_text();
         assert!(masked("Password for 'https://u@h':"));
         assert!(masked(
             "Enter passphrase for key '/home/u/.ssh/id_ed25519':"
@@ -1287,7 +1337,7 @@ mod tests {
 
     #[test]
     fn only_a_prompt_ending_in_the_host_key_choice_is_shown_in_clear() {
-        let masked = |prompt: &str| CredentialPrompt::new(prompt.into(), false).masked;
+        let masked = |prompt: &str| !CredentialPrompt::new(prompt.into(), false).shows_typed_text();
         // Ssh's own question, with the trailing space it sends.
         assert!(!masked(
             "The authenticity of host 'h' can't be established.\n\
@@ -1315,6 +1365,79 @@ mod tests {
         assert!(masked("Token (yes/no/[fingerprint])?"));
         // Not git's username question, so masked on purpose.
         assert!(masked("Username:"));
+    }
+
+    const HOST_KEY_QUESTION: &str = "The authenticity of host 'h' can't be established.\n\
+         Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    /// Whether `typed`, typed into `prompt`, is drawn in clear.
+    fn shows(prompt: &str, typed: &str) -> bool {
+        let mut prompt = CredentialPrompt::new(prompt.into(), false);
+        for c in typed.chars() {
+            prompt
+                .input
+                .edit(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        prompt.shows_typed_text()
+    }
+
+    #[test]
+    fn a_host_key_question_picks_the_answer_echo() {
+        let echo = |prompt: &str| CredentialPrompt::new(prompt.into(), false).echo;
+        assert_eq!(echo(HOST_KEY_QUESTION), Echo::HostKeyAnswer);
+        assert_eq!(echo("Username for 'https://h':"), Echo::Clear);
+        assert_eq!(echo("Password for 'https://u@h':"), Echo::Masked);
+    }
+
+    #[test]
+    fn a_host_key_question_shows_a_yes_or_no_being_typed() {
+        for typed in ["", "y", "ye", "yes", "n", "no"] {
+            assert!(shows(HOST_KEY_QUESTION, typed), "{typed:?} masked");
+        }
+        assert!(shows(
+            "Are you sure you want to continue connecting (yes/no)?",
+            "yes"
+        ));
+    }
+
+    #[test]
+    fn a_host_key_question_masks_anything_but_an_answer() {
+        for typed in ["yess", "yes ", "YES", "Y", "hunter2", "nope", "x", " "] {
+            assert!(!shows(HOST_KEY_QUESTION, typed), "{typed:?} shown");
+        }
+    }
+
+    #[test]
+    fn a_host_key_question_shows_a_sha256_fingerprint() {
+        let fingerprint = "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s";
+        for typed in ["S", "SHA2", "SHA256:", "SHA256:a+/9", fingerprint] {
+            assert!(shows(HOST_KEY_QUESTION, typed), "{typed:?} masked");
+        }
+        assert!(shows(HOST_KEY_QUESTION, &format!("{fingerprint}=")));
+        let too_long = format!("SHA256:{}", "a".repeat(44));
+        for typed in [
+            "SHA256:abc def",
+            "SHA256:abc!",
+            "SHA256:=",
+            "SHA256:abc==",
+            "SHA256:abc=d",
+            "sha256:abc",
+            too_long.as_str(),
+            "MD5:aa:bb",
+        ] {
+            assert!(!shows(HOST_KEY_QUESTION, typed), "{typed:?} shown");
+        }
+    }
+
+    #[test]
+    fn other_prompts_keep_their_echo_whatever_is_typed() {
+        for typed in ["", "ann", "hunter2 with spaces"] {
+            assert!(shows("Username for 'https://h':", typed), "{typed:?}");
+        }
+        for typed in ["x", "yes"] {
+            assert!(!shows("Password for 'https://u@h':", typed), "{typed:?}");
+            assert!(!shows("Token (yes/no)?", typed), "{typed:?}");
+        }
     }
 
     #[test]

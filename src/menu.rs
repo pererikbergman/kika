@@ -5,7 +5,7 @@ use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
 use crate::git::bisect::BisectMark;
-use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode, leading_dirs};
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
@@ -265,20 +265,38 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
-/// Why a set with a staged rename or deletion and an untracked file is
-/// refused; see `GitOp::stash_files_for`.
-pub(crate) const STASH_APART: &str = "Stash renamed/deleted files apart from untracked";
+/// Why a set with a staged deletion and an untracked file is refused;
+/// see `GitOp::stash_files_for`.
+pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
+
+/// Why a staged rename is refused when a file sits at its old path again.
+pub(crate) use crate::git::ops::STASH_RENAME_TAKEN;
 
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
-/// cursor's row refuses it, as other row actions are refused.
+/// cursor's row refuses it, as other row actions are refused. A staged
+/// rename is refused when any listed entry sits at its old path or at a
+/// directory that path needs: the restore after the push would overwrite
+/// or unlink that file. Names are compared ignoring ASCII case, since a
+/// case-insensitive filesystem folds them; on another one this only
+/// refuses more.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true)
         .or_else(|| stash_blocked(state))
         .or_else(|| {
             let (entries, _) = state.files_marked();
+            let taken = (entries.iter())
+                .filter_map(|e| GitOp::stash_file_for(e))
+                .flat_map(|set| set.restore)
+                .flat_map(|old| leading_dirs(&old).into_iter().chain([old]))
+                .any(|taken| {
+                    (state.files.iter())
+                        .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
+                });
             if entries.is_empty() {
                 Some("No file selected".into())
+            } else if taken {
+                Some(STASH_RENAME_TAKEN.into())
             } else if GitOp::stash_files_for(&entries).is_none() {
                 Some(STASH_APART.into())
             } else {
