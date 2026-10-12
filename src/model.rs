@@ -6357,6 +6357,7 @@ fn failure_title(op: &GitOp) -> &'static str {
 mod branch_lists;
 mod custom_patch;
 mod fixup;
+pub(crate) mod forge_load;
 mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;

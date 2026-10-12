@@ -461,7 +461,7 @@ mod tests {
         let dir = seed(&tmp, &green);
         let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)));
         let ctx = context(Arc::clone(&gh), Some(dir.clone()));
-        let mut state = crate::forge::tests::forge_state(&branches);
+        let mut state = crate::model::forge_load::tests::forge_state(&branches);
         let effects = state.load_pull_requests();
         let Some(crate::effect::Effect::LoadPullRequests { tag: load_tag, .. }) = effects.first()
         else {
@@ -740,7 +740,7 @@ mod tests {
             cache_dir: Some(cache_dir.clone()),
         };
         let branches: Vec<BranchName> = vec!["main".into()];
-        let mut state = crate::forge::tests::forge_state(&branches);
+        let mut state = crate::model::forge_load::tests::forge_state(&branches);
         let hosts = hosts();
         for _ in 0..2 {
             state.forge.want_refresh();
