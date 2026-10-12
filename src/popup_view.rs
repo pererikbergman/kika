@@ -124,6 +124,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             Popup::CommandLog(view) => {
                 crate::command_log_view::render(&state.command_log, view, top, frame, area)
             }
+            Popup::MergePullRequest(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
         }
     }
 }
@@ -1225,6 +1231,24 @@ mod tests {
                 },
             ),
             ("confirm", Popup::Confirm(ConfirmKind::CreatePullRequest)),
+            (
+                "merge",
+                Popup::MergePullRequest(crate::popup::MergePrConfirm {
+                    number: 7,
+                    title: "Make the widget cache 組織 🦀 ".repeat(6),
+                    base: "main".into(),
+                    head: "topic".into(),
+                    method: crate::forge::merge::MergeMethod::Squash,
+                    head_oid: crate::git::commit_files::CommitId::parse(&"a".repeat(40)).unwrap(),
+                    repo: crate::forge::ForgeRepo {
+                        host: "github.com".into(),
+                        owner: "acme".into(),
+                        name: "widgets".into(),
+                    },
+                    host: crate::forge::ForgeHost::parse("github.com").unwrap(),
+                    unstable: true,
+                }),
+            ),
         ];
         popups
             .into_iter()
@@ -1273,6 +1297,18 @@ mod tests {
             contains(confirm, "Press y to create it on GitHub"),
             "{confirm:#?}"
         );
+        let merge = rows("merge");
+        assert!(contains(merge, " Merge pull request "), "{merge:#?}");
+        assert!(
+            contains(merge, "Press y to merge it on GitHub"),
+            "{merge:#?}"
+        );
+        assert!(
+            contains(merge, "Merge #7 Make the widget cache"),
+            "{merge:#?}"
+        );
+        assert!(contains(merge, "into main by squash?"), "{merge:#?}");
+        assert!(contains(merge, "Some checks have not passed"), "{merge:#?}");
     }
 
     #[test]

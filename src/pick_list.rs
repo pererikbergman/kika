@@ -11,6 +11,8 @@ pub enum PickPurpose {
     BaseBranch,
     /// The failing check whose page opens in the browser.
     CheckDetails,
+    /// How a pull request is merged; a question follows.
+    MergeMethod,
 }
 
 impl PickPurpose {
@@ -19,6 +21,7 @@ impl PickPurpose {
             PickPurpose::TargetRemote => "Target remote",
             PickPurpose::BaseBranch => "Base branch",
             PickPurpose::CheckDetails => "Check details",
+            PickPurpose::MergeMethod => "Merge method",
         }
     }
 }
