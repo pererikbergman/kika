@@ -753,7 +753,7 @@ mod tests {
     #[test]
     fn a_dropped_command_is_named_with_its_description_made_safe() {
         use crate::config::ConfigError;
-        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::features::custom_commands::{OutputMode, Panel, test_table};
         use crate::intent::AppIntent;
         use crate::keymap::{Keymap, KeysTable, Trust};
         let keys: KeysTable = [("files.stage".to_string(), vec!["ctrl-t".to_string()])].into();
@@ -1516,8 +1516,9 @@ mod tests {
 
     #[test]
     fn a_command_prompt_is_titled_by_the_command() {
-        use crate::custom_command::{CustomCommand, OutputMode, Panel, test_table};
-        use crate::model::PendingCommand;
+        use crate::features::custom_commands::{
+            CustomCommand, OutputMode, Panel, PendingCommand, test_table,
+        };
         let table = test_table(
             Panel::Files,
             &["ctrl-t"],
@@ -1528,7 +1529,7 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.pending_command = Some(PendingCommand {
             command: CustomCommand::parse(&table, 1).unwrap(),
-            target: crate::custom_command::Target {
+            target: crate::features::custom_commands::Target {
                 path: "a.rs".into(),
                 line: None,
                 commit: None,

@@ -65,8 +65,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::custom_command::CommandTable;
 use crate::external_diff::{check_argv, parse_command};
+use crate::features::custom_commands::CommandTable;
 use crate::forge::ForgeHost;
 use crate::forge::allow::AllowRule;
 use crate::git::diff::EmojiZwj;
@@ -930,7 +930,7 @@ output = "none"
 
     #[test]
     fn a_global_command_loads_into_the_keymap() {
-        use crate::custom_command::{OutputMode, Part};
+        use crate::features::custom_commands::{OutputMode, Part};
         let files = Files::new("commands");
         files.global(COPY_COMMAND);
         let loaded = files.load();

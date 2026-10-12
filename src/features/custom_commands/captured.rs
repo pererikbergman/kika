@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
-use crate::custom_command::CommandFailure;
+use super::command::CommandFailure;
 use crate::git::diff::terminal_safe;
 use crate::handoff::start_error;
 
