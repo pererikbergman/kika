@@ -18,7 +18,6 @@ use crate::features::{
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
-use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::list_filter::LogFilterField;
@@ -1336,33 +1335,6 @@ pub(crate) fn open_disabled(state: &AppState) -> Option<Reason> {
         return Some(OP_RUNNING.into());
     }
     no_file_selected(state)
-}
-
-/// Why `e` cannot edit the selected hunk right now. What kind of change
-/// can be edited is the model's call once it runs.
-pub(crate) fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
-    if let Some(reason) = in_commit(state) {
-        return Some(reason);
-    }
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    let Focus::Diff(view) = &state.focus else {
-        return Some(NO_CHANGES.into());
-    };
-    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
-        return Some(reason);
-    }
-    if view.lines.is_some() {
-        return Some("Press Esc to edit the whole hunk".into());
-    }
-    if view.loading() {
-        return Some("Loading…".into());
-    }
-    match &view.patch {
-        Some(patch) if !patch.hunks.is_empty() => None,
-        _ => Some(NO_CHANGES.into()),
-    }
 }
 
 /// The editor's keys wait while the commit runs, so the message cannot change.
@@ -3959,58 +3931,6 @@ mod tests {
             None
         );
         assert_eq!(from(KeyScope::Files, plain('e')), None);
-    }
-
-    #[test]
-    fn o_and_e_say_why_they_cannot_run() {
-        use crate::git::diff::DiffSide;
-        use crate::git::patch::parse;
-        use crate::hunk_view::{HunkView, LineCursor};
-
-        let reason = |state: &AppState, scope, c| match resolve(
-            registry(),
-            &Keymap::default(),
-            scope,
-            state,
-            plain(c),
-        ) {
-            Resolution::Disabled(reason) => Some(reason),
-            Resolution::Run(_) => None,
-            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
-        };
-        let mut state = AppState::new(Context::Workspace);
-        assert_eq!(
-            reason(&state, KeyScope::Files, 'o'),
-            Some("No file selected".into())
-        );
-        state.op_seq = Some(1);
-        assert_eq!(
-            reason(&state, KeyScope::Files, 'o'),
-            Some(OP_RUNNING.into())
-        );
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(OP_RUNNING.into()));
-        state.op_seq = None;
-
-        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
-        view.seq = Some(3);
-        state.focus = Focus::Diff(view.clone());
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some("Loading…".into()));
-        view.seq = None;
-        state.focus = Focus::Diff(view.clone());
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(NO_CHANGES.into()));
-        view.patch =
-            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
-        assert_eq!(reason(&state, KeyScope::Diff, 'e'), None);
-        view.lines = Some(LineCursor {
-            anchor: 0,
-            cursor: 0,
-        });
-        state.focus = Focus::Diff(view);
-        assert_eq!(
-            reason(&state, KeyScope::Lines, 'e'),
-            Some("Press Esc to edit the whole hunk".into())
-        );
     }
 
     #[test]
