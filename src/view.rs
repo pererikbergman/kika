@@ -8,13 +8,13 @@ use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::features::blame;
 use crate::features::conflicts;
+use crate::features::operation;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, EmojiZwj, LineKind, sanitize};
 use crate::git::emoji;
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::remote::RemoteOp;
-use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
@@ -66,7 +66,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         let look = PanelLook::of(state, Panel::Side(side), area);
         let expanded = side == state.expanded;
         match side {
-            SidePanel::Status => render_status_panel(state, &look, expanded, frame, area),
+            SidePanel::Status => {
+                operation::view::render_status_panel(state, &look, expanded, frame, area)
+            }
             SidePanel::Files => render_files_panel(state, &look, expanded, frame, area),
             SidePanel::Branches => {
                 let spinner = state
@@ -290,98 +292,11 @@ pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     }
 }
 
-/// Where the user is: the branch, its upstream, and any operation in
-/// progress. Names too wide for the panel lose their start to `…`, so the
-/// counts and markers after them stay visible. Blank when no load has
-/// succeeded yet, since the Files panel shows why; dimmed when the last
-/// refresh failed, since it may be out of date. Collapsed, one row shows
-/// the branch and any operation in progress; with only a title row, the
-/// title does.
-fn render_status_panel(
-    state: &AppState,
-    look: &PanelLook,
-    expanded: bool,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    if area.is_empty() {
-        return;
-    }
-    let stale = state.status_error.is_some() && state.branch.is_some();
-    let stale_note = if stale { " (stale)" } else { "" };
-    // Inside a submodule, say which one: the paths from the launch
-    // repository. A long one loses its start, so the innermost name shows.
-    let location: Vec<&str> = state.repo_stack.iter().map(|p| p.path.display()).collect();
-    let operations: Vec<&str> = state
-        .branch
-        .iter()
-        .flat_map(|b| b.in_progress.iter().map(|&op| doing(op)))
-        .collect();
-    let operations = operations.join(", ");
-    let title = if let (true, Some(branch)) = (look.title_only, &state.branch) {
-        let ops = if operations.is_empty() {
-            String::new()
-        } else {
-            format!(" · {operations}")
-        };
-        look.path_title(
-            "Status ·",
-            &head_name(&branch.head),
-            &format!("{ops}{stale_note}"),
-        )
-    } else if location.is_empty() {
-        look.title(&format!("Status{stale_note}"))
-    } else {
-        look.path_title("Status ·", &location.join("/"), stale_note)
-    };
-    let block = look.block(title);
-    let block = if stale {
-        block.style(Style::new().fg(Color::DarkGray))
-    } else {
-        block
-    };
-    let width = usize::from(block.inner(area).width);
-    let Some(branch) = &state.branch else {
-        let text = if state.files_loaded { "" } else { "Loading…" };
-        frame.render_widget(Paragraph::new(text).block(block), area);
-        return;
-    };
-    let marker = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    if !expanded {
-        // One row: the branch, and what the repository is in the middle of.
-        let ops = if operations.is_empty() {
-            String::new()
-        } else {
-            format!(" {operations}")
-        };
-        let ops = elide_right(&ops, width.saturating_sub(2));
-        let head = head_line(&branch.head, width.saturating_sub(width_of(&ops)));
-        let line = Line::from(vec![Span::raw(head), Span::styled(ops, marker)]);
-        frame.render_widget(Paragraph::new(line).block(block), area);
-        return;
-    }
-    let head = head_line(&branch.head, width);
-    let upstream = match (&branch.upstream, branch.ahead_behind) {
-        (None, _) => fit("no upstream", "", width),
-        (Some(name), Some((ahead, behind))) => fit(name, &format!(" ↑{ahead} ↓{behind}"), width),
-        (Some(name), None) => fit(name, " (gone)", width),
-    };
-    let mut lines = vec![
-        Line::raw(head),
-        Line::raw(upstream),
-        Line::styled(elide_right(&operations, width), marker),
-    ];
-    if let Some(bisect) = &branch.bisect {
-        lines.extend(bisect_lines(state, &branch.head, bisect, width));
-    }
-    frame.render_widget(Paragraph::new(lines).block(block), area);
-}
-
 /// The bisect under the "bisecting" marker: its marks and outcome, the
 /// commit being tested, and where it started. A commit is shown as tested
 /// once `HEAD` is detached, as the Status panel's mark keys need. Every
 /// string here is already terminal-safe.
-fn bisect_lines(
+pub(crate) fn bisect_lines(
     state: &AppState,
     head: &Head,
     bisect: &BisectState,
@@ -428,23 +343,6 @@ fn bisect_lines(
 /// Marks the found commit's line, so it stands out without colour too.
 const FOUND_MARK: &str = "◆";
 
-/// The branch row, fitted to `width` columns.
-fn head_line(head: &Head, width: usize) -> String {
-    match head {
-        Head::Branch(name) => fit(name, "", width),
-        Head::Detached(oid) => fit("detached", &format!(" {}", short_hash(oid)), width),
-        Head::Unborn(name) => fit(name, " (no commits)", width),
-    }
-}
-
-/// The branch in a few words, for a title.
-fn head_name(head: &Head) -> String {
-    match head {
-        Head::Branch(name) | Head::Unborn(name) => name.clone(),
-        Head::Detached(oid) => format!("detached {}", short_hash(oid)),
-    }
-}
-
 /// `name` then `suffix` in `width` columns. The name gives way first, so
 /// the suffix (counts, markers) is cut only when it cannot fit at all.
 pub(crate) fn fit(name: &str, suffix: &str, width: usize) -> String {
@@ -479,17 +377,6 @@ pub(crate) fn short_hash(oid: &str) -> &str {
     oid.char_indices()
         .nth(SHORT_HASH)
         .map_or(oid, |(end, _)| &oid[..end])
-}
-
-/// What the repository is in the middle of, as the panel names it.
-fn doing(op: Operation) -> &'static str {
-    match op {
-        Operation::Rebase => "rebasing",
-        Operation::Merge => "merging",
-        Operation::CherryPick => "cherry-picking",
-        Operation::Revert => "reverting",
-        Operation::Bisect => "bisecting",
-    }
 }
 
 /// The border colour of the panel or commit box that has the keys.
@@ -2232,12 +2119,13 @@ mod tests {
     use crate::commit_editor::{CommitEditor, Field};
     use crate::features::blame::CommitView;
     use crate::git::diff::{DiffLine, LineKind};
-    use crate::git::status::{BranchStatus, EntryKind};
+    use crate::git::repo_state::Operation;
+    use crate::git::status::EntryKind;
     use crate::model::CommitFlow;
     use crate::test_support::OID;
     use crate::test_support::screen::{
         assert_no_split_cluster, blame_line, blamed, branch, contains, diff_line, draw,
-        draw_buffer, file, find, loaded,
+        draw_buffer, file, find, loaded, on, status_focused, thin,
     };
 
     /// Draw a workspace whose Files panel is exactly `panel` columns wide and
@@ -2265,26 +2153,6 @@ mod tests {
             .collect()
     }
 
-    /// `rows` with the focused panel's thick border drawn thin, for tests
-    /// about what a panel shows rather than how it is framed.
-    fn thin(rows: Vec<String>) -> Vec<String> {
-        rows.into_iter()
-            .map(|row| {
-                row.chars()
-                    .map(|c| match c {
-                        '┃' => '│',
-                        '━' => '─',
-                        '┏' => '┌',
-                        '┓' => '┐',
-                        '┗' => '└',
-                        '┛' => '┘',
-                        c => c,
-                    })
-                    .collect()
-            })
-            .collect()
-    }
-
     fn renamed(orig: &str, path: &str) -> FileEntry {
         FileEntry {
             path: path.into(),
@@ -2293,206 +2161,6 @@ mod tests {
             worktree: '.',
             kind: EntryKind::Renamed,
         }
-    }
-
-    /// A loaded workspace with no changes on `branch`.
-    fn on(branch: BranchStatus) -> AppState {
-        let mut state = loaded(vec![]);
-        state.branch = Some(branch);
-        state
-    }
-
-    /// `state` with the Status panel focused, so it is expanded.
-    fn status_focused(state: &AppState) -> AppState {
-        let mut state = state.clone();
-        state.focus = Focus::Status;
-        state.expanded = SidePanel::Status;
-        state
-    }
-
-    /// The three text rows inside the expanded Status panel on an 80x24 screen.
-    fn panel_rows(state: &AppState) -> Vec<String> {
-        let rows = thin(draw(&status_focused(state), 80, 24));
-        assert!(rows[0].contains(" [1] Status "), "{rows:#?}");
-        rows[1..4].to_vec()
-    }
-
-    #[test]
-    fn the_panel_shows_the_branch_and_its_upstream_counts() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.upstream = Some("origin/main".into());
-        main.ahead_behind = Some((2, 1));
-        let rows = panel_rows(&on(main));
-        assert!(rows[0].starts_with("│main "), "{rows:#?}");
-        assert!(rows[1].starts_with("│origin/main ↑2 ↓1 "), "{rows:#?}");
-        assert!(rows[2].starts_with("│ "), "{rows:#?}");
-    }
-
-    #[test]
-    fn the_panel_says_when_there_is_no_upstream() {
-        let rows = panel_rows(&on(branch(Head::Branch("topic".into()))));
-        assert!(rows[0].starts_with("│topic "), "{rows:#?}");
-        assert!(rows[1].starts_with("│no upstream "), "{rows:#?}");
-    }
-
-    #[test]
-    fn the_panel_marks_an_upstream_that_is_gone() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.upstream = Some("origin/main".into());
-        let rows = panel_rows(&on(main));
-        assert!(rows[1].starts_with("│origin/main (gone) "), "{rows:#?}");
-    }
-
-    #[test]
-    fn a_detached_head_shows_the_short_hash() {
-        let rows = panel_rows(&on(branch(Head::Detached("abc1234def5678".into()))));
-        assert!(rows[0].starts_with("│detached abc1234 "), "{rows:#?}");
-    }
-
-    #[test]
-    fn an_unborn_branch_says_it_has_no_commits() {
-        let rows = panel_rows(&on(branch(Head::Unborn("main".into()))));
-        assert!(rows[0].starts_with("│main (no commits) "), "{rows:#?}");
-    }
-
-    #[test]
-    fn operations_in_progress_are_named_in_yellow() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.in_progress = vec![Operation::Merge];
-        let state = on(main.clone());
-        assert!(panel_rows(&state)[2].starts_with("│merging "));
-        let buffer = draw_buffer(&status_focused(&state), 80, 24);
-        let (x, y) = find(&buffer, "merging");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
-        // Bold too, so it stands out where yellow reads poorly.
-        assert!(buffer[(x, y)].style().add_modifier.contains(Modifier::BOLD));
-
-        main.in_progress = vec![Operation::Rebase];
-        assert!(panel_rows(&on(main.clone()))[2].starts_with("│rebasing "));
-
-        main.in_progress = vec![
-            Operation::Rebase,
-            Operation::Merge,
-            Operation::CherryPick,
-            Operation::Bisect,
-        ];
-        let rows = thin(draw(&status_focused(&on(main)), 200, 24));
-        assert!(
-            contains(&rows, "│rebasing, merging, cherry-picking, bisecting"),
-            "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn the_panel_says_loading_before_the_first_load() {
-        let rows = panel_rows(&AppState::new(Context::Workspace));
-        assert!(rows[0].starts_with("│Loading… "), "{rows:#?}");
-    }
-
-    #[test]
-    fn a_failed_first_load_leaves_the_panel_blank_not_loading() {
-        let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
-        state.status_error = Some("fatal: not a git repository".into());
-        let rows = panel_rows(&state);
-        assert!(!contains(&rows, "Loading"), "{rows:#?}");
-    }
-
-    #[test]
-    fn a_long_branch_name_is_elided_with_a_marker() {
-        let rows = panel_rows(&on(branch(Head::Branch(format!("{}end", "b".repeat(100))))));
-        // 22 columns inside the panel: the start gives way, the end stays.
-        assert!(
-            rows[0].starts_with(&format!("│…{}end││", "b".repeat(21))),
-            "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn a_long_upstream_keeps_its_counts_on_screen() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.upstream = Some("origin/feature/a-really-long-status-panel".into());
-        main.ahead_behind = Some((2, 1));
-        let rows = panel_rows(&on(main.clone()));
-        assert!(
-            rows[1].starts_with("│…-long-status-panel ↑2 ↓1││"),
-            "{rows:#?}"
-        );
-
-        main.ahead_behind = None;
-        let rows = panel_rows(&on(main));
-        assert!(
-            rows[1].starts_with("│…") && rows[1].contains(" (gone)"),
-            "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn a_long_unborn_branch_keeps_no_commits_on_screen() {
-        let rows = panel_rows(&on(branch(Head::Unborn("x".repeat(40)))));
-        assert!(
-            rows[0].starts_with("│…xxx") && rows[0].contains(" (no commits)"),
-            "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn an_overflowing_operations_row_ends_in_a_marker() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.in_progress = vec![Operation::Rebase, Operation::Merge, Operation::CherryPick];
-        let rows = panel_rows(&on(main));
-        assert!(
-            rows[2].starts_with("│rebasing, merging, cherr…││"),
-            "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn a_failed_refresh_marks_the_panel_stale() {
-        let mut state = on(branch(Head::Branch("main".into())));
-        state.status_error = Some("fatal: index file corrupt".into());
-        let buffer = draw_buffer(&state, 80, 24);
-        let rows = buffer_rows(&buffer);
-        assert!(rows[0].contains(" Status (stale) "), "{rows:#?}");
-        let (x, y) = find(&buffer, "main");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-    }
-
-    fn parent(path: &str) -> crate::model::ParentRepo {
-        crate::model::ParentRepo {
-            path: path.into(),
-            files: vec![],
-            files_loaded: true,
-            branch: None,
-            selected: None,
-        }
-    }
-
-    #[test]
-    fn inside_a_submodule_the_status_title_names_it() {
-        let mut state = on(branch(Head::Branch("main".into())));
-        state.repo_stack = vec![parent("sub")];
-        let rows = draw(&state, 80, 24);
-        assert!(rows[0].contains(" Status · sub "), "{rows:#?}");
-
-        // Nested, and with a name that must not drive the terminal.
-        state.repo_stack = vec![parent("libs/a"), parent("in\x1bner")];
-        state.status_error = Some("boom".into());
-        let rows = draw(&state, 160, 24);
-        assert!(
-            rows[0].contains(" Status · libs/a/in\u{FFFD}ner (stale) "),
-            "{rows:#?}"
-        );
-        // A narrow panel keeps the innermost name.
-        let rows = draw(&state, 80, 24);
-        assert!(rows[0].contains(" [1] Status · …r (stale) "), "{rows:#?}");
-    }
-
-    #[test]
-    fn the_launch_repository_has_a_plain_status_title() {
-        let state = on(branch(Head::Branch("main".into())));
-        let rows = draw(&state, 80, 24);
-        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
     }
 
     /// The Files panel's title row and the row below it.
@@ -2580,27 +2248,6 @@ mod tests {
         state.files.clear();
         let rows = draw(&state, 80, 24);
         assert!(files_rows(&rows).1.starts_with("│No changes "), "{rows:#?}");
-    }
-
-    #[test]
-    fn tiny_terminals_do_not_panic_with_a_status_panel() {
-        let mut main = branch(Head::Branch("a-long-branch-name".into()));
-        main.upstream = Some("origin/a-long-branch-name".into());
-        main.ahead_behind = Some((12, 345));
-        main.in_progress = vec![Operation::Rebase, Operation::Merge];
-        let state = on(main);
-        for (w, h) in [
-            (0, 0),
-            (1, 1),
-            (10, 2),
-            (2, 10),
-            (3, 3),
-            (5, 4),
-            (20, 6),
-            (80, 24),
-        ] {
-            draw(&state, w, h);
-        }
     }
 
     #[test]
@@ -4967,18 +4614,6 @@ mod tests {
             rows[0].starts_with("┌[1] Status · …c · merging┐"),
             "{rows:#?}"
         );
-    }
-
-    #[test]
-    fn a_collapsed_status_still_shows_an_operation_in_progress() {
-        let mut main = branch(Head::Branch("main".into()));
-        main.in_progress = vec![Operation::Rebase];
-        let state = on(main);
-        let buffer = draw_buffer(&state, 80, 24);
-        let rows = buffer_rows(&buffer);
-        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
-        let (x, y) = find(&buffer, "rebasing");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
 
     /// The side panels other than Files, each with its rect, on a
