@@ -11,6 +11,7 @@ use super::commit_files::CommitId;
 use super::diff::terminal_safe;
 use super::path::{RepoPath, os_string};
 use super::runner::{GitCommand, GitRunner};
+use super::worktree_trust::mark_untrusted;
 
 /// One worktree as `git worktree list --porcelain` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +28,8 @@ pub struct Worktree {
     /// The first record: the repository's own worktree, never removable.
     pub main: bool,
     /// Read without `-z`, the record had a line that is no known key, which
-    /// is what a path holding a newline looks like. Its path is not trusted.
+    /// is what a path holding a newline looks like, or its `.git` does not
+    /// lead back to this repository. Its path is not trusted.
     pub unsure: bool,
 }
 
@@ -65,7 +67,8 @@ pub fn list_command(z: bool) -> GitCommand {
 
 /// Every worktree, the main one first. `-z` is tried first; a git too old
 /// for it fails, and the list is read again with newlines. Only that
-/// second failure is reported.
+/// second failure is reported. A record read with newlines could be forged
+/// by a path holding one, so each is checked against the shared git dir.
 pub fn read_worktrees(runner: &dyn GitRunner) -> Result<Vec<Worktree>, String> {
     if let Ok(output) = runner.run(&list_command(true))
         && output.success
@@ -83,7 +86,12 @@ pub fn read_worktrees(runner: &dyn GitRunner) -> Result<Vec<Worktree>, String> {
             message
         });
     }
-    Ok(parse_list(&output.stdout, b'\n'))
+    let mut list = parse_list(&output.stdout, b'\n');
+    match git_dirs(runner, &runner.workdir()) {
+        Ok((_, common)) => mark_untrusted(&mut list, &common),
+        Err(_) => list.iter_mut().for_each(|w| w.unsure = true),
+    }
+    Ok(list)
 }
 
 /// Parse porcelain output whose fields end at `sep`. An empty field ends a
@@ -340,7 +348,7 @@ fn normalize(path: &Path) -> PathBuf {
 }
 
 /// The deepest existing ancestor of `path` resolved, with the rest put back.
-fn canonical(path: &Path) -> PathBuf {
+pub(super) fn canonical(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut base = path;
     loop {
@@ -361,7 +369,7 @@ fn canonical(path: &Path) -> PathBuf {
 /// Windows canonical paths start `\\?\`, which git does not expect; a
 /// drive path without it means the same file.
 #[cfg(windows)]
-fn without_verbatim(path: PathBuf) -> PathBuf {
+pub(super) fn without_verbatim(path: PathBuf) -> PathBuf {
     let stripped = path
         .to_str()
         .and_then(|text| text.strip_prefix(r"\\?\"))
@@ -371,7 +379,7 @@ fn without_verbatim(path: PathBuf) -> PathBuf {
 }
 
 #[cfg(not(windows))]
-fn without_verbatim(path: PathBuf) -> PathBuf {
+pub(super) fn without_verbatim(path: PathBuf) -> PathBuf {
     path
 }
 
@@ -388,7 +396,8 @@ fn has_dot_git(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, TempDir, fail, ok};
+    use crate::git::CliRunner;
+    use crate::git::fake::{self, FakeRunner, TempDir, fail, ok};
 
     const A: &str = "1111111111111111111111111111111111111111";
     const B: &str = "2222222222222222222222222222222222222222";
@@ -609,7 +618,8 @@ mod tests {
     fn read_worktrees_falls_back_to_newlines_and_reports_only_the_second_failure() {
         let runner = FakeRunner::new()
             .expect(LIST_Z, fail("error: unknown switch `z'\n"))
-            .expect(LIST, ok(b"worktree /r\nbare\n\n"));
+            .expect(LIST, ok(b"worktree /r\nbare\n\n"))
+            .expect(GIT_DIRS, ok(b"/r\n/r\n"));
         assert_eq!(read_worktrees(&runner).unwrap()[0].path.display(), "/r");
         runner.assert_done();
 
@@ -621,6 +631,75 @@ mod tests {
             Err("fatal: not a \u{FFFD}[31mrepo".into())
         );
         runner.assert_done();
+    }
+
+    const GIT_DIRS: &[&str] = &["rev-parse", "--git-dir", "--git-common-dir"];
+
+    #[test]
+    fn read_worktrees_with_newlines_checks_each_record_against_the_common_dir() {
+        let tmp = TempDir::new("read-trust");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(main.join(".git")).unwrap();
+        let common = format!("{}\n", main.join(".git").display());
+        let listed = format!(
+            "worktree {}\nHEAD {A}\n\nworktree {}\nHEAD {A}\n\n",
+            main.display(),
+            tmp.path().join("forged").display()
+        );
+        let runner = FakeRunner::new()
+            .expect(LIST_Z, fail("error: unknown switch `z'\n"))
+            .expect(LIST, ok(listed.as_bytes()))
+            .expect(GIT_DIRS, ok(format!("{common}{common}").as_bytes()));
+        let unsure: Vec<_> = read_worktrees(&runner)
+            .unwrap()
+            .iter()
+            .map(|w| w.unsure)
+            .collect();
+        assert_eq!(unsure, [false, true]);
+        runner.assert_done();
+        assert_eq!(runner.envs()[2], [("LC_ALL".into(), "C".into())]);
+
+        let runner = FakeRunner::new()
+            .expect(LIST_Z, fail("error: unknown switch `z'\n"))
+            .expect(LIST, ok(listed.as_bytes()))
+            .expect(GIT_DIRS, fail("fatal: no\n"));
+        let list = read_worktrees(&runner).unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().all(|w| w.unsure), "{list:#?}");
+        runner.assert_done();
+
+        // With `-z` nothing is checked: the one call made is the list.
+        let nul = listed.replace('\n', "\0");
+        let runner = FakeRunner::new().expect(LIST_Z, ok(nul.as_bytes()));
+        let list = read_worktrees(&runner).unwrap();
+        assert!(list.iter().all(|w| !w.unsure), "{list:#?}");
+        assert_eq!(runner.envs().len(), 1);
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_real_linked_worktree_and_the_main_one_are_trusted_from_either() {
+        let tmp = TempDir::new("real-trust");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        fake::git(&repo, &["init", "-q"]);
+        fake::git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        let linked = tmp.path().join("wt");
+        let linked_text = linked.to_str().unwrap();
+        fake::git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "side", "--", linked_text],
+        );
+        for dir in [&repo, &linked] {
+            let runner = CliRunner::isolated(dir.as_path());
+            let output = runner.run(&list_command(false)).unwrap();
+            assert!(output.success);
+            let mut list = parse_list(&output.stdout, b'\n');
+            let (_, common) = git_dirs(&runner, dir).unwrap();
+            mark_untrusted(&mut list, &common);
+            assert_eq!(list.len(), 2, "{list:#?}");
+            assert!(list.iter().all(|w| !w.unsure), "{list:#?}");
+        }
     }
 
     fn args(cmd: &GitCommand) -> Vec<String> {
@@ -769,10 +848,7 @@ mod tests {
         let target_text = target.to_str().unwrap().to_string();
         let runner = WorkdirRunner {
             fake: FakeRunner::new()
-                .expect(
-                    &["rev-parse", "--git-dir", "--git-common-dir"],
-                    ok(b".git\n.git\n"),
-                )
+                .expect(GIT_DIRS, ok(b".git\n.git\n"))
                 .expect(&["worktree", "add", "--", &target_text, "feature"], ok(b"")),
             workdir: workdir.clone(),
         };
@@ -783,10 +859,7 @@ mod tests {
         runner.fake.assert_done();
 
         let runner = WorkdirRunner {
-            fake: FakeRunner::new().expect(
-                &["rev-parse", "--git-dir", "--git-common-dir"],
-                ok(b".git\n.git\n"),
-            ),
+            fake: FakeRunner::new().expect(GIT_DIRS, ok(b".git\n.git\n")),
             workdir,
         };
         assert!(add_worktree(&runner, ".git/x", &BranchName::from("feature")).is_err());
