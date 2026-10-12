@@ -218,6 +218,9 @@ pub struct AppState {
     pub op_seq: Option<u64>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
+    /// From the global `[commit] hooks_detached`: the user's hooks never ask
+    /// anything, so a commit that only runs hooks stays detached.
+    pub commit_hooks_detached: bool,
     /// The last operation's failure, or why one was refused.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
@@ -310,6 +313,7 @@ impl AppState {
             screen_mode: ScreenMode::Normal,
             op_seq: None,
             commit_on_terminal: false,
+            commit_hooks_detached: false,
             op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
@@ -2336,7 +2340,7 @@ impl AppState {
             self.end_commit(None);
             return vec![];
         }
-        if needs_terminal(&op, facts.as_ref()) {
+        if needs_terminal(&op, facts.as_ref(), self.commit_hooks_detached) {
             self.commit_on_terminal = true;
             vec![Effect::HandOff(HandOff::Commit { tag, op })]
         } else {
@@ -6489,6 +6493,44 @@ mod tests {
             assert_eq!(state.busy, busy, "OpFinished still settles busy");
             assert_eq!(state.op_seq, Some(tag.seq));
             assert!(matches!(state.commit, CommitFlow::Running(_)));
+        }
+    }
+
+    fn hooks_only() -> Option<PromptFacts> {
+        Some(PromptFacts {
+            signs: false,
+            hooks: vec!["pre-commit", "commit-msg", "post-commit"],
+        })
+    }
+
+    #[test]
+    fn with_hooks_detached_a_commit_that_only_runs_hooks_stays_detached() {
+        for (mut state, tag, op) in submissions() {
+            state.commit_hooks_detached = true;
+            let effects = state.update(probed(tag, &op, hooks_only()));
+            assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
+            assert!(!state.commit_on_terminal);
+        }
+    }
+
+    #[test]
+    fn without_hooks_detached_a_commit_with_hooks_is_handed_the_terminal() {
+        let (mut state, tag, op) = submitted();
+        assert!(!state.commit_hooks_detached, "off by default");
+        assert_eq!(
+            state.update(probed(tag, &op, hooks_only())),
+            vec![Effect::HandOff(HandOff::Commit { tag, op })]
+        );
+        assert!(state.commit_on_terminal);
+    }
+
+    #[test]
+    fn with_hooks_detached_a_commit_that_signs_is_still_handed_the_terminal() {
+        for (mut state, tag, op) in submissions() {
+            state.commit_hooks_detached = true;
+            let effects = state.update(probed(tag, &op, signing()));
+            assert_eq!(effects, vec![Effect::HandOff(HandOff::Commit { tag, op })]);
+            assert!(state.commit_on_terminal);
         }
     }
 

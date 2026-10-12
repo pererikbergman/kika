@@ -30,8 +30,10 @@ pub struct PromptFacts {
 
 /// Whether `op` should run on the real terminal. Only commits ever do.
 /// `None` facts mean the probe failed: any doubt hands over, since handing
-/// over always works and a detached prompt hangs.
-pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>) -> bool {
+/// over always works and a detached prompt hangs. `hooks_detached` is the
+/// user's word that their hooks never ask anything, so hooks alone keep a
+/// commit detached; signing still hands over, as it may ask for a passphrase.
+pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>, hooks_detached: bool) -> bool {
     let GitOp::Commit {
         amend, no_verify, ..
     } = op
@@ -44,6 +46,9 @@ pub fn needs_terminal(op: &GitOp, facts: Option<&PromptFacts>) -> bool {
     // Amending and `--no-edit` sign too, and `--no-verify` does not stop it.
     if facts.signs {
         return true;
+    }
+    if hooks_detached {
+        return false;
     }
     facts.hooks.iter().any(|&hook| match hook {
         "pre-commit" | "commit-msg" => !no_verify,
@@ -238,15 +243,15 @@ mod tests {
             GitOp::SubmoduleUpdate(RepoPath::from("sub")),
             GitOp::SubmoduleInit(RepoPath::from("sub")),
         ] {
-            assert!(!needs_terminal(&op, None), "{op:?}");
-            assert!(!needs_terminal(&op, Some(&signing)), "{op:?}");
+            assert!(!needs_terminal(&op, None, false), "{op:?}");
+            assert!(!needs_terminal(&op, Some(&signing), false), "{op:?}");
         }
     }
 
     #[test]
     fn a_failed_probe_hands_over() {
         for op in all_commits() {
-            assert!(needs_terminal(&op, None), "{op:?}");
+            assert!(needs_terminal(&op, None, false), "{op:?}");
         }
     }
 
@@ -257,7 +262,7 @@ mod tests {
             hooks: vec![],
         };
         for op in all_commits() {
-            assert!(needs_terminal(&op, Some(&facts)), "{op:?}");
+            assert!(needs_terminal(&op, Some(&facts), false), "{op:?}");
         }
     }
 
@@ -266,15 +271,21 @@ mod tests {
         for hook in ["pre-commit", "commit-msg"] {
             let facts = hooks(&[hook]);
             assert!(
-                needs_terminal(&commit(false, false), Some(&facts)),
+                needs_terminal(&commit(false, false), Some(&facts), false),
                 "{hook}"
             );
-            assert!(needs_terminal(&commit(true, false), Some(&facts)), "{hook}");
             assert!(
-                !needs_terminal(&commit(false, true), Some(&facts)),
+                needs_terminal(&commit(true, false), Some(&facts), false),
                 "{hook}"
             );
-            assert!(!needs_terminal(&commit(true, true), Some(&facts)), "{hook}");
+            assert!(
+                !needs_terminal(&commit(false, true), Some(&facts), false),
+                "{hook}"
+            );
+            assert!(
+                !needs_terminal(&commit(true, true), Some(&facts), false),
+                "{hook}"
+            );
         }
     }
 
@@ -283,7 +294,7 @@ mod tests {
         for hook in ["prepare-commit-msg", "post-commit", "reference-transaction"] {
             let facts = hooks(&[hook]);
             for op in all_commits() {
-                assert!(needs_terminal(&op, Some(&facts)), "{hook} {op:?}");
+                assert!(needs_terminal(&op, Some(&facts), false), "{hook} {op:?}");
             }
         }
     }
@@ -291,20 +302,65 @@ mod tests {
     #[test]
     fn post_rewrite_hands_over_only_when_amending() {
         let facts = hooks(&["post-rewrite"]);
-        assert!(needs_terminal(&commit(true, false), Some(&facts)));
-        assert!(needs_terminal(&commit(true, true), Some(&facts)));
-        assert!(!needs_terminal(&commit(false, false), Some(&facts)));
-        assert!(!needs_terminal(&commit(false, true), Some(&facts)));
+        assert!(needs_terminal(&commit(true, false), Some(&facts), false));
+        assert!(needs_terminal(&commit(true, true), Some(&facts), false));
+        assert!(!needs_terminal(&commit(false, false), Some(&facts), false));
+        assert!(!needs_terminal(&commit(false, true), Some(&facts), false));
     }
 
     #[test]
     fn no_signing_and_no_hooks_stays_detached() {
         for op in all_commits() {
             assert!(
-                !needs_terminal(&op, Some(&PromptFacts::default())),
+                !needs_terminal(&op, Some(&PromptFacts::default()), false),
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn hooks_detached_keeps_a_hook_only_commit_detached() {
+        let facts = hooks(&["pre-commit", "commit-msg", "post-commit"]);
+        let op = commit(false, false);
+        assert!(!needs_terminal(&op, Some(&facts), true));
+        assert!(needs_terminal(&op, Some(&facts), false));
+        for op in all_commits() {
+            assert!(
+                !needs_terminal(&op, Some(&hooks(&COMMIT_HOOKS)), true),
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hooks_detached_still_hands_signing_over() {
+        for facts in [
+            PromptFacts {
+                signs: true,
+                hooks: vec![],
+            },
+            PromptFacts {
+                signs: true,
+                hooks: COMMIT_HOOKS.to_vec(),
+            },
+        ] {
+            for op in all_commits() {
+                assert!(needs_terminal(&op, Some(&facts), true), "{facts:?} {op:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hooks_detached_still_hands_a_failed_probe_over_and_never_other_ops() {
+        for op in all_commits() {
+            assert!(needs_terminal(&op, None, true), "{op:?}");
+        }
+        assert!(!needs_terminal(&GitOp::StageAll, None, true));
+        assert!(!needs_terminal(
+            &GitOp::StageAll,
+            Some(&hooks(&COMMIT_HOOKS)),
+            true
+        ));
     }
 
     use crate::git::CliRunner;
