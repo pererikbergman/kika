@@ -199,7 +199,7 @@ mod tests {
     use crate::intent::AppIntent;
     use crate::keymap::{FILTER_HIDES_ROW, KeyPress, KeyScope};
     use crate::layout::{Panel, SidePanel};
-    use crate::list_filter::{INPUT_FULL, MAX_INPUT};
+    use crate::list_filter::{MAX_INPUT, input_full_notice};
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         let mods = match code {
@@ -420,7 +420,7 @@ mod tests {
                 key(&mut state, 'z');
             }
             assert_eq!(shown(&state).0.chars().count(), MAX_INPUT);
-            assert_eq!(state.notice, Some(INPUT_FULL.into()));
+            assert_eq!(state.notice, Some(input_full_notice().into()));
         }
     }
 
