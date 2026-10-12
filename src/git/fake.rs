@@ -363,6 +363,20 @@ pub fn try_git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> bool {
     setup_git(dir, args).output().unwrap().status.success()
 }
 
+/// The value of `key` in `dir`'s config, or `None` when it is unset.
+pub fn config(dir: &std::path::Path, key: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    let out = cmd
+        .current_dir(dir)
+        .envs(crate::git::runner::isolation_env())
+        .args(["config", "--get", key])
+        .output()
+        .unwrap();
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).unwrap().trim().to_string())
+}
+
 fn setup_git<A: AsRef<OsStr>>(dir: &std::path::Path, args: &[A]) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command

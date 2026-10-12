@@ -46,8 +46,6 @@ mod reflog;
 mod reflog_view;
 mod refresh;
 mod remote_run;
-mod remotes;
-mod remotes_view;
 mod rendered_view;
 mod rows;
 mod sequence_editor;
