@@ -570,6 +570,23 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_file_cannot_remap_the_range_question_but_can_the_list_keys() {
+        for id in ["delete_range.yes", "delete_range.no", "delete_range.quit"] {
+            let locked = repo(&format!("[keys]\n\"{id}\" = [\"Z\"]\n")).unwrap_err();
+            assert_eq!(
+                locked,
+                format!("\"{id}\" can only be changed in the global config file")
+            );
+        }
+        for scope in ["branches", "remotes", "tags"] {
+            let text =
+                format!("[keys]\n\"{scope}.filter\" = [\"F\"]\n\"{scope}.range\" = [\"Z\"]\n");
+            let keymap = repo(&text).unwrap();
+            assert_eq!(keys_of(&keymap, &format!("{scope}.filter")), [key("F")]);
+        }
+    }
+
+    #[test]
     fn a_repository_file_may_move_the_worktrees_filter_but_not_its_escape() {
         let keymap = repo("[keys]\n\"worktrees.filter\" = [\"f\"]\n").unwrap();
         assert_eq!(keys_of(&keymap, "worktrees.filter"), [key("f")]);

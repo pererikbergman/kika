@@ -12,7 +12,9 @@ use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::remotes_view;
 use crate::tags_view;
-use crate::view::{PanelLook, clip, elide_right, fit, pad, reversed, width_of};
+use crate::view::{
+    PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
+};
 
 /// Columns given to a log row's author, so subjects line up.
 const LOG_AUTHOR: usize = 16;
@@ -64,7 +66,7 @@ pub fn render_panel(
         Some(branch) if look.title_only => {
             look.title(&format!("Branches · {}", branch.name.display()))
         }
-        _ if expanded => look.title(&tabs_title(panel.tab, look)),
+        _ if expanded => look.title(&tab_title(panel, look)),
         _ => look.title("Branches"),
     };
     let mut block = look.block(title);
@@ -88,28 +90,65 @@ pub fn render_panel(
     } else if !expanded {
         Paragraph::new(current.map(|b| row(b, width)).unwrap_or_default())
     } else {
-        let rows = usize::from(inner.height);
-        let selected = panel.selected.unwrap_or(0);
-        // Scrolled just enough to keep the selection in view.
-        let first = selected.saturating_sub(rows.saturating_sub(1));
-        let lines = panel
-            .branches
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(rows)
-            .map(|(i, branch)| {
-                let line = row(branch, width);
-                if Some(i) == panel.selected {
-                    reversed(line, width)
-                } else {
-                    line
-                }
-            })
-            .collect::<Vec<_>>();
-        Paragraph::new(lines)
+        let shown = panel.visible();
+        if shown.is_empty() {
+            Paragraph::new(no_matches())
+        } else {
+            let range = panel.range();
+            let lines = scrolled(&shown, panel.selected, usize::from(inner.height))
+                .iter()
+                .map(|&i| {
+                    range_row(
+                        row(&panel.branches[i], width),
+                        i,
+                        panel.selected,
+                        &range,
+                        width,
+                    )
+                })
+                .collect::<Vec<_>>();
+            Paragraph::new(lines)
+        }
     };
     frame.render_widget(body.block(block), area);
+}
+
+/// The tabs, with the shown tab's filter and range named after them.
+fn tab_title(panel: &BranchesPanel, look: &PanelLook) -> String {
+    let tabs = tabs_title(panel.tab, look);
+    let range = |anchored: bool, range: Vec<usize>| anchored.then_some(range.len());
+    match panel.tab {
+        BranchesTab::Local => list_title(
+            look,
+            &tabs,
+            &panel.filter,
+            panel.visible().len(),
+            panel.branches.len(),
+            range(panel.range_anchor.is_some(), panel.range()),
+        ),
+        BranchesTab::Remotes => {
+            let list = &panel.remotes;
+            list_title(
+                look,
+                &tabs,
+                &list.filter,
+                list.visible().len(),
+                list.rows().len(),
+                range(list.range_anchor.is_some(), list.range()),
+            )
+        }
+        BranchesTab::Tags => {
+            let list = &panel.tags;
+            list_title(
+                look,
+                &tabs,
+                &list.filter,
+                list.visible().len(),
+                list.tags.len(),
+                range(list.range_anchor.is_some(), list.range()),
+            )
+        }
+    }
 }
 
 /// What marks a branch row besides its own state.
@@ -388,6 +427,55 @@ pub(crate) mod tests {
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         draw(&state, width, height)
+    }
+
+    fn buffer(state: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    /// Whether the row holding `needle` is drawn reversed where it starts.
+    pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
+        let rows = buffer_rows(buffer);
+        let y = rows
+            .iter()
+            .position(|r| r.contains(needle))
+            .unwrap_or_else(|| panic!("{needle} in {rows:#?}"));
+        let x = rows[y].find(needle).map(|b| rows[y][..b].chars().count());
+        buffer[(x.unwrap() as u16, y as u16)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED)
+    }
+
+    #[test]
+    fn a_filter_draws_safe_with_its_count_and_a_range_reversed() {
+        let names = ["main", "fix-a", "other", "fix-b", "fix-c"];
+        let mut state = focused(
+            names
+                .iter()
+                .map(|n| branch(n, false, None, Track::None))
+                .collect(),
+        );
+        state.screen_mode = crate::layout::ScreenMode::Full;
+        state.branches.set_filter("f\x1b[31m".into());
+        let drawn = buffer(&state, 100, 24);
+        let rows = buffer_rows(&drawn);
+        assert!(drawn.content().iter().all(|c| !c.symbol().contains('\x1b')));
+        assert!(contains(&rows, "0 of 5"), "{rows:#?}");
+        assert!(contains(&rows, "No matches"), "{rows:#?}");
+
+        state.branches.set_filter("fix".into());
+        state.branches.toggle_range();
+        state.branches.move_by(1);
+        let drawn = buffer(&state, 100, 24);
+        let rows = buffer_rows(&drawn);
+        assert!(contains(&rows, "/fix 3 of 5 · 2 selected"), "{rows:#?}");
+        assert!(!contains(&rows, "other"), "{rows:#?}");
+        assert!(reversed_at(&drawn, "fix-a"));
+        assert!(reversed_at(&drawn, "fix-b"));
+        assert!(!reversed_at(&drawn, "fix-c"));
     }
 
     fn pr(number: u64, state: PrState, ci: Option<CiState>) -> PrBadge {

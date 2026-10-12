@@ -1028,6 +1028,25 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             };
             (leading, vec!["commits.filter", "commits.range"])
         }
+        KeyScope::Branches | KeyScope::Remotes | KeyScope::Tags => {
+            let panel = &state.branches;
+            let (clears, ids) = match focus {
+                KeyScope::Branches => (
+                    panel.range_anchor.is_some() || !panel.filter.is_empty(),
+                    ["branches.escape", "branches.filter", "branches.range"],
+                ),
+                KeyScope::Remotes => (
+                    panel.remotes.range_anchor.is_some() || !panel.remotes.filter.is_empty(),
+                    ["remotes.escape", "remotes.filter", "remotes.range"],
+                ),
+                _ => (
+                    panel.tags.range_anchor.is_some() || !panel.tags.filter.is_empty(),
+                    ["tags.escape", "tags.filter", "tags.range"],
+                ),
+            };
+            let leading = if clears { vec![ids[0]] } else { vec![] };
+            (leading, vec![ids[1], ids[2]])
+        }
         KeyScope::Diff if searching(state) => (
             vec!["diff.search_next", "diff.search_prev", "diff.escape"],
             vec!["diff.search"],
@@ -1256,7 +1275,7 @@ fn render_files_panel(
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
     } else if shown.is_empty() {
-        Paragraph::new(Line::styled("No matches", Style::new().fg(Color::DarkGray)))
+        Paragraph::new(no_matches())
     } else if !expanded {
         Paragraph::new(count)
     } else {
@@ -1317,6 +1336,42 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
     ));
     let room = look.title_width.saturating_sub(fixed).max(1);
     format!("{name} · /{} {counts}", elide_right(&query, room))
+}
+
+/// What a list says when its filter hides every row.
+pub(crate) fn no_matches() -> Line<'static> {
+    Line::styled("No matches", Style::new().fg(Color::DarkGray))
+}
+
+/// A list's title text: `base` alone, or with ` · N selected` while a
+/// range is set, or as [`filter_title`] with the shown count while a
+/// filter is.
+pub(crate) fn list_title(
+    look: &PanelLook,
+    base: &str,
+    filter: &str,
+    shown: usize,
+    total: usize,
+    range: Option<usize>,
+) -> String {
+    let selected = range.map_or_else(String::new, |n| format!(" · {n} selected"));
+    if !filter.is_empty() {
+        let counts = format!("{shown} of {total}{selected}");
+        filter_title(look, base, filter, &counts)
+    } else {
+        format!("{base}{selected}")
+    }
+}
+
+/// The part of `shown` that fits in `rows`, scrolled just enough to keep
+/// `selected` in view.
+pub(crate) fn scrolled(shown: &[usize], selected: Option<usize>, rows: usize) -> &[usize] {
+    let at = selected
+        .and_then(|s| shown.iter().position(|&i| i == s))
+        .unwrap_or(0);
+    let first = at.saturating_sub(rows.saturating_sub(1));
+    let end = shown.len().min(first + rows);
+    &shown[first.min(end)..end]
 }
 
 /// `<name> · path: <path> · author: <author>`, naming the parts set, each

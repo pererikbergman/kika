@@ -102,7 +102,9 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         ),
         // Renaming or deleting a branch leaves HEAD's commits where they are.
         GitOp::RenameBranch { .. } => (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath),
-        GitOp::DeleteBranch { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        GitOp::DeleteBranch { .. } | GitOp::DeleteBranches(_) => {
+            (&[Scope::Branches][..], Selection::KeepPath)
+        }
         // The upstream shows in the Status panel and on the branch's row.
         GitOp::SetUpstream { .. } | GitOp::UnsetUpstream(_) => {
             (&[Scope::Branch, Scope::Branches][..], Selection::KeepPath)
@@ -110,12 +112,12 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         // A new remote has no branches until the user fetches.
         GitOp::AddRemote { .. } => (&[Scope::Branches][..], Selection::KeepPath),
         // Tags list with the branches; nothing else shows them.
-        GitOp::CreateTag { .. } | GitOp::DeleteTag { .. } => {
+        GitOp::CreateTag { .. } | GitOp::DeleteTag { .. } | GitOp::DeleteTags(_) => {
             (&[Scope::Branches][..], Selection::KeepPath)
         }
         // These rename or delete remote-tracking refs, which upstreams and
         // the log's markers name.
-        GitOp::RenameRemote { .. } | GitOp::RemoveRemote(_) => (
+        GitOp::RenameRemote { .. } | GitOp::RemoveRemote(_) | GitOp::RemoveRemotes(_) => (
             &[Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),

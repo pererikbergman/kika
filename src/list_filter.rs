@@ -17,6 +17,9 @@ pub const INPUT_FULL: &str = "The filter is full (256 characters)";
 pub enum InputTarget {
     FilesFilter,
     CommitsFilter,
+    BranchesFilter,
+    RemotesFilter,
+    TagsFilter,
     DiffSearch,
     /// The path git narrows the log to; read on Enter, not as typed.
     LogPath,
@@ -34,6 +37,9 @@ impl InputTarget {
         match self {
             InputTarget::FilesFilter
             | InputTarget::CommitsFilter
+            | InputTarget::BranchesFilter
+            | InputTarget::RemotesFilter
+            | InputTarget::TagsFilter
             | InputTarget::DiffSearch
             | InputTarget::ReviewFilter
             | InputTarget::WorktreesFilter => "/",
