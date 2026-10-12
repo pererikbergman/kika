@@ -4,9 +4,9 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::custom_patch::{CustomPatch, PatchAction};
 use crate::features::branches::{remotes, tags};
 use crate::features::commits::bisect::git::run_bisect_start;
+use crate::features::commits::custom_patch::{CustomPatch, PatchAction};
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::git::bisect::BisectMark;
 use crate::git::branches::BranchName;
@@ -111,9 +111,9 @@ pub enum GitOp {
     InteractiveRebase(RebasePlan),
     /// Rewrite history with the custom patch `picks`, as `action` says:
     /// the interactive rebase of `plan`, stopping at each commit the patch
-    /// changes (see `crate::git::custom_patch`). Refused unless `HEAD` is still
-    /// `orig_head`; any failure puts `HEAD`, the index and the worktree
-    /// back as they were.
+    /// changes (see `crate::features::commits::custom_patch::git`).
+    /// Refused unless `HEAD` is still `orig_head`; any failure puts
+    /// `HEAD`, the index and the worktree back as they were.
     CustomPatch {
         plan: RebasePlan,
         action: PatchAction,
@@ -747,7 +747,8 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 .arg(plan.base.as_str())
                 .env(PLAN_ENV, encode(&plan.steps));
         }
-        // Its first step; the rest run from `crate::git::custom_patch::run`.
+        // Its first step; the rest run from
+        // `crate::features::commits::custom_patch::git::run`.
         GitOp::CustomPatch { plan, .. } => {
             return op_command(&GitOp::InteractiveRebase(plan.clone()));
         }

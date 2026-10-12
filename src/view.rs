@@ -2,12 +2,12 @@ use crate::branches::BranchesTab;
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
-use crate::custom_patch::CustomPatch;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::features::blame;
 use crate::features::branches::remotes;
+use crate::features::commits::custom_patch::{self, CustomPatch};
 use crate::features::conflicts;
 use crate::features::operation;
 use crate::git::FileEntry;
@@ -1628,7 +1628,9 @@ fn render_hunk_view(
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
     // A commit's change gives a second column to what the patch holds.
-    let picked_ids = pane.picks.map(|patch| picked_rows(view, patch));
+    let picked_ids = pane
+        .picks
+        .map(|patch| custom_patch::view::picked_rows(view, patch));
     let gutters = if picked_ids.is_some() { 2 } else { 1 };
     let pane = match &view.patch {
         None if view.loading() => Paragraph::new("Loading…"),
@@ -1701,25 +1703,6 @@ fn render_hunk_view(
 struct HunkPane<'a> {
     view: &'a HunkView,
     picks: Option<&'a CustomPatch>,
-}
-
-/// `(hunk, line)` of each row whose changed line the patch holds.
-fn picked_rows(view: &HunkView, patch: &CustomPatch) -> std::collections::HashSet<(usize, usize)> {
-    let Some(file) = &view.patch else {
-        return Default::default();
-    };
-    file.hunks
-        .iter()
-        .enumerate()
-        .flat_map(|(h, hunk)| {
-            hunk.line_ids()
-                .into_iter()
-                .enumerate()
-                .filter_map(move |(l, id)| Some(((h, l), id?)))
-        })
-        .filter(|(_, id)| patch.contains_line(&view.path, *id))
-        .map(|(at, _)| at)
-        .collect()
 }
 
 /// [`search_marks`] of a pane's search, if it has one.
@@ -3771,7 +3754,7 @@ mod tests {
 
     #[test]
     fn in_a_commits_change_the_lines_the_patch_holds_carry_a_mark() {
-        use crate::custom_patch::CustomPatch;
+        use crate::features::commits::custom_patch::CustomPatch;
         use crate::git::commit_files::{CommitId, CommitRange};
         use crate::git::patch::LineId;
         let range = CommitRange {
@@ -3804,7 +3787,7 @@ mod tests {
 
     #[test]
     fn the_patch_mark_keeps_wide_lines_aligned_at_any_width() {
-        use crate::custom_patch::CustomPatch;
+        use crate::features::commits::custom_patch::CustomPatch;
         use crate::git::commit_files::{CommitId, CommitRange};
         use crate::git::patch::LineId;
         let range = CommitRange {

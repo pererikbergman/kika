@@ -8,8 +8,8 @@ use std::fmt;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::commit_editor::{byte_at, char_len};
-use crate::custom_patch::PatchAction;
 use crate::features::command_log::CommandLogView;
+use crate::features::commits::custom_patch::PatchAction;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;

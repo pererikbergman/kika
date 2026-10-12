@@ -7,13 +7,13 @@
 
 use std::collections::BTreeSet;
 
-use super::commit_files::CommitId;
-use super::diff::{DiffOptions, commit_patch_command, run_diff, terminal_safe};
-use super::patch::{self, Direction, PatchSelection};
-use super::rebase_plan::{RebasePlan, TodoAction};
-use super::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
-use super::runner::{GitCommand, GitRunner};
-use crate::custom_patch::{CustomPatch, FilePick, PatchAction};
+use super::state::{CustomPatch, FilePick, PatchAction};
+use crate::git::commit_files::CommitId;
+use crate::git::diff::{DiffOptions, commit_patch_command, run_diff, terminal_safe};
+use crate::git::patch::{self, Direction, PatchSelection};
+use crate::git::rebase_plan::{RebasePlan, TodoAction};
+use crate::git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// What is done at one stop of the rebase, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub fn stop_work(plan: &RebasePlan, action: &PatchAction, source: &CommitId) -> 
 /// One file's change in the source commit, as the patch engine reads it:
 /// git's default context, whitespace kept, renames off, the name read
 /// literally after `--`.
-pub fn diff_command(patch: &CustomPatch, path: &super::path::RepoPath) -> GitCommand {
+pub fn diff_command(patch: &CustomPatch, path: &crate::git::path::RepoPath) -> GitCommand {
     commit_patch_command(&patch.source, path, DiffOptions::default())
 }
 
@@ -126,7 +126,7 @@ pub fn build(runner: &dyn GitRunner, picks: &CustomPatch) -> Result<Vec<u8>, Str
         let stdout = run_diff(
             runner,
             &diff_command(picks, path),
-            super::diff::DiffSide::Index,
+            crate::git::diff::DiffSide::Index,
         )?;
         let file = patch::parse(&stdout).map_err(|e| format!("{}: {e}", path.display()))?;
         let all: BTreeSet<_> = file
@@ -330,7 +330,7 @@ fn fail_closed(runner: &dyn GitRunner, orig: &CommitId, error: String) -> String
 
 /// Run `cmd` detached; its stdout, or git's message made safe to draw.
 fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String> {
-    super::runner::run_checked(runner, cmd).map(|output| output.stdout)
+    crate::git::runner::run_checked(runner, cmd).map(|output| output.stdout)
 }
 
 #[cfg(test)]
