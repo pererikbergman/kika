@@ -3222,45 +3222,6 @@ static COMMITS_RESET_HARD_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 59: rewrite
-static REWRITE_LEAVE_COMMITS_CONFIRM: &[Binding] = &[
-    // As with a hard reset, Enter is left unbound: commits left behind
-    // are only in the reflog.
-    Binding {
-        id: "leave_commits.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::LeaveCommits,
-        intent: AppIntent::ConfirmLeaveCommits,
-        description: "Yes, move HEAD and leave the commits behind",
-        label: "leave",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "leave_commits.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::LeaveCommits,
-        intent: AppIntent::ConfirmNo,
-        description: "No, stay where HEAD is",
-        label: "stay",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "leave_commits.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::LeaveCommits,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 72: core
 static CORE_FILTER_SEARCH: &[Binding] = &[
     // List filters, ranges and the diff search.
@@ -3794,7 +3755,7 @@ static CHUNKS: &[&[Binding]] = &[
     BRANCHES_DELETE_RANGE_CONFIRM,
     remotes::keys::REMOTES_REMOVE_CONFIRM,
     COMMITS_RESET_HARD_CONFIRM,
-    REWRITE_LEAVE_COMMITS_CONFIRM,
+    commits::rewrite::keys::REWRITE_LEAVE_COMMITS_CONFIRM,
     stash::keys::STASH_DROP_CONFIRM,
     operation::keys::OPERATION_ABORT_CONFIRM,
     commits::rewrite::keys::REWRITE_AUTOSQUASH_CONFIRM,
@@ -5165,61 +5126,6 @@ mod tests {
         );
         assert_eq!(KeyScope::ResetHard.parent(), None);
         assert_eq!(KeyScope::ResetHard.title(), "Reset hard");
-    }
-
-    #[test]
-    fn the_leave_commits_question_has_no_enter_and_n_or_esc_stays() {
-        let state = AppState::new(Context::Workspace);
-        let resolve_in = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::LeaveCommits,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Unbound => None,
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let none = KeyModifiers::NONE;
-        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
-        assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmLeaveCommits));
-        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
-        assert_eq!(
-            resolve_in(key(KeyCode::Esc, none)),
-            Some(AppIntent::ConfirmNo)
-        );
-        assert_eq!(
-            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(AppIntent::Quit)
-        );
-        assert_eq!(KeyScope::LeaveCommits.parent(), None);
-        assert_eq!(KeyScope::LeaveCommits.title(), "Leave commits behind");
-
-        let enter = key(KeyCode::Enter, none);
-        for b in registry()
-            .iter()
-            .filter(|b| b.id.starts_with("leave_commits."))
-        {
-            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
-        }
-    }
-
-    #[test]
-    fn a_repository_layer_cannot_rebind_the_leave_commits_answers() {
-        for id in [
-            "leave_commits.yes",
-            "leave_commits.no",
-            "leave_commits.quit",
-        ] {
-            assert!(REPO_LOCKED.contains(&id), "{id}");
-            assert_eq!(
-                build(&[(id, &["enter"])], Trust::Repo).unwrap_err(),
-                format!("\"{id}\" can only be changed in the global config file")
-            );
-            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
-        }
     }
 
     #[test]

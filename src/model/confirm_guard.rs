@@ -10,7 +10,7 @@ impl AppState {
     /// now refuses it; if so, its reason goes in the bar. A reset waits
     /// for any operation in progress, a checkout only for a bisect, as
     /// their keys do.
-    pub(super) fn confirm_refused(&mut self, op: &GitOp) -> bool {
+    pub(crate) fn confirm_refused(&mut self, op: &GitOp) -> bool {
         let reason = match op {
             GitOp::Reset { .. } => crate::keymap::in_progress_disabled(self),
             GitOp::CheckoutCommit(_) => crate::bisect::head_move_disabled(self),

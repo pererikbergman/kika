@@ -3,15 +3,19 @@
 //! rewrites themselves: squash, fixup, drop and reword, on one row or over
 //! a range (`range.rs`), creating a `fixup!` commit, autosquash and
 //! finding the fixup base (`fixup.rs`, `fixup_base.rs`), and move, edit,
-//! break and pick. With them go all of chunk 12, the autosquash and
-//! drop-range questions (chunks 62 and 64), the guards and plans those
-//! keys and handlers share, `Effect::LoadRebaseTodo`/`WriteRebaseTodo`/
-//! `FindFixupBase` and the `GitOp::InteractiveRebase` argv. Only the
-//! commits-left-behind question (chunk 59) is left for #305.
+//! break and pick. It also owns the check before a detached `HEAD`
+//! moves: checkout and reset first list the commits nothing else reaches
+//! (`left_behind.rs`), then ask before leaving them to the reflog
+//! (`leave_commits.rs`). With them go all of chunk 12, the
+//! commits-left-behind, autosquash and drop-range questions (chunks 59,
+//! 62 and 64), the guards and plans those keys and handlers share,
+//! `Effect::LoadRebaseTodo`/`WriteRebaseTodo`/`FindFixupBase`/
+//! `CheckLeftBehind` and the `GitOp::InteractiveRebase` argv.
 //!
 //! Its `pub(crate)` API:
 //! - the todo types `RebaseTodo`, `Rewrite` and `TodoFile` (`todo.rs`),
 //!   and `FixupBase`, which `intent.rs` carries;
+//! - `LeftBehindCheck`, the check in flight that `AppState` holds;
 //! - the shared guards and plans here: `rewrite_disabled`, `log_plan`,
 //!   `todo_edit`, `autosquash_plan`, `autosquash_disabled`,
 //!   `create_fixup_disabled`, `find_base_disabled`,
@@ -19,21 +23,24 @@
 //!   `NEEDS_BREAK`, `TODO_SAVING`, `FILTER_HIDES_NEIGHBOUR` and
 //!   `STAGE_THE_FIX`;
 //! - `keys::{REWRITE_COMMITS, REWRITE_TODO_COMMITS,
-//!   REWRITE_AUTOSQUASH_CONFIRM, REWRITE_DROP_RANGE_CONFIRM}`,
+//!   REWRITE_LEAVE_COMMITS_CONFIRM, REWRITE_AUTOSQUASH_CONFIRM,
+//!   REWRITE_DROP_RANGE_CONFIRM}`,
 //!   `keys::stop_disabled` and the `keys::commits_*_disabled` row guards;
 //! - the handlers in `update.rs` (`rewrite`, `rebase_todo_written`,
 //!   `reload_rebase_todo`, `rebase_todo_loaded`), `range.rs`
-//!   (`rewrite_range`, `confirm_drop_range`) and `fixup.rs`
+//!   (`rewrite_range`, `confirm_drop_range`), `fixup.rs`
 //!   (`create_fixup`, `ask_autosquash`, `autosquash`, `find_fixup_base`,
-//!   `fixup_base_found`);
-//! - `effects::{load_todo, write_todo, find_base}`, `git::rebase_command`
-//!   and `fixup_base::candidates_notice`.
+//!   `fixup_base_found`) and `leave_commits.rs` (`move_head`,
+//!   `left_behind_checked`, `confirm_leave_commits`, `head_still`);
+//! - `effects::{load_todo, write_todo, find_base, check_left_behind}`,
+//!   `git::rebase_command` and `fixup_base::candidates_notice`.
 //!
 //! Kept cross-feature reads: `commits.todo`, `todo_selected`, `todo_seq`,
 //! `todo_write_seq`, `rows`, `selected`, `query`, `filter`, `tips`,
-//! `range_anchor`, `range()` and `fixup_base_seq` (the commits panel,
-//! still in core); `files` (the Files panel, core); `op_seq`, `branch`,
-//! `busy` and `generation` (core).
+//! `range_anchor`, `range()`, `fixup_base_seq`, `pending` and
+//! `short_oid` (the commits panel, still in core); `files` (the Files
+//! panel, core); `op_seq`, `branch` (and its `head`), `popups`,
+//! `left_behind_check`, `busy`, `generation` and `notice` (core).
 //!
 //! What stays in core, and why:
 //! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`, `range_anchor` and
@@ -42,9 +49,13 @@
 //! - `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
 //! - the `AppIntent` and `Effect` variants, `ConfirmKind::{Autosquash,
-//!   DropRange}` with its question, the popup key scopes and
+//!   DropRange}` with its question, `Popup::LeaveCommits`, the popup key
+//!   scopes (`KeyScope::LeaveCommits` among them) and
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
+//! - `confirm_refused` (`model/confirm_guard.rs`), the guard every move
+//!   question re-checks, and the reset-hard question, a Commits panel
+//!   action that also calls `head_still`;
 //! - `commits_range_disabled`, `CLEAR_RANGE_FIRST` and `CLEAR_LOG_FILTER`,
 //!   which other features' guards use too.
 
@@ -53,11 +64,14 @@ mod fixup;
 pub(crate) mod fixup_base;
 pub(crate) mod git;
 pub(crate) mod keys;
+mod leave_commits;
+mod left_behind;
 mod range;
 mod todo;
 mod update;
 
 pub(crate) use fixup_base::FixupBase;
+pub(crate) use leave_commits::LeftBehindCheck;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
 
 use super::{Crossing, with_stacked_branches};
