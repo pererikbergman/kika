@@ -42,4 +42,5 @@ pub(crate) mod conflicts;
 pub(crate) mod custom_commands;
 pub(crate) mod repos;
 pub(crate) mod submodules;
+pub(crate) mod sync;
 pub(crate) mod worktrees;

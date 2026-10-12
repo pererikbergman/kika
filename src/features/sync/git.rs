@@ -3,8 +3,8 @@
 //! must never stop to ask for a password: nobody is there to type it, and
 //! the prompt would draw over the screen.
 
-use super::diff::terminal_safe;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::diff::terminal_safe;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// Fetch every remote, quietly, failing instead of prompting for
 /// credentials or an SSH passphrase.
