@@ -167,7 +167,7 @@ mod tests {
         use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
-        let stash = || crate::git::stash::StashRef {
+        let stash = || crate::features::stash::StashRef {
             index: 0,
             oid: oid(),
         };
@@ -205,7 +205,7 @@ mod tests {
             GitOp::StageAll,
             // A stash makes commits, but no hooks run for them.
             GitOp::StashPush {
-                mode: crate::op::StashMode::All,
+                mode: crate::features::stash::StashMode::All,
                 message: None,
                 paths: vec![],
                 restore: vec![],

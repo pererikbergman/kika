@@ -5,6 +5,7 @@
 use crate::commit_editor::CommitEditor;
 use crate::effect::{Effect, Tag};
 use crate::features::commits::reflog::Reflog;
+use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
 use crate::git::GitRunner;
@@ -20,7 +21,6 @@ use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
 use crate::git::runner::{GitChild, GitCommand, GitOutput};
-use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 use crate::git::submodule::{Submodule, SubmoduleState};
 use crate::git::tags::TagRef;
@@ -49,6 +49,17 @@ pub(crate) fn untracked(path: &str) -> FileEntry {
         index: '?',
         worktree: '?',
         kind: EntryKind::Untracked,
+    }
+}
+
+/// A Files entry at `path` with these status letters and kind.
+pub(crate) fn file_entry(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
+    FileEntry {
+        path: path.into(),
+        orig_path: None,
+        index,
+        worktree,
+        kind,
     }
 }
 
@@ -1260,7 +1271,7 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
     // Every binding is enabled on a workspace with a stageable file
     // selected, a commit in the log and a stash in the list.
     let mut state = AppState::new(Context::Workspace);
-    state.stash.entries = vec![crate::git::stash::StashEntry {
+    state.stash.entries = vec![crate::features::stash::StashEntry {
         index: 0,
         oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
         base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
