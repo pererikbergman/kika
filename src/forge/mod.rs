@@ -17,7 +17,8 @@ use std::collections::HashMap;
 
 use crate::effect::{Effect, Tag};
 use crate::git::branches::BranchName;
-use crate::model::AppState;
+use crate::model::pull_request::refresh_disabled;
+use crate::model::{AppState, Context};
 
 /// A host the user lets Kika contact, checked when the config is read:
 /// lower-case ASCII DNS labels joined by dots, nothing else.
@@ -372,6 +373,20 @@ impl AppState {
             user: false,
         };
         self.forge.load(tag).into_iter().collect()
+    }
+
+    /// Ask the forge again because the user pressed for it: the same
+    /// refresh a fetch starts, refused with a notice when it may not run.
+    pub(crate) fn refresh_pull_requests(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = refresh_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.forge.want_refresh();
+        self.load_pull_requests()
     }
 
     /// Show the answer, then run a refresh that waited for this call.
@@ -875,6 +890,116 @@ pub(crate) mod tests {
         assert!(state.forge.in_flight);
         assert_eq!(state.forge.repo, None);
         assert_eq!(state.forge.status, ForgeView::Updating);
+    }
+
+    /// A workspace on github.com whose first load is done: the remote
+    /// matched, nothing in flight, no refresh waiting.
+    fn loaded() -> AppState {
+        let mut state = forge_state(&["main".into()]);
+        state.forge.repo = Some(repo());
+        state.forge.refresh_wanted = false;
+        state.forge.status = ForgeView::Fresh;
+        state
+    }
+
+    fn press_refresh(state: &mut AppState) -> Vec<Effect> {
+        let key = crate::keymap::KeyPress::new(
+            crossterm::event::KeyCode::Char('B'),
+            crossterm::event::KeyModifiers::SHIFT,
+        );
+        state.update(AppIntent::Key(key))
+    }
+
+    #[test]
+    fn the_refresh_key_asks_the_forge_again_once() {
+        let mut state = loaded();
+        let effects = state.update(AppIntent::RefreshPullRequests);
+        let [(tag, true)] = loads(&effects)[..] else {
+            panic!("{effects:?}")
+        };
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert!(state.forge.in_flight);
+        assert_eq!(state.forge.status, ForgeView::Updating);
+        assert_eq!(state.notice, None);
+
+        // Again before the answer: refused, and nothing queued behind it.
+        assert_eq!(press_refresh(&mut state), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Pull requests are already being refreshed")
+        );
+        assert!(!state.forge.refresh_wanted);
+        let effects = state.update(AppIntent::PullRequestsFetched {
+            tag,
+            result: Ok(HashMap::new()),
+            limited_until: None,
+        });
+        assert_eq!(effects, []);
+        assert!(!state.forge.in_flight);
+    }
+
+    #[test]
+    fn the_refresh_key_is_refused_with_no_hosts_or_no_matched_remote() {
+        let mut off = loaded();
+        off.forge = ForgeState::new(vec![]);
+        assert_eq!(press_refresh(&mut off), []);
+        assert_eq!(
+            off.notice.as_deref(),
+            Some("Name GitHub hosts under [forge] in the global config")
+        );
+        assert_eq!(off.update(AppIntent::RefreshPullRequests), []);
+
+        let mut unknown = loaded();
+        unknown.forge.repo = None;
+        assert_eq!(press_refresh(&mut unknown), []);
+        assert_eq!(
+            unknown.notice.as_deref(),
+            Some("The remote is on no forge host in the global config")
+        );
+
+        let mut unmatched = loaded();
+        let [(tag, true)] = loads(&unmatched.update(AppIntent::RefreshPullRequests))[..] else {
+            panic!()
+        };
+        unmatched.update(AppIntent::ForgeRepoNone { tag });
+        assert!(unmatched.forge.unmatched);
+        assert_eq!(unmatched.update(AppIntent::RefreshPullRequests), []);
+        assert_eq!(
+            unmatched.notice.as_deref(),
+            Some("The remote is on no forge host in the global config")
+        );
+    }
+
+    #[test]
+    fn the_refresh_key_waits_out_a_rate_limit_and_runs_once_it_has_passed() {
+        const T: i64 = 1_700_000_000;
+        let mut state = loaded();
+        state.forge.limited.insert("github.com".into(), T);
+        state.forge.repo = Some(ForgeRepo {
+            host: "GitHub.com".into(),
+            ..repo()
+        });
+        state.now = T - 1;
+        assert_eq!(press_refresh(&mut state), []);
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("GitHub is rate limited; refresh after the limit resets")
+        );
+        assert!(!state.forge.in_flight);
+
+        state.now = T;
+        state.notice = None;
+        let effects = press_refresh(&mut state);
+        assert!(matches!(loads(&effects)[..], [(_, true)]), "{effects:?}");
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn the_refresh_key_does_nothing_outside_the_workspace() {
+        let mut state = loaded();
+        state.context = Context::Review { number: None };
+        assert_eq!(state.update(AppIntent::RefreshPullRequests), []);
+        assert!(!state.forge.in_flight);
     }
 
     #[test]
