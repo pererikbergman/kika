@@ -2710,9 +2710,9 @@ fn clone_missing_a_pull_request_head() -> (TestRepo, TempDir, String, String) {
 async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() {
     use std::sync::Arc;
 
+    use crate::features::review::ReviewScreen;
     use crate::forge::github::{FakeGh, answer};
     use crate::forge::review::fixtures::{DETAIL, QUEUES};
-    use crate::model::review::ReviewScreen;
 
     let (repo, _remote, head, base) = clone_missing_a_pull_request_head();
     assert!(!repo.try_git(["cat-file", "-e", &format!("{head}^{{commit}}")]));

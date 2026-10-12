@@ -21,12 +21,11 @@
 //! - `commit_url_disabled` and `commit_page` read the selected commit
 //!   (commits);
 //! - `pick_select` dispatches to `pick_check` and `pick_merge_method`
-//!   (review and merge);
-//! - core `merge_pr` uses `REFRESH_LIMITED`, `same_repo` and
-//!   `record_rate_limit`. Whichever slice moves `merge_pr` into a feature
-//!   must first lift these into core;
+//!   (review);
+//! - `REFRESH_LIMITED`, `same_repo` and `ForgeState::record_rate_limit`,
+//!   which review's merge shares, live in `src/forge`;
 //! - core calls `load_pull_requests` when a branch list loads
-//!   (`branches_loaded`) and after a merge (`merge_pr`). A fetch, pull or
+//!   (`branches_loaded`), and review calls it after a merge. A fetch, pull or
 //!   push sets `forge.want_refresh()` in sync's `remote_finished`, and the
 //!   branch reload that follows starts the load.
 
@@ -36,6 +35,6 @@ pub(crate) mod effects;
 pub(crate) mod keys;
 
 pub(crate) use create::{
-    PrCreating, PrDraft, REFRESH_LIMITED, commit_page, commit_url_disabled, copy_url_disabled,
-    create_disabled, open_url_disabled, question, same_repo,
+    PrCreating, PrDraft, commit_page, commit_url_disabled, copy_url_disabled, create_disabled,
+    open_url_disabled, question,
 };

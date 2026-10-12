@@ -95,6 +95,15 @@ pub struct ForgeRepo {
     pub name: String,
 }
 
+pub(crate) const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
+
+/// GitHub compares owners and names without regard to case.
+pub(crate) fn same_repo(a: &ForgeRepo, b: &ForgeRepo) -> bool {
+    a.host.eq_ignore_ascii_case(&b.host)
+        && a.owner.eq_ignore_ascii_case(&b.owner)
+        && a.name.eq_ignore_ascii_case(&b.name)
+}
+
 /// What a pull request shows beside its branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrBadge {
@@ -394,6 +403,19 @@ impl ForgeState {
     pub fn want_refresh(&mut self) {
         if self.enabled() {
             self.refresh_wanted = true;
+        }
+    }
+
+    /// GitHub refuses calls to `host` until `until`: no create, merge or
+    /// load asks it before then, and the status line says so when it is
+    /// the badges' host.
+    pub(crate) fn record_rate_limit(&mut self, host: &ForgeHost, until: i64) {
+        let host = host.as_str();
+        self.limited.insert(host.to_string(), until);
+        let here = self.repo.as_ref();
+        if here.is_some_and(|r| r.host.eq_ignore_ascii_case(host)) {
+            self.limited_until = Some(until);
+            self.status = ForgeView::Problem(ForgeStatus::RateLimited);
         }
     }
 }
