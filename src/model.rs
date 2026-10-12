@@ -490,7 +490,7 @@ impl AppState {
                             // A long paste would only slow every frame down.
                             let full = input.line.text.chars().count() >= list_filter::MAX_INPUT;
                             if full && matches!(key.code, crossterm::event::KeyCode::Char(_)) {
-                                self.notice = Some(list_filter::INPUT_FULL.into());
+                                self.notice = Some(list_filter::input_full_notice().into());
                                 return vec![];
                             }
                             input.line.edit(key);
@@ -5611,7 +5611,6 @@ impl AppState {
     }
 }
 
-/// The first line of a rejected edited hunk's error, above git's message.
 /// Said when a changed filter drops the range made over the old rows.
 const SELECTION_CLEARED: &str = "Selection cleared";
 
@@ -6110,6 +6109,7 @@ impl AppState {
     }
 }
 
+/// The first line of a rejected edited hunk's error, above git's message.
 pub(crate) const EDITED_HUNK_INVALID: &str = "The edited hunk is not a patch git can apply. \
 Keep the @@ line as it was and start each line with a space, + or -.";
 
@@ -15486,7 +15486,7 @@ mod tests {
             command_log_view(&state).filter.chars().count(),
             list_filter::MAX_INPUT
         );
-        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
     }
 
     #[test]
@@ -16097,7 +16097,7 @@ mod tests {
             state.commits.reflog.filter.chars().count(),
             list_filter::MAX_INPUT
         );
-        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
     }
 
     #[test]
@@ -17261,7 +17261,7 @@ mod tests {
             the_worktree_list(&state).filter.chars().count(),
             list_filter::MAX_INPUT
         );
-        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
     }
 
     #[test]
@@ -18327,7 +18327,7 @@ mod tests {
             open_files(&state).filter.chars().count(),
             list_filter::MAX_INPUT
         );
-        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
     }
 
     #[test]
@@ -18577,7 +18577,7 @@ mod tests {
             press_char(&mut state, 'z');
         }
         assert_eq!(state.files_filter.chars().count(), list_filter::MAX_INPUT);
-        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+        assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
         press(&mut state, KeyCode::Backspace);
         assert_eq!(
             state.files_filter.chars().count(),

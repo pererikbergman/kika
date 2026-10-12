@@ -9,8 +9,12 @@ use crate::popup::LineInput;
 /// each frame cheap whatever is pasted.
 pub const MAX_INPUT: usize = 256;
 
-/// Why a key typed into a full input does nothing.
-pub const INPUT_FULL: &str = "The filter is full (256 characters)";
+/// Why a key typed into a full input does nothing. Built from the cap so
+/// the two never disagree, and worded for searches and queries as well
+/// as filters.
+pub fn input_full_notice() -> String {
+    format!("Input full: {MAX_INPUT} characters max")
+}
 
 /// What the one text input on the bottom bar is typing into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +153,15 @@ pub fn range(visible: &[usize], anchor: usize, cursor: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_full_input_notice_names_the_cap_and_fits_any_target() {
+        let notice = input_full_notice();
+        assert!(notice.contains(&MAX_INPUT.to_string()), "{notice}");
+        // Searches and log queries hit the cap too, not only filters.
+        assert!(!notice.to_lowercase().contains("filter"), "{notice}");
+        assert!(notice.chars().count() <= 40, "{notice}");
+    }
 
     #[test]
     fn a_query_matches_as_a_subsequence() {
