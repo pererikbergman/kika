@@ -43,6 +43,7 @@ mod menu;
 mod model;
 mod popup;
 mod popup_view;
+mod rebase_todo;
 mod recent;
 mod recent_list;
 mod reflog;
@@ -107,10 +108,13 @@ fn main() -> color_eyre::Result<ExitCode> {
     let launch = std::env::current_dir()?;
     let probe = CliRunner::new(&launch);
     // Before the terminal is taken, so the refusal is plain text on exit.
-    if let Err(message) = version::check(&probe) {
-        eprintln!("{message}");
-        return Ok(ExitCode::FAILURE);
-    }
+    let git_version = match version::check(&probe) {
+        Ok(found) => found,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
     // Once, before anything runs: status paths are root-relative, so every
     // git command runs at the top level whichever subdirectory Kika started in.
     let repo = repo_root::find_toplevel(&probe);
@@ -126,6 +130,7 @@ fn main() -> color_eyre::Result<ExitCode> {
     let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
     let state = AppState::new(cli.context())
         .with_location(repo, launch)
+        .with_git_version(git_version)
         .with_forge_hosts(config.forge_hosts.clone());
     let recent_store = recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;

@@ -28,6 +28,22 @@ pub const MIN_GIT: GitVersion = GitVersion {
     patch: 0,
 };
 
+/// 2.20 brought the `break` todo command, which stops a rebase after a
+/// commit.
+pub const BREAK: GitVersion = GitVersion {
+    major: 2,
+    minor: 20,
+    patch: 0,
+};
+
+/// 2.38 brought `rebase --update-refs`, which moves branches stacked on
+/// rewritten commits along with them.
+pub const UPDATE_REFS: GitVersion = GitVersion {
+    major: 2,
+    minor: 38,
+    patch: 0,
+};
+
 /// `git --version`, in the C locale so the words around the number are
 /// always English.
 pub fn version_command() -> GitCommand {
@@ -55,10 +71,11 @@ pub fn parse_version(stdout: &[u8]) -> Option<GitVersion> {
     })
 }
 
-/// Whether Kika can run with the installed Git. `Err` holds the message
-/// to print. A version it cannot read is let through: an odd build string
-/// should not lock anyone out.
-pub fn check(runner: &dyn GitRunner) -> Result<(), String> {
+/// Whether Kika can run with the installed Git, and which it is. `Err`
+/// holds the message to print. A version it cannot read is let through as
+/// `None`: an odd build string should not lock anyone out, but features
+/// that need a newer Git stay off.
+pub fn check(runner: &dyn GitRunner) -> Result<Option<GitVersion>, String> {
     match runner.run(&version_command()) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Err(format!(
             "Kika needs Git {MIN_GIT} or newer; git was not found."
@@ -67,9 +84,9 @@ pub fn check(runner: &dyn GitRunner) -> Result<(), String> {
             Some(found) if found < MIN_GIT => {
                 Err(format!("Kika needs Git {MIN_GIT} or newer; found {found}."))
             }
-            _ => Ok(()),
+            found => Ok(found),
         },
-        _ => Ok(()),
+        _ => Ok(None),
     }
 }
 
@@ -127,7 +144,7 @@ mod tests {
         }
     }
 
-    fn check_with(stdout: &[u8]) -> Result<(), String> {
+    fn check_with(stdout: &[u8]) -> Result<Option<GitVersion>, String> {
         check(&FakeRunner::new().expect(&["--version"], ok(stdout)))
     }
 
@@ -145,17 +162,27 @@ mod tests {
 
     #[test]
     fn the_minimum_and_newer_pass() {
-        assert_eq!(check_with(b"git version 2.15.0\n"), Ok(()));
-        assert_eq!(check_with(b"git version 2.39.3 (Apple Git-146)\n"), Ok(()));
-        assert_eq!(check_with(b"git version 3.1.0\n"), Ok(()));
+        assert_eq!(check_with(b"git version 2.15.0\n"), Ok(Some(MIN_GIT)));
+        assert_eq!(
+            check_with(b"git version 2.39.3 (Apple Git-146)\n"),
+            Ok(Some(v(2, 39, 3)))
+        );
+        assert_eq!(check_with(b"git version 3.1.0\n"), Ok(Some(v(3, 1, 0))));
     }
 
     #[test]
     fn an_unreadable_version_or_a_failed_run_is_let_through() {
-        assert_eq!(check_with(b"git version banana\n"), Ok(()));
+        assert_eq!(check_with(b"git version banana\n"), Ok(None));
         let runner = FakeRunner::new().expect(&["--version"], fail("odd"));
-        assert_eq!(check(&runner), Ok(()));
+        assert_eq!(check(&runner), Ok(None));
         runner.assert_done();
+    }
+
+    #[test]
+    fn break_and_update_refs_need_newer_gits_than_the_minimum() {
+        assert!(MIN_GIT < BREAK && BREAK < UPDATE_REFS);
+        assert_eq!(BREAK.to_string(), "2.20.0");
+        assert_eq!(UPDATE_REFS.to_string(), "2.38.0");
     }
 
     /// A runner with no `git` to start.

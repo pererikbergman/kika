@@ -854,7 +854,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
         ));
     }
     let remote_notice = state.remote.as_ref().and_then(|run| run.notice.as_deref());
-    let notice = state.notice.or(state.notice_text.as_deref());
+    let notice = state.notice.as_deref().or(state.notice_text.as_deref());
     if let Some(notice) = notice.or(remote_notice) {
         spans.push(Span::styled(
             elide_right(&format!(" {notice}"), room),
@@ -2272,7 +2272,7 @@ mod tests {
     #[test]
     fn a_notice_replaces_the_hints_in_yellow_after_loading() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.notice = Some("An operation is running");
+        state.notice = Some("An operation is running".into());
         state.op_error = Some("older failure".into());
         state.busy = 1;
         let buffer = draw_buffer(&state, 80, 8);
@@ -2402,7 +2402,7 @@ mod tests {
     fn tiny_terminals_do_not_panic_with_help_open() {
         let mut state = loaded(vec![file("a.rs")]);
         state.help_open = true;
-        state.notice = Some("No file selected");
+        state.notice = Some("No file selected".into());
         for context in [Context::Workspace, Context::Review { number: 2 }] {
             state.context = context;
             for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (20, 6)] {

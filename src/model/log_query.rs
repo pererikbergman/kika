@@ -49,7 +49,7 @@ impl AppState {
             _ => LogQuery::author_from(&input.line.text).map(|a| query.author = a),
         };
         if let Err(why) = parsed {
-            self.notice = Some(why);
+            self.notice = Some(why.into());
             self.input = Some(input);
             return vec![];
         }
@@ -115,7 +115,7 @@ impl AppState {
         };
         if self.diff_mark.as_ref() == Some(&mark) {
             self.diff_mark = None;
-            self.notice = Some(MARK_CLEARED);
+            self.notice = Some(MARK_CLEARED.into());
         } else {
             self.notice_text = Some(format!("Marked {} for diffing", mark.label()));
             self.diff_mark = Some(mark);
@@ -381,7 +381,7 @@ mod tests {
 
         assert!(state.input.is_some());
         assert_eq!(
-            state.notice,
+            state.notice.as_deref(),
             Some("A path cannot contain control characters")
         );
         assert!(!state.commits.query.is_active());
@@ -499,7 +499,7 @@ mod tests {
         assert!(state.diff_mark.is_some());
         type_text(&mut state, "M");
         assert_eq!(state.diff_mark, None);
-        assert_eq!(state.notice, Some(MARK_CLEARED));
+        assert_eq!(state.notice.as_deref(), Some(MARK_CLEARED));
     }
 
     fn branch(name: &str) -> Branch {
@@ -551,12 +551,15 @@ mod tests {
     fn enter_in_branches_needs_a_mark_on_another_branch() {
         let mut state = with_branches();
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("Mark a commit or branch first (M)"));
+        assert_eq!(
+            state.notice.as_deref(),
+            Some("Mark a commit or branch first (M)")
+        );
 
         type_text(&mut state, "M");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(
-            state.notice,
+            state.notice.as_deref(),
             Some("Pick another branch or commit to diff against")
         );
     }
