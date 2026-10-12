@@ -4,8 +4,8 @@
 use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::TagsList;
 use crate::git::tags::TagRef;
-use crate::tags::TagsList;
 use crate::view::{elide_right, no_matches, range_row, scrolled};
 
 /// What the tab shows when there are no tags.

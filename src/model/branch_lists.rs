@@ -3,7 +3,7 @@
 //! the branches or tags, or removing the remotes, a range covers. Every
 //! name an op carries comes from the loaded list, never from the filter.
 
-use super::{AppState, Context, SELECTION_CLEARED};
+use super::{AppState, Context, SELECTION_CLEARED, delete_tag_disabled};
 use crate::branches::BranchesTab;
 use crate::effect::Effect;
 use crate::keymap::{self, Reason};
@@ -57,7 +57,7 @@ impl AppState {
         }
         let disabled: fn(&AppState) -> Option<Reason> = match kind {
             RangeKind::Branches => keymap::delete_branch_disabled,
-            RangeKind::Tags => keymap::delete_tag_disabled,
+            RangeKind::Tags => delete_tag_disabled,
             RangeKind::Remotes => keymap::change_remote_disabled,
             RangeKind::Stashes => keymap::drop_stash_disabled,
         };
