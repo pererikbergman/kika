@@ -82,6 +82,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                 branches_view::render_panel(
                     &state.branches,
                     &state.forge,
+                    state.now,
                     &look,
                     expanded,
                     marks,
