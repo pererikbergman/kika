@@ -9,8 +9,8 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
+use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::git::GitRunner;
 use crate::git::cherry_pick;
 use crate::git::custom_patch;

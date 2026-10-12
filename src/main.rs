@@ -1,10 +1,8 @@
 mod ansi;
 mod app;
 mod bisect;
-mod blame_view;
 mod branches;
 mod branches_view;
-mod captured_command;
 mod cli;
 mod clipboard;
 mod commit_editor;
@@ -16,7 +14,6 @@ mod config;
 #[cfg(test)]
 mod config_docs;
 mod copied;
-mod custom_command;
 mod custom_patch;
 mod diff_mark;
 mod diff_pane;
