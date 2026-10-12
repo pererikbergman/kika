@@ -614,6 +614,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "create_pull_request.no",
     "create_pull_request.quit",
     "command_log.quit",
+    "command_log.escape",
     "commits.paste",
     "files.escape",
     "commits.escape",
@@ -5229,11 +5230,28 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "command_log.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the commands shown",
+        label: "filter",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::ListEscape,
+        description: "Clear the filter, else close the log",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "command_log.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char('q'), NONE)],
         scope: KeyScope::CommandLog,
         intent: AppIntent::PopPopup,
         description: "Close the log",
@@ -6918,7 +6936,8 @@ mod tests {
         assert_eq!(run(key(KeyCode::Up, none)), Some(CommandLogPrev));
         assert_eq!(run(key(KeyCode::PageDown, none)), Some(CommandLogPageDown));
         assert_eq!(run(key(KeyCode::PageUp, none)), Some(CommandLogPageUp));
-        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(plain('/')), Some(OpenFilter));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));
         assert_eq!(
             run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -7042,6 +7061,33 @@ mod tests {
             crate::worktree_list::add_worktree_disabled(&state),
             Some("Select a local branch in the Branches panel".into())
         );
+    }
+
+    #[test]
+    fn the_command_log_filter_keys_clash_with_nothing_the_log_reaches() {
+        // The log has no parent scope, so only its own keys are reachable.
+        assert_eq!(KeyScope::CommandLog.parent(), None);
+        for id in ["command_log.filter", "command_log.escape"] {
+            let new = binding(id);
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != id && b.scope == KeyScope::CommandLog)
+            {
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_log_escape_is_locked_and_its_filter_is_not() {
+        assert!(REPO_LOCKED.contains(&"command_log.escape"));
+        assert!(build(&[("command_log.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"command_log.filter"));
+        assert!(build(&[("command_log.filter", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -8678,6 +8724,10 @@ mod tests {
             .iter()
             .filter(|b| b.scope == KeyScope::CommandLog);
         for b in log {
+            // `/` filters the log; there is no range or separate search.
+            if b.id == "command_log.filter" {
+                continue;
+            }
             for c in ['/', 'V', 'n', 'N'] {
                 assert!(
                     !b.keys.iter().any(|k| k.matches(plain(c))),
