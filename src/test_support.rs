@@ -203,6 +203,23 @@ pub(crate) fn probe_of(effects: &[Effect]) -> (Tag, GitOp) {
     }
 }
 
+pub(crate) fn head_load(effects: &[Effect]) -> Tag {
+    match effects {
+        [Effect::LoadHeadMessage { tag }] => *tag,
+        other => panic!("expected one LoadHeadMessage, got {other:?}"),
+    }
+}
+
+pub(crate) fn commit_op() -> GitOp {
+    GitOp::Commit {
+        message: Some("m\n".into()),
+        stage_all: false,
+        amend: false,
+        no_verify: false,
+        fixup: None,
+    }
+}
+
 pub(crate) fn select_path(state: &mut AppState, path: &str) {
     while state.files[state.selected.unwrap()].path != path.into() {
         state.update(AppIntent::SelectNext);
