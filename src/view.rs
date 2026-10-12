@@ -39,7 +39,7 @@ pub fn render(state: &AppState, frame: &mut Frame) {
 
     match state.context {
         Context::Workspace => render_workspace(state, frame, main),
-        Context::Review { .. } => crate::review_view::render(state, frame, main),
+        Context::Review { .. } => crate::features::review::view::render(state, frame, main),
     }
     if state.help_open {
         render_help(state, frame, main);

@@ -6,11 +6,13 @@
 
 use std::collections::HashMap;
 
-use super::commit_files::{CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat};
-use super::diff::terminal_safe;
-use super::remote::{AskpassEnv, askpass_for, safe, with_prompts};
-use super::remotes::RemoteName;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::commit_files::{
+    CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
+};
+use crate::git::diff::terminal_safe;
+use crate::git::remote::{AskpassEnv, askpass_for, safe, with_prompts};
+use crate::git::remotes::RemoteName;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// What a changed file's line counts are known to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
