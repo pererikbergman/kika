@@ -2415,6 +2415,29 @@ mod tests {
     }
 
     #[test]
+    fn the_fixup_candidates_notice_fits_80_columns_and_elides_when_narrow() {
+        use crate::git::fixup_base::candidates_notice;
+        let shorts: Vec<String> = (0..20).map(|i| format!("abc{i:04}")).collect();
+        let notice = candidates_notice(&shorts);
+        let mut state = loaded(vec![file("a.rs")]);
+        state.notice = Some(notice.clone().into());
+
+        let rows = draw(&state, 80, 8);
+        assert_eq!(rows[7].trim(), notice, "{rows:#?}");
+        assert!(notice.ends_with("abc0002 +17 more"), "{notice}");
+        let buffer = draw_buffer(&state, 80, 8);
+        let (x, y) = find(&buffer, "Staged lines");
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
+
+        for width in [30, 8] {
+            let rows = draw(&state, width, 8);
+            let bar = rows[7].trim_end();
+            assert!(bar.ends_with('…'), "{width}: {rows:#?}");
+            assert!(bar.chars().count() <= usize::from(width), "{rows:#?}");
+        }
+    }
+
+    #[test]
     fn help_lists_the_keys_of_the_focused_panel() {
         let mut state = loaded(vec![file("a.rs")]);
         state.selected = Some(0);
@@ -5282,6 +5305,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "the tested one".into(),
+            subject_altered: false,
         }];
         let graph = state.commits.builder.push(&state.commits.rows[0]);
         state.commits.graph = vec![graph];

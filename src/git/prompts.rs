@@ -228,6 +228,7 @@ mod tests {
             stage_all: false,
             amend,
             no_verify,
+            fixup: None,
         }
     }
 

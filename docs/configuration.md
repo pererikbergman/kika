@@ -903,6 +903,9 @@ can be reset, but not marked from Kika.
 | `commits.edit` | `E` | Stop the rebase at the selected commit, to amend it, then continue from Status | locked |
 | `commits.break` | `b` | Stop the rebase right after the selected commit, or toggle the stop after a todo row | locked |
 | `commits.pick` | `u` | Pick the selected todo row as it is, undoing its other action | locked |
+| `commits.create_fixup` | `ctrl-f` | Commit the staged change as a fixup! of the selected commit | locked |
+| `commits.autosquash` | `S` | Fold every fixup! commit into the commit it fixes, after asking | locked |
+| `commits.find_base` | `ctrl-b` | Select the commit that last touched the staged lines | |
 | `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
 | `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
 | `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
@@ -988,6 +991,26 @@ newer every rewrite passes `--update-refs`, so other branches that point at
 rewritten commits move to their new copies; a move that would change which
 commits such a branch holds is refused. With an older Git, a rewrite that
 would leave another branch behind is refused and names the branch.
+
+To fix an older commit, stage the fix and press `ctrl-b`: Kika blames the
+lines the staged change touches in `HEAD` and moves the cursor to the commit
+that last changed them. When they come from several commits it names the
+newest three, counts the rest, and leaves the cursor; newly added files have
+no such commit. `ctrl-f` then
+commits the staged change as `fixup! <subject>` of the selected commit, with
+`git commit --fixup`, so hooks and signing work as for any commit. `S` asks
+first (only `y` answers, not Enter), then folds every `fixup!` commit into the
+commit it fixes in one rewrite: each moves to just after its target, older
+fixups first, and becomes a fixup. The target is the nearest older commit
+whose subject is the fixup's, without its `fixup! ` prefixes. Only the line
+of history from `HEAD` down to the first merge is searched; if a fixup's
+target is not loaded yet, the whole autosquash is refused, and moving down
+to the end of the log loads more. A fixup or target whose subject holds
+control characters, or starts or ends with spaces, is refused rather than
+matched, since Kika shows such subjects changed. Kika orders the fixups itself and passes
+`--no-autosquash`, so `rebase.autoSquash` has no effect, and `squash!` and
+`amend!` commits stay as they are. With `--update-refs`, a branch on a fixup
+or on a commit a fixup moves past is refused, like a move.
 
 While a rebase is stopped, its remaining steps show above the log under
 "Rebase todo", the last to run at the top. `j` and `k` move through them and
@@ -1329,6 +1352,17 @@ and resetting a bisect drops its marks, so `enter` does not answer it.
 | `abort_confirm.yes` | `y` | Yes, abort the operation | locked |
 | `abort_confirm.no` | `n`, `esc` | No, keep the operation going | locked |
 | `abort_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Fold every fixup! commit?
+
+Autosquash rewrites commits you may not be looking at, so `enter` does not
+answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `autosquash_confirm.yes` | `y` | Yes, fold every fixup! commit into its target | locked |
+| `autosquash_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `autosquash_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 

@@ -235,6 +235,7 @@ mod tests {
             author: "a".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }
     }
 

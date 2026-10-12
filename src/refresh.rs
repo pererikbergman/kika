@@ -237,6 +237,7 @@ mod tests {
             stage_all: true,
             amend: false,
             no_verify: false,
+            fixup: None,
         };
         assert_eq!(
             plan(&op),

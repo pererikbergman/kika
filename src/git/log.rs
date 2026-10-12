@@ -23,6 +23,9 @@ pub struct CommitRow {
     pub time: i64,
     /// Terminal-safe: it is drawn as it is.
     pub subject: String,
+    /// Making `subject` terminal-safe changed it: it is not git's subject
+    /// byte for byte, so it must not be matched against another one.
+    pub subject_altered: bool,
 }
 
 /// A slice of the log. `done` means there is nothing after it.
@@ -206,6 +209,8 @@ fn parse_row(record: &[u8]) -> CommitRow {
             author: terminal_safe(author),
             time,
             subject: terminal_safe(subject),
+            subject_altered: std::str::from_utf8(subject)
+                .map_or(true, |raw| raw != terminal_safe(subject)),
         };
     }
     let oid = terminal_safe(fields.first().copied().unwrap_or_default());
@@ -216,6 +221,7 @@ fn parse_row(record: &[u8]) -> CommitRow {
         author: String::new(),
         time: 0,
         subject: "(a commit Kika could not read)".into(),
+        subject_altered: true,
     }
 }
 
@@ -327,6 +333,22 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{TempDir, git};
+
+    #[test]
+    fn a_subject_made_safe_to_draw_is_flagged_as_altered() {
+        let record = |subject: &[u8]| {
+            let mut record = b"a\x1fa\x1f\x1f0\x1fAnn\x1f".to_vec();
+            record.extend_from_slice(subject);
+            parse_row(&record)
+        };
+        assert!(!record(b"fixup! A").subject_altered);
+        assert!(!record("caf\u{e9}".as_bytes()).subject_altered);
+        for raw in [&b" fixup! A"[..], b"A\x01", b"A\x1b[1m", b"A\xff"] {
+            let row = record(raw);
+            assert!(row.subject_altered, "{raw:?} became {:?}", row.subject);
+        }
+        assert_eq!(record(b" fixup! A").subject, "fixup! A");
+    }
 
     /// A repository on `main` with an identity and fixed dates.
     fn repo(label: &str) -> TempDir {

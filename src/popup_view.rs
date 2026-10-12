@@ -722,6 +722,50 @@ mod tests {
         assert_eq!(text, kind.question(), "{rows:#?}");
     }
 
+    /// The text inside the popup box titled `title`, row by row, every
+    /// row closed by the right border.
+    fn box_text(rows: &[String], title: &str) -> String {
+        let (x, top) = find(rows, title);
+        let chars = |y: u16| rows[usize::from(y)].chars().collect::<Vec<_>>();
+        let left = usize::from(x) - 1;
+        let right = chars(top)
+            .iter()
+            .rposition(|c| *c == '┐')
+            .expect("top-right corner");
+        let mut text = Vec::new();
+        for y in top + 1.. {
+            let row = chars(y);
+            if row[left] == '└' {
+                break;
+            }
+            assert_eq!(row[right], '│', "row {y} is cut off: {rows:#?}");
+            let inner: String = row[left + 1..right].iter().collect();
+            text.push(inner.trim().to_string());
+        }
+        text.join(" ")
+    }
+
+    #[test]
+    fn the_autosquash_question_shows_whole_and_only_y_folds() {
+        let mut state = workspace(&["a.rs"]);
+        let kind = ConfirmKind::Autosquash;
+        state.popups = vec![Popup::Confirm(kind)];
+        for (width, height) in [(80, 24), (40, 12)] {
+            let (_, rows) = draw(&state, width, height);
+            assert_eq!(
+                box_text(&rows, " Autosquash "),
+                kind.question(),
+                "{rows:#?}"
+            );
+            let bar = &rows[usize::from(height) - 1];
+            assert!(bar.starts_with(" y fold  n keep"), "{rows:#?}");
+            assert!(!bar.contains("enter"), "{rows:#?}");
+        }
+        // Too small for the box: drawing still works.
+        let (_, rows) = draw(&state, 16, 5);
+        assert_eq!(rows.len(), 5);
+    }
+
     #[test]
     fn the_discard_question_names_the_file_and_only_y_discards() {
         let mut state = workspace(&["src/a.rs"]);
@@ -1599,6 +1643,37 @@ mod tests {
     }
 
     #[test]
+    fn a_password_popup_on_a_tiny_screen_still_hides_what_was_typed() {
+        let typed = "ΩΨЖ";
+        let state = asked("Password for 'https://u@h':", typed);
+        let (_, rows) = draw(&state, 20, 6);
+        for c in typed.chars() {
+            assert!(!contains(&rows, &c.to_string()), "{c} shown: {rows:#?}");
+        }
+        assert!(contains(&rows, "•"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_ssh_host_key_question_shows_every_line_and_the_typed_answer() {
+        let state = asked(
+            "The authenticity of host 'h' can't be established.\n\
+             ED25519 key fingerprint is SHA256:abc.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? ",
+            "yes",
+        );
+        let (_, rows) = draw(&state, 80, 24);
+        for line in [
+            "The authenticity of host 'h' can't be established.",
+            "ED25519 key fingerprint is SHA256:abc.",
+            "connecting (yes/no/[fingerprint])?",
+            " yes ",
+        ] {
+            assert!(contains(&rows, line), "{line:?} missing: {rows:#?}");
+        }
+        assert!(!contains(&rows, "•"), "{rows:#?}");
+    }
+
+    #[test]
     fn the_answer_line_keeps_the_cursor_after_the_last_dot() {
         let state = asked("Passphrase:", "secret");
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -1657,6 +1732,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }];
         let graph = state.commits.builder.push(&state.commits.rows[0]);
         state.commits.graph = vec![graph];

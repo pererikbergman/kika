@@ -72,11 +72,14 @@ pub struct CredentialPrompt {
 
 impl CredentialPrompt {
     /// Only git's username question and ssh's new-host-key question are
-    /// shown as typed, matched on their exact words, so a prompt a server
-    /// chose cannot ask for a secret with the text in sight.
+    /// shown as typed, matched on their exact words (the start of git's,
+    /// the whole closing sentence of ssh's), so a prompt a server chose
+    /// cannot ask for a secret with the text in sight. Ssh puts
+    /// `(user@host) ` before a server's own prompts, so one starting with
+    /// `(` stays masked however it ends. A bare `Username:` is not git's
+    /// question and stays masked on purpose.
     pub fn new(prompt: String, confirm: bool) -> Self {
-        let in_clear = prompt.starts_with("Username for '")
-            || prompt.contains("want to continue connecting (yes/no");
+        let in_clear = prompt.starts_with("Username for '") || is_host_key_question(&prompt);
         let masked = !in_clear;
         Self {
             prompt,
@@ -85,6 +88,18 @@ impl CredentialPrompt {
             input: SecretInput::default(),
         }
     }
+}
+
+/// Ssh's new-host-key question: it ends with ssh's whole closing sentence,
+/// after which nothing more can be asked, and is not a server prompt.
+fn is_host_key_question(prompt: &str) -> bool {
+    const ENDINGS: [&str; 2] = [
+        "want to continue connecting (yes/no/[fingerprint])?",
+        // Older ssh asks without the fingerprint choice.
+        "want to continue connecting (yes/no)?",
+    ];
+    let prompt = prompt.trim_end();
+    !prompt.starts_with('(') && ENDINGS.iter().any(|ending| prompt.ends_with(ending))
 }
 
 /// A [`LineInput`] that may hold a password, so its `Debug` hides the text.
@@ -424,6 +439,9 @@ pub enum ConfirmKind {
     /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
     /// is lost and Enter may answer.
     DetachedCheckout,
+    /// Fold every `fixup!` commit into its target. It rewrites commits
+    /// the user may not be looking at, so only `y` answers.
+    Autosquash,
     /// Open the pull request `AppState::pr_draft` describes. It reaches
     /// GitHub, so only `y` answers it: never Enter.
     CreatePullRequest,
@@ -441,6 +459,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
+            ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
         }
     }
@@ -486,6 +505,7 @@ impl ConfirmKind {
                  branch; new commits there belong to no branch until you \
                  create one. (y/n)"
             }
+            ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
             // `AppState::confirm_question` names the repository, branches
             // and title; this is the fallback when it cannot.
             ConfirmKind::CreatePullRequest => {
@@ -502,6 +522,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
+            ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
         }
     }
@@ -513,6 +534,7 @@ impl ConfirmKind {
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout
+            | ConfirmKind::Autosquash
             | ConfirmKind::CreatePullRequest => None,
         }
     }
@@ -1031,6 +1053,38 @@ mod tests {
         // A server's own prompt that only looks like one stays masked.
         assert!(masked("Username and token:"));
         assert!(masked("Token (yes/no is fine):"));
+    }
+
+    #[test]
+    fn only_a_prompt_ending_in_the_host_key_choice_is_shown_in_clear() {
+        let masked = |prompt: &str| CredentialPrompt::new(prompt.into(), false).masked;
+        // Ssh's own question, with the trailing space it sends.
+        assert!(!masked(
+            "The authenticity of host 'h' can't be established.\n\
+             ED25519 key fingerprint is SHA256:abc.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? "
+        ));
+        assert!(!masked(
+            "Are you sure you want to continue connecting (yes/no)?"
+        ));
+        assert!(!masked("Username for 'https://h':"));
+        // A server's prompt, which ssh opens with `(user@host) `.
+        assert!(masked(
+            "(git@host) Are you sure you want to continue connecting (yes/no)?"
+        ));
+        // The phrase with a secret asked for after it.
+        assert!(masked(
+            "Are you sure you want to continue connecting (yes/no)? Password:"
+        ));
+        assert!(masked(
+            "want to continue connecting (yes/no/[fingerprint])? token:"
+        ));
+        // Only the choice, without ssh's sentence before it.
+        assert!(masked("Token (yes/no)?"));
+        assert!(masked("Password:\n(yes/no)?"));
+        assert!(masked("Token (yes/no/[fingerprint])?"));
+        // Not git's username question, so masked on purpose.
+        assert!(masked("Username:"));
     }
 
     #[test]
