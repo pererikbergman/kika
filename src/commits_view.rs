@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::commit_files::{CommitFilesList, drawn_path};
+use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
@@ -19,6 +19,7 @@ use crate::git::diff::{sanitize, terminal_safe};
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
+use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::view::{
     PanelLook, elide_right, filter_title, no_matches, query_title, range_row, reversed, scrolled,
     width_of,
@@ -260,29 +261,6 @@ fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Lin
     line.spans
         .insert(0, Span::styled(format!("{mark} "), PATCH_MARK));
     line
-}
-
-/// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
-/// cut to `width`.
-pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
-    let colour = status_colour(file.status);
-    let path = drawn_path(file);
-    Line::from(vec![
-        Span::styled(file.status.to_string(), Style::new().fg(colour)),
-        Span::raw(" "),
-        Span::raw(elide_right(&path, width.saturating_sub(2))),
-    ])
-}
-
-/// The colour of a changed file's status letter.
-pub(crate) fn status_colour(status: char) -> Color {
-    match status {
-        'A' => Color::Green,
-        'D' => Color::Red,
-        'M' => Color::Yellow,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Reset,
-    }
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
@@ -571,15 +549,6 @@ impl<'a> Marks<'a> {
             diff,
         }
     }
-}
-
-/// The diff mark's column, on a marked commit or branch row. Its own
-/// glyph, not the current branch's `*`, so the two read apart without
-/// colour.
-pub(crate) const DIFF_MARK: &str = "◆ ";
-
-pub(crate) fn diff_mark_style() -> Style {
-    Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
 }
 
 /// `text` padded with spaces to `width` display columns.

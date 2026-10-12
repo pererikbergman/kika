@@ -6,8 +6,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::commits_view::commit_file_line;
 use crate::git::stash::StashEntry;
+use crate::rows::commit_file_line;
 use crate::stash::{StashFilesList, StashList};
 use crate::view::{
     PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled, width_of,

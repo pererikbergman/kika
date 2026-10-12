@@ -61,6 +61,7 @@ mod remotes;
 mod remotes_view;
 mod rendered_view;
 mod review_view;
+mod rows;
 mod sequence_editor;
 mod stash;
 mod stash_view;

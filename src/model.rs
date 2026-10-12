@@ -3310,6 +3310,13 @@ impl AppState {
         })
     }
 
+    /// The Branches panel's selected branch, when its Local tab shows.
+    pub(crate) fn local_branch_selected(&self) -> Option<&Branch> {
+        (self.branches.tab == BranchesTab::Local)
+            .then(|| self.branches.selected_branch())
+            .flatten()
+    }
+
     fn worktree_list_mut(&mut self) -> Option<&mut WorktreeList> {
         self.popups.iter_mut().rev().find_map(|popup| match popup {
             Popup::Worktrees(list) => Some(list),

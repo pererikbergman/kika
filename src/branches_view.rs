@@ -7,10 +7,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::branches::{BranchesPanel, BranchesTab};
-use crate::commits_view::{DIFF_MARK, diff_mark_style};
 use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
 use crate::remotes_view;
+use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::tags_view;
 use crate::view::{
     PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
@@ -329,13 +329,6 @@ fn forge_line(forge: &ForgeState, now: i64, width: usize) -> Option<String> {
     Some(fitting.cloned().unwrap_or_else(|| elide_right(what, width)))
 }
 
-/// `HH:MM` of the UTC day `secs` (since the epoch) falls in, by plain
-/// arithmetic: no clock is read and no time zone is known.
-pub(crate) fn clock(secs: i64) -> String {
-    let of_day = secs.rem_euclid(86_400);
-    format!("{:02}:{:02}", of_day / 3600, of_day % 3600 / 60)
-}
-
 /// The selected branch's newest commits, one per row, scrolled by the
 /// log's own scroll.
 pub fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, area: Rect) {
@@ -392,13 +385,14 @@ fn log_row(row: &LogRow) -> String {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
+    use crate::test_support::reversed_at;
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -431,34 +425,10 @@ pub(crate) mod tests {
         state
     }
 
-    /// The Branches panel drawn on its own, focused, for checks that only
-    /// care what it shows.
-    pub(crate) fn draw_branches(state: &AppState, width: u16, height: u16) -> Vec<String> {
-        let mut state = state.clone();
-        state.files_loaded = true;
-        state.focus = Focus::Branches;
-        state.expanded = SidePanel::Branches;
-        draw(&state, width, height)
-    }
-
     fn buffer(state: &AppState, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(state, frame)).unwrap();
         terminal.backend().buffer().clone()
-    }
-
-    /// Whether the row holding `needle` is drawn reversed where it starts.
-    pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> bool {
-        let rows = buffer_rows(buffer);
-        let y = rows
-            .iter()
-            .position(|r| r.contains(needle))
-            .unwrap_or_else(|| panic!("{needle} in {rows:#?}"));
-        let x = rows[y].find(needle).map(|b| rows[y][..b].chars().count());
-        buffer[(x.unwrap() as u16, y as u16)]
-            .style()
-            .add_modifier
-            .contains(ratatui::style::Modifier::REVERSED)
     }
 
     #[test]
