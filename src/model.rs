@@ -19,6 +19,7 @@ use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::custom_patch::CustomPatch;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
+use crate::diff_search::DiffSearch;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, RendererKind, map_rows};
 use crate::forge::{ForgeHost, ForgeState};
@@ -572,10 +573,7 @@ impl AppState {
                     return self.diff.scroll(by, rows);
                 }
             }
-            AppIntent::DiffLoaded { tag, result } => {
-                self.diff_loaded(tag, result);
-                self.refresh_review_search();
-            }
+            AppIntent::DiffLoaded { tag, result } => self.diff_loaded(tag, result),
             AppIntent::DiffSlow { tag } => {
                 if tag.generation == self.generation {
                     self.diff.slow(tag.seq);
@@ -885,6 +883,9 @@ impl AppState {
             }
             AppIntent::ApplyStash => return self.stash_op(GitOp::StashApply),
             AppIntent::PopStash => return self.stash_op(GitOp::StashPop),
+            AppIntent::DropStash if self.stash.range_anchor.is_some() => {
+                self.ask_delete_range(RangeKind::Stashes)
+            }
             AppIntent::DropStash => self.ask_drop_stash(),
             AppIntent::ConfirmDropStash => return self.confirm_drop_stash(),
             AppIntent::RenameStash => self.ask_rename_stash(),
@@ -1218,7 +1219,13 @@ impl AppState {
                 result,
             } => return self.left_behind_checked(tag, op, head, result),
             AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
+            AppIntent::RewriteCommit(
+                edit @ (rebase_plan::Edit::Squash
+                | rebase_plan::Edit::Fixup
+                | rebase_plan::Edit::Drop),
+            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
+            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
             AppIntent::CreateFixup => return self.create_fixup(),
             AppIntent::Autosquash => self.ask_autosquash(),
@@ -1264,21 +1271,11 @@ impl AppState {
             AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
             AppIntent::OpenSearch if self.review_files_shown() => {
-                if let Some(text) = self.review_search_text() {
-                    self.input = Some(ListInput {
-                        target: InputTarget::DiffSearch,
-                        line: LineInput::with_text(&text),
-                    });
-                }
+                self.input = Some(search_input(InputTarget::PreviewSearch, &self.diff.search));
             }
-            AppIntent::OpenSearch => {
-                if let Focus::Diff(view) = &self.focus {
-                    let text = view.search.as_ref().map_or("", |s| s.query.as_str());
-                    self.input = Some(ListInput {
-                        target: InputTarget::DiffSearch,
-                        line: LineInput::with_text(text),
-                    });
-                }
+            AppIntent::OpenSearch => self.open_search(),
+            AppIntent::OpenPreviewSearch => {
+                self.input = Some(search_input(InputTarget::PreviewSearch, &self.diff.search));
             }
             AppIntent::InputAccept => return self.input_accept(),
             AppIntent::InputCancel => {
@@ -1292,18 +1289,13 @@ impl AppState {
             AppIntent::ToggleRange => self.toggle_range(),
             AppIntent::ListEscape => return self.list_escape(),
             AppIntent::DiffEscape if self.review_files_shown() => self.review_diff_escape(),
-            AppIntent::SearchNext if self.review_files_shown() => {
-                return self.step_review_search(false);
-            }
-            AppIntent::SearchPrev if self.review_files_shown() => {
-                return self.step_review_search(true);
-            }
             AppIntent::DiffEscape => match &mut self.focus {
                 Focus::Diff(view) if view.search.is_some() => view.search = None,
                 _ => return self.update(AppIntent::FocusLeft),
             },
-            AppIntent::SearchNext => self.step_search(false),
-            AppIntent::SearchPrev => self.step_search(true),
+            AppIntent::PaneEscape => return self.pane_escape(),
+            AppIntent::SearchNext => return self.step_search(false),
+            AppIntent::SearchPrev => return self.step_search(true),
             AppIntent::OpenLogFilter(field) => self.open_log_filter(field),
             AppIntent::LogOfFile => return self.log_of_file(),
             AppIntent::ToggleDiffMark => self.toggle_diff_mark(),
@@ -1413,6 +1405,15 @@ impl AppState {
         {
             return KeyScope::Input;
         }
+        // So does the Command log's.
+        if matches!(self.popups.last(), Some(Popup::CommandLog(_)))
+            && self
+                .input
+                .as_ref()
+                .is_some_and(|i| i.target == InputTarget::CommandLogFilter)
+        {
+            return KeyScope::Input;
+        }
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
@@ -1423,6 +1424,7 @@ impl AppState {
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
             Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
+            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -2201,6 +2203,11 @@ impl AppState {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
+            // Only the count: subjects and the filter are not drawn here.
+            (ConfirmKind::DropRange(ids), _) => Cow::Owned(format!(
+                "Drop {} commits and their changes from the history? (y/n)",
+                ids.len()
+            )),
             _ => Cow::Borrowed(kind.question()),
         }
     }
@@ -5334,10 +5341,10 @@ impl AppState {
     /// or on the newest one.
     fn command_logged(&mut self, event: CommandEvent) {
         let evicted = self.command_log.apply(event);
-        let len = self.command_log.len();
+        let log = &self.command_log;
         for popup in &mut self.popups {
             if let Popup::CommandLog(view) = popup {
-                view.logged(len, evicted);
+                view.logged(log, evicted);
             }
         }
     }
@@ -5348,9 +5355,8 @@ impl AppState {
     }
 
     fn move_command_log(&mut self, delta: isize) {
-        let len = self.command_log.len();
         if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
-            view.move_by(delta, len);
+            view.move_by(delta, &self.command_log);
         }
     }
 
@@ -5572,6 +5578,20 @@ impl AppState {
 /// Said when a changed filter drops the range made over the old rows.
 const SELECTION_CLEARED: &str = "Selection cleared";
 
+/// The bottom-bar input for a search, starting from its query.
+fn search_input(target: InputTarget, search: &Option<DiffSearch>) -> ListInput {
+    let text = search.as_ref().map_or("", |s| s.query.as_str());
+    ListInput {
+        target,
+        line: LineInput::with_text(text),
+    }
+}
+
+/// A search is open and found nothing, so there is no match to go to.
+fn no_matches(search: &Option<DiffSearch>) -> bool {
+    search.as_ref().is_some_and(|s| s.current.is_none())
+}
+
 /// List filters, range selections and the diff search.
 impl AppState {
     /// The indexes of the files the filter shows, in order.
@@ -5615,6 +5635,15 @@ impl AppState {
             }
             return;
         }
+        if self.key_focus() == KeyScope::CommandLog {
+            if let Some(Popup::CommandLog(view)) = self.popups.last() {
+                self.input = Some(ListInput {
+                    target: InputTarget::CommandLogFilter,
+                    line: LineInput::with_text(&view.filter),
+                });
+            }
+            return;
+        }
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
@@ -5622,6 +5651,7 @@ impl AppState {
             KeyScope::Remotes => (InputTarget::RemotesFilter, &self.branches.remotes.filter),
             KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
             KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.filter),
+            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
             }
@@ -5669,10 +5699,30 @@ impl AppState {
             }
             // A reflog row drives nothing, so a moved cursor loads nothing.
             InputTarget::ReflogFilter => self.commits.reflog.set_filter(text),
-            InputTarget::DiffSearch if self.review_files_shown() => self.set_review_search(&text),
+            // A stash row drives nothing, so a moved cursor loads nothing.
+            InputTarget::StashFilter => {
+                if self.stash.set_filter(text) {
+                    self.notice = Some(SELECTION_CLEARED.into());
+                }
+            }
             InputTarget::DiffSearch => {
                 if let Focus::Diff(view) = &mut self.focus {
                     view.set_search(&text, self.emoji_zwj);
+                }
+            }
+            InputTarget::PreviewSearch => self.diff.set_search(&text),
+            InputTarget::BlameSearch => {
+                if let Focus::Blame(view) = &mut self.focus {
+                    view.set_search(&text);
+                }
+            }
+            InputTarget::BlameCommitSearch => {
+                if let Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }) = &mut self.focus
+                {
+                    commit.set_search(&text);
                 }
             }
             InputTarget::ReviewFilter => {
@@ -5683,6 +5733,12 @@ impl AppState {
                 if let Some(list) = self.worktree_list_mut() {
                     list.filter = text;
                     list.reconcile();
+                }
+            }
+            InputTarget::CommandLogFilter => {
+                if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
+                    view.filter = text;
+                    view.reconcile(&self.command_log);
                 }
             }
             // Git runs the query on Enter, not on every key.
@@ -5701,31 +5757,130 @@ impl AppState {
         if input.target.is_log_query() {
             return self.accept_log_query(input);
         }
-        if input.target == InputTarget::DiffSearch && self.review_files_shown() {
-            return self.accept_review_search();
-        }
-        let rows = self.pane_rows();
-        if input.target == InputTarget::DiffSearch
-            && let Focus::Diff(view) = &mut self.focus
-        {
-            match &view.search {
-                Some(search) if search.current.is_none() => self.notice = Some("No matches".into()),
-                _ => view.jump_to_match(rows),
+        let rows = self.diff_rows();
+        let mut effects = vec![];
+        let found = match (input.target, &mut self.focus) {
+            (InputTarget::DiffSearch, Focus::Diff(view)) => {
+                let found = !no_matches(&view.search);
+                if found {
+                    view.jump_to_match(rows);
+                }
+                found
             }
+            (InputTarget::BlameSearch, Focus::Blame(view)) => {
+                let found = !no_matches(&view.search);
+                if found {
+                    view.jump_to_match(rows);
+                }
+                found
+            }
+            (
+                InputTarget::BlameCommitSearch,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => {
+                let found = !no_matches(&commit.search);
+                if found {
+                    commit.jump_to_match(rows);
+                }
+                found
+            }
+            (InputTarget::PreviewSearch, _) => {
+                let found = !no_matches(&self.diff.search);
+                if found {
+                    effects = self.diff.jump_to_match(rows);
+                }
+                found
+            }
+            _ => true,
+        };
+        if !found {
+            self.notice = Some("No matches".into());
         }
-        vec![]
+        effects
     }
 
-    /// `n` or `N`: the next or previous match, saying so when it wrapped.
-    fn step_search(&mut self, back: bool) {
-        let rows = self.pane_rows();
-        if let Focus::Diff(view) = &mut self.focus {
-            if view.search.as_ref().is_some_and(|s| s.current.is_none()) {
-                self.notice = Some("No matches".into());
-            } else if view.step_search(back, rows) {
-                self.notice = Some("Search wrapped".into());
-            }
+    /// Type a search for the focused pane, starting from its query.
+    fn open_search(&mut self) {
+        let (target, search) = match &self.focus {
+            Focus::Diff(view) => (InputTarget::DiffSearch, &view.search),
+            Focus::Blame(view) => match &view.commit {
+                Some(commit) => (InputTarget::BlameCommitSearch, &commit.search),
+                None => (InputTarget::BlameSearch, &view.search),
+            },
+            _ => return,
+        };
+        self.input = Some(search_input(target, search));
+    }
+
+    /// `n` or `N`: the next or previous match of the search the key focus
+    /// owns, saying so when it wrapped. A side panel steps its preview's.
+    fn step_search(&mut self, back: bool) -> Vec<Effect> {
+        let rows = self.diff_rows();
+        let mut effects = vec![];
+        // `None` when the search found nothing to step to.
+        let wrapped = match (self.panel_focus(), &mut self.focus) {
+            (KeyScope::Diff, Focus::Diff(view)) if no_matches(&view.search) => None,
+            (KeyScope::Diff, Focus::Diff(view)) => Some(view.step_search(back, rows)),
+            (KeyScope::Blame, Focus::Blame(view)) if no_matches(&view.search) => None,
+            (KeyScope::Blame, Focus::Blame(view)) => Some(view.step_search(back, rows)),
+            (
+                KeyScope::BlameCommit,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => (!no_matches(&commit.search)).then(|| commit.step_search(back, rows)),
+            (
+                KeyScope::Files
+                | KeyScope::CommitFiles
+                | KeyScope::StashFiles
+                | KeyScope::ReviewDiff,
+                _,
+            ) => (!no_matches(&self.diff.search)).then(|| {
+                let (wrapped, demand) = self.diff.step_search(back, rows);
+                effects = demand;
+                wrapped
+            }),
+            _ => Some(false),
+        };
+        match wrapped {
+            None => self.notice = Some("No matches".into()),
+            Some(true) => self.notice = Some("Search wrapped".into()),
+            Some(false) => {}
         }
+        effects
+    }
+
+    /// Esc in the blame, its commit, or a commit's or a stash's files:
+    /// clear that pane's search, else close the pane as Esc did before.
+    fn pane_escape(&mut self) -> Vec<Effect> {
+        let scope = self.panel_focus();
+        let cleared = match (scope, &mut self.focus) {
+            (
+                KeyScope::BlameCommit,
+                Focus::Blame(BlameView {
+                    commit: Some(commit),
+                    ..
+                }),
+            ) => commit.search.take().is_some(),
+            (KeyScope::Blame, Focus::Blame(view)) => view.search.take().is_some(),
+            (KeyScope::CommitFiles | KeyScope::StashFiles, _) => self.diff.search.take().is_some(),
+            _ => false,
+        };
+        if cleared {
+            return vec![];
+        }
+        let close = match scope {
+            KeyScope::Blame => AppIntent::CloseBlame,
+            KeyScope::BlameCommit => AppIntent::CloseBlameCommit,
+            KeyScope::CommitFiles => AppIntent::CloseCommitFiles,
+            KeyScope::StashFiles => AppIntent::CloseStashFiles,
+            _ => return vec![],
+        };
+        self.update(close)
     }
 
     /// Start a range at the cursor, or clear the one there is.
@@ -5748,15 +5903,27 @@ impl AppState {
             KeyScope::Branches => self.branches.toggle_range(),
             KeyScope::Remotes => self.branches.remotes.toggle_range(),
             KeyScope::Tags => self.branches.tags.toggle_range(),
+            KeyScope::Stash => self.stash.toggle_range(),
             _ => {}
         }
     }
 
-    /// Esc in a list: clear the range, else the filter, else (in Commits)
-    /// the diff mark, else the log query, else quit as Esc always has. In
-    /// the Worktrees popup: clear the filter, else close the popup. The
-    /// Reflog tab has no range: clear the filter, else quit.
+    /// Esc in a list: clear the range, else the filter, else (in Files)
+    /// the preview's search, else (in Commits) the diff mark, else the log
+    /// query, else quit as Esc always has. In the Worktrees and Command log
+    /// popups: clear the filter, else close the popup. The Reflog tab has
+    /// no range: clear the filter, else quit.
     fn list_escape(&mut self) -> Vec<Effect> {
+        if self.key_focus() == KeyScope::CommandLog {
+            if let Some(Popup::CommandLog(view)) = self.popups.last_mut()
+                && !view.filter.is_empty()
+            {
+                view.filter.clear();
+                view.reconcile(&self.command_log);
+                return vec![];
+            }
+            return self.update(AppIntent::PopPopup);
+        }
         if self.key_focus() == KeyScope::Worktrees {
             if let Some(list) = self.worktree_list_mut()
                 && !list.filter.is_empty()
@@ -5784,6 +5951,10 @@ impl AppState {
                 &mut branches.tags.filter,
             ),
             KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
+            KeyScope::Stash => (
+                self.stash.range_anchor.take().is_some(),
+                &mut self.stash.filter,
+            ),
             _ => return self.update(AppIntent::Quit),
         };
         if cleared {
@@ -5791,6 +5962,9 @@ impl AppState {
         }
         if !filter.is_empty() {
             filter.clear();
+            return vec![];
+        }
+        if focus == KeyScope::Files && self.diff.search.take().is_some() {
             return vec![];
         }
         if self.panel_focus() == KeyScope::Commits {
@@ -5919,7 +6093,7 @@ fn failure_next(op: &GitOp) -> &'static str {
         GitOp::StashApply(_) | GitOp::StashPop(_) => {
             "The file list was reloaded. If git stopped on conflicts, resolve them in the Files panel; the stash is kept."
         }
-        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+        GitOp::StashDrop(_) | GitOp::StashDrops(_) | GitOp::StashRename { .. } => {
             "The stash list was reloaded. Fix the cause above, then try again."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
@@ -6050,6 +6224,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::StashApply(_) => "Could not apply the stash",
         GitOp::StashPop(_) => "Could not pop the stash",
         GitOp::StashDrop(_) => "Could not drop the stash",
+        GitOp::StashDrops(_) => "Could not drop the stashes",
         GitOp::StashRename { .. } => "Could not rename the stash",
         GitOp::CheckoutTracking { .. } => "Could not check out the remote branch",
         GitOp::SetUpstream { .. } => "Could not set the upstream",
@@ -6082,6 +6257,7 @@ mod log_query;
 pub(crate) mod pull_request;
 pub(crate) mod review;
 pub(crate) mod review_files;
+mod rewrite_range;
 mod stash_actions;
 
 use custom_patch::NO_PATCH;
@@ -15087,7 +15263,7 @@ mod tests {
 
     fn command_log_view(state: &AppState) -> CommandLogView {
         match state.popups.last() {
-            Some(Popup::CommandLog(view)) => *view,
+            Some(Popup::CommandLog(view)) => view.clone(),
             other => panic!("expected the command log on top, got {other:?}"),
         }
     }
@@ -15149,7 +15325,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 2,
-                follow: true
+                follow: true,
+                filter: String::new()
             }
         );
 
@@ -15161,7 +15338,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 2,
-                follow: false
+                follow: false,
+                filter: String::new()
             }
         );
         log_started(&mut state, 4);
@@ -15173,7 +15351,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 4,
-                follow: true
+                follow: true,
+                filter: String::new()
             }
         );
 
@@ -15191,6 +15370,156 @@ mod tests {
         // Recording carries on while closed.
         log_started(&mut state, 30);
         assert_eq!(state.command_log.len(), 31);
+    }
+
+    /// The Command log open on `git cmd0`..`git cmd11`, all running.
+    fn open_log_of_twelve() -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.size = (80, 24);
+        for id in 0..12 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::OpenCommandLog);
+        state
+    }
+
+    fn command_log_rows(state: &AppState) -> Vec<usize> {
+        command_log_view(state).visible(&state.command_log)
+    }
+
+    #[test]
+    fn slash_in_the_command_log_filters_it_as_typed() {
+        let mut state = open_log_of_twelve();
+        assert_eq!(press_char(&mut state, '/'), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        let input = state.input.as_ref().expect("the input is open");
+        assert_eq!(input.target, InputTarget::CommandLogFilter);
+        assert_eq!(input.target.prompt(), "/");
+        type_text(&mut state, "cmd1");
+        assert_eq!(command_log_view(&state).filter, "cmd1");
+        assert_eq!(command_log_rows(&state), [1, 10, 11]);
+        type_text(&mut state, "0");
+        assert_eq!(command_log_rows(&state), [10]);
+        assert_eq!(command_log_view(&state).cursor, 10, "moved to a shown row");
+
+        // `q` and `?` are typed, not run.
+        type_text(&mut state, "q?");
+        assert_eq!(command_log_view(&state).filter, "cmd10q?");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        assert!(matches!(state.popups.as_slice(), [Popup::CommandLog(_)]));
+    }
+
+    #[test]
+    fn the_command_log_filter_stops_at_its_limit() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(
+            command_log_view(&state).filter.chars().count(),
+            list_filter::MAX_INPUT
+        );
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+    }
+
+    #[test]
+    fn enter_keeps_the_command_log_filter_and_esc_in_the_input_clears_it() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.input, None);
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+        assert_eq!(command_log_rows(&state), [1, 10, 11]);
+
+        // `/` again starts from the kept text; Esc there clears it.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "cmd1");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+    }
+
+    #[test]
+    fn esc_in_the_command_log_clears_the_filter_then_closes_it() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::CommandLog, "still open");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert!(state.popups.is_empty());
+        assert!(!state.should_quit);
+
+        // `q` closes at once, filter or not.
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        press_char(&mut state, 'q');
+        assert!(state.popups.is_empty());
+        assert!(!state.should_quit);
+
+        // Opened again, the log starts unfiltered.
+        state.update(AppIntent::OpenCommandLog);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(command_log_rows(&state).len(), 12);
+    }
+
+    #[test]
+    fn moving_in_a_filtered_command_log_skips_hidden_rows() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(command_log_view(&state).cursor, 11, "still on the newest");
+        press_char(&mut state, 'k');
+        assert_eq!(command_log_view(&state).cursor, 10);
+        press_char(&mut state, 'k');
+        assert_eq!(command_log_view(&state).cursor, 1);
+        assert!(!command_log_view(&state).follow);
+        press(&mut state, KeyCode::PageDown);
+        assert_eq!(command_log_view(&state).cursor, 11);
+        assert!(command_log_view(&state).follow);
+
+        // Following, a new matching command takes the cursor; others not.
+        log_started(&mut state, 20);
+        assert_eq!(command_log_view(&state).cursor, 11);
+        log_started(&mut state, 21);
+        assert_eq!(command_log_view(&state).cursor, 13);
+    }
+
+    #[test]
+    fn the_command_log_filter_never_reaches_an_effect() {
+        let mut state = open_log_of_twelve();
+        let filter = "--force \x1b[31m";
+        let mut effects = press_char(&mut state, '/');
+        for c in filter.chars() {
+            effects.extend(press(&mut state, KeyCode::Char(c)));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        // The input drops the control char; the rest is kept.
+        assert_eq!(command_log_view(&state).filter, "--force [31m");
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Char('q'),
+        ] {
+            effects.extend(press(&mut state, code));
+        }
+        assert!(state.popups.is_empty());
+        let shown = format!("{effects:?}");
+        for part in [filter, "--force [31m", "--force", "force"] {
+            assert!(!shown.contains(part), "{part:?} in {shown}");
+        }
     }
 
     #[test]
@@ -17410,6 +17739,300 @@ mod tests {
         assert!(!state.should_quit);
     }
 
+    // --- Search in the diff preview, the blame and its commit ---
+
+    /// The tag of the diff load among `effects`.
+    fn load_diff_tag(effects: &[Effect]) -> Tag {
+        effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::LoadDiff { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("expected a LoadDiff in {effects:?}"))
+    }
+
+    /// 60 preview lines, "foo" on rows 30 and 50, more still to come.
+    fn preview_loaded(state: &mut AppState, tag: Tag) {
+        let lines = (0..60)
+            .map(|i| line(if i == 30 || i == 50 { "+foo" } else { " x" }))
+            .collect();
+        state.update(AppIntent::DiffLoaded {
+            tag,
+            result: Ok(DiffChunk { lines, done: false }),
+        });
+    }
+
+    fn preview_current(state: &AppState) -> Option<usize> {
+        state.diff.search.as_ref().and_then(|s| s.current)
+    }
+
+    /// ctrl-f, `foo`, Enter: the preview scrolls to the first match, and
+    /// `n` and `N` cycle round both ways.
+    fn search_the_preview_for_foo(state: &mut AppState) {
+        ctrl(state, 'f');
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        type_text(state, "foo");
+        assert_eq!(state.diff.scroll, 0, "typing does not jump");
+        press(state, KeyCode::Enter);
+        assert_eq!(state.input, None);
+        // 21 rows: row 30 is the bottom one.
+        assert_eq!(state.diff.scroll, 10);
+        assert_eq!(preview_current(state), Some(0));
+
+        press_char(state, 'n');
+        assert_eq!((preview_current(state), state.diff.scroll), (Some(1), 30));
+        assert_eq!(state.notice, None);
+        press_char(state, 'n');
+        assert_eq!((preview_current(state), state.diff.scroll), (Some(0), 30));
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(state, 'N');
+        assert_eq!(preview_current(state), Some(1));
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(state, 'N');
+        assert_eq!(preview_current(state), Some(0));
+    }
+
+    #[test]
+    fn ctrl_f_searches_the_files_preview_and_esc_clears_range_filter_search_then_quits() {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        type_text(&mut state, "/a\n");
+        press_char(&mut state, 'V');
+        search_the_preview_for_foo(&mut state);
+        assert_eq!(state.diff.path, Some("a.rs".into()));
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_anchor, None, "the range goes first");
+        assert!(state.diff.search.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.files_filter, "", "then the filter");
+        assert!(state.diff.search.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None, "then the search");
+        assert!(!state.should_quit);
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("Nothing searched yet (ctrl-f)".into()));
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit, "then Esc quits as before");
+    }
+
+    #[test]
+    fn a_preview_search_with_no_match_says_so_on_enter_and_n() {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        ctrl(&mut state, 'f');
+        type_text(&mut state, "zzz\n");
+        assert_eq!(state.notice, Some("No matches".into()));
+        state.notice = None;
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("No matches".into()));
+    }
+
+    #[test]
+    fn the_preview_search_waits_for_a_file() {
+        let (mut state, _) = with_files(vec![], 24);
+        state.focus = Focus::Files;
+        assert_eq!(state.diff.path, None);
+        ctrl(&mut state, 'f');
+        assert_eq!(state.input, None);
+        assert_eq!(state.notice, Some("No file selected".into()));
+    }
+
+    #[test]
+    fn a_commits_files_preview_is_searched_and_esc_clears_it_before_going_back() {
+        let mut state = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
+        preview_loaded(&mut state, tag);
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
+        search_the_preview_for_foo(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.key_focus(), KeyScope::CommitFiles, "still open");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.open, None);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn a_stashs_files_preview_is_searched_and_esc_clears_it_before_going_back() {
+        let mut state = on_stash_one();
+        let tag = load_diff_tag(&stash_opened(&mut state));
+        preview_loaded(&mut state, tag);
+        assert_eq!(state.key_focus(), KeyScope::StashFiles);
+        search_the_preview_for_foo(&mut state);
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.key_focus(), KeyScope::StashFiles, "still open");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.stash.open, None);
+        assert_eq!(state.key_focus(), KeyScope::Stash);
+        assert!(!state.should_quit);
+    }
+
+    /// A loaded blame of five committed lines, "foo" on lines 2 and 4.
+    fn blamed_foo() -> AppState {
+        let (mut state, tag) = blaming(24);
+        let lines = ["fn a", "foo", "x", "foo bar", "y"]
+            .iter()
+            .enumerate()
+            .map(|(i, text)| crate::git::blame::BlameLine {
+                text: text.to_string(),
+                ..blame_line(OID, i + 1)
+            })
+            .collect();
+        state.update(AppIntent::BlameLoaded {
+            tag,
+            result: Ok(lines),
+        });
+        state
+    }
+
+    #[test]
+    fn the_blame_and_its_commit_each_search_on_their_own() {
+        let mut state = blamed_foo();
+        type_text(&mut state, "/foo");
+        assert_eq!(blame(&state).cursor, 0, "typing does not move the cursor");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(blame(&state).cursor, 1);
+        press_char(&mut state, 'n');
+        assert_eq!(blame(&state).cursor, 3);
+        press_char(&mut state, 'n');
+        assert_eq!(blame(&state).cursor, 1);
+        assert_eq!(state.notice, Some("Search wrapped".into()));
+        press_char(&mut state, 'N');
+        assert_eq!(blame(&state).cursor, 3);
+
+        // Enter opens the match's line's commit.
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, oid }] => {
+                assert_eq!(oid, OID);
+                *tag
+            }
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        press_char(&mut state, '/');
+        assert_eq!(state.input, None, "nothing to search while it loads");
+        assert_eq!(state.notice, Some("Loading…".into()));
+        state.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("commit abc"), line("+foo"), line(" ctx")]),
+        });
+        press_char(&mut state, '/');
+        assert_eq!(
+            state
+                .input
+                .as_ref()
+                .map(|i| (i.target, i.line.text.as_str())),
+            Some((InputTarget::BlameCommitSearch, "")),
+            "the commit's own search, not the blame's"
+        );
+        type_text(&mut state, "ctx\n");
+        let commit = blame(&state).commit.as_ref().unwrap();
+        let found = commit.search.as_ref().unwrap();
+        assert_eq!((found.query.as_str(), found.current), ("ctx", Some(0)));
+        assert_eq!(blame(&state).search.as_ref().unwrap().query, "foo");
+
+        press(&mut state, KeyCode::Esc);
+        let commit = blame(&state).commit.as_ref().expect("still open");
+        assert_eq!(commit.search, None);
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(blame(&state).commit, None);
+        assert_eq!(state.panel_focus(), KeyScope::Blame);
+        assert!(blame(&state).search.is_some(), "the blame kept its search");
+
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(blame(&state).search, None);
+        press_char(&mut state, 'n');
+        assert_eq!(state.notice, Some("Nothing searched yet (/)".into()));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn keys_typed_into_each_new_search_are_only_text() {
+        let typed = "q?d\u{202E}";
+        let check = |mut state: AppState, open: &dyn Fn(&mut AppState), target| {
+            open(&mut state);
+            assert_eq!(state.input.as_ref().map(|i| i.target), Some(target));
+            let mut effects = Vec::new();
+            for c in typed.chars() {
+                effects.extend(press_char(&mut state, c));
+            }
+            assert_eq!(state.input.as_ref().unwrap().line.text, typed);
+            assert!(!state.should_quit && !state.help_open, "{target:?}");
+            assert!(state.popups.is_empty(), "{target:?}");
+            effects.extend(press(&mut state, KeyCode::Enter));
+            for effect in &effects {
+                assert!(
+                    !matches!(
+                        effect,
+                        Effect::RunOp { .. }
+                            | Effect::ProbeCommit { .. }
+                            | Effect::CheckLeftBehind { .. }
+                    ),
+                    "{target:?}: {effect:?}"
+                );
+                let shown = format!("{effect:?}");
+                assert!(!shown.contains("q?d"), "{target:?}: {shown}");
+            }
+        };
+        let ctrl_f = |state: &mut AppState| {
+            ctrl(state, 'f');
+        };
+        let slash = |state: &mut AppState| {
+            press_char(state, '/');
+        };
+
+        let (mut files, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut files, diff_tag(&effects));
+        check(files, &ctrl_f, InputTarget::PreviewSearch);
+
+        let mut commit_files = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut commit_files, two_commit_files()));
+        preview_loaded(&mut commit_files, tag);
+        check(commit_files, &ctrl_f, InputTarget::PreviewSearch);
+
+        let mut stash_files = on_stash_one();
+        let tag = load_diff_tag(&stash_opened(&mut stash_files));
+        preview_loaded(&mut stash_files, tag);
+        check(stash_files, &ctrl_f, InputTarget::PreviewSearch);
+
+        check(blamed_foo(), &slash, InputTarget::BlameSearch);
+
+        let mut commit = blamed_foo();
+        let tag = match press(&mut commit, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, .. }] => *tag,
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        commit.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("+foo")]),
+        });
+        check(commit, &slash, InputTarget::BlameCommitSearch);
+    }
+
+    #[test]
+    fn the_focused_commit_file_diff_is_still_searched_with_slash() {
+        let mut state = on_commit_five();
+        let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
+        preview_loaded(&mut state, tag);
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
+        let Focus::Diff(view) = &state.focus else {
+            panic!("expected the commit file's hunks, got {:?}", state.focus);
+        };
+        assert!(view.commit.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::DiffSearch)
+        );
+    }
+
     #[test]
     fn the_input_stops_at_its_limit_but_still_edits() {
         let (mut state, _) = with_files(three_files(), 24);
@@ -18034,6 +18657,198 @@ mod tests {
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::StashDrop(stash_ref(1, "a1")));
         assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn slash_in_the_stash_panel_narrows_it_as_typed_and_enter_keeps_it() {
+        let mut state = on_stash_one();
+        let mut effects = press_char(&mut state, '/');
+        let input = state.input.as_ref().expect("the input opens");
+        assert_eq!(input.target, InputTarget::StashFilter);
+        assert_eq!(input.target.prompt(), "/");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        for c in "zero".chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        assert_eq!(state.stash.visible(), [0], "by subject");
+        assert_eq!(state.stash.selected, 0, "the hidden cursor follows");
+        for _ in 0..4 {
+            effects.extend(press(&mut state, KeyCode::Backspace));
+        }
+        for c in "{2}".chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        assert_eq!(state.stash.visible(), [2], "by its place");
+        assert_eq!(state.stash.selected, 2);
+        effects.extend(press(&mut state, KeyCode::Enter));
+        assert_eq!(effects, vec![], "the filter asks git nothing");
+        assert_eq!(state.input, None);
+        assert_eq!(state.stash.filter, "{2}");
+        assert_eq!(state.key_focus(), KeyScope::Stash);
+        // `/` again starts from the kept text.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "{2}");
+    }
+
+    #[test]
+    fn a_changed_stash_filter_clears_the_range_and_says_so() {
+        let mut state = on_stash_one();
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        assert_eq!(state.stash.range(), [1, 2]);
+        press_char(&mut state, '/');
+        press_char(&mut state, 'o');
+        assert_eq!(state.stash.range_anchor, None);
+        assert_eq!(state.notice.as_deref(), Some(SELECTION_CLEARED));
+    }
+
+    #[test]
+    fn esc_in_the_stash_panel_clears_the_range_then_the_filter_then_quits() {
+        let mut state = on_stash_one();
+        press_char(&mut state, '/');
+        type_text(&mut state, "main\n");
+        press(&mut state, KeyCode::Char('V'));
+        assert!(state.stash.range_anchor.is_some());
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.stash.range_anchor, None);
+        assert_eq!(state.stash.filter, "main");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.stash.filter, "");
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit);
+    }
+
+    /// The Stash panel with a range over all three stashes, the cursor on
+    /// `stash@{2}`.
+    fn stash_range_of_three() -> AppState {
+        let mut state = on_stash_one();
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(state.stash.range(), [0, 1, 2]);
+        state
+    }
+
+    #[test]
+    fn d_over_a_stash_range_asks_once_and_only_y_drops_every_stash_in_it() {
+        let mut state = stash_range_of_three();
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        let confirm = match state.popups.as_slice() {
+            [Popup::DeleteRange(confirm)] => confirm.clone(),
+            other => panic!("expected the range question, got {other:?}"),
+        };
+        assert_eq!(confirm.title(), "Drop stashes");
+        assert_eq!(
+            confirm.question(),
+            "Drop 3 stashes (stash@{0}, stash@{1}, stash@{2})? \
+             They cannot be recovered from the stash list. (y/n)"
+        );
+        assert_eq!(state.key_focus(), KeyScope::DeleteRange);
+        let refs = vec![stash_ref(0, "a0"), stash_ref(1, "a1"), stash_ref(2, "a2")];
+
+        // Enter is not an answer.
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1);
+        assert_eq!(state.op_seq, None);
+        // A reload under the question moves the list, not the answer.
+        let mut moved = three_stashes();
+        moved.insert(0, stash_entry(0, "f0", "new"));
+        load_stashes(&mut state, moved);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::StashDrops(refs));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.stash.range_anchor, None, "the range is done with");
+    }
+
+    #[test]
+    fn n_or_esc_keeps_a_stash_range_and_drops_nothing() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = stash_range_of_three();
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_stash_range_refuses_the_one_row_actions_and_a_hidden_anchor_asks_nothing() {
+        let mut state = stash_range_of_three();
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('g'),
+            KeyCode::Char('R'),
+            KeyCode::Enter,
+        ] {
+            state.notice = None;
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(
+                state.notice.as_deref(),
+                Some(keymap::CLEAR_RANGE_FIRST),
+                "{code:?}"
+            );
+            assert_eq!((state.op_seq, state.popups.len()), (None, 0), "{code:?}");
+            assert_eq!(state.stash.open, None, "{code:?}");
+        }
+        // Asked of the model directly, the guard still holds.
+        state.update(AppIntent::ApplyStash);
+        assert_eq!(state.op_seq, None);
+        state.update(AppIntent::OpenStashFiles);
+        assert_eq!(state.stash.open, None);
+
+        // The anchor hidden by a filter set under the range: nothing to ask.
+        state.stash.filter = "{2}".into();
+        assert!(state.stash.range().is_empty());
+        state.update(AppIntent::DropStash);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.notice.as_deref(), Some("No stash in the selection"));
+    }
+
+    #[test]
+    fn the_stash_filter_never_reaches_git_and_a_range_drop_holds_only_listed_refs() {
+        let hostile = "-x stash@{0}";
+        let mut state = on_stash_one();
+        // Every subject matches, so the filter keeps every row.
+        let entries = ["a0", "a1", "a2"]
+            .iter()
+            .enumerate()
+            .map(|(i, oid)| stash_entry(i, oid, "On main: -x stash@{0}"))
+            .collect();
+        load_stashes(&mut state, entries);
+        let mut effects = press_char(&mut state, '/');
+        for c in hostile.chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        assert_eq!(effects, vec![], "typing a filter returns no effects");
+        assert_eq!(state.stash.filter, hostile);
+        assert_eq!(state.stash.visible(), [0, 1, 2]);
+
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'd');
+        let ran = press_char(&mut state, 'y');
+        let debug = format!("{ran:?}");
+        assert!(!debug.contains("-x"), "{debug}");
+        let (_, op) = op_of(&ran);
+        assert_eq!(
+            op,
+            GitOp::StashDrops(vec![stash_ref(0, "a0"), stash_ref(1, "a1")])
+        );
+        for step in crate::git::ops::op_steps(&op) {
+            let argv: Vec<String> = crate::git::ops::op_command(&step)
+                .args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(argv[..2], ["stash", "drop"]);
+            assert!(argv[2] == "stash@{1}" || argv[2] == "stash@{0}", "{argv:?}");
+            assert_eq!(argv.len(), 3);
+        }
     }
 
     #[test]
@@ -18770,8 +19585,14 @@ mod tests {
         // On a todo row while a range is kept.
         let mut todo = stopped(TODO, 2);
         todo.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(press_char(&mut todo, 'e'), vec![]);
         assert_eq!(todo.notice.as_deref(), range);
+        // Drop takes a range, but only one of log rows.
+        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(
+            todo.notice.as_deref(),
+            Some("Select a commit in the log first")
+        );
         // A range starts on log rows only.
         let mut todo = stopped(TODO, 2);
         press_char(&mut todo, 'V');

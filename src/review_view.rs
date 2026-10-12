@@ -262,13 +262,12 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     frame.render_widget(block, list);
     frame.render_widget(Paragraph::new(file_lines(files, list_inner)), list_inner);
 
-    let mut tail = view::diff_position(&state.diff);
-    if let Some(search) = &files.search {
-        match search.current {
-            Some(i) => tail.push_str(&format!(" · match {} of {}", i + 1, search.matches.len())),
-            None => tail.push_str(" · no matches"),
-        }
-    }
+    let stream = &state.diff;
+    let tail = format!(
+        "{}{}",
+        view::diff_position(stream),
+        view::found_note(stream.search.as_ref(), !stream.done)
+    );
     let path = files
         .selected()
         .filter(|_| files.stage == FilesStage::Ready)
@@ -278,7 +277,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let block = view::panel_block(title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
     let body = match &files.stage {
-        FilesStage::Ready => view::diff_pane_body(&state.diff, files.search.as_ref(), diff_inner),
+        FilesStage::Ready => view::diff_pane_body(&state.diff, diff_inner),
         FilesStage::Failed(_) => Paragraph::new(Line::styled("No diff to show", dim())),
         _ => Paragraph::new(Line::styled(
             "The diff shows once the files are listed",
@@ -832,7 +831,6 @@ mod tests {
             stage: FilesStage::Ready,
             fetched: false,
             seq: None,
-            search: None,
         });
         state
     }
@@ -900,7 +898,7 @@ mod tests {
         let texts: Vec<String> = state.diff.lines.iter().map(|l| l.text.clone()).collect();
         let files = state.review.files.as_mut().unwrap();
         files.focus = FilesFocus::Diff;
-        files.search = Some(DiffSearch::new("cache", &texts, 0));
+        state.diff.search = Some(DiffSearch::new("cache", &texts, 0));
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         terminal
             .draw(|frame| crate::view::render(&state, frame))
@@ -1030,7 +1028,7 @@ mod tests {
         let files = state.review.files.as_mut().unwrap();
         files.rows[0].file.path = path.into();
         files.focus = FilesFocus::Diff;
-        files.search = Some(crate::diff_search::DiffSearch::new(
+        state.diff.search = Some(crate::diff_search::DiffSearch::new(
             "cache",
             &["+cache".to_string()],
             0,

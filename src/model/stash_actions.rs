@@ -10,7 +10,7 @@ use crate::git::ops::{GitOp, StashMode};
 use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::keymap;
 use crate::menu;
-use crate::popup::{DropStashConfirm, LineInput, Popup, PromptKind};
+use crate::popup::{DeleteRangeConfirm, DropStashConfirm, LineInput, Popup, PromptKind, RangeKind};
 use crate::stash::{StashDraft, StashFilesList};
 
 impl AppState {
@@ -37,6 +37,10 @@ impl AppState {
             || self.focus != Focus::Stash
             || self.stash.open.is_some()
         {
+            return vec![];
+        }
+        if let Some(reason) = keymap::list_guard(self, false) {
+            self.notice = Some(reason);
             return vec![];
         }
         let Some(entry) = self.stash.selected_entry().cloned() else {
@@ -158,6 +162,24 @@ impl AppState {
             op: GitOp::StashDrop(stash),
         };
         self.popups.push(Popup::DropStash(confirm));
+    }
+
+    /// Every entry in the range, each with its place and id as listed
+    /// now. Only the loaded list names them; the filter only chose which
+    /// rows the range spans.
+    pub(super) fn stashes_range_confirm(&self) -> DeleteRangeConfirm {
+        let stashes: Vec<StashRef> = self
+            .stash
+            .range()
+            .into_iter()
+            .map(|i| self.stash.entries[i].stash_ref())
+            .collect();
+        DeleteRangeConfirm {
+            kind: RangeKind::Stashes,
+            names: stashes.iter().map(StashRef::arg).collect(),
+            skipped: vec![],
+            op: GitOp::StashDrops(stashes),
+        }
     }
 
     /// Drop as the open question asked, and only if one is open.

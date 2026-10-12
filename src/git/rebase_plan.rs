@@ -138,11 +138,53 @@ pub fn plan(rows: &[CommitRow], selected: usize, edit: Edit) -> Result<RebasePla
         return Err("Already a pick");
     }
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let last = if folds { selected + 1 } else { selected };
     let mut plan = picks(linear_range(rows, last)?)?;
     step_of(&mut plan, selected).action = edit.into();
+    Ok(plan)
+}
+
+/// Why a range cannot be planned: it is not one unbroken run of loaded
+/// rows, which only happens when the filter hides commits inside it.
+pub const RANGE_GAP: &str = "The filter hides commits inside the selection; clear it first";
+
+/// Why an edit other than squash, fixup or drop cannot act on a range.
+pub const RANGE_EDIT: &str = "Only squash, fixup and drop act on a selection";
+
+/// Why the root commit cannot be rewritten: there is no parent to rebase
+/// onto.
+pub const FIRST_COMMIT: &str = "Cannot rewrite the first commit";
+
+/// The plan for `edit` on every row of `range`, log row indexes newest
+/// first, in one rebase. Squash and fixup fold the whole range into the
+/// commit below it; drop removes every commit in it. Refuses a range with a
+/// gap, since rewriting commits the user cannot see would widen it
+/// silently, and any edit but those three.
+pub fn plan_range(
+    rows: &[CommitRow],
+    range: &[usize],
+    edit: Edit,
+) -> Result<RebasePlan, &'static str> {
+    if !matches!(edit, Edit::Squash | Edit::Fixup | Edit::Drop) {
+        return Err(RANGE_EDIT);
+    }
+    let (Some(&lo), Some(&hi)) = (range.first(), range.last()) else {
+        return Err(RANGE_GAP);
+    };
+    if range.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+        return Err(RANGE_GAP);
+    }
+    let targets = rows.get(lo..=hi).ok_or("No commits")?;
+    if targets.iter().any(|row| row.parents.is_empty()) {
+        return Err(FIRST_COMMIT);
+    }
+    let last = if edit == Edit::Drop { hi } else { hi + 1 };
+    let mut plan = picks(linear_range(rows, last)?)?;
+    for &index in range {
+        step_of(&mut plan, index).action = edit.into();
+    }
     Ok(plan)
 }
 
@@ -160,7 +202,7 @@ pub fn plan_move(
         Direction::Down => (selected, selected + 1),
     };
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, older)?)?;
     let n = plan.steps.len();
@@ -174,7 +216,7 @@ pub fn plan_move(
 pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'static str> {
     let target = rows.get(selected).ok_or("No commits")?;
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, selected)?)?;
     step_of(&mut plan, selected).break_after = true;
@@ -188,7 +230,7 @@ pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'s
 pub fn plan_stops(rows: &[CommitRow], stops: &[usize]) -> Result<RebasePlan, &'static str> {
     let oldest = *stops.iter().max().ok_or("No commits")?;
     if rows.get(oldest).is_some_and(|row| row.parents.is_empty()) {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, oldest)?)?;
     for &stop in stops {
@@ -263,7 +305,7 @@ pub fn plan_autosquash(rows: &[CommitRow]) -> Result<RebasePlan, &'static str> {
     let pairs = fixup_targets(rows)?;
     let deepest = pairs.iter().map(|&(_, target)| target).max().unwrap_or(0);
     if rows[deepest].parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let picked = picks(linear_range(rows, deepest)?)?;
     let n = picked.steps.len();
@@ -960,6 +1002,123 @@ mod tests {
         assert_eq!(plan(&rows, n - 2, Edit::Squash).unwrap().steps.len(), n);
         assert_eq!(
             plan(&rows, n - 1, Edit::Squash),
+            Err("Too many commits above it")
+        );
+    }
+
+    #[test]
+    fn a_range_folds_every_selected_commit_into_the_one_below_it() {
+        for (edit, action) in [
+            (Edit::Squash, TodoAction::Squash),
+            (Edit::Fixup, TodoAction::Fixup),
+        ] {
+            assert_eq!(
+                plan_range(&linear(), &[1, 2], edit),
+                Ok(plan_of(
+                    'e',
+                    vec![pick('d'), step(action, 'c'), step(action, 'b'), pick('a')]
+                )),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_drop_drops_every_selected_commit_from_the_parent_of_the_oldest() {
+        assert_eq!(
+            plan_range(&linear(), &[0, 1], Edit::Drop),
+            Ok(plan_of(
+                'c',
+                vec![step(TodoAction::Drop, 'b'), step(TodoAction::Drop, 'a')]
+            ))
+        );
+    }
+
+    #[test]
+    fn a_one_row_range_plans_as_the_single_row_action() {
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
+            assert_eq!(
+                plan_range(&linear(), &[1], edit),
+                plan(&linear(), 1, edit),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_with_a_gap_or_none_is_refused() {
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
+            assert_eq!(plan_range(&linear(), &[0, 2], edit), Err(RANGE_GAP));
+            assert_eq!(plan_range(&linear(), &[], edit), Err(RANGE_GAP));
+            assert_eq!(plan_range(&linear(), &[1, 0], edit), Err(RANGE_GAP));
+        }
+    }
+
+    #[test]
+    fn a_range_refuses_every_other_edit() {
+        for edit in [Edit::Reword, Edit::Stop, Edit::Pick] {
+            assert_eq!(
+                plan_range(&linear(), &[0, 1], edit),
+                Err(RANGE_EDIT),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_holding_the_root_commit_is_refused() {
+        let mut rows = linear();
+        rows[3].parents.clear();
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
+            assert_eq!(
+                plan_range(&rows, &[2, 3], edit),
+                Err("Cannot rewrite the first commit"),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_fold_needs_the_commit_below_loaded() {
+        assert_eq!(plan_range(&linear(), &[2, 3], Edit::Squash), Err(LOAD_MORE));
+        assert_eq!(plan_range(&linear(), &[2, 3], Edit::Fixup), Err(LOAD_MORE));
+        assert_eq!(
+            plan_range(&linear(), &[2, 3], Edit::Drop).map(|p| p.base),
+            Ok(cid('e'))
+        );
+        assert_eq!(
+            plan_range(&linear(), &[3, 4], Edit::Drop),
+            Err("No commits")
+        );
+    }
+
+    #[test]
+    fn a_range_across_a_merge_is_refused() {
+        let mut rows = linear();
+        rows[1].parents.push(id('f'));
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
+            assert_eq!(
+                plan_range(&rows, &[0, 1], edit),
+                Err("Cannot rewrite across a merge"),
+                "{edit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_range_past_max_steps_is_refused() {
+        let n = MAX_STEPS;
+        let ids: Vec<String> = (0..=n + 2).map(|i| format!("{i:040x}")).collect();
+        let rows: Vec<CommitRow> = (0..n + 2).map(|i| row(&ids[i], &[&ids[i + 1]])).collect();
+        let all: Vec<usize> = (0..n).collect();
+        assert_eq!(plan_range(&rows, &all, Edit::Drop).unwrap().steps.len(), n);
+        let too_many: Vec<usize> = (0..=n).collect();
+        assert_eq!(
+            plan_range(&rows, &too_many, Edit::Drop),
+            Err("Too many commits above it")
+        );
+        assert_eq!(
+            plan_range(&rows, &all, Edit::Squash),
             Err("Too many commits above it")
         );
     }

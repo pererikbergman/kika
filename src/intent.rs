@@ -508,8 +508,8 @@ pub enum AppIntent {
     RemoveRemote,
     /// Remove the remote the open question names.
     ConfirmRemoveRemote,
-    /// Delete the branches or tags, or remove the remotes, the open range
-    /// question names.
+    /// Delete the branches or tags, remove the remotes, or drop the
+    /// stashes the open range question names.
     ConfirmDeleteRange,
     /// Ask which remote branch the selected local branch should track.
     SetUpstream,
@@ -645,6 +645,9 @@ pub enum AppIntent {
     Autosquash,
     /// Autosquash, as the question asked.
     ConfirmAutosquash,
+    /// Drop a log range, as the question asked: the full ids it held then,
+    /// newest first, so a range that changed since is not dropped.
+    ConfirmDropRange(Vec<CommitId>),
     /// Find which commit last touched the staged lines.
     FindFixupBase,
     /// The commits the staged lines come from, or why they are not known.
@@ -720,8 +723,11 @@ pub enum AppIntent {
     },
     /// Type into the focused list's filter, which narrows it live.
     OpenFilter,
-    /// Type a text to search the focused Diff pane for.
+    /// Type a text to search the focused pane for: the Diff pane, the
+    /// blame, or the commit opened from it.
     OpenSearch,
+    /// Type a text to search the diff preview beside a side panel for.
+    OpenPreviewSearch,
     /// Close the text input, keeping what it typed; a search goes to its
     /// current match.
     InputAccept,
@@ -733,6 +739,9 @@ pub enum AppIntent {
     ListEscape,
     /// Clear the search, else go back to the side panel.
     DiffEscape,
+    /// Clear the focused pane's search, else close the pane: the blame,
+    /// its commit, or a commit's or a stash's files.
+    PaneEscape,
     /// Go to the next or previous match of the search.
     SearchNext,
     SearchPrev,

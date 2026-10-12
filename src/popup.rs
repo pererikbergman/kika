@@ -11,6 +11,7 @@ use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::custom_patch::PatchAction;
 use crate::git::askpass::Secret;
+use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
 use crate::git::path::RepoPath;
@@ -44,7 +45,8 @@ pub enum Popup {
     DropStash(DropStashConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     DeleteTag(DeleteTagConfirm),
-    /// Delete the branches or tags of a range, or remove its remotes.
+    /// Delete the branches or tags of a range, remove its remotes, or drop
+    /// its stashes.
     DeleteRange(DeleteRangeConfirm),
     Submodules(SubmoduleList),
     Worktrees(WorktreeList),
@@ -387,6 +389,7 @@ pub enum RangeKind {
     Branches,
     Tags,
     Remotes,
+    Stashes,
 }
 
 /// "Delete these?" over a range. Like [`DeleteBranchConfirm`], it carries
@@ -411,6 +414,7 @@ impl DeleteRangeConfirm {
             RangeKind::Branches => "Delete branches",
             RangeKind::Tags => "Delete tags",
             RangeKind::Remotes => "Remove remotes",
+            RangeKind::Stashes => "Drop stashes",
         }
     }
 
@@ -424,6 +428,8 @@ impl DeleteRangeConfirm {
             (RangeKind::Tags, false) => ("Delete", "tags"),
             (RangeKind::Remotes, true) => ("Remove", "remote"),
             (RangeKind::Remotes, false) => ("Remove", "remotes"),
+            (RangeKind::Stashes, true) => ("Drop", "stash"),
+            (RangeKind::Stashes, false) => ("Drop", "stashes"),
         };
         let mut names = self.names[..count.min(Self::LISTED)].join(", ");
         if count > Self::LISTED {
@@ -439,6 +445,8 @@ impl DeleteRangeConfirm {
             (RangeKind::Remotes, false) => " Their remote-tracking branches are deleted, and \
                 branches tracking them lose their upstream."
                 .into(),
+            (RangeKind::Stashes, true) => " It cannot be recovered from the stash list.".into(),
+            (RangeKind::Stashes, false) => " They cannot be recovered from the stash list.".into(),
         };
         let kept: Vec<String> = self
             .skipped
@@ -525,6 +533,10 @@ pub enum ConfirmKind {
     /// target or message fixed when asked, and rewrites commits the user
     /// may not be looking at, so only `y` answers.
     CustomPatch(PatchAction),
+    /// Drop these commits, the full ids of a log range when asked, newest
+    /// first. It throws away several commits' changes, so only `y`
+    /// answers, and the answer drops only if the range still holds them.
+    DropRange(Vec<CommitId>),
 }
 
 impl ConfirmKind {
@@ -542,6 +554,7 @@ impl ConfirmKind {
             ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
             ConfirmKind::CustomPatch(_) => "Custom patch",
+            ConfirmKind::DropRange(_) => "Drop commits",
         }
     }
 
@@ -595,6 +608,9 @@ impl ConfirmKind {
             // `AppState::confirm_question` names the commits; this is the
             // fallback when it cannot.
             ConfirmKind::CustomPatch(_) => "Rewrite the history with the custom patch? (y/n)",
+            // `AppState::confirm_question` counts the commits; this is the
+            // fallback when it cannot.
+            ConfirmKind::DropRange(_) => "Drop the selected commits and their changes? (y/n)",
         }
     }
 
@@ -609,6 +625,7 @@ impl ConfirmKind {
             ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
             ConfirmKind::CustomPatch(action) => AppIntent::ConfirmPatchAction(action.clone()),
+            ConfirmKind::DropRange(ids) => AppIntent::ConfirmDropRange(ids.clone()),
         }
     }
 
@@ -621,7 +638,8 @@ impl ConfirmKind {
             | ConfirmKind::DetachedCheckout
             | ConfirmKind::Autosquash
             | ConfirmKind::CreatePullRequest
-            | ConfirmKind::CustomPatch(_) => None,
+            | ConfirmKind::CustomPatch(_)
+            | ConfirmKind::DropRange(_) => None,
         }
     }
 }
@@ -1134,6 +1152,25 @@ mod tests {
             range(RangeKind::Remotes, &["a"], &[("not configured", 2)]).question(),
             "Remove 1 remote (a)? Its remote-tracking branches are deleted, \
              and branches tracking it lose their upstream. Kept: 2 not configured. (y/n)"
+        );
+    }
+
+    #[test]
+    fn a_stash_range_question_names_the_count_and_each_place() {
+        let ask = range(
+            RangeKind::Stashes,
+            &["stash@{1}", "stash@{2}", "stash@{3}"],
+            &[],
+        );
+        assert_eq!(ask.title(), "Drop stashes");
+        assert_eq!(
+            ask.question(),
+            "Drop 3 stashes (stash@{1}, stash@{2}, stash@{3})? \
+             They cannot be recovered from the stash list. (y/n)"
+        );
+        assert_eq!(
+            range(RangeKind::Stashes, &["stash@{0}"], &[]).question(),
+            "Drop 1 stash (stash@{0})? It cannot be recovered from the stash list. (y/n)"
         );
     }
 

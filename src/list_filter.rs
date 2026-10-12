@@ -22,7 +22,15 @@ pub enum InputTarget {
     TagsFilter,
     /// Narrows the Commits panel's Reflog tab.
     ReflogFilter,
+    /// Narrows the Stash panel's list.
+    StashFilter,
     DiffSearch,
+    /// Searches the diff preview a side panel shows.
+    PreviewSearch,
+    /// Searches the blame's line text.
+    BlameSearch,
+    /// Searches the commit opened from a blame line.
+    BlameCommitSearch,
     /// The path git narrows the log to; read on Enter, not as typed.
     LogPath,
     /// The author git narrows the log to; read on Enter, not as typed.
@@ -31,6 +39,8 @@ pub enum InputTarget {
     ReviewFilter,
     /// Narrows the Worktrees popup's list.
     WorktreesFilter,
+    /// Narrows the Command log popup.
+    CommandLogFilter,
 }
 
 impl InputTarget {
@@ -43,9 +53,14 @@ impl InputTarget {
             | InputTarget::RemotesFilter
             | InputTarget::TagsFilter
             | InputTarget::ReflogFilter
+            | InputTarget::StashFilter
             | InputTarget::DiffSearch
+            | InputTarget::PreviewSearch
+            | InputTarget::BlameSearch
+            | InputTarget::BlameCommitSearch
             | InputTarget::ReviewFilter
-            | InputTarget::WorktreesFilter => "/",
+            | InputTarget::WorktreesFilter
+            | InputTarget::CommandLogFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }

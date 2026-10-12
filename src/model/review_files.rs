@@ -7,7 +7,6 @@
 use super::review::{ReviewScreen, ReviewState};
 use super::{AppState, Context};
 use crate::diff_pane::DiffPane;
-use crate::diff_search::DiffSearch;
 use crate::effect::{Effect, Tag};
 use crate::forge::review::ViewedState;
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -71,8 +70,6 @@ pub struct PrFiles {
     pub fetched: bool,
     /// The stage's load in flight; any other answer is dropped.
     pub seq: Option<u64>,
-    /// A search of the diff's loaded lines.
-    pub search: Option<DiffSearch>,
 }
 
 impl PrFiles {
@@ -88,7 +85,6 @@ impl PrFiles {
             stage: FilesStage::Checking,
             fetched: false,
             seq: Some(seq),
-            search: None,
         }
     }
 
@@ -178,7 +174,7 @@ pub(crate) fn refresh_in_files(state: &AppState) -> Option<Reason> {
 
 /// `n` and `N` step through a search there is.
 pub(crate) fn review_search_step_disabled(state: &AppState) -> Option<Reason> {
-    let searched = files_screen(state).is_some_and(|f| f.search.is_some());
+    let searched = files_screen(state).is_some() && state.diff.search.is_some();
     (!searched).then_some(NOTHING_SEARCHED.into())
 }
 
@@ -388,9 +384,7 @@ impl AppState {
 
     /// Stream the selected file's diff, merge base to head.
     fn review_file_diff(&mut self) -> Vec<Effect> {
-        let request = self.review.files.as_mut().and_then(|files| {
-            // The search was over the last file's lines.
-            files.search = None;
+        let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
             Some(DiffRequest::for_commit_file(
@@ -447,99 +441,12 @@ impl AppState {
         self.diff.scroll(by, rows)
     }
 
-    /// The text of the diff's loaded lines, as they are drawn.
-    fn review_diff_texts(&self) -> Vec<String> {
-        self.diff.lines.iter().map(|l| l.text.clone()).collect()
-    }
-
-    /// The search's text, for the input to start from.
-    pub(super) fn review_search_text(&self) -> Option<String> {
-        files_screen(self)
-            .filter(|f| f.focus == FilesFocus::Diff)
-            .map(|f| f.search.as_ref().map_or(String::new(), |s| s.query.clone()))
-    }
-
-    /// Search the loaded lines for `query`, from the top line shown; an
-    /// empty query ends the search.
-    pub(super) fn set_review_search(&mut self, query: &str) {
-        let texts = self.review_diff_texts();
-        let from = self.diff.scroll;
-        if let Some(files) = &mut self.review.files {
-            files.search = (!query.is_empty()).then(|| DiffSearch::new(query, &texts, from));
-        }
-    }
-
-    /// New lines came in: find the search in them too.
-    pub(super) fn refresh_review_search(&mut self) {
-        if files_screen(self).is_none_or(|f| f.search.is_none()) {
-            return;
-        }
-        let texts = self.review_diff_texts();
-        if let Some(search) = self.review.files.as_mut().and_then(|f| f.search.as_mut()) {
-            search.refresh(&texts);
-        }
-    }
-
-    /// Scroll just enough to show the current match, and ask for more
-    /// lines if that moved past them.
-    pub(super) fn jump_to_review_match(&mut self) -> Vec<Effect> {
-        let rows = self.review_diff_rows();
-        let Some(row) = self
-            .review
-            .files
-            .as_ref()
-            .and_then(|f| f.search.as_ref())
-            .and_then(|s| s.current_match())
-            .map(|m| m.row)
-        else {
-            return vec![];
-        };
-        if row < self.diff.scroll {
-            self.diff.scroll = row;
-        } else if row >= self.diff.scroll + rows {
-            self.diff.scroll = row + 1 - rows;
-        }
-        self.diff.demand(rows)
-    }
-
-    /// The search, when it has a current match; else says there is none.
-    fn matched_search(&mut self) -> Option<&mut DiffSearch> {
-        let search = self.review.files.as_mut()?.search.as_mut()?;
-        if search.current.is_none() {
-            self.notice = Some("No matches".into());
-            return None;
-        }
-        self.review.files.as_mut()?.search.as_mut()
-    }
-
-    /// Enter on the typed search: go to its match.
-    pub(super) fn accept_review_search(&mut self) -> Vec<Effect> {
-        match self.matched_search() {
-            Some(_) => self.jump_to_review_match(),
-            None => vec![],
-        }
-    }
-
-    /// `n` or `N` in the review diff, saying so when it wrapped.
-    pub(super) fn step_review_search(&mut self, back: bool) -> Vec<Effect> {
-        let Some(search) = self.matched_search() else {
-            return vec![];
-        };
-        let wrapped = if back { search.prev() } else { search.next() };
-        if wrapped {
-            self.notice = Some("Search wrapped".into());
-        }
-        self.jump_to_review_match()
-    }
-
     /// Esc in the review diff: clear the search, else back to the list.
     pub(super) fn review_diff_escape(&mut self) {
-        if let Some(files) = &mut self.review.files {
-            if files.search.is_some() {
-                files.search = None;
-            } else {
-                files.focus = FilesFocus::List;
-            }
+        if self.diff.search.take().is_none()
+            && let Some(files) = &mut self.review.files
+        {
+            files.focus = FilesFocus::List;
         }
     }
 
@@ -1052,7 +959,7 @@ mod tests {
     }
 
     fn current_row(state: &AppState) -> Option<usize> {
-        let search = state.review.files.as_ref()?.search.as_ref()?;
+        let search = state.diff.search.as_ref()?;
         search.current_match().map(|m| m.row)
     }
 
@@ -1066,14 +973,14 @@ mod tests {
         type_char(&mut state, '/');
         assert_eq!(
             state.input.as_ref().map(|i| i.target),
-            Some(crate::list_filter::InputTarget::DiffSearch)
+            Some(crate::list_filter::InputTarget::PreviewSearch)
         );
         for c in "hit".chars() {
             type_char(&mut state, c);
         }
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.input, None);
-        let search = state.review.files.as_ref().unwrap().search.clone().unwrap();
+        let search = state.diff.search.clone().unwrap();
         assert_eq!(search.matches.len(), 10);
         assert_eq!(current_row(&state), Some(0));
         type_char(&mut state, 'n');
@@ -1090,7 +997,7 @@ mod tests {
         assert!(state.diff.scroll <= 90 && 90 < state.diff.scroll + rows);
         // Esc clears the search, then gives the list the keys.
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.review.files.as_ref().unwrap().search, None);
+        assert_eq!(state.diff.search, None);
         assert_eq!(state.panel_focus(), KeyScope::ReviewDiff);
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.panel_focus(), KeyScope::ReviewFiles);
@@ -1106,21 +1013,9 @@ mod tests {
             type_char(&mut state, c);
         }
         press(&mut state, KeyCode::Enter);
-        assert_eq!(
-            state
-                .review
-                .files
-                .as_ref()
-                .unwrap()
-                .search
-                .as_ref()
-                .unwrap()
-                .matches
-                .len(),
-            1
-        );
+        assert_eq!(state.diff.search.as_ref().unwrap().matches.len(), 1);
         load_lines(&mut state, 20, true);
-        let search = state.review.files.as_ref().unwrap().search.clone().unwrap();
+        let search = state.diff.search.clone().unwrap();
         assert_eq!(search.matches.len(), 3);
     }
 

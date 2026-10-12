@@ -774,7 +774,10 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.menu` | `m` | Open the actions menu | |
 | `files.filter` | `/` | Filter the files by typed text | |
 | `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
-| `files.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+| `files.escape` | `esc` | Clear the selection, else the filter, else the diff search, else quit Kika | locked |
+| `files.search_diff` | `ctrl-f` | Search the selected file's diff for typed text | |
+| `files.search_next` | `n` | Go to the next match of the diff search | |
+| `files.search_prev` | `N` | Go to the previous match of the diff search | |
 | `files.log` | `L` | Show the selected file's history in the Commits panel | |
 
 The filter matches each word you type, in order but not necessarily side by
@@ -784,6 +787,13 @@ it. `space` then stages the whole range in one go (or unstages it, when
 nothing in it is left to stage), skipping conflicted files, and `d` asks
 once before discarding the range; only `y` answers that question. Keys that
 act on one file are refused while a range is selected.
+
+`ctrl-f` searches the diff beside the list without focusing it, as `/` does
+in the Diff pane: each key you type searches again, Enter scrolls to the
+match, and `n` and `N` step through the matches. A diff still streaming in is
+searched as far as it has loaded; the pane's title says `of 7+` until the
+rest arrives. The commit files and stash files lists search their diff the
+same way. Esc clears the search before it does anything else.
 
 | `files.stash` | `s` | Stash changes: all, with untracked files, staged only, or this file | locked |
 
@@ -956,7 +966,7 @@ can be reset, but not marked from Kika.
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |
 | `commits.filter` | `/` | Filter the loaded commits by typed text | |
-| `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
+| `commits.range` | `V` | Select a range of commits from here, for copy, squash, fixup and drop; again to clear it | |
 | `commits.escape` | `esc` | Clear the selection, else the filter, else the diff mark, else the log filter, else quit Kika | locked |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 | `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
@@ -1069,7 +1079,18 @@ with `git rebase --edit-todo`, or continue or abort from the Status panel.
 Rebases Kika starts itself always use `#` for comments, whatever
 `core.commentChar` says, so their todo list stays editable.
 
-Moves, edit, break and pick act on one row: they wait while a range is
+`s`, `F` and `d` also act on a range of log rows, in one rebase. `s` and `F`
+turn every commit in the range into a squash or a fixup, so the whole range
+folds into the commit just below it; to fold only the selected commits
+together, leave the oldest of them out of the range. `d` drops every commit in
+the range, and asks first, naming how many, when that is two or more; only `y`
+answers. The whole range is checked before git runs, and anything a single
+commit would be refused for refuses the range. A range the `/` filter has
+gaps in, because it hides commits inside the selection, is refused rather
+than widened to commits you cannot see; clear the filter first. If the range
+changes while the drop question is open, `y` drops nothing.
+
+Reword, moves, edit, break and pick act on one row: they wait while a range is
 selected (`esc` clears it), and on a log row the filter hides. While the log is
 filtered, `alt-k` and `alt-j` do not move log commits at all, since the commit
 next to the selected one may be hidden; clear the filter first. The filter
@@ -1121,7 +1142,11 @@ goes back to the log.
 | `commit_files.next` | `j`, `down` | Select the next file and show its change | |
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
 | `commit_files.patch` | `space` | Pick the selected file's whole change for the custom patch, or drop it | |
-| `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
+| `commit_files.back` | `h`, `left` | Back to the log, at the same commit | |
+| `commit_files.search` | `ctrl-f` | Search the selected file's change for typed text | |
+| `commit_files.search_next` | `n` | Go to the next match of the diff search | |
+| `commit_files.search_prev` | `N` | Go to the previous match of the diff search | |
+| `commit_files.escape` | `esc` | Clear the diff search, else go back to the log, at the same commit | locked |
 
 #### Custom patches
 
@@ -1171,8 +1196,20 @@ the patch is dropped.
 | `stash.files` | `enter` | Show the files the selected stash holds | locked |
 | `stash.apply` | `space` | Apply the selected stash to the worktree and keep it | locked |
 | `stash.pop` | `g` | Apply the selected stash and drop it; a conflict keeps it | locked |
-| `stash.drop` | `d` | Drop the selected stash, asking first | locked |
+| `stash.drop` | `d` | Drop the selected stash, or the range, asking first | locked |
 | `stash.rename` | `R` | Give the selected stash a new message; it moves to stash@{0} | locked |
+| `stash.filter` | `/` | Filter the stashes by typed text | |
+| `stash.range` | `V` | Select a range from here, for drop; again to clear it | |
+| `stash.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+
+`/` narrows the list as you type, matching each row as drawn:
+`stash@{N}` and the message. The filter only picks rows; it never reaches
+git. `V` starts a range; `d` over it asks once, naming how many stashes go
+and which, and only `y` answers. Kika checks every entry in the range is
+still where it was listed before it drops any, then drops them from the
+deepest up, so no drop renumbers one still to go. If the list changed, none
+is dropped and the list reloads. While a range is set, `enter`, `space`, `g`
+and `R` wait until `esc` clears it.
 
 Git has no rename for a stash, so `R` stores the entry again with the new
 message, as `stash@{0}`, and drops it from its old place. Git adds no entry
@@ -1192,7 +1229,11 @@ another panel goes back to the list.
 |---|---|---|---|
 | `stash_files.next` | `j`, `down` | Select the next file and show its change | |
 | `stash_files.prev` | `k`, `up` | Select the previous file and show its change | |
-| `stash_files.close` | `esc`, `bksp` | Back to the stash list, at the same stash | |
+| `stash_files.close` | `bksp` | Back to the stash list, at the same stash | |
+| `stash_files.search` | `ctrl-f` | Search the selected file's change for typed text | |
+| `stash_files.search_next` | `n` | Go to the next match of the diff search | |
+| `stash_files.search_prev` | `N` | Go to the previous match of the diff search | |
+| `stash_files.escape` | `esc` | Clear the diff search, else go back to the stash list, at the same stash | locked |
 
 ### Diff (hunks)
 
@@ -1235,7 +1276,14 @@ another panel goes back to the list.
 | `blame.page_down` | `pgdn` | Move down a page | |
 | `blame.page_up` | `pgup` | Move up a page | |
 | `blame.commit` | `enter` | Show the commit that last changed this line | |
-| `blame.back` | `esc`, `h`, `left` | Back to the file list | |
+| `blame.back` | `h`, `left` | Back to the file list | |
+| `blame.search` | `/` | Search the blamed lines' text for typed text | |
+| `blame.search_next` | `n` | Go to the next match of the search | |
+| `blame.search_prev` | `N` | Go to the previous match of the search | |
+| `blame.escape` | `esc` | Clear the search, else go back to the file list | locked |
+
+The search reads each line's text, not its commit, author or date. Enter on
+the bar puts the cursor on the match, so a second Enter shows its commit.
 
 ### Commit opened from a blame line
 
@@ -1245,7 +1293,14 @@ another panel goes back to the list.
 | `blame_commit.scroll_up` | `k`, `up` | Scroll the commit up a line | |
 | `blame_commit.page_down` | `pgdn` | Scroll the commit down a page | |
 | `blame_commit.page_up` | `pgup` | Scroll the commit up a page | |
-| `blame_commit.back` | `esc`, `h`, `left` | Back to the blame, at the same line | |
+| `blame_commit.back` | `h`, `left` | Back to the blame, at the same line | |
+| `blame_commit.search` | `/` | Search the commit for typed text | |
+| `blame_commit.search_next` | `n` | Go to the next match of the search | |
+| `blame_commit.search_prev` | `N` | Go to the previous match of the search | |
+| `blame_commit.escape` | `esc` | Clear the search, else go back to the blame, at the same line | locked |
+
+The commit's search is its own: the blame's search is still there when you
+go back to it.
 
 ### Conflict view
 
@@ -1399,8 +1454,8 @@ not answer it.
 
 ### Delete the selection?
 
-`d` over a range in the Branches panel asks once, naming how many go and the
-first few names. Only `y` answers it; `enter` does not.
+`d` over a range in the Branches or Stash panel asks once, naming how many go
+and the first few names. Only `y` answers it; `enter` does not.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1473,6 +1528,18 @@ not answer it.
 | `patch_confirm.yes` | `y` | Yes, rewrite the history with the custom patch | locked |
 | `patch_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
 | `patch_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Drop the selected commits?
+
+Dropping a range throws away the changes of several commits at once, so
+`enter` does not answer it. The question counts the commits; `y` drops them
+only if the range still holds the same ones.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `drop_range_confirm.yes` | `y` | Yes, drop the selected commits and their changes | locked |
+| `drop_range_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `drop_range_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 
@@ -1569,7 +1636,9 @@ diff, `esc` goes back to the pull request.
 Every git command Kika ran this session, oldest first, with how it ended and
 how long it took. Lines never show env, stdin, credentials in URLs, secret
 config values or message bodies. `@` opens it with any modifiers, since
-layouts type it with Shift, AltGr or Option.
+layouts type it with Shift, AltGr or Option. `/` narrows it to the rows that
+match, as drawn: state, time, `[terminal]` marker and the cleaned line. Esc
+clears the filter first and closes the log on the next press.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
@@ -1577,7 +1646,9 @@ layouts type it with Shift, AltGr or Option.
 | `command_log.prev` | `k`, `up` | Select the previous command | |
 | `command_log.page_down` | `pgdn` | Move a page down | |
 | `command_log.page_up` | `pgup` | Move a page up | |
-| `command_log.close` | `esc`, `q` | Close the log | |
+| `command_log.filter` | `/` | Filter the commands shown | |
+| `command_log.escape` | `esc` | Clear the filter, else close the log | locked |
+| `command_log.close` | `q` | Close the log | |
 | `command_log.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Remove this worktree?
