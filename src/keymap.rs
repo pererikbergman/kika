@@ -3668,7 +3668,8 @@ static REGISTRY: &[Binding] = &[
         description: "Select the next hunk",
         label: "",
         bar: false,
-        disabled: never,
+        // The tool's rows show no hunk, so moving the selection is unseen.
+        disabled: display_only,
     },
     Binding {
         id: "diff.prev",
@@ -3681,7 +3682,7 @@ static REGISTRY: &[Binding] = &[
         description: "Select the previous hunk",
         label: "",
         bar: false,
-        disabled: never,
+        disabled: display_only,
     },
     Binding {
         id: "diff.stage",
@@ -9854,6 +9855,51 @@ mod tests {
         }
         state.renderer = None;
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
+    }
+
+    #[test]
+    fn a_diff_tool_view_disables_the_hunk_keys_with_its_notice() {
+        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::hunk_view::HunkView;
+
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Diff(HunkView::new("a.rs".into(), DiffSide::Worktree));
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        let keys = [
+            (plain('j'), AppIntent::NextHunk),
+            (key(KeyCode::Down, KeyModifiers::NONE), AppIntent::NextHunk),
+            (plain('k'), AppIntent::PrevHunk),
+            (key(KeyCode::Up, KeyModifiers::NONE), AppIntent::PrevHunk),
+        ];
+        let resolved = |state: &AppState, key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Diff,
+            state,
+            key,
+        ) {
+            Resolution::Run(binding) => Ok(binding.intent.clone()),
+            Resolution::Disabled(reason) => Err(reason),
+            other => panic!("{key:?} resolved to {other:?}"),
+        };
+
+        state.renderer = Some(0);
+        for (key, _) in &keys {
+            assert_eq!(resolved(&state, *key), Err(DISPLAY_ONLY.into()), "{key:?}");
+        }
+        // A pager's rows map to the patch, and the built-in view is the patch.
+        state.renderers[0].kind = RendererKind::Pager;
+        for (key, intent) in &keys {
+            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
+        }
+        state.renderer = None;
+        for (key, intent) in &keys {
+            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
+        }
     }
 
     /// The `<scope>` part of a binding id.

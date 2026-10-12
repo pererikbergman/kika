@@ -134,8 +134,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         }
         // A tool's rows show no patch lines, so no cursor is drawn on them.
         (Focus::Diff(view), Some(rendered), Some(label)) if state.display_only() => {
-            let suffix = format!("{label} (display only)");
-            let block = look.block(hunk_title(view, options, &suffix, &look));
+            let (side, tail) = hunk_title_parts(view, options);
+            let path = view.path.display();
+            let block = look.block(tool_title(&look, side, path, &tail, label));
             render_rendered(rendered, block, None, hint, frame, area);
         }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
@@ -163,6 +164,11 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             Some(commit) => render_commit_view(commit, &look, frame, area),
             None => render_blame(view, &look, frame, area),
         },
+        (_, Some(rendered), Some(label)) if state.display_only() => {
+            let (path, tail) = (rendered.path.display(), options_note(options));
+            let block = look.block(tool_title(&look, "Diff", path, &tail, label));
+            render_rendered(rendered, block, None, hint, frame, area);
+        }
         (_, Some(rendered), Some(label)) => {
             let tail = format!("{} · {label}", options_note(options));
             let block = look.block(look.path_title("Diff", rendered.path.display(), &tail));
@@ -1895,6 +1901,18 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
 /// The focused pane's title: the side, the path, the mode, the options
 /// and `suffix` after a `·`, the path giving way to fit.
 fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
+    let (side, tail) = hunk_title_parts(view, options);
+    let suffix = if suffix.is_empty() {
+        String::new()
+    } else {
+        format!(" · {suffix}")
+    };
+    look.path_title(side, view.path.display(), &format!("{tail}{suffix}"))
+}
+
+/// The focused pane's side word and what follows its path: the mode, the
+/// options and the search.
+fn hunk_title_parts(view: &HunkView, options: DiffOptions) -> (&'static str, String) {
     let side = match view.side {
         _ if view.commit.is_some() => "Commit",
         DiffSide::Index => "Staged",
@@ -1905,14 +1923,31 @@ fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelL
         Some(_) => " · lines",
         None => "",
     };
-    let suffix = if suffix.is_empty() {
-        String::new()
-    } else {
-        format!(" · {suffix}")
-    };
     let found = found_note(view.search.as_ref(), false);
-    let tail = format!("{mode}{}{found}{suffix}", options_note(options));
-    look.path_title(side, view.path.display(), &tail)
+    (side, format!("{mode}{}{found}", options_note(options)))
+}
+
+/// A diff tool's title, ` [n] <head> <path><tail> · <label> (display only) `,
+/// fitted so the note stays as long as it can: the label gives way first,
+/// then the path, then all but the note. Only too narrow for that does
+/// [`PanelLook::title`] cut the note itself.
+fn tool_title(look: &PanelLook, head: &str, path: &str, tail: &str, label: &str) -> String {
+    const NOTE: &str = " (display only)";
+    let whole = format!("{head} {path}{tail} · {label}{NOTE}");
+    if look.fits(&whole) {
+        return look.title(&whole);
+    }
+    let without_label = format!("{head} {path}{tail} · {NOTE}");
+    let used = width_of(&look.title(&without_label));
+    if look.fits(&without_label) && used < look.title_room() {
+        let label = elide_right(label, look.title_room() - used);
+        return look.title(&format!("{head} {path}{tail} · {label}{NOTE}"));
+    }
+    let tail = format!("{tail} · …{NOTE}");
+    if look.fits(&format!("{head} …{tail}")) {
+        return look.path_title(head, path, &tail);
+    }
+    look.title(NOTE.trim_start())
 }
 
 /// Where a search is, for a pane's title: " · match i of n", with `+` on
@@ -5395,6 +5430,100 @@ mod tests {
         assert!(contains(&rows, "old one │ new one"), "{rows:#?}");
         assert!(!contains(&rows, "-old one"), "{rows:#?}");
         assert!(!rows.iter().any(|r| r.contains('▌')), "{rows:#?}");
+    }
+
+    /// Show `text` as tool `label` drew the shown diff: rows that map to
+    /// no patch line.
+    fn through_tool(state: &mut AppState, label: &str, text: &str) {
+        through_renderer(state, text);
+        state.renderers[0].label = label.into();
+        state.renderers[0].kind = crate::external_diff::RendererKind::Tool;
+        if let Some(rendered) = &mut state.rendered {
+            rendered.map.clear();
+        }
+    }
+
+    /// A tool label too long for any pane's title at 80 columns.
+    const LONG_LABEL: &str = "a-diff-tool-with-a-very-long-name-that-goes-on-and-on-and-on";
+
+    /// The Diff pane's title row, from its key `[0]` on.
+    fn diff_title(rows: &[String]) -> &str {
+        rows.iter()
+            .find_map(|r| r.find("[0]").map(|at| &r[at..]))
+            .unwrap_or_else(|| panic!("no Diff pane title: {rows:#?}"))
+    }
+
+    #[test]
+    fn a_long_tool_label_gives_way_to_the_display_only_note() {
+        assert_eq!(LONG_LABEL.len(), 60);
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        through_tool(&mut state, LONG_LABEL, "old one │ new one\n");
+        let rows = draw(&state, 80, 24);
+        let title = diff_title(&rows);
+        assert!(title.contains(" (display only)"), "{rows:#?}");
+        assert!(title.contains("Unstaged a.rs · a-diff-tool"), "{rows:#?}");
+        assert!(title.contains("… (display only)"), "{rows:#?}");
+        assert!(!title.contains(LONG_LABEL), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_narrow_tool_view_still_says_display_only() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        through_tool(&mut state, LONG_LABEL, "old one │ new one\n");
+        for (width, height) in [(40, 12), (30, 8)] {
+            let rows = draw(&state, width, height);
+            let title = diff_title(&rows);
+            assert!(
+                title.contains("(display only)"),
+                "{width}x{height}: {rows:#?}"
+            );
+        }
+        // Narrower, the usual title elision applies; it draws without a panic.
+        for (width, height) in [(0, 0), (1, 1), (10, 4), (20, 6)] {
+            draw(&state, width, height);
+        }
+    }
+
+    #[test]
+    fn a_tool_title_cuts_the_label_then_the_path_then_all_but_the_note() {
+        let look = |width: usize| PanelLook {
+            number: 0,
+            focused: true,
+            mode: String::new(),
+            title_width: width,
+            top_only: false,
+            title_only: false,
+        };
+        let title = |width| tool_title(&look(width), "Diff", "src/a.rs", " · x", "difft");
+        assert_eq!(title(46), " [0] Diff src/a.rs · x · difft (display only) ");
+        assert_eq!(title(48), title(46));
+        assert_eq!(title(45), " [0] Diff src/a.rs · x · dif… (display only) ");
+        assert_eq!(title(42), " [0] Diff src/a.rs · x · … (display only) ");
+        assert_eq!(title(40), " [0] Diff …/a.rs · x · … (display only) ");
+        assert_eq!(title(35), " [0] Diff … · x · … (display only) ");
+        assert_eq!(title(34), " [0] (display only) ");
+        assert_eq!(title(19), "[0] (display only)");
+        assert_eq!(title(10), "[0] (disp…");
+    }
+
+    #[test]
+    fn a_side_panels_diff_title_says_a_tool_view_is_display_only() {
+        for label in ["difft", LONG_LABEL] {
+            let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
+            through_tool(&mut state, label, "old one │ new one\n");
+            assert_eq!(state.focus, Focus::Files);
+            let rows = draw(&state, 80, 24);
+            let title = diff_title(&rows);
+            assert!(title.contains("(display only)"), "{label}: {rows:#?}");
+            assert!(title.contains(" Diff a.rs · "), "{label}: {rows:#?}");
+            assert!(contains(&rows, "old one │ new one"), "{label}: {rows:#?}");
+        }
+        let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
+        through_renderer(&mut state, DECORATED);
+        let rows = draw(&state, 80, 24);
+        let title = diff_title(&rows);
+        assert!(title.contains(" Diff a.rs · delta "), "{rows:#?}");
+        assert!(!title.contains("(display only)"), "{rows:#?}");
     }
 
     #[test]
