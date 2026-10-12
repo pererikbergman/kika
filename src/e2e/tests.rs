@@ -759,7 +759,7 @@ async fn emptying_the_hunk_file_cancels_the_edit() {
     app.press(KeyCode::Char('e')).await;
 
     assert!(repo.staged().is_empty());
-    assert_eq!(app.state().notice, Some("Edit cancelled"));
+    assert_eq!(app.state().notice, Some("Edit cancelled".into()));
     assert_eq!(app.state().popups, []);
     assert_hunk_file_removed(&repo);
 }
@@ -1063,7 +1063,10 @@ async fn emptying_the_message_in_the_editor_aborts_and_keeps_the_popup() {
 
     assert_eq!(repo.head(), head);
     assert_eq!(repo.staged(), ["a.txt"]);
-    assert_eq!(app.state().notice, Some("Empty message; commit aborted"));
+    assert_eq!(
+        app.state().notice,
+        Some("Empty message; commit aborted".into())
+    );
     app.assert_screen_contains("typed");
 }
 
@@ -1971,7 +1974,7 @@ async fn a_worktree_is_added_switched_to_and_removed_from_the_main_one() {
     app.press(KeyCode::Enter).await;
     assert_eq!(
         app.state().notice,
-        Some("Worktree added; Enter switches to it")
+        Some("Worktree added; Enter switches to it".into())
     );
     let listed = worktree_list(&repo);
     let wt = beside.0.canonicalize().unwrap();
@@ -2058,6 +2061,160 @@ async fn adding_at_a_directory_that_is_not_empty_is_refused_and_leaves_it_alone(
         std::fs::read_dir(repo.path().join("full")).unwrap().count(),
         1
     );
+}
+
+/// `init`, then `second`, `third` and `fourth` on `main`, each adding its
+/// own file, with git's editor a no-op and Kika's hidden mode ready as the
+/// sequence editor.
+#[cfg(unix)]
+async fn four_commits() -> (TestRepo, Harness) {
+    let repo = on_main()
+        .write("b.txt", "b\n")
+        .commit("second")
+        .write("c.txt", "c\n")
+        .commit("third")
+        .write("d.txt", "d\n")
+        .commit("fourth");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    (repo, app)
+}
+
+#[cfg(unix)]
+fn subjects(repo: &TestRepo) -> String {
+    String::from_utf8(repo.git(["log", "--format=%s"])).unwrap()
+}
+
+#[cfg(unix)]
+fn assert_no_failure(app: &mut Harness) {
+    let screen = app.screen();
+    assert!(
+        !screen.iter().any(|row| row.contains("Could not")),
+        "{}",
+        screen.join("\n")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn alt_k_moves_the_selected_commit_above_the_newer_one() {
+    let (repo, mut app) = four_commits().await;
+
+    app.press(KeyCode::Char('j')).await;
+    app.press_with(KeyCode::Char('k'), KeyModifiers::ALT).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "third\nfourth\nsecond\ninit\n");
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(app.state().commits.selected, 0);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn capital_e_stops_at_the_commit_and_continue_finishes_the_rebase() {
+    let (repo, mut app) = four_commits().await;
+    let before = repo.head();
+
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('E')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "second\ninit\n");
+    app.assert_screen_contains("Rebase todo (2 left)");
+    app.press(KeyCode::Char('1')).await;
+    app.assert_screen_contains("┃rebasing ");
+    app.press(KeyCode::Char('c')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(current_branch(&repo), "main");
+    assert_eq!(
+        repo.head(),
+        before,
+        "nothing changed, so git fast-forwarded"
+    );
+    assert!(app.state().commits.todo.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn b_stops_the_rebase_right_after_the_commit() {
+    let (repo, mut app) = four_commits().await;
+
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('b')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "third\nsecond\ninit\n");
+    assert!(
+        app.state()
+            .branch
+            .as_ref()
+            .unwrap()
+            .in_progress
+            .contains(&crate::git::repo_state::Operation::Rebase)
+    );
+    app.assert_screen_contains("Rebase todo (1 left)");
+    app.press(KeyCode::Char('1')).await;
+    app.press(KeyCode::Char('c')).await;
+    assert_eq!(subjects(&repo), "fourth\nthird\nsecond\ninit\n");
+    assert_eq!(current_branch(&repo), "main");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn moving_a_todo_row_while_stopped_changes_the_final_order() {
+    let (repo, mut app) = four_commits().await;
+
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('E')).await;
+    // Up through the log to the todo's top row, `fourth`.
+    for _ in 0..8 {
+        app.press(KeyCode::Char('k')).await;
+    }
+    assert_eq!(app.state().commits.todo_selected, Some(1));
+    app.press_with(KeyCode::Char('j'), KeyModifiers::ALT).await;
+    assert_eq!(app.state().commits.todo_selected, Some(0));
+    let todo =
+        std::fs::read_to_string(repo.path().join(".git/rebase-merge/git-rebase-todo")).unwrap();
+    assert!(
+        todo.starts_with("pick ") && todo.contains(" fourth\npick ") && todo.ends_with(" third\n"),
+        "{todo}"
+    );
+    app.press(KeyCode::Char('1')).await;
+    app.press(KeyCode::Char('c')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "third\nfourth\nsecond\ninit\n");
+    assert_eq!(current_branch(&repo), "main");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_branch_on_a_rewritten_commit_moves_to_its_new_copy() {
+    let (repo, mut app) = four_commits().await;
+    if !app.state().git_has(crate::git::version::UPDATE_REFS) {
+        eprintln!("skipped: --update-refs needs Git 2.38 or newer");
+        return;
+    }
+    repo.git(["branch", "stack", "HEAD~1"]);
+    app.press(KeyCode::Char('r')).await;
+
+    // Drop `second`, under `stack`'s `third`.
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('d')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "fourth\nthird\ninit\n");
+    let stack = String::from_utf8(repo.git(["rev-parse", "stack"])).unwrap();
+    let below_head = String::from_utf8(repo.git(["rev-parse", "HEAD~1"])).unwrap();
+    assert_eq!(stack, below_head);
+    let on_stack = String::from_utf8(repo.git(["log", "--format=%s", "stack"])).unwrap();
+    assert_eq!(on_stack, "third\ninit\n");
 }
 
 #[tokio::test(flavor = "multi_thread")]

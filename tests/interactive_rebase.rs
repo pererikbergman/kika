@@ -138,19 +138,28 @@ fn script(dir: &Path, name: &str, body: &str) -> OsString {
 /// Run Kika's interactive rebase in `dir` onto `base` with `plan`, and
 /// `editor` as git's editor for messages.
 fn rebase(dir: &Path, base: &str, plan: &str, editor: &OsString) -> Output {
+    rebase_with(dir, base, plan, editor, false)
+}
+
+/// [`rebase`], with `--update-refs` as Kika passes it on git 2.38 or newer.
+fn rebase_with(dir: &Path, base: &str, plan: &str, editor: &OsString, update_refs: bool) -> Output {
+    let mut args = vec!["-c"];
+    if !update_refs {
+        args.extend(["rebase.updateRefs=false", "-c"]);
+    }
+    args.extend([
+        "rebase.rebaseMerges=false",
+        "-c",
+        "core.commentChar=#",
+        "rebase",
+        "-i",
+    ]);
+    if update_refs {
+        args.push("--update-refs");
+    }
+    args.extend(["--autostash", "--no-autosquash", "--keep-empty", base]);
     git_command(dir)
-        .args([
-            "-c",
-            "rebase.updateRefs=false",
-            "-c",
-            "rebase.rebaseMerges=false",
-            "rebase",
-            "-i",
-            "--autostash",
-            "--no-autosquash",
-            "--keep-empty",
-            base,
-        ])
+        .args(args)
         .env("KIKA_REBASE_PLAN", plan)
         .env("GIT_SEQUENCE_EDITOR", editor_value(Path::new(KIKA)))
         .env("GIT_EDITOR", editor)
@@ -258,6 +267,88 @@ fn reword_changes_only_that_message() {
     assert_eq!(messages, ["fourth", "reworded", "second", "first"]);
 }
 
+#[test]
+fn a_move_swaps_two_commits_and_keeps_their_changes() {
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [_, second, third, fourth] = ids(dir);
+    let plan = format!("pick {fourth}\npick {third}\n");
+    assert_ok(&rebase(dir, &second, &plan, &"false".into()));
+
+    let messages: Vec<String> = history(dir).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages, ["third", "fourth", "second", "first"]);
+    assert_eq!(tree_files(dir, "HEAD"), "a\nb\nc\nd\n");
+}
+
+#[test]
+fn a_custom_comment_char_does_not_stop_kika_s_rebase() {
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [_, second, third, fourth] = ids(dir);
+    git(dir, &["config", "core.commentChar", ";"]);
+    let plan = format!("pick {fourth}\npick {third}\n");
+    assert_ok(&rebase(dir, &second, &plan, &"false".into()));
+    let messages: Vec<String> = history(dir).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages, ["third", "fourth", "second", "first"]);
+}
+
+#[test]
+fn edit_and_break_stop_the_rebase_where_the_plan_says() {
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [_, second, third, fourth] = ids(dir);
+    let plan = format!("edit {third}\npick {fourth}\n");
+    assert_ok(&rebase(dir, &second, &plan, &"false".into()));
+    assert!(dir.join(".git/rebase-merge").exists());
+    assert_eq!(rev(dir, "HEAD"), third);
+    git(dir, &["rebase", "--abort"]);
+
+    let plan = format!("pick {third}\nbreak\npick {fourth}\n");
+    assert_ok(&rebase(dir, &second, &plan, &"false".into()));
+    assert_eq!(rev(dir, "HEAD"), third);
+    let todo = fs::read_to_string(dir.join(".git/rebase-merge/git-rebase-todo")).unwrap();
+    assert!(todo.starts_with(&format!("pick {fourth}")), "{todo}");
+    git(dir, &["rebase", "--continue"]);
+    assert_eq!(rev(dir, "HEAD"), fourth);
+}
+
+/// Whether the installed git has `rebase --update-refs` (2.38).
+fn has_update_refs() -> bool {
+    let out = git(Path::new("."), &["--version"]);
+    let mut numbers = out
+        .trim_start_matches("git version ")
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|n| n.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (numbers.next().unwrap_or(0), numbers.next().unwrap_or(0));
+    (major, minor) >= (2, 38)
+}
+
+#[test]
+fn with_update_refs_a_stacked_branch_moves_and_a_move_across_it_aborts() {
+    if !has_update_refs() {
+        eprintln!("skipped: --update-refs needs Git 2.38 or newer");
+        return;
+    }
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [first, second, third, fourth] = ids(dir);
+    git(dir, &["branch", "stack", &third]);
+
+    // Moving `fourth` below `third` would put it on `stack`.
+    let head = rev(dir, "HEAD");
+    let plan = format!("pick {second}\npick {fourth}\npick {third}\n");
+    let out = rebase_with(dir, &first, &plan, &"false".into(), true);
+    assert!(!out.status.success());
+    assert_eq!(rev(dir, "HEAD"), head);
+    assert_eq!(rev(dir, "stack"), third);
+
+    // Dropping `second` rewrites `third`; `stack` follows its copy.
+    let plan = format!("drop {second}\npick {third}\npick {fourth}\n");
+    assert_ok(&rebase_with(dir, &first, &plan, &"false".into(), true));
+    assert_eq!(rev(dir, "stack"), rev(dir, "HEAD~1"));
+    assert_eq!(git(dir, &["log", "-1", "--format=%s", "stack"]), "third\n");
+}
+
 /// Every file in the worktree but `.git`, with its contents.
 fn worktree(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<_> = fs::read_dir(dir)
@@ -310,8 +401,8 @@ fn a_plan_that_does_not_match_makes_git_abort_and_change_nothing() {
     let files_before = worktree(dir);
 
     for plan in [
-        // Out of order.
-        format!("pick {fourth}\ndrop {third}\n"),
+        // One commit twice.
+        format!("pick {fourth}\ndrop {fourth}\n"),
         // One commit short.
         format!("drop {third}\n"),
         // Not a commit in the range.

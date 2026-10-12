@@ -5,6 +5,7 @@ pub mod askpass;
 pub mod attr;
 pub mod bisect;
 pub mod blame;
+pub mod branch_tips;
 pub mod branches;
 pub mod cherry_pick;
 pub mod command_line;
