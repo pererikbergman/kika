@@ -14,6 +14,7 @@ use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::branches::tags;
+use crate::features::commits::copy;
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
     blame, conflicts, custom_commands, pull_requests, repos, submodules, sync, worktrees,
@@ -32,7 +33,7 @@ use crate::git::comment_prefix::read_comment_prefix;
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fixup_base::find_fixup_base;
-use crate::git::head::{read_commit_message, read_head_message};
+use crate::git::head::read_head_message;
 use crate::git::left_behind::read_left_behind;
 use crate::git::log::{LogQuery, branch_commit, log_page, markers};
 use crate::git::path::RepoPath;
@@ -1366,18 +1367,7 @@ impl Runtime {
                 sync::effects::remote(runner, tx, tag, op, Arc::clone(&self.credential))
             }
             Effect::LoadCommitMessage { tag, oid } => {
-                tokio::spawn(async move {
-                    let read = oid.clone();
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        read_commit_message(runner.as_ref(), &read)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
-                    });
-                    let _ = tx.send(AppIntent::CommitMessageLoaded { tag, oid, result });
-                });
+                copy::effects::load_message(runner, tx, tag, oid)
             }
             Effect::CheckLeftBehind {
                 tag,
