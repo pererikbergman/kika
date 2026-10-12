@@ -10,13 +10,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::features::command_log;
+use crate::features::repos::{RecentList, RecentRow};
+use crate::features::submodules::SubmoduleList;
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
-use crate::recent_list::{RecentList, RecentRow};
-use crate::submodule_list::SubmoduleList;
 use crate::view::{
     COMMIT_WIDTH, centered, clip, elide_left, render_question, tail, width_of, wrap,
 };
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[test]
     fn the_welcome_says_where_and_offers_init_then_the_recent_paths() {
-        use crate::recent_list::RecentList;
+        use crate::features::repos::RecentList;
 
         let mut state = AppState::new(Context::Workspace).with_location(None, "/home/me/x".into());
         state.recent = vec!["/work/alpha".into(), "/work/b\x1b[2Jeta".into()];
@@ -1883,7 +1883,7 @@ mod tests {
 
     #[test]
     fn inside_a_repository_the_list_leaves_it_out_and_an_empty_one_says_so() {
-        use crate::recent_list::RecentList;
+        use crate::features::repos::RecentList;
 
         let mut state =
             workspace(&["a.rs"]).with_location(Some("/work/a".into()), "/work/a".into());
@@ -1900,7 +1900,7 @@ mod tests {
 
     #[test]
     fn a_long_launch_path_loses_its_start_but_not_the_words() {
-        use crate::recent_list::RecentList;
+        use crate::features::repos::RecentList;
 
         let long = format!("/{}/end", "d".repeat(200));
         let mut state = AppState::new(Context::Workspace).with_location(None, long.into());

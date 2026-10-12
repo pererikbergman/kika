@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791805069",
-  "issue_count": 13,
+  "timestamp": "1791806201",
+  "issue_count": 15,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/forge",
     "coupling_violation:src/e2e -> src/git",
@@ -10,11 +10,13 @@
     "coupling_violation:src/model -> src/git",
     "coupling_violation:src/model -> src/forge",
     "gravity_well:src/git/branches.rs",
+    "red_flag:fused_sibling:src/features -> src/git",
     "red_flag:fused_sibling:src/model -> src/git",
     "coupling_violation:src/e2e -> src/model",
     "zone_flag:src/forge",
     "zone_flag:src/git",
     "low_cohesion:src/features",
+    "low_cohesion:src/features/repos",
     "low_cohesion:src/model"
   ]
 }
