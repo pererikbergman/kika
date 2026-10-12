@@ -4,8 +4,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::git::ops::GitOp;
 use crate::git::remote::RemoteOp;
+use crate::op::GitOp;
 
 /// A piece of loaded data that can go stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -284,8 +284,8 @@ mod tests {
     #[test]
     fn stash_ops_reload_the_list_and_what_they_change_in_the_worktree() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::StashMode;
         use crate::git::stash::StashRef;
+        use crate::op::StashMode;
         let at = || StashRef {
             index: 1,
             oid: CommitId::parse("abc").unwrap(),
@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn checkout_revert_and_reset_of_a_commit_reload_everything_head_touches() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
         let ops = [
             GitOp::CheckoutCommit(oid()),
@@ -374,8 +374,8 @@ mod tests {
 
     #[test]
     fn merge_rebases_and_their_controls_reload_everything_head_touches_and_the_stashes() {
-        use crate::git::ops::MergeStrategy;
         use crate::git::repo_state::Operation;
+        use crate::op::MergeStrategy;
         let ops = [
             GitOp::Merge {
                 branch: "b".into(),

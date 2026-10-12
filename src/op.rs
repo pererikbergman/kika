@@ -4,22 +4,22 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use super::bisect::BisectMark;
-use super::branches::BranchName;
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::path::RepoPath;
-use super::rebase_plan::{RebasePlan, encode};
-use super::remote::redact_userinfo;
-use super::remotes::{RemoteBranch, RemoteName};
-use super::repo_state::Operation;
-use super::runner::{GitCommand, GitOutput, GitRunner};
-use super::stash::StashRef;
-use super::status::{EntryKind, FileEntry};
-use super::tags::{TagName, validate_tag_name};
-use super::undo::{Direction, Expected, Step};
-use super::version::{GitVersion, parse_version, version_command};
 use crate::custom_patch::{CustomPatch, PatchAction};
+use crate::git::bisect::BisectMark;
+use crate::git::branches::BranchName;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::path::RepoPath;
+use crate::git::rebase_plan::{RebasePlan, encode};
+use crate::git::remote::redact_userinfo;
+use crate::git::remotes::{RemoteBranch, RemoteName};
+use crate::git::repo_state::Operation;
+use crate::git::runner::{GitCommand, GitOutput, GitRunner, run_checked};
+use crate::git::stash::StashRef;
+use crate::git::status::{EntryKind, FileEntry};
+use crate::git::tags::{TagName, validate_tag_name};
+use crate::git::undo::{Direction, Expected, Step};
+use crate::git::version::{GitVersion, parse_version, version_command};
 use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
@@ -37,7 +37,7 @@ pub enum GitOp {
     /// When signing is configured or a hook would run, Kika hands the
     /// terminal over and git runs on it, so a terminal pinentry, a key
     /// passphrase or a hook that asks a question works (see
-    /// `git::prompts`). Otherwise git runs detached, with the message on
+    /// `crate::prompts`). Otherwise git runs detached, with the message on
     /// stdin.
     ///
     /// With `amend`, the staged changes are folded into `HEAD` instead; a
@@ -109,7 +109,7 @@ pub enum GitOp {
     InteractiveRebase(RebasePlan),
     /// Rewrite history with the custom patch `picks`, as `action` says:
     /// the interactive rebase of `plan`, stopping at each commit the patch
-    /// changes (see `super::custom_patch`). Refused unless `HEAD` is still
+    /// changes (see `crate::git::custom_patch`). Refused unless `HEAD` is still
     /// `orig_head`; any failure puts `HEAD`, the index and the worktree
     /// back as they were.
     CustomPatch {
@@ -134,7 +134,7 @@ pub enum GitOp {
     /// commit, which needs a mainline.
     Revert(CommitId),
     /// Pick these commits onto `HEAD`, one by one in this order. Built
-    /// with parents first (see `super::cherry_pick::ordered`); never with
+    /// with parents first (see `crate::git::cherry_pick::ordered`); never with
     /// a merge commit, which needs a mainline.
     CherryPick(Vec<CommitId>),
     /// Move the current branch, or a detached `HEAD`, to `to`; `mode` says
@@ -797,7 +797,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 .arg(plan.base.as_str())
                 .env(PLAN_ENV, encode(&plan.steps));
         }
-        // Its first step; the rest run from `super::custom_patch::run`.
+        // Its first step; the rest run from `crate::git::custom_patch::run`.
         GitOp::CustomPatch { plan, .. } => {
             return op_command(&GitOp::InteractiveRebase(plan.clone()));
         }
@@ -978,7 +978,7 @@ fn push_with_fixups(
     if !unstage.is_empty() && restore_taken(runner, unstage)? {
         return Err(STASH_DELETED_TAKEN.into());
     }
-    let top = super::repo_root::find_toplevel(runner)
+    let top = crate::git::repo_root::find_toplevel(runner)
         .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
     if restore_blocked_on_disk(&top, restore) {
         return Err(STASH_RENAME_TAKEN.into());
@@ -1190,7 +1190,7 @@ fn run_op_with(
             .try_for_each(|step| run_op_with(runner, step, env_set));
     }
     if let GitOp::Travel { expect, .. } = op {
-        let now = super::reflog::read_head(runner);
+        let now = crate::git::reflog::read_head(runner);
         if now.oid.as_ref() != Some(&expect.oid) || now.head_ref != expect.head_ref {
             return Err(HEAD_MOVED.into());
         }
@@ -1223,20 +1223,6 @@ fn run_op_with(
         | GitOp::RemoveRemotes(_) => redact_userinfo(&terminal_safe(&output.stderr)),
         _ => terminal_safe(&output.stderr),
     };
-    if message.is_empty() {
-        let subcommand = cmd.subcommand().to_string_lossy();
-        return Err(format!("git {subcommand} failed"));
-    }
-    Err(message)
-}
-
-/// Run `cmd`, with git's message, made safe to draw, as the error.
-pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
-    let output = runner.run(cmd).map_err(|e| e.to_string())?;
-    if output.success {
-        return Ok(output);
-    }
-    let message = terminal_safe(&output.stderr);
     if message.is_empty() {
         let subcommand = cmd.subcommand().to_string_lossy();
         return Err(format!("git {subcommand} failed"));
@@ -1369,7 +1355,7 @@ pub fn refusal(op: &GitOp) -> Option<&'static str> {
         }
         // Only a full id is surely a commit, never a ref of that name.
         GitOp::CherryPick(picks)
-            if picks.is_empty() || !picks.iter().all(super::cherry_pick::is_full_id) =>
+            if picks.is_empty() || !picks.iter().all(crate::git::cherry_pick::is_full_id) =>
         {
             Some("Only full commit ids can be cherry-picked")
         }

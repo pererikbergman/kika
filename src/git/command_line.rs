@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn no_command_kika_builds_shows_a_secret() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::{GitOp, op_command};
+        use crate::op::{GitOp, op_command};
 
         let oid = "0123456789abcdef0123456789abcdef01234567";
         let ops = [

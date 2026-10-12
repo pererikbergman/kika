@@ -5,9 +5,9 @@
 use super::AppState;
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
-use crate::git::ops::{GitOp, ResetMode};
 use crate::git::status::Head;
 use crate::keymap::KeyScope;
+use crate::op::{GitOp, ResetMode};
 use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHardConfirm};
 
 /// The left-behind check in flight, and where the user was when it
