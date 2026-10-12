@@ -13,7 +13,7 @@ use crate::custom_command::{CommandTable, CustomCommand};
 use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
-use crate::features::command_log;
+use crate::features::{command_log, submodules};
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -22,7 +22,6 @@ use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
-use crate::git::submodule::SubmoduleState;
 use crate::git::{branch_tips, version};
 use crate::hunk_view::NO_CHANGES;
 use crate::intent::{AppIntent, Scroll};
@@ -1574,52 +1573,6 @@ fn commit_editor_disabled(state: &AppState) -> Option<Reason> {
     running.then_some(OP_RUNNING.into())
 }
 
-fn no_submodule(state: &AppState) -> Option<Reason> {
-    state
-        .selected_submodule()
-        .is_none()
-        .then_some("No submodule selected".into())
-}
-
-/// Why `i` or `u` cannot run on the selected submodule right now.
-fn submodule_op_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    no_submodule(state)
-}
-
-/// Why the selected submodule cannot be entered: it must be surely checked
-/// out, and an operation must not be running in the repository being left.
-pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some("Wait for the operation to finish".into());
-    }
-    match state.selected_submodule() {
-        None => Some("No submodule selected".into()),
-        Some(sub) if sub.state == SubmoduleState::Uninitialized => {
-            Some("Update the submodule first".into())
-        }
-        // Git marks a conflict before it looks for a checkout, so the
-        // directory may hold none, and git there would find the parent.
-        Some(sub) if sub.state == SubmoduleState::Conflicted => {
-            Some("Resolve the submodule conflict first".into())
-        }
-        Some(_) => None,
-    }
-}
-
-/// Why there is no parent to go back to right now.
-pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<Reason> {
-    if state.repo_stack.is_empty() {
-        Some("Not in a submodule".into())
-    } else if state.op_seq.is_some() {
-        Some("Wait for the operation to finish".into())
-    } else {
-        None
-    }
-}
-
 /// Why `i` cannot make the launch directory a repository: it is offered
 /// only by the recent list shown outside one.
 pub(crate) fn init_repo_disabled(state: &AppState) -> Option<Reason> {
@@ -2826,21 +2779,6 @@ static CORE_SCROLL: &[Binding] = &[
     },
 ];
 
-// Chunk 4: submodules
-#[rustfmt::skip]
-static SUBMODULES_WORKSPACE: &[Binding] = &[
-    Binding {
-        id: "workspace.parent",
-        keys: &[KeyPattern::any(KeyCode::Backspace)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::LeaveSubmodule,
-        description: "Back to the parent repository",
-        label: "parent",
-        bar: true,
-        disabled: leave_submodule_disabled,
-    },
-];
-
 // Chunk 5: diff
 static DIFF_WORKSPACE: &[Binding] = &[
     // Diff settings, in Workspace so they work from Files, Diff and Lines.
@@ -3688,21 +3626,6 @@ static FILES_DISCARD_OPEN: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: files_open_disabled,
-    },
-];
-
-// Chunk 23: submodules
-#[rustfmt::skip]
-static SUBMODULES_FILES: &[Binding] = &[
-    Binding {
-        id: "files.submodules",
-        keys: &[KeyPattern::any(KeyCode::Char('S'))],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenSubmodules,
-        description: "Show submodules",
-        label: "submodules",
-        bar: false,
-        disabled: never,
     },
 ];
 
@@ -5809,89 +5732,6 @@ static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 66: submodules
-static SUBMODULES_KEYS: &[Binding] = &[
-    Binding {
-        id: "submodules.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::SubmoduleNext,
-        description: "Select the next submodule",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "submodules.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::SubmodulePrev,
-        description: "Select the previous submodule",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "submodules.enter",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::EnterSubmodule,
-        description: "Work in the selected submodule",
-        label: "enter",
-        bar: true,
-        disabled: enter_submodule_disabled,
-    },
-    Binding {
-        id: "submodules.update",
-        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::UpdateSubmodule,
-        description: "Clone or check out the selected submodule at the recorded commit",
-        label: "update",
-        bar: true,
-        disabled: submodule_op_disabled,
-    },
-    Binding {
-        id: "submodules.init",
-        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::InitSubmodule,
-        description: "Record the selected submodule's URL without cloning it",
-        label: "init",
-        bar: true,
-        disabled: submodule_op_disabled,
-    },
-    Binding {
-        id: "submodules.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::PopPopup,
-        description: "Close the list",
-        label: "close",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "submodules.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Submodules,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 67: worktrees
 static WORKTREES_KEYS: &[Binding] = &[
     Binding {
@@ -6779,7 +6619,7 @@ static CHUNKS: &[&[Binding]] = &[
     CORE_GLOBAL,
     SYNC_WORKSPACE,
     CORE_SCROLL,
-    SUBMODULES_WORKSPACE,
+    submodules::keys::SUBMODULES_WORKSPACE,
     DIFF_WORKSPACE,
     CORE_FOCUS,
     CUSTOM_PATCH_WORKSPACE,
@@ -6798,7 +6638,7 @@ static CHUNKS: &[&[Binding]] = &[
     FILES_STAGE,
     COMMIT_FROM_FILES,
     FILES_DISCARD_OPEN,
-    SUBMODULES_FILES,
+    submodules::keys::SUBMODULES_FILES,
     WORKTREES_WORKSPACE,
     command_log::keys::COMMAND_LOG_WORKSPACE,
     REPOS_WORKSPACE,
@@ -6841,7 +6681,7 @@ static CHUNKS: &[&[Binding]] = &[
     CUSTOM_PATCH_CONFIRM,
     REWRITE_DROP_RANGE_CONFIRM,
     REFLOG_TRAVEL_CONFIRM,
-    SUBMODULES_KEYS,
+    submodules::keys::SUBMODULES_KEYS,
     WORKTREES_KEYS,
     command_log::keys::COMMAND_LOG_KEYS,
     WORKTREES_REMOVE_CONFIRM,
@@ -6874,7 +6714,7 @@ mod tests {
     use super::*;
     use crate::custom_command::{OutputMode, Panel, test_table};
     use crate::model::Context;
-    use crate::test_support::{binding, build, key, layer, plain};
+    use crate::test_support::{binding, build, from, key, layer, plain};
 
     fn off(_: &AppState) -> Option<Reason> {
         Some("off".into())
@@ -7024,41 +6864,6 @@ mod tests {
                 &AppIntent::Quit
             ]
         );
-    }
-
-    fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
-        // Every binding is enabled on a workspace with a stageable file
-        // selected, a commit in the log and a stash in the list.
-        let mut state = AppState::new(Context::Workspace);
-        state.stash.entries = vec![crate::git::stash::StashEntry {
-            index: 0,
-            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
-            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
-            untracked: None,
-            subject: "On main: wip".into(),
-        }];
-        state.files = vec![crate::git::FileEntry {
-            path: "a.rs".into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }];
-        state.selected = Some(0);
-        state.commits.rows = vec![crate::git::log::CommitRow {
-            oid: "abc".into(),
-            short_oid: "abc".into(),
-            parents: vec![],
-            author: "Ann".into(),
-            time: 0,
-            subject: "s".into(),
-            subject_altered: false,
-        }];
-        match resolve(registry(), &Keymap::default(), focus, &state, key) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
-            Resolution::Unbound | Resolution::Command(_) => None,
-        }
     }
 
     #[test]
@@ -7772,65 +7577,6 @@ mod tests {
     }
 
     #[test]
-    fn the_submodule_list_has_its_own_keys_and_never_reaches_global_ones() {
-        use crate::git::submodule::{Submodule, SubmoduleState};
-        use crate::popup::Popup;
-        use crate::submodule_list::SubmoduleList;
-        use AppIntent::*;
-
-        let none = KeyModifiers::NONE;
-        let shift = KeyModifiers::SHIFT;
-        assert_eq!(
-            from(KeyScope::Files, key(KeyCode::Char('S'), shift)),
-            Some(OpenSubmodules)
-        );
-        assert_eq!(KeyScope::Submodules.parent(), None);
-        assert_eq!(KeyScope::Submodules.title(), "Submodules");
-
-        let mut state = AppState::new(Context::Workspace);
-        let mut list = SubmoduleList::loading(0);
-        list.loaded(Ok(vec![Submodule {
-            path: "sub".into(),
-            oid: "abc".into(),
-            state: SubmoduleState::UpToDate,
-        }]));
-        state.popups = vec![Popup::Submodules(list)];
-        assert_eq!(state.key_focus(), KeyScope::Submodules);
-        let run = |k| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::Submodules,
-            &state,
-            k,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
-            Resolution::Unbound | Resolution::Command(_) => None,
-        };
-        assert_eq!(run(plain('j')), Some(SubmoduleNext));
-        assert_eq!(run(key(KeyCode::Down, none)), Some(SubmoduleNext));
-        assert_eq!(run(plain('k')), Some(SubmodulePrev));
-        assert_eq!(run(key(KeyCode::Up, none)), Some(SubmodulePrev));
-        assert_eq!(run(key(KeyCode::Enter, none)), Some(EnterSubmodule));
-        assert_eq!(run(plain('i')), Some(InitSubmodule));
-        assert_eq!(run(plain('u')), Some(UpdateSubmodule));
-        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
-        assert_eq!(run(plain('q')), Some(PopPopup));
-        assert_eq!(
-            run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Quit)
-        );
-        for k in [
-            plain('?'),
-            plain('r'),
-            plain(' '),
-            key(KeyCode::Backspace, none),
-        ] {
-            assert_eq!(run(k), None, "{k:?}");
-        }
-    }
-
-    #[test]
     fn the_worktree_list_has_its_own_keys_and_never_reaches_global_ones() {
         use crate::git::worktrees::parse_list;
         use crate::popup::Popup;
@@ -7977,56 +7723,6 @@ mod tests {
         ] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
         }
-    }
-
-    #[test]
-    fn backspace_leaves_a_submodule_from_every_workspace_panel_once_inside_one() {
-        let backspace = key(KeyCode::Backspace, KeyModifiers::NONE);
-        let mut state = AppState::new(Context::Workspace);
-        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
-            assert!(
-                matches!(
-                    resolve(registry(), &Keymap::default(), scope, &state, backspace),
-                    Resolution::Disabled(ref reason) if reason == "Not in a submodule"
-                ),
-                "{scope:?}"
-            );
-        }
-        state.repo_stack.push(crate::model::ParentRepo {
-            path: "sub".into(),
-            files: vec![],
-            files_loaded: true,
-            branch: None,
-            selected: None,
-        });
-        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
-            assert!(
-                matches!(
-                    resolve(registry(), &Keymap::default(), scope, &state, backspace),
-                    Resolution::Run(Binding {
-                        intent: AppIntent::LeaveSubmodule,
-                        ..
-                    })
-                ),
-                "{scope:?}"
-            );
-        }
-        state.op_seq = Some(1);
-        assert!(matches!(
-            resolve(
-                registry(),
-                &Keymap::default(),
-                KeyScope::Files,
-                &state,
-                backspace
-            ),
-            Resolution::Disabled(ref reason) if reason == "Wait for the operation to finish"
-        ));
-        assert_eq!(
-            KeyPattern::any(KeyCode::Backspace).label(),
-            "bksp",
-            "the same on every platform"
-        );
     }
 
     #[test]
