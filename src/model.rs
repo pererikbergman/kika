@@ -1201,7 +1201,13 @@ impl AppState {
                 result,
             } => return self.left_behind_checked(tag, op, head, result),
             AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
+            AppIntent::RewriteCommit(
+                edit @ (rebase_plan::Edit::Squash
+                | rebase_plan::Edit::Fixup
+                | rebase_plan::Edit::Drop),
+            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
+            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
             AppIntent::CreateFixup => return self.create_fixup(),
             AppIntent::Autosquash => self.ask_autosquash(),
@@ -1385,6 +1391,7 @@ impl AppState {
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
             Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
+            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -2163,6 +2170,11 @@ impl AppState {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
+            // Only the count: subjects and the filter are not drawn here.
+            (ConfirmKind::DropRange(ids), _) => Cow::Owned(format!(
+                "Drop {} commits and their changes from the history? (y/n)",
+                ids.len()
+            )),
             _ => Cow::Borrowed(kind.question()),
         }
     }
@@ -6024,6 +6036,7 @@ mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
 pub(crate) mod review;
+mod rewrite_range;
 mod stash_actions;
 
 use custom_patch::NO_PATCH;
@@ -18712,8 +18725,14 @@ mod tests {
         // On a todo row while a range is kept.
         let mut todo = stopped(TODO, 2);
         todo.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(press_char(&mut todo, 'e'), vec![]);
         assert_eq!(todo.notice.as_deref(), range);
+        // Drop takes a range, but only one of log rows.
+        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(
+            todo.notice.as_deref(),
+            Some("Select a commit in the log first")
+        );
         // A range starts on log rows only.
         let mut todo = stopped(TODO, 2);
         press_char(&mut todo, 'V');
