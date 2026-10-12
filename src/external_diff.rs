@@ -250,9 +250,9 @@ pub fn run(
     if !workdir.as_os_str().is_empty() {
         command.current_dir(workdir);
     }
-    let mut child = command
-        .spawn()
-        .map_err(|e| terminal_safe(format!("{label}: {e}").as_bytes()))?;
+    // An OS error, named after the renderer and made safe to show.
+    let os_error = |e: std::io::Error| terminal_safe(format!("{label}: {e}").as_bytes());
+    let mut child = command.spawn().map_err(os_error)?;
 
     let stdin = child.stdin.take();
     let input = input.to_vec();
@@ -268,7 +268,7 @@ pub fn run(
 
     let deadline = Instant::now() + timeout;
     let mut output = None;
-    let mut status = None;
+    let mut exited = false;
     loop {
         if output.is_none() {
             match stdout.try_recv() {
@@ -280,12 +280,19 @@ pub fn run(
                 Err(_) => {}
             }
         }
-        if status.is_none() {
-            status = child.try_wait().map_err(|e| e.to_string())?;
+        if !exited {
+            exited = match has_exited(&mut child) {
+                Ok(exited) => exited,
+                Err(e) => {
+                    kill_group(&mut child);
+                    return Err(os_error(e));
+                }
+            };
         }
-        if let Some(status) = status
-            && let Some(bytes) = output.take()
-        {
+        if exited && let Some(bytes) = output.take() {
+            // Reaped only now: until the output is in, a timeout or an
+            // overflow may still need the renderer's group id reserved.
+            let status = child.wait().map_err(os_error)?;
             if status.success() {
                 return Ok(bytes);
             }
@@ -307,6 +314,46 @@ pub fn run(
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Whether the renderer has exited. On unix it is left unreaped, so its
+/// pid, which is also its group id, stays reserved for [`kill_group`]; `run`
+/// reaps it with `wait` once its output is in.
+#[cfg(unix)]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    let pid = libc::id_t::try_from(child.id()).map_err(std::io::Error::other)?;
+    loop {
+        // SAFETY: an all-zero `siginfo_t` is a valid value; `waitid` only
+        // writes into it.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a valid, writable `siginfo_t`. WNOWAIT leaves the
+        // child waitable, so `Child::wait` still reaps it later.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        // With WNOHANG and no exit yet, `info` is left zeroed.
+        // SAFETY: `waitid` succeeded, so `info` holds a child-state record.
+        return Ok(unsafe { info.si_pid() } != 0);
+    }
+}
+
+/// Whether the renderer has exited. Nothing signals a group off unix, so
+/// reaping it here is safe.
+#[cfg(not(unix))]
+fn has_exited(child: &mut Child) -> std::io::Result<bool> {
+    Ok(child.try_wait()?.is_some())
 }
 
 /// More output than the cap allows.
@@ -341,8 +388,9 @@ fn drain(
 /// children holding the pipes. Renderers and the clipboard program use it.
 pub(crate) fn kill_group(child: &mut Child) {
     // A direct signal, not a `kill` program, so nothing is looked up on
-    // `PATH`. The child is unreaped until `wait` below, so its pid, which
-    // is also its group id, cannot have been reused by another process.
+    // `PATH`. Callers must not have reaped the child (`run` polls with
+    // WNOWAIT): the child is unreaped until `wait` below, so its pid, which
+    // is also its group id, stays reserved for it.
     #[cfg(unix)]
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
         // SAFETY: `killpg` only sends a signal; `pid` leads the group the
@@ -619,11 +667,65 @@ mod tests {
             Err("sh timed out".into())
         );
 
-        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+        assert_gone_soon(read_pid(&pidfile));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_renderer_that_exited_still_takes_what_it_left_holding_stdout() {
+        let tmp = crate::git::fake::TempDir::new("external-diff-exited");
+        let pidfile = tmp.path().join("pid");
+        let script = format!("sleep 30 & echo $! >'{}'; exit 0", pidfile.display());
+        let r = renderer(&["/bin/sh", "-c", &script]);
+        let limits = Limits {
+            timeout: Duration::from_millis(500),
+            max_output: 100,
+        };
+        assert_eq!(
+            run(&r, Path::new("/"), &[], b"", 80, limits),
+            Err("sh timed out".into())
+        );
+        assert_gone_soon(read_pid(&pidfile));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_renderer_stays_unreaped_until_its_group_is_killed() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        // Its own group, so the group kill below cannot reach the tests.
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let mut child = command.spawn().unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !has_exited(&mut child).unwrap() {
+            assert!(Instant::now() < deadline, "child {pid} never exited");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // A second poll still sees it: polling does not reap.
+        assert!(has_exited(&mut child).unwrap());
+        // SAFETY: signal 0 only checks whether the process exists.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the exited child is an unreaped zombie, so its pid is reserved"
+        );
+        kill_group(&mut child);
+        assert_gone_soon(pid);
+    }
+
+    #[cfg(unix)]
+    fn read_pid(file: &Path) -> libc::pid_t {
+        std::fs::read_to_string(file)
             .expect("the renderer wrote its child's pid")
             .trim()
             .parse()
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Wait until no process `pid` exists, or fail the test after a while.
+    #[cfg(unix)]
+    fn assert_gone_soon(pid: libc::pid_t) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             // SAFETY: signal 0 only checks whether the process exists.
@@ -632,7 +734,7 @@ mod tests {
             if gone {
                 break;
             }
-            assert!(Instant::now() < deadline, "grandchild {pid} still alive");
+            assert!(Instant::now() < deadline, "process {pid} still alive");
             std::thread::sleep(Duration::from_millis(20));
         }
     }
