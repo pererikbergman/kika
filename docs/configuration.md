@@ -708,15 +708,18 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   that entry is dropped, and the command keeps the key.
 - In the global file, a command on a key that the same file's `[keys]` gives
   a binding in the command's scope is dropped on its own: the binding keeps
-  the key, and the other commands and the rest of the file apply. Kika shows
-  one error per dropped command, naming the key, the binding and the command
-  by its place in the file and its description, for example `key "ctrl-t" is
-  bound to both "files.stage" and command 1 ("Copy the file to…"); command 1
-  was dropped`. If several commands share that key, all of them are dropped.
-- A global command key that clashes with a default binding the file did not
-  move, or with another command, still ignores the whole global file, and so
-  does one that would hide a locked binding, even when the same command or
-  file also has a droppable clash.
+  the key, and the other commands and the rest of the file apply. The whole
+  command is dropped, even if its other keys are free or clash with a default
+  binding. Kika shows one error per dropped command, naming every key of it
+  that a binding holds, those bindings, and the command by its place in the
+  file and its description, for example `key "ctrl-t" is bound to both
+  "files.stage" and command 1 ("Copy the file to…"); command 1 was dropped`.
+  If several commands share that key, all of them are dropped. A dropped
+  command binds nothing, so it never takes a key from any binding.
+- The commands that are left must still follow every rule: one that clashes
+  with a default binding the file did not move, with another command that is
+  left, or that would hide a locked binding still ignores the whole global
+  file.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
 - A `"popup"` or `"none"` command that is still running can be stopped with

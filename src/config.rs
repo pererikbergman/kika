@@ -44,8 +44,9 @@
 //! 64 KiB. A `[keys]` entry that binds a key twice in one scope is dropped
 //! alone: its binding keeps the keys of the layer below, and the rest of the
 //! file applies. A global `[[commands]]` entry on a key the same file's
-//! `[keys]` gives a binding of its scope is dropped alone too: the binding
-//! keeps the key. A file with any other error, a command clashing with a
+//! `[keys]` gives a binding of its scope is dropped alone too, whatever its
+//! other keys: the binding keeps the key. The commands left must pass every
+//! other check. A file with any other error, a command left clashing with a
 //! default key or another command included, is ignored as a whole, and the
 //! layer below it applies.
 //!
@@ -1059,6 +1060,35 @@ output = "none"
     }
 
     #[test]
+    fn a_command_on_a_moved_key_and_a_default_key_is_dropped_and_the_file_loads() {
+        let files = Files::new("global-onto-command-and-default");
+        files.global(&format!(
+            "{ONLY_STAGE_ON_CTRL_T}[watch]\nfetch = 300\n{}{}",
+            COPY_COMMAND.replace(r#"["ctrl-t"]"#, r#"["ctrl-t", "c"]"#),
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: concat!(
+                    r#"key "ctrl-t" is bound to both "files.stage" and command 1, "#,
+                    r#"and key "c" is bound to both "files.commit" and command 1 "#,
+                    r#"("Copy the file to…"); command 1 was dropped"#
+                )
+                .into(),
+                dropped_binding: true,
+            }]
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+    }
+
+    #[test]
     fn a_droppable_command_does_not_save_a_file_with_another_error() {
         let err = |extra_keys: &str, extra: &str| {
             global(&format!(
@@ -1072,14 +1102,6 @@ output = "none"
         );
         assert_eq!(
             err("", &COPY_COMMAND.replace("ctrl-t", "q")),
-            r#"command 1: key "q" would hide "global.quit""#
-        );
-        // The dropped command itself would hide quit: refused before any drop.
-        assert_eq!(
-            err(
-                "",
-                &COPY_COMMAND.replace(r#"["ctrl-t"]"#, r#"["ctrl-t", "q"]"#)
-            ),
             r#"command 1: key "q" would hide "global.quit""#
         );
         assert_eq!(

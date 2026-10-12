@@ -1,7 +1,7 @@
 //! Every key Kika understands, declared once. The same records drive
 //! dispatch, the help menu and the bottom bar, so they cannot drift apart.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -813,10 +813,13 @@ impl Keymap {
     /// a binding in `kept`, the ones the same file's `[keys]` moved, holds
     /// in the command's scope is dropped alone: the user's newer intent is
     /// usually the binding, and one stale command should not cost the rest
-    /// of the file. Fails on a table that does not parse, a command that
-    /// would hide a locked binding in an enclosing scope, such as `q`
-    /// hiding quit, or any other clash in a command's scope. Messages
-    /// number commands by their place in the file, dropped ones included.
+    /// of the file. A dropped command binds nothing, so it can neither hide
+    /// nor move a locked binding. The commands left must then pass every
+    /// other check: the file fails on a table that does not parse, a
+    /// command that would hide a locked binding in an enclosing scope, such
+    /// as `q` hiding quit, or any other clash in a command's scope.
+    /// Messages number commands by their place in the file, dropped ones
+    /// included.
     pub fn with_commands(
         self,
         tables: &[CommandTable],
@@ -828,16 +831,15 @@ impl Keymap {
             .map(|(i, table)| CustomCommand::parse(table, i + 1))
             .collect::<Result<Vec<_>, _>>()?;
         let keymap = Keymap { commands, ..self };
-        // Before any drop, so a drop can never hide this refusal.
-        keymap.check_locked_commands()?;
-        let dropping = keymap.commands_on_kept_keys(kept)?;
+        let dropping = keymap.binding_clashes(kept);
         let mut messages = Vec::new();
         let mut numbers = Vec::new();
         let mut commands = Vec::new();
-        for (i, (command, drop)) in keymap.commands.into_iter().zip(dropping).enumerate() {
-            match drop {
-                Some(clash) => messages.push(format!(
-                    "{clash} (\"{}\"); command {} was dropped",
+        for (i, (command, clashes)) in keymap.commands.into_iter().zip(dropping).enumerate() {
+            match clashes {
+                Some(clashes) => messages.push(format!(
+                    "{} (\"{}\"); command {} was dropped",
+                    clashes.join(", and "),
                     command.description,
                     i + 1
                 )),
@@ -851,6 +853,7 @@ impl Keymap {
             commands,
             overrides: keymap.overrides,
         };
+        keymap.check_locked_commands(&numbers)?;
         if let Some(clash) = keymap.clashes().first() {
             // Named by their place in the file, not in what is left.
             let renumber = |owner| match owner {
@@ -867,17 +870,14 @@ impl Keymap {
         Ok((keymap, messages))
     }
 
-    /// For each command, the clash that drops it: one of its keys is held
-    /// in its scope by a binding in `kept`. A command that also clashes with
-    /// a binding the layer did not move fails the file instead, so the drop
-    /// cannot hide that clash. Bindings are indexed by scope and key code,
-    /// so the work stays linear in the number of keys.
-    fn commands_on_kept_keys(
-        &self,
-        kept: &BTreeSet<&'static str>,
-    ) -> Result<Vec<Option<Clash<'static>>>, String> {
-        let mut held: HashMap<(KeyScope, KeyCode), Vec<(&KeyPattern, &'static Binding)>> =
-            HashMap::new();
+    /// For each command that one of its keys puts on a binding in `kept`,
+    /// in its scope, every key of it that a binding of its scope holds,
+    /// one clash each, so the message says all it loses; `None` for the
+    /// others. Bindings are indexed by scope and key code and a repeated
+    /// key is listed once, so the work and the messages stay linear in the
+    /// number of keys.
+    fn binding_clashes(&self, kept: &BTreeSet<&'static str>) -> Vec<Option<Vec<String>>> {
+        let mut held: HashMap<(KeyScope, KeyCode), Vec<(&KeyPattern, &Binding)>> = HashMap::new();
         for binding in REGISTRY {
             for key in self.keys(binding) {
                 held.entry((binding.scope, key.code))
@@ -887,40 +887,34 @@ impl Keymap {
         }
         let mut dropping = Vec::with_capacity(self.commands.len());
         for (i, command) in self.commands.iter().enumerate() {
-            let mut on_kept = None;
-            let mut on_other = None;
+            let mut on_kept = false;
+            let mut listed = HashSet::new();
+            let mut clashes = Vec::new();
             for key in &command.keys {
                 let holders = held.get(&(command.scope, key.code)).into_iter().flatten();
                 for &(_, binding) in holders.filter(|(k, _)| k.overlaps(key)) {
-                    let clash = Clash {
-                        a: Owner::Binding(binding),
-                        b: Owner::Command(i),
-                        key: *key,
-                        // Only shown, never ordered against another clash.
-                        at: (0, 0),
-                    };
-                    let slot = if kept.contains(binding.id) {
-                        &mut on_kept
-                    } else {
-                        &mut on_other
-                    };
-                    slot.get_or_insert(clash);
-                }
-                if on_kept.is_some() && on_other.is_some() {
-                    break;
+                    on_kept |= kept.contains(binding.id);
+                    if listed.insert((key.label(), binding.id)) {
+                        let clash = Clash {
+                            a: Owner::Binding(binding),
+                            b: Owner::Command(i),
+                            key: *key,
+                            // Only shown, never ordered against another clash.
+                            at: (0, 0),
+                        };
+                        clashes.push(clash.to_string());
+                    }
                 }
             }
-            if let (Some(_), Some(clash)) = (on_kept, on_other) {
-                return Err(clash.to_string());
-            }
-            dropping.push(on_kept);
+            dropping.push(on_kept.then_some(clashes));
         }
-        Ok(dropping)
+        dropping
     }
 
     /// No command key may hide a locked binding of an enclosing scope.
-    fn check_locked_commands(&self) -> Result<(), String> {
-        for (i, command) in self.commands.iter().enumerate() {
+    /// `numbers` holds each command's place in the file, from 0.
+    fn check_locked_commands(&self, numbers: &[usize]) -> Result<(), String> {
+        for (command, n) in self.commands.iter().zip(numbers) {
             let locked = REGISTRY.iter().filter(|b| REPO_LOCKED.contains(&b.id));
             for binding in locked.filter(|b| command.scope.chain().any(|s| s == b.scope)) {
                 let hidden = self
@@ -930,7 +924,7 @@ impl Keymap {
                 if let Some(key) = hidden {
                     return Err(format!(
                         "command {}: key \"{}\" would hide \"{}\"",
-                        i + 1,
+                        n + 1,
                         key.label(),
                         binding.id
                     ));
@@ -10960,15 +10954,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e, r#"key "X" is bound to both command 2 and command 3"#);
-        // On the moved key and on a default key: the drop cannot hide that.
-        let e = global_with_commands(moved, &[files_command(&["ctrl-t", "c"])]).unwrap_err();
+        // A command that is left still may not hide a locked binding.
+        let e = global_with_commands(moved, &[files_command(&["ctrl-t"]), files_command(&["q"])])
+            .unwrap_err();
+        assert_eq!(e, r#"command 2: key "q" would hide "global.quit""#);
+    }
+
+    #[test]
+    fn a_dropped_command_names_every_key_it_clashed_on_and_binds_nothing() {
+        let moved = &[("files.stage", &["ctrl-t"][..])];
+        // `c` is a default key, `X` is free: only the bindings are named.
+        let (keymap, dropped) =
+            global_with_commands(moved, &[files_command(&["ctrl-t", "c", "X", "ctrl-t"])]).unwrap();
         assert_eq!(
-            e,
-            r#"key "c" is bound to both "files.commit" and command 1"#
+            dropped,
+            [concat!(
+                r#"key "ctrl-t" is bound to both "files.stage" and command 1, "#,
+                r#"and key "c" is bound to both "files.commit" and command 1 ("Run true"); "#,
+                "command 1 was dropped"
+            )]
         );
-        // On the moved key and hiding quit: the locked check runs first.
-        let e = global_with_commands(moved, &[files_command(&["ctrl-t", "q"])]).unwrap_err();
-        assert_eq!(e, r#"command 1: key "q" would hide "global.quit""#);
+        assert_eq!(keymap.commands, []);
+        assert_eq!(
+            keymap.keys(binding("files.commit")),
+            binding("files.commit").keys
+        );
+        // On the moved key and on quit's: dropped, so quit keeps its key.
+        let (keymap, dropped) =
+            global_with_commands(moved, &[files_command(&["ctrl-t", "q"])]).unwrap();
+        assert_eq!(dropped.len(), 1, "{dropped:?}");
+        assert_eq!(keymap.commands, []);
+        let state = AppState::new(Context::Workspace);
+        let q = key(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(
+            resolve(registry(), &keymap, KeyScope::Files, &state, q),
+            Resolution::Run(b) if b.id == "global.quit"
+        ));
     }
 
     /// A global file may hold 64 KiB of commands, every one on the key a
