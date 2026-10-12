@@ -18,6 +18,43 @@ pub enum InputTarget {
     FilesFilter,
     CommitsFilter,
     DiffSearch,
+    /// The path git narrows the log to; read on Enter, not as typed.
+    LogPath,
+    /// The author git narrows the log to; read on Enter, not as typed.
+    LogAuthor,
+}
+
+impl InputTarget {
+    /// What the bar draws before the typed text.
+    pub fn prompt(self) -> &'static str {
+        match self {
+            InputTarget::FilesFilter | InputTarget::CommitsFilter | InputTarget::DiffSearch => "/",
+            InputTarget::LogPath => "path: ",
+            InputTarget::LogAuthor => "author: ",
+        }
+    }
+
+    /// Whether git runs the query on Enter, rather than the list
+    /// narrowing as each key is typed.
+    pub fn is_log_query(self) -> bool {
+        matches!(self, InputTarget::LogPath | InputTarget::LogAuthor)
+    }
+}
+
+/// Which half of the log query an input sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogFilterField {
+    Path,
+    Author,
+}
+
+impl LogFilterField {
+    pub fn target(self) -> InputTarget {
+        match self {
+            LogFilterField::Path => InputTarget::LogPath,
+            LogFilterField::Author => InputTarget::LogAuthor,
+        }
+    }
 }
 
 /// The open text input: where the text goes, and the text so far.

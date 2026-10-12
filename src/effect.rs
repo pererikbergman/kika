@@ -12,6 +12,7 @@ use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::conflict::MAX_CONFLICT_FILE;
 use crate::custom_command::{CommandFailure, OutputMode};
+use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
@@ -29,7 +30,7 @@ use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
 use crate::git::head::{read_commit_message, read_head_message};
-use crate::git::log::{log_page, markers};
+use crate::git::log::{LogQuery, branch_commit, log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
@@ -221,12 +222,20 @@ pub enum Effect {
     SnapshotRefs {
         tag: Tag,
     },
-    /// Read a page of `HEAD`'s log, from `tip` when set; always answered
-    /// by one `CommitsLoaded`.
+    /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to
+    /// `query`; always answered by one `CommitsLoaded`.
     LoadCommits {
         tag: Tag,
         tip: Option<String>,
         skip: usize,
+        query: LogQuery,
+    },
+    /// Read both ends of a comparison as commits; always answered by one
+    /// `DiffResolved`.
+    ResolveDiff {
+        tag: Tag,
+        base: DiffEnd,
+        target: DiffEnd,
     },
     /// List the files `range` changed; always answered by one
     /// `CommitFilesLoaded`.
@@ -379,6 +388,15 @@ fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// A comparison's end as a commit: a commit as it is, a branch where it
+/// points now.
+fn resolve_end(runner: &dyn GitRunner, end: DiffEnd) -> Result<CommitId, String> {
+    match end {
+        DiffEnd::Commit(id) => Ok(id),
+        DiffEnd::Branch(name) => branch_commit(runner, &name),
+    }
 }
 
 /// How long a diff may take before "Loading…" is shown.
@@ -831,11 +849,17 @@ impl Runtime {
                     let _ = tx.send(AppIntent::RefsLoaded { tag, result });
                 });
             }
-            Effect::LoadCommits { tag, tip, skip } => {
+            Effect::LoadCommits {
+                tag,
+                tip,
+                skip,
+                query,
+            } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the panel would wait forever.
                     let result = tokio::task::spawn_blocking(move || {
-                        let page = log_page(runner.as_ref(), tip.as_deref(), skip, commits::PAGE)?;
+                        let page =
+                            log_page(runner.as_ref(), tip.as_deref(), skip, commits::PAGE, &query)?;
                         Ok((page, unix_now()))
                     })
                     .await
@@ -843,6 +867,26 @@ impl Runtime {
                         Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
                     });
                     let _ = tx.send(AppIntent::CommitsLoaded { tag, skip, result });
+                });
+            }
+            Effect::ResolveDiff { tag, base, target } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let base = resolve_end(runner.as_ref(), base)?;
+                        let target = resolve_end(runner.as_ref(), target)?;
+                        Ok(CommitRange {
+                            oid: target,
+                            parent: Some(base),
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git rev-parse crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::DiffResolved { tag, result });
                 });
             }
             Effect::LoadCommitFiles { tag, range } => {
@@ -2610,6 +2654,7 @@ mod tests {
             tag: background(5),
             tip: Some("abc".into()),
             skip: 200,
+            query: LogQuery::default(),
         });
 
         match rx.recv().await {
@@ -2629,6 +2674,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_diff_reads_each_branch_through_its_full_ref() {
+        let user = Tag {
+            generation: 1,
+            seq: 9,
+            user: true,
+        };
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["rev-parse", "-q", "--verify", "refs/heads/main^{commit}"],
+                    ok(b"aaa111\n"),
+                )
+                .expect(
+                    &["rev-parse", "-q", "--verify", "refs/heads/topic^{commit}"],
+                    ok(b"--output=x\n"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let target = CommitId::parse("bbb222").unwrap();
+
+        runtime.spawn(Effect::ResolveDiff {
+            tag: user,
+            base: DiffEnd::Branch(BranchName::from_bytes(b"main")),
+            target: DiffEnd::Commit(target.clone()),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::DiffResolved {
+                tag: user,
+                result: Ok(CommitRange {
+                    oid: target,
+                    parent: CommitId::parse("aaa111"),
+                }),
+            })
+        );
+
+        // Output that is not hex is never taken for a commit.
+        runtime.spawn(Effect::ResolveDiff {
+            tag: user,
+            base: DiffEnd::Commit(CommitId::parse("aaa111").unwrap()),
+            target: DiffEnd::Branch(BranchName::from_bytes(b"topic")),
+        });
+        match rx.recv().await {
+            Some(AppIntent::DiffResolved {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, user);
+                assert!(message.contains("not a commit id"), "{message:?}");
+            }
+            other => panic!("expected a failed DiffResolved, got {other:?}"),
+        }
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn load_commits_passes_its_query_to_git() {
+        let runner = Arc::new(FakeRunner::new().expect(
+            &[
+                "log",
+                "--no-show-signature",
+                "--no-color",
+                "-z",
+                "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s",
+                "--skip=0",
+                "-n",
+                "200",
+                "--author=Ann",
+                "--fixed-strings",
+                "HEAD",
+                "--",
+            ],
+            ok(b""),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadCommits {
+            tag: background(5),
+            tip: None,
+            skip: 0,
+            query: LogQuery {
+                path: None,
+                author: Some("Ann".into()),
+            },
+        });
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::CommitsLoaded { result: Ok(_), .. })
+        ));
+        runner.assert_done();
+    }
+
+    #[tokio::test]
     async fn panicking_commit_and_marker_loads_still_report_back() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
@@ -2637,6 +2778,7 @@ mod tests {
             tag: background(6),
             tip: None,
             skip: 0,
+            query: LogQuery::default(),
         });
         match rx.recv().await {
             Some(AppIntent::CommitsLoaded {

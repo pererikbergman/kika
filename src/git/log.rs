@@ -1,9 +1,13 @@
-//! The history of `HEAD`, a page at a time, and the sets that say which of
-//! its commits are pushed or already merged into the main branch.
+//! The history of `HEAD`, a page at a time, optionally narrowed to one
+//! path or author, and the sets that say which of its commits are pushed
+//! or already merged into the main branch.
 
 use std::collections::HashSet;
 
+use super::branches::BranchName;
+use super::commit_files::CommitId;
 use super::diff::terminal_safe;
+use super::path::RepoPath;
 use super::runner::{GitCommand, GitOutput, GitRunner};
 
 /// One commit of the log, as the Commits panel lists it.
@@ -40,6 +44,42 @@ pub struct Markers {
     pub unpushed: Option<HashSet<String>>,
 }
 
+/// What git narrows the log to. The default is the whole history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LogQuery {
+    /// One file or directory, followed across renames.
+    pub path: Option<RepoPath>,
+    /// Matched as fixed text against "Name <email>", with smart case.
+    pub author: Option<String>,
+}
+
+impl LogQuery {
+    pub fn is_active(&self) -> bool {
+        self.path.is_some() || self.author.is_some()
+    }
+
+    /// The author half from typed text: trimmed, `None` when blank. A
+    /// control char could not be typed on purpose, so it is refused.
+    pub fn author_from(text: &str) -> Result<Option<String>, &'static str> {
+        let text = text.trim();
+        if text.contains(char::is_control) {
+            return Err("An author cannot contain control characters");
+        }
+        Ok((!text.is_empty()).then(|| text.to_string()))
+    }
+
+    /// The path half from typed text, relative to the repository root:
+    /// trimmed, one trailing `/` dropped, `None` when blank.
+    pub fn path_from(text: &str) -> Result<Option<RepoPath>, &'static str> {
+        let text = text.trim();
+        if text.contains(char::is_control) {
+            return Err("A path cannot contain control characters");
+        }
+        let text = text.strip_suffix('/').unwrap_or(text);
+        Ok((!text.is_empty()).then(|| RepoPath::from_bytes(text.as_bytes())))
+    }
+}
+
 /// Past this many commits a set is dropped instead of kept partial, so a
 /// marker is never wrong, only missing.
 pub const MARKER_CAP: usize = 10_000;
@@ -48,15 +88,19 @@ pub const MARKER_CAP: usize = 10_000;
 /// separator in an author name can only shift text into the subject.
 const FORMAT: &str = "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s";
 
-/// Up to `limit` commits of `tip` (or `HEAD`), after skipping `skip`. Later
-/// pages pass the first page's newest commit as `tip`, so a page never
-/// mixes two histories when `HEAD` moves in between. An unborn `HEAD` is
-/// an empty, finished log, not an error.
+/// Up to `limit` commits of `tip` (or `HEAD`) that match `query`, after
+/// skipping `skip`. Later pages pass the first page's newest commit as
+/// `tip`, so a page never mixes two histories when `HEAD` moves in
+/// between; under a query that commit is the newest match, so the set is
+/// the same. A path query asks git for every commit up to the page's end,
+/// since `--follow` cannot skip. An unborn `HEAD` is an empty, finished
+/// log, not an error.
 pub fn log_page(
     runner: &dyn GitRunner,
     tip: Option<&str>,
     skip: usize,
     limit: usize,
+    query: &LogQuery,
 ) -> Result<LogPage, String> {
     // Only an object id from an earlier page: nothing that git could read
     // as an option, without `--end-of-options`, which older git lacks.
@@ -68,19 +112,14 @@ pub fn log_page(
             terminal_safe(tip.as_bytes())
         ));
     }
-    let output = run(
-        runner,
-        GitCommand::new("log")
-            .arg("--no-show-signature")
-            .arg("--no-color")
-            .arg("-z")
-            .arg(FORMAT)
-            .arg(format!("--skip={skip}"))
-            .arg("-n")
-            .arg(limit.to_string())
-            .arg(tip.unwrap_or("HEAD"))
-            .arg("--"),
-    )?;
+    // `--follow` finds a rename only in a commit it shows, so a rename
+    // inside the skipped commits would lose the file: a path query reads
+    // from the top every time and drops what earlier pages had.
+    let (drop, skip, limit) = match &query.path {
+        Some(_) => (skip, 0, skip + limit),
+        None => (0, skip, limit),
+    };
+    let output = run(runner, log_command(tip, skip, limit, query))?;
     if !output.success {
         if tip.is_none() && !resolves(runner, "HEAD")? {
             return Ok(LogPage {
@@ -95,12 +134,61 @@ pub fn log_page(
         .split(|&b| b == 0)
         .map(|record| record.strip_prefix(b"\n").unwrap_or(record))
         .filter(|record| !record.is_empty())
+        .skip(drop)
         .map(parse_row)
         .collect::<Vec<_>>();
     Ok(LogPage {
-        done: rows.len() < limit,
+        done: drop + rows.len() < limit,
         rows,
     })
+}
+
+/// The `git log` behind [`log_page`]. Typed text never stands alone in
+/// argv: the author is glued to `--author=`, and the path comes after
+/// `--`, read literally.
+fn log_command(tip: Option<&str>, skip: usize, limit: usize, query: &LogQuery) -> GitCommand {
+    let mut cmd = GitCommand::new("log")
+        .arg("--no-show-signature")
+        .arg("--no-color")
+        .arg("-z")
+        .arg(FORMAT)
+        .arg(format!("--skip={skip}"))
+        .arg("-n")
+        .arg(limit.to_string());
+    if let Some(author) = &query.author {
+        cmd = cmd.arg(format!("--author={author}")).arg("--fixed-strings");
+        if !author.chars().any(char::is_uppercase) {
+            cmd = cmd.arg("--regexp-ignore-case");
+        }
+    }
+    if query.path.is_some() {
+        cmd = cmd.arg("--follow");
+    }
+    cmd = cmd.arg(tip.unwrap_or("HEAD")).arg("--");
+    if let Some(path) = &query.path {
+        cmd = cmd.arg(path.as_os_str()).env("GIT_LITERAL_PATHSPECS", "1");
+    }
+    cmd
+}
+
+/// The commit local branch `name` points at. The argument starts with
+/// `refs/heads/`, so git can never read it as an option.
+pub fn branch_commit(runner: &dyn GitRunner, name: &BranchName) -> Result<CommitId, String> {
+    let mut rev = name.ref_bytes();
+    rev.extend(b"^{commit}");
+    let output = run(
+        runner,
+        GitCommand::new("rev-parse")
+            .arg("-q")
+            .arg("--verify")
+            .arg(super::path::os_string(&rev)),
+    )?;
+    if !output.success {
+        return Err(format!("No branch named {}", name.display()));
+    }
+    let text = String::from_utf8_lossy(output.stdout.trim_ascii());
+    CommitId::parse(&text)
+        .ok_or_else(|| format!("not a commit id: {}", terminal_safe(text.as_bytes())))
 }
 
 /// One `FORMAT` record. A record that cannot be read still makes a row,
@@ -287,7 +375,7 @@ mod tests {
         );
         let runner = CliRunner::isolated(dir);
 
-        let page = log_page(&runner, None, 0, 10).unwrap();
+        let page = log_page(&runner, None, 0, 10, &LogQuery::default()).unwrap();
 
         assert!(page.done);
         assert_eq!(page.rows.len(), 4);
@@ -314,7 +402,9 @@ mod tests {
             commit(dir, &format!("c{i}"), "Ann", 1_000 + i);
         }
         let runner = CliRunner::isolated(dir);
-        let all = log_page(&runner, None, 0, 100).unwrap().rows;
+        let all = log_page(&runner, None, 0, 100, &LogQuery::default())
+            .unwrap()
+            .rows;
         let tip = all[0].oid.clone();
         // HEAD moves on; the fixed tip keeps the pages on the old history.
         commit(dir, "later", "Ann", 5_000);
@@ -322,7 +412,7 @@ mod tests {
         let mut paged = Vec::new();
         let mut skip = 0;
         loop {
-            let page = log_page(&runner, Some(&tip), skip, 3).unwrap();
+            let page = log_page(&runner, Some(&tip), skip, 3, &LogQuery::default()).unwrap();
             skip += page.rows.len();
             paged.extend(page.rows);
             if page.done {
@@ -335,11 +425,55 @@ mod tests {
     }
 
     #[test]
+    fn pages_of_a_query_from_its_newest_match_concatenate_to_the_whole_query() {
+        let tmp = repo("log-query-pages");
+        let dir = tmp.path();
+        let touch = |file: &str, text: &str, author: &str, time: i64| {
+            std::fs::write(dir.join(file), text).unwrap();
+            git(dir, &["add", "-A"]);
+            commit(dir, &format!("{file} {text}"), author, time);
+        };
+        for i in 0..4 {
+            touch("a.txt", &format!("a{i}\n").repeat(9), "Ann", 1_000 + i);
+            touch("b.txt", &format!("b{i}"), "Bob", 2_000 + i);
+        }
+        git(dir, &["mv", "a.txt", "c.txt"]);
+        commit(dir, "rename", "Ann", 3_000);
+        touch("c.txt", &"a3\nz\n".repeat(9), "Ann", 4_000);
+        touch("b.txt", "last", "Bob", 5_000);
+        let runner = CliRunner::isolated(dir);
+        let queries = [
+            LogQuery {
+                path: Some(RepoPath::from("c.txt")),
+                author: None,
+            },
+            author("bob"),
+        ];
+
+        for query in &queries {
+            let all = log_page(&runner, None, 0, 100, query).unwrap().rows;
+            assert!(all.len() >= 5, "{query:?}: {all:?}");
+            let tip = all[0].oid.clone();
+            let mut paged = Vec::new();
+            let mut skip = 0;
+            loop {
+                let page = log_page(&runner, Some(&tip), skip, 2, query).unwrap();
+                skip += page.rows.len();
+                paged.extend(page.rows);
+                if page.done {
+                    break;
+                }
+            }
+            assert_eq!(paged, all, "{query:?}");
+        }
+    }
+
+    #[test]
     fn an_unborn_repo_gives_an_empty_finished_page() {
         let tmp = repo("log-unborn");
         let runner = CliRunner::isolated(tmp.path());
         assert_eq!(
-            log_page(&runner, None, 0, 200),
+            log_page(&runner, None, 0, 200, &LogQuery::default()),
             Ok(LogPage {
                 rows: vec![],
                 done: true
@@ -452,7 +586,7 @@ mod tests {
                  c1\x1fc1\0"),
         );
 
-        let page = log_page(&fake, None, 0, 3).unwrap();
+        let page = log_page(&fake, None, 0, 3, &LogQuery::default()).unwrap();
 
         assert_eq!(page.rows.len(), 3);
         assert!(!page.done);
@@ -477,8 +611,196 @@ mod tests {
 
         let fake = FakeRunner::new();
         for tip in ["--output=x", "", "HEAD~1", "abc def", "abc\u{1b}"] {
-            assert!(log_page(&fake, Some(tip), 0, 10).is_err(), "{tip:?}");
+            assert!(
+                log_page(&fake, Some(tip), 0, 10, &LogQuery::default()).is_err(),
+                "{tip:?}"
+            );
         }
+        fake.assert_done();
+    }
+
+    /// The argv of a first-page log with `query`, as `log_page` runs it.
+    fn query_argv<'a>(query: &[&'a str], path: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = vec![
+            "log",
+            "--no-show-signature",
+            "--no-color",
+            "-z",
+            FORMAT,
+            "--skip=0",
+            "-n",
+            "5",
+        ];
+        argv.extend(query);
+        argv.extend(["HEAD", "--"]);
+        argv.extend(path);
+        argv
+    }
+
+    fn author(text: &str) -> LogQuery {
+        LogQuery {
+            path: None,
+            author: Some(text.into()),
+        }
+    }
+
+    #[test]
+    fn an_author_query_is_one_glued_argument_matched_as_fixed_text_with_smart_case() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let lower = query_argv(
+            &["--author=ann", "--fixed-strings", "--regexp-ignore-case"],
+            &[],
+        );
+        let upper = query_argv(&["--author=Ann", "--fixed-strings"], &[]);
+        let hostile = query_argv(
+            &[
+                "--author=--output=/tmp/x",
+                "--fixed-strings",
+                "--regexp-ignore-case",
+            ],
+            &[],
+        );
+        let fake = FakeRunner::new()
+            .expect(&lower, ok(b""))
+            .expect(&upper, ok(b""))
+            .expect(&hostile, ok(b""));
+
+        for text in ["ann", "Ann", "--output=/tmp/x"] {
+            let page = log_page(&fake, None, 0, 5, &author(text)).unwrap();
+            assert!(page.done && page.rows.is_empty(), "{text}");
+        }
+        fake.assert_done();
+        // No path, so no pathspec to read literally.
+        for env in fake.envs() {
+            assert!(!env.iter().any(|(k, _)| k == "GIT_LITERAL_PATHSPECS"));
+        }
+    }
+
+    #[test]
+    fn a_path_query_follows_renames_and_names_the_path_only_after_the_separator() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let fake = FakeRunner::new()
+            .expect(&query_argv(&["--follow"], &["src/a.rs"]), ok(b""))
+            .expect(&query_argv(&["--follow"], &["-p"]), ok(b""));
+        for path in ["src/a.rs", "-p"] {
+            let query = LogQuery {
+                path: Some(RepoPath::from(path)),
+                author: None,
+            };
+            log_page(&fake, None, 0, 5, &query).unwrap();
+        }
+        fake.assert_done();
+        for env in fake.envs() {
+            assert!(
+                env.contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_later_page_of_a_path_query_reads_from_the_top_and_drops_what_was_shown() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let mut argv = query_argv(&["--follow"], &["a.rs"]);
+        argv[7] = "4";
+        argv[9] = "abc";
+        let fake = FakeRunner::new().expect(
+            &argv,
+            ok(b"a1\x1fa1\x1f\x1f1\x1fA\x1fone\0\
+                 b1\x1fb1\x1f\x1f1\x1fA\x1ftwo\0\
+                 c1\x1fc1\x1f\x1f1\x1fA\x1fthree\0"),
+        );
+        let query = LogQuery {
+            path: Some(RepoPath::from("a.rs")),
+            author: None,
+        };
+
+        let page = log_page(&fake, Some("abc"), 2, 2, &query).unwrap();
+
+        let subjects: Vec<&str> = page.rows.iter().map(|r| r.subject.as_str()).collect();
+        assert_eq!(subjects, ["three"]);
+        assert!(page.done);
+        fake.assert_done();
+    }
+
+    #[test]
+    fn a_path_reaches_argv_as_its_raw_bytes() {
+        let query = LogQuery {
+            path: Some(RepoPath::from_bytes(b"x\xff.rs")),
+            author: Some("ann".into()),
+        };
+        let cmd = log_command(Some("abc"), 200, 200, &query);
+        let args = cmd.args();
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[sep + 1].as_encoded_bytes(), b"x\xff.rs");
+        assert_eq!(args.len(), sep + 2);
+        let follow = args.iter().position(|a| a == "--follow").unwrap();
+        let tip = args.iter().position(|a| a == "abc").unwrap();
+        assert!(follow < tip && tip < sep);
+    }
+
+    #[test]
+    fn no_log_query_uses_end_of_options() {
+        let queries = [
+            LogQuery::default(),
+            author("ann"),
+            LogQuery {
+                path: Some(RepoPath::from("-p")),
+                author: Some("--end-of-options".into()),
+            },
+        ];
+        for query in &queries {
+            for tip in [None, Some("abc")] {
+                let cmd = log_command(tip, 0, 5, query);
+                assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
+            }
+        }
+    }
+
+    #[test]
+    fn typed_query_text_is_trimmed_blank_is_none_and_control_chars_are_refused() {
+        assert_eq!(LogQuery::author_from("  ann "), Ok(Some("ann".into())));
+        assert_eq!(LogQuery::author_from("   "), Ok(None));
+        assert_eq!(LogQuery::author_from(""), Ok(None));
+        for bad in ["a\0b", "a\x1bb", "a\nb", "\u{7f}"] {
+            assert!(LogQuery::author_from(bad).is_err(), "{bad:?}");
+            assert!(LogQuery::path_from(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(LogQuery::path_from(" "), Ok(None));
+        assert_eq!(
+            LogQuery::path_from(" src/a.rs "),
+            Ok(Some(RepoPath::from("src/a.rs")))
+        );
+        assert_eq!(LogQuery::path_from("src/"), Ok(Some(RepoPath::from("src"))));
+        assert_eq!(
+            LogQuery::path_from("src//"),
+            Ok(Some(RepoPath::from("src/"))),
+            "only one slash"
+        );
+        assert!(!LogQuery::default().is_active());
+        assert!(author("a").is_active());
+    }
+
+    #[test]
+    fn a_branch_resolves_through_its_full_ref_to_a_commit() {
+        use crate::git::fake::{FakeRunner, fail, ok};
+
+        let argv = ["rev-parse", "-q", "--verify", "refs/heads/-x^{commit}"];
+        let fake = FakeRunner::new()
+            .expect(&argv, ok(b"abc123\n"))
+            .expect(&argv, ok(b"not hex\n"))
+            .expect(&argv, fail(""));
+        let name = BranchName::from_bytes(b"-x");
+
+        assert_eq!(
+            branch_commit(&fake, &name).map(|id| id.as_str().to_string()),
+            Ok("abc123".to_string())
+        );
+        assert!(branch_commit(&fake, &name).is_err());
+        assert!(branch_commit(&fake, &name).is_err());
         fake.assert_done();
     }
 
@@ -502,7 +824,7 @@ mod tests {
             ],
             ok(b"a\x1fa\x1f\x1f5\x1fAnn\x1fsubj\0"),
         );
-        let page = log_page(&fake, None, 0, 2).unwrap();
+        let page = log_page(&fake, None, 0, 2, &LogQuery::default()).unwrap();
         assert!(page.done);
         assert_eq!(page.rows[0].time, 5);
         fake.assert_done();

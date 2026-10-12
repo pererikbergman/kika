@@ -647,6 +647,7 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.filter` | `/` | Filter the files by typed text | |
 | `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
 | `files.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+| `files.log` | `L` | Show the selected file's history in the Commits panel | |
 
 The filter matches each word you type, in order but not necessarily side by
 side, against the file's path; it ignores case until you type an uppercase
@@ -688,6 +689,8 @@ this way.
 | `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
 | `branches.switch_tab` | `]` | Show the remotes and their branches | |
 | `branches.prev_tab` | `[` | Show the tags | |
+| `branches.mark` | `M` | Mark the selected branch to diff against (enter on another); again to clear | |
+| `branches.diff` | `enter` | Show what changed from the diff mark to the selected branch | |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -780,7 +783,7 @@ can be reset, but not marked from Kika.
 |---|---|---|---|
 | `commits.next` | `j`, `down` | Select the next commit | |
 | `commits.prev` | `k`, `up` | Select the previous commit | |
-| `commits.open` | `enter` | Show the files the selected commit changed | |
+| `commits.open` | `enter` | Show the files the selected commit changed, or those changed from the diff mark to it | |
 | `commits.checkout` | `space` | Check out the selected commit as a detached HEAD, asking first | |
 | `commits.revert` | `R` | Make a commit that undoes the selected one | locked |
 | `commits.reset` | `X` | Reset the current branch to the selected commit: soft, mixed or hard | locked |
@@ -801,9 +804,30 @@ can be reset, but not marked from Kika.
 | `commits.clear_copied` | `C` | Clear the copied set | |
 | `commits.filter` | `/` | Filter the loaded commits by typed text | |
 | `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
-| `commits.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+| `commits.escape` | `esc` | Clear the selection, else the filter, else the diff mark, else the log filter, else quit Kika | locked |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 | `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
+| `commits.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |
+| `commits.filter_author` | `A` | Show only the commits by a typed author | |
+| `commits.mark` | `M` | Mark the selected commit to diff against (enter on another); again to clear | |
+
+`L` and `A` ask git for a narrower log, typed on the bottom bar and run when
+you press `enter`: `L` takes one file or directory, relative to the
+repository's top level, and follows the file across renames; `A` matches the
+typed text anywhere in the author's name and email, as plain text, ignoring
+case until you type an uppercase letter. Both can be set at once, and an empty
+answer clears that half. The title names what the log is narrowed to, the
+graph is hidden, and the rewrites (squash, fixup, drop, reword, moving a
+commit, edit and break) wait until it is cleared, since the row below need not
+be the commit's parent.
+
+`M` marks a commit for diffing (`M` on a local branch in the Branches panel
+marks the branch). `enter` on another commit, or on another branch, then lists
+the files changed from the mark to it, in place of the log, and the diff pane
+shows each one. The marked row shows `◆` in both panels. In the Commits
+panel, `esc` clears a range, then the `/` filter, then the mark, then the log
+filter, and only then quits; in the Branches panel, `M` on the marked branch
+clears the mark.
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -904,6 +928,8 @@ redo from it.
 | `reflog.next` | `j`, `down` | Select the next reflog entry | |
 | `reflog.prev` | `k`, `up` | Select the previous reflog entry | |
 | `reflog.switch_tab` | `[`, `]` | Show the log | |
+| `reflog.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |
+| `reflog.filter_author` | `A` | Show only the commits by a typed author | |
 
 ### Commit files (a commit opened from the Commits panel)
 

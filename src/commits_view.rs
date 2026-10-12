@@ -11,13 +11,16 @@ use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
+use crate::diff_mark::DiffMark;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
-use crate::view::{PanelLook, elide_right, filter_title, range_row, reversed, width_of};
+use crate::view::{
+    PanelLook, elide_right, filter_title, query_title, range_row, reversed, width_of,
+};
 
 /// Authors longer than this lose their end, so the subject keeps room.
 const AUTHOR_WIDTH: usize = 16;
@@ -51,22 +54,46 @@ pub(crate) fn render_commits_panel(
         "Commits".to_string()
     };
     let mut last = if expanded { tabs } else { "Commits" }.to_string();
-    // A filter or a range on the log names itself in place of the tabs.
+    // A query, a filter or a range on the log names itself in place of
+    // the tabs, the query first.
     let mut name = name;
     let selected = match panel.range_anchor {
         Some(_) => format!(" · {} selected", panel.range().len()),
         None => String::new(),
     };
-    if expanded && !reflog && !panel.filter.is_empty() {
-        let counts = format!(
+    // Only with a filter: counting the shown rows walks every loaded one.
+    let counts = || {
+        format!(
             "{} of {} loaded{selected}",
             panel.visible().len(),
             panel.rows.len()
+        )
+    };
+    let mut base = "Commits".to_string();
+    if expanded && !reflog && panel.query.is_active() {
+        // With a filter as well, the query leaves room for it, up to half.
+        let reserve = if panel.filter.is_empty() {
+            width_of(&selected)
+        } else {
+            let filter = format!(" · /{} {}", panel.filter, counts());
+            width_of(&filter).min(look.title_room() / 2)
+        };
+        let query = &panel.query;
+        base = query_title(
+            look,
+            "Commits",
+            query.path.as_ref().map(|p| p.display()),
+            query.author.as_deref(),
+            reserve,
         );
-        name = filter_title(look, "Commits", &panel.filter, &counts);
+        name = format!("{base}{selected}");
+        last.clone_from(&name);
+    }
+    if expanded && !reflog && !panel.filter.is_empty() {
+        name = filter_title(look, &base, &panel.filter, &counts());
         last.clone_from(&name);
     } else if expanded && !reflog && !selected.is_empty() {
-        name = format!("Commits{selected}");
+        name = format!("{base}{selected}");
         last.clone_from(&name);
     }
     let last = last.as_str();
@@ -107,15 +134,19 @@ pub(crate) fn render_commits_panel(
                 lines.push(Line::from("Press r to retry"));
                 Paragraph::new(lines).wrap(Wrap { trim: false })
             }
+            None if panel.query.is_active() && panel.done => {
+                Paragraph::new(Line::styled("No commits match", dim))
+            }
             None => Paragraph::new(Line::styled("No commits yet", dim)),
         }
     } else if !expanded {
         let width = usize::from(inner.width);
-        Paragraph::new(commit_lines(panel, &state.copied, &[0], None, &[], width))
+        let marks = Marks::of(state);
+        Paragraph::new(commit_lines(panel, &marks, &[0], None, &[], width))
     } else if panel.visible().is_empty() {
         Paragraph::new(Line::styled("No matches", dim))
     } else {
-        Paragraph::new(window(panel, &state.copied, inner))
+        Paragraph::new(window(panel, &Marks::of(state), inner))
     };
     frame.render_widget(paragraph.block(block), area);
 }
@@ -123,7 +154,11 @@ pub(crate) fn render_commits_panel(
 /// A commit's files in place of the log: a placeholder until they load,
 /// then one row per file, scrolled so the cursor shows.
 fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Frame, area: Rect) {
-    let block = look.block(look.title(&format!("Commit {}", open.short_oid)));
+    let title = match &open.against {
+        Some(against) => format!("Files · {} vs {against}", open.short_oid),
+        None => format!("Commit {}", open.short_oid),
+    };
+    let block = look.block(look.title(&title));
     let inner = block.inner(area);
     let (height, width) = (usize::from(inner.height), usize::from(inner.width));
     let paragraph = match &open.error {
@@ -183,7 +218,7 @@ pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static>
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
 /// row saying a page is loading or failed. A stopped rebase's todo list
 /// comes first, right above the log it will extend.
-fn window(panel: &CommitsPanel, copied: &CopiedCommits, area: Rect) -> Vec<Line<'static>> {
+fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>> {
     let height = usize::from(area.height);
     let width = usize::from(area.width);
     let note = if panel.more_in_flight {
@@ -222,7 +257,7 @@ fn window(panel: &CommitsPanel, copied: &CopiedCommits, area: Rect) -> Vec<Line<
     let selected = panel.todo_selected.is_none().then_some(panel.selected);
     lines.extend(commit_lines(
         panel,
-        copied,
+        marks,
         &shown[log_start..end],
         selected,
         &range,
@@ -306,12 +341,15 @@ fn todo_line(entry: &TodoEntry, width: usize) -> Line<'static> {
 /// first, then the author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Columns {
-    /// Graph lanes shown; wider rows end in `…`. Zero while a filter hides
-    /// rows, since lanes would not join across them.
+    /// Graph lanes shown; wider rows end in `…`. Zero while a filter or a
+    /// query hides rows, since lanes would not join across them.
     lanes: usize,
     /// Two columns before the hash for the copied mark, kept on every row
     /// while anything is copied so the hashes line up.
     mark: bool,
+    /// Two more for the diff mark, kept on every row while a commit is
+    /// marked.
+    diff_mark: bool,
     hash: usize,
     date: bool,
     /// 0 drops the author.
@@ -319,10 +357,12 @@ struct Columns {
 }
 
 impl Columns {
-    fn fit(panel: &CommitsPanel, mark: bool, indexes: &[usize], width: usize) -> Self {
+    fn fit(panel: &CommitsPanel, marks: &Marks, indexes: &[usize], width: usize) -> Self {
+        let mark = !marks.copied.is_empty();
+        let diff_mark = marks.diff.is_some();
         // The widest row loaded so far, not just on screen, so the columns
         // stay put while scrolling; never more than a third of the width.
-        let lanes = if panel.filter.is_empty() {
+        let lanes = if panel.filter.is_empty() && !panel.query.is_active() {
             panel.lanes.max(1).min((width / 6).max(1))
         } else {
             0
@@ -332,7 +372,7 @@ impl Columns {
             .map(|&i| width_of(&panel.rows[i].short_oid))
             .max()
             .unwrap_or(0);
-        let fixed = lanes * 2 + 2 + if mark { 2 } else { 0 } + hash + 1;
+        let fixed = lanes * 2 + 2 + 2 * usize::from(mark) + 2 * usize::from(diff_mark) + hash + 1;
         let left = width.saturating_sub(fixed);
         let date = left >= SUBJECT_MIN + 4;
         let left = if date { left - 4 } else { left };
@@ -340,6 +380,7 @@ impl Columns {
         Self {
             lanes,
             mark,
+            diff_mark,
             hash,
             date,
             author: if author < 4 { 0 } else { author },
@@ -351,17 +392,17 @@ impl Columns {
 /// `range` are drawn reversed.
 fn commit_lines(
     panel: &CommitsPanel,
-    copied: &CopiedCommits,
+    marks: &Marks,
     indexes: &[usize],
     selected: Option<usize>,
     range: &[usize],
     width: usize,
 ) -> Vec<Line<'static>> {
-    let columns = Columns::fit(panel, !copied.is_empty(), indexes, width);
+    let columns = Columns::fit(panel, marks, indexes, width);
     indexes
         .iter()
         .map(|&i| {
-            let line = commit_line(panel, copied, i, &panel.graph[i], columns, width);
+            let line = commit_line(panel, marks, i, &panel.graph[i], columns, width);
             range_row(line, i, selected, range, width)
         })
         .collect()
@@ -372,7 +413,7 @@ fn commit_lines(
 /// to fit.
 fn commit_line(
     panel: &CommitsPanel,
-    copied: &CopiedCommits,
+    marks: &Marks,
     index: usize,
     graph: &GraphRow,
     columns: Columns,
@@ -396,12 +437,19 @@ fn commit_line(
     }
     spans.extend([marker, Span::raw(" ")]);
     if columns.mark {
-        let is_copied = CommitId::parse(&row.oid).is_some_and(|id| copied.contains(&id));
+        let is_copied = CommitId::parse(&row.oid).is_some_and(|id| marks.copied.contains(&id));
         spans.push(if is_copied {
             Span::styled(
                 "+ ",
                 Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )
+        } else {
+            Span::raw("  ")
+        });
+    }
+    if columns.diff_mark {
+        spans.push(if marks.diff == Some(row.oid.as_str()) {
+            Span::styled(DIFF_MARK, diff_mark_style())
         } else {
             Span::raw("  ")
         });
@@ -432,6 +480,36 @@ fn commit_line(
         width.saturating_sub(used),
     )));
     Line::from(spans)
+}
+
+/// What marks a commit row besides its own state: the copied set and the
+/// commit marked for diffing.
+struct Marks<'a> {
+    copied: &'a CopiedCommits,
+    /// The marked commit's full id, when the mark is a commit.
+    diff: Option<&'a str>,
+}
+
+impl<'a> Marks<'a> {
+    fn of(state: &'a AppState) -> Self {
+        let diff = match &state.diff_mark {
+            Some(DiffMark::Commit { id, .. }) => Some(id.as_str()),
+            _ => None,
+        };
+        Self {
+            copied: &state.copied,
+            diff,
+        }
+    }
+}
+
+/// The diff mark's column, on a marked commit or branch row. Its own
+/// glyph, not the current branch's `*`, so the two read apart without
+/// colour.
+pub(crate) const DIFF_MARK: &str = "◆ ";
+
+pub(crate) fn diff_mark_style() -> Style {
+    Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
 }
 
 /// `text` padded with spaces to `width` display columns.
@@ -986,7 +1064,7 @@ mod tests {
         let mut state = showing(rows);
         state.commits.selected = 99_990;
 
-        let lines = window(&state.commits, &state.copied, Rect::new(0, 0, 60, 20));
+        let lines = window(&state.commits, &Marks::of(&state), Rect::new(0, 0, 60, 20));
         assert_eq!(lines.len(), 20, "one line per visible row, no more");
         let text = |line: &Line| {
             line.spans
@@ -1094,7 +1172,7 @@ mod tests {
         );
 
         // Narrow, the graph takes at most a third of the width and says so.
-        let lines = commit_lines(&state.commits, &state.copied, &[0], None, &[], 18);
+        let lines = commit_lines(&state.commits, &Marks::of(&state), &[0], None, &[], 18);
         let text: String = lines[0].spans[0].content.to_string();
         assert_eq!(text, "●─╮─╮…");
         assert!(text.ends_with('…'), "{text:?}");
@@ -1335,6 +1413,127 @@ mod tests {
         state.commits.filter = "zzz".into();
         let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "No matches");
+    }
+
+    fn queried(path: Option<&str>, author: Option<&str>) -> AppState {
+        let mut state = showing(merge_rows());
+        state.commits.query = crate::git::log::LogQuery {
+            path: path.map(Into::into),
+            author: author.map(Into::into),
+        };
+        state
+    }
+
+    #[test]
+    fn a_log_query_names_itself_in_the_title_made_safe_and_hides_the_graph() {
+        let state = queried(Some("src/a.rs"), Some("ann\u{202E}x"));
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "Commits · path: src/a.rs · author: ann<U+202E>x");
+        assert!(!rows.iter().any(|r| r.contains('\u{202E}')), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains('●')), "no graph: {rows:#?}");
+        line_with(&rows, "Main work");
+
+        // The fuzzy filter's counts come after the query.
+        let mut state = queried(None, Some("ann"));
+        state.commits.filter = "work".into();
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        line_with(&rows, "Commits · author: ann · /work 2 of 4 loaded");
+    }
+
+    #[test]
+    fn a_long_query_is_cut_to_the_title_keeping_the_file_name() {
+        let long = format!("{}/name.rs", "dir/".repeat(40));
+        let state = queried(Some(&long), Some(&"a".repeat(80)));
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        let title = line_with(&rows, "[4] path: …");
+        assert!(title.contains("name.rs · author: aaa"), "{title}");
+        assert!(width_of(title) <= 80, "{title}");
+    }
+
+    #[test]
+    fn a_wide_character_query_keeps_the_file_name_end_at_every_width() {
+        let path = format!("{}名前.rs", "目录/".repeat(10));
+        let state = queried(Some(&path), Some(&"作者".repeat(10)));
+        for (width, height) in [(40, 10), (20, 6), (12, 3), (8, 4)] {
+            let rows = buffer_rows(&draw(&state, width, height));
+            let title = &rows[0];
+            assert!(width_of(title) <= usize::from(width), "{rows:#?}");
+            // The title's last cell is the border, never a cut glyph.
+            assert!(!title.contains('\u{FFFD}'), "{title}");
+            if width >= 20 {
+                assert!(title.contains(".rs"), "{width}: {title}");
+            }
+            if width >= 40 {
+                assert!(
+                    title.contains("path: …") && title.contains("author: 作"),
+                    "{title}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_and_the_fuzzy_filter_share_the_title() {
+        let path = format!("{}name.rs", "dir/".repeat(30));
+        let mut state = queried(Some(&path), Some("ann"));
+        state.commits.filter = "work".into();
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        let title = &rows[0];
+        assert!(width_of(title) <= 80, "{title}");
+        assert!(title.contains("name.rs · author: ann"), "{title}");
+        assert!(title.contains("/work"), "{title}");
+    }
+
+    #[test]
+    fn an_empty_finished_query_says_nothing_matches() {
+        let mut state = queried(None, Some("zed"));
+        state.commits.set_query(state.commits.query.clone());
+        state.commits.begin_page(1, 0);
+        state.commits.page_loaded(
+            1,
+            0,
+            Ok((
+                LogPage {
+                    rows: vec![],
+                    done: true,
+                },
+                NOW,
+            )),
+        );
+        line_with(&buffer_rows(&draw(&state, 100, 30)), "No commits match");
+    }
+
+    #[test]
+    fn the_marked_commit_draws_its_mark_and_the_columns_stay_aligned() {
+        let mut state = showing(merge_rows());
+        state.diff_mark = Some(DiffMark::Commit {
+            id: CommitId::parse("b000000aaa").unwrap(),
+            short: "b000000".into(),
+        });
+        let buffer = draw(&state, 100, 30);
+        let rows = buffer_rows(&buffer);
+        assert!(
+            line_with(&rows, "Main work").contains("◆ b000000"),
+            "{rows:#?}"
+        );
+        assert!(
+            line_with(&rows, "Side work").contains("  s000000"),
+            "{rows:#?}"
+        );
+        assert_eq!(column_of(&rows, "b000000"), column_of(&rows, "s000000"));
+        let y = rows.iter().position(|r| r.contains("Main work")).unwrap() as u16;
+        let x = column_of(&rows, "◆ b000000") as u16;
+        assert_eq!(buffer[(x, y)].style().fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn a_comparison_names_both_ends_in_the_title() {
+        let mut state = opened(Some(Ok(five_files())));
+        let open = state.commits.open.as_mut().unwrap();
+        open.short_oid = "a1b2c3d".into();
+        open.against = Some("main".into());
+        let rows = buffer_rows(&draw(&state, 80, 20));
+        assert!(rows[0].contains("Files · a1b2c3d vs main"), "{rows:#?}");
     }
 
     #[test]
