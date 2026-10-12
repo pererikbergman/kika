@@ -11,6 +11,7 @@ use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::custom_patch::PatchAction;
 use crate::git::askpass::Secret;
+use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
 use crate::git::path::RepoPath;
@@ -525,6 +526,10 @@ pub enum ConfirmKind {
     /// target or message fixed when asked, and rewrites commits the user
     /// may not be looking at, so only `y` answers.
     CustomPatch(PatchAction),
+    /// Drop these commits, the full ids of a log range when asked, newest
+    /// first. It throws away several commits' changes, so only `y`
+    /// answers, and the answer drops only if the range still holds them.
+    DropRange(Vec<CommitId>),
 }
 
 impl ConfirmKind {
@@ -542,6 +547,7 @@ impl ConfirmKind {
             ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
             ConfirmKind::CustomPatch(_) => "Custom patch",
+            ConfirmKind::DropRange(_) => "Drop commits",
         }
     }
 
@@ -595,6 +601,9 @@ impl ConfirmKind {
             // `AppState::confirm_question` names the commits; this is the
             // fallback when it cannot.
             ConfirmKind::CustomPatch(_) => "Rewrite the history with the custom patch? (y/n)",
+            // `AppState::confirm_question` counts the commits; this is the
+            // fallback when it cannot.
+            ConfirmKind::DropRange(_) => "Drop the selected commits and their changes? (y/n)",
         }
     }
 
@@ -609,6 +618,7 @@ impl ConfirmKind {
             ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
             ConfirmKind::CustomPatch(action) => AppIntent::ConfirmPatchAction(action.clone()),
+            ConfirmKind::DropRange(ids) => AppIntent::ConfirmDropRange(ids.clone()),
         }
     }
 
@@ -621,7 +631,8 @@ impl ConfirmKind {
             | ConfirmKind::DetachedCheckout
             | ConfirmKind::Autosquash
             | ConfirmKind::CreatePullRequest
-            | ConfirmKind::CustomPatch(_) => None,
+            | ConfirmKind::CustomPatch(_)
+            | ConfirmKind::DropRange(_) => None,
         }
     }
 }
