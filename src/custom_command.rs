@@ -308,8 +308,9 @@ fn placeholder_named(name: &str) -> Option<Part> {
 
 /// A shell reads its script, and the options before it, as code. A value
 /// placed there would run as code too, so it must come after the script,
-/// where the script reads it as `"$1"`. A shell started through one of
-/// `LAUNCHERS` is checked the same way.
+/// where the script reads it as `"$1"` (csh/tcsh: after a name, as
+/// `$2:q`). A shell started through one of `LAUNCHERS` is checked the
+/// same way.
 fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
     if is_shell(&command[0]) {
         return check_shell_at(command, argv);
@@ -347,9 +348,10 @@ fn check_shell(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> {
         if let Some(part) = first_value(&argv[1..k]) {
             return Err(format!(
                 "\"{}\" is before the shell that {} starts, where it could become the \
-                 program or its options; pass it after the script and read it as \"$1\"",
+                 program or its options; {}",
                 placeholder(part),
-                command[0]
+                command[0],
+                read_rule(&command[k])
             ));
         }
         check_shell_at(&command[k..], &argv[k..])?;
@@ -390,9 +392,9 @@ fn check_shell_at(command: &[String], argv: &[Vec<Part>]) -> Result<(), String> 
     let script = options_end.map_or(1, |i| i + 2);
     if first <= script {
         return Err(format!(
-            "\"{}\" is in the shell script or before it, where it would run as code; \
-             pass it after the script and read it as \"$1\"",
-            placeholder(part)
+            "\"{}\" is in the shell script or before it, where it would run as code; {}",
+            placeholder(part),
+            read_rule(&command[0])
         ));
     }
     Ok(())
@@ -516,21 +518,44 @@ fn is_env(program: &str) -> bool {
 /// which Windows drops. The untrimmed name is checked too, so trimming
 /// never turns a shell into a non-shell.
 fn is_shell(program: &str) -> bool {
-    is_shell_name(&last_component(program)) || is_shell_name(&program_name(program))
+    shell_of(program).is_some()
 }
 
-/// `is_shell` for a lowercased last component.
-fn is_shell_name(name: &str) -> bool {
+/// Whether `program` names csh or tcsh, by `is_shell`'s rules. They read
+/// a value differently from the other shells.
+fn is_csh(program: &str) -> bool {
+    matches!(shell_of(program), Some("csh" | "tcsh"))
+}
+
+/// The entry of `SHELLS` that `program` names, if any.
+fn shell_of(program: &str) -> Option<&'static str> {
+    shell_named(&last_component(program)).or_else(|| shell_named(&program_name(program)))
+}
+
+/// `shell_of` for a lowercased last component.
+fn shell_named(name: &str) -> Option<&'static str> {
     let name = name.strip_suffix(".exe").unwrap_or(name);
-    if SHELLS.contains(&name) {
-        return true;
+    let find = |base: &str| SHELLS.iter().copied().find(|&shell| shell == base);
+    if let Some(shell) = find(name) {
+        return Some(shell);
     }
     let base = name.trim_end_matches(|c: char| c.is_ascii_digit() || c == '.');
     if !name[base.len()..].contains(|c: char| c.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    let base = base.strip_suffix('-').unwrap_or(base);
-    SHELLS.contains(&base)
+    find(base.strip_suffix('-').unwrap_or(base))
+}
+
+/// How a value reaches a script run by `shell`. csh/tcsh take the word
+/// after the script as a name and quote a value with `:q`, since `"$2"`
+/// breaks on a newline.
+fn read_rule(shell: &str) -> &'static str {
+    if is_csh(shell) {
+        "pass it after the script and a name, as in tcsh -c '… $2:q' tcsh {path}, \
+         and read it as $2:q"
+    } else {
+        "pass it after the script and read it as \"$1\""
+    }
 }
 
 /// A `[[commands]]` entry, for tests elsewhere.
@@ -725,14 +750,6 @@ mod tests {
             // A value in $0 counts as the script's place too.
             &["bash", "-c", "x {{a}} \"$1\"", "{path}"],
             &["mksh", "-c", "x {path}"],
-            &["tcsh", "-c", "x {path}"],
-            // tcsh reads options after the script too, until the first word
-            // that is not one, so the slot after the script stays closed.
-            &["tcsh", "-c", "x $1:q", "{path}"],
-            &["csh", "-c", "x $1:q", "{path}"],
-            &["tcsh", "-c", "x $2:q", "-x", "{path}"],
-            &["tcsh", "-f", "{path}"],
-            &["tcsh6", "-c", "x {path}"],
             &["sh", "-{path}"],
             // Versioned names, as distributions install them.
             &["bash5", "-c", "x {path}"],
@@ -746,6 +763,31 @@ mod tests {
             assert!(
                 e.starts_with(r#"command 2: "{path}" is in the shell script or before it"#)
                     && e.ends_with(rule),
+                "{command:?}: {e}"
+            );
+        }
+        let csh_rule = "pass it after the script and a name, as in \
+                        tcsh -c '… $2:q' tcsh {path}, and read it as $2:q";
+        for command in [
+            &["tcsh", "-c", "x {path}"][..],
+            // tcsh reads options after the script too, until the first word
+            // that is not one, so the slot after the script stays closed.
+            &["tcsh", "-c", "x $1:q", "{path}"],
+            &["csh", "-c", "x $1:q", "{path}"],
+            &["tcsh", "-c", "x $2:q", "-x", "{path}"],
+            &["tcsh", "-f", "{path}"],
+            // Versioned and decorated names.
+            &["tcsh6", "-c", "x {path}"],
+            &["tcsh-6.24", "-c", "x {path}"],
+            &["/usr/local/bin/csh2", "-c", "x {path}"],
+            &["TCSH.EXE", "-c", "x {path}"],
+            &["tcsh.", "-c", "x {path}"],
+        ] {
+            let e = error(Panel::Files, command, &[]);
+            assert!(
+                e.starts_with(r#"command 2: "{path}" is in the shell script or before it"#)
+                    && e.ends_with(csh_rule)
+                    && !e.contains("\"$1\""),
                 "{command:?}: {e}"
             );
         }
@@ -837,6 +879,48 @@ mod tests {
         ] {
             assert!(!is_shell(program), "{program}");
         }
+    }
+
+    #[test]
+    fn only_csh_and_tcsh_names_are_csh() {
+        for program in [
+            "csh",
+            "tcsh",
+            "tcsh6",
+            "tcsh-6.24",
+            "/usr/local/bin/csh2",
+            "TCSH.EXE",
+            "tcsh.",
+            r"C:\x\Csh.exe",
+        ] {
+            assert!(is_csh(program), "{program}");
+        }
+        for program in ["cshell", "tcsh-", "sh", "bash", "xcsh", "bash5", "fish"] {
+            assert!(!is_csh(program), "{program}");
+        }
+    }
+
+    #[test]
+    fn a_launched_csh_gets_the_csh_rule() {
+        let csh_rule = "and read it as $2:q";
+        let e = error(Panel::Files, &["env", "tcsh", "-c", "x {path}"], &[]);
+        assert!(
+            e.starts_with(r#"command 2: "{path}" is in the shell script or before it"#)
+                && e.ends_with(csh_rule),
+            "{e}"
+        );
+        let e = error(Panel::Files, &["env", "X={path}", "tcsh", "-c", "x"], &[]);
+        assert!(
+            e.starts_with(r#"command 2: "{path}" is before the shell that env starts"#)
+                && e.ends_with(csh_rule)
+                && !e.contains("\"$1\""),
+            "{e}"
+        );
+        let e = error(Panel::Files, &["env", "X={path}", "sh", "-c", "x"], &[]);
+        assert!(
+            e.ends_with("pass it after the script and read it as \"$1\""),
+            "{e}"
+        );
     }
 
     #[test]

@@ -456,6 +456,8 @@ pub enum PromptKind {
     TagName,
     /// An annotated tag's message, asked after its name.
     TagMessage,
+    /// The pattern to add to `.gitignore`, filled with the selected file's.
+    IgnorePattern,
 }
 
 impl PromptKind {
@@ -473,6 +475,7 @@ impl PromptKind {
             PromptKind::WorktreePath => "New worktree",
             PromptKind::TagName => "New tag",
             PromptKind::TagMessage => "Tag message",
+            PromptKind::IgnorePattern => "Add to .gitignore",
         }
     }
 
@@ -490,6 +493,7 @@ impl PromptKind {
             PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
             PromptKind::TagName => AppIntent::TagNamed(text),
             PromptKind::TagMessage => AppIntent::TagMessaged(text),
+            PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
         }
     }
 }

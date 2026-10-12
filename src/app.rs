@@ -44,7 +44,8 @@ pub async fn run(
     let runtime = Runtime::new(Arc::clone(&runner), tx.clone())
         .with_recent_store(recent_store)
         .with_global_config(global_config)
-        .with_diff_pager(config.diff_pager.clone());
+        .with_diff_pager(config.diff_pager.clone())
+        .with_diff_tool(config.diff_tool.clone());
     let input = Arc::new(InputGate::default());
     // Watch settings apply from startup only: the timers are spawned once.
     spawn_watch_timers(tx.clone(), &config.watch);
@@ -111,6 +112,11 @@ pub fn dispatch(state: &mut AppState, runtime: &Runtime, intent: AppIntent) -> V
     for effect in state.update(intent) {
         match effect {
             Effect::HandOff(job) => jobs.push(job),
+            Effect::Clipboard(text) => {
+                if let Err(why) = runtime.copy_to_clipboard(&text) {
+                    jobs.extend(dispatch(state, runtime, AppIntent::CopyFailed(why)));
+                }
+            }
             effect => runtime.spawn(effect),
         }
     }

@@ -31,6 +31,7 @@ fetch = 300     # leave out to keep auto-fetch off
 
 [diff]
 pager = "delta --paging=never"   # a program that draws the Diff pane
+tool = "difft --color=always"    # a display-only diff tool
 ```
 
 ## Layering
@@ -143,6 +144,41 @@ pager = "delta --paging=never"
   `core.pager`, under the same rules. Plain viewers (`less`, `more`, `most`,
   `cat`) and `true`/`false` values are skipped, from either source. A
   repository's own git config is never read for this.
+
+### `tool`: a display-only diff tool
+
+`tool` names a structural diff tool, such as difftastic, that compares the
+old and new file instead of reading a diff. `R` offers it after the pagers.
+
+```toml
+[diff]
+tool = "difft --color=always"
+```
+
+- Kika reads both sides of the shown file into two new temp files in a
+  private directory, runs the tool as `<tool> -- OLD NEW`, and removes the
+  directory afterwards. For unstaged changes OLD is the index and NEW the
+  working tree file; for staged changes OLD is `HEAD` and NEW the index; for
+  an untracked file OLD is empty. The temp files are named `old` and `new`,
+  plus the file's extension when it is 1 to 16 letters or digits, so your
+  file names never reach the tool's arguments.
+- The value follows the same rules as `pager`: run directly, never through a
+  shell, split on spaces, with a bare name or an absolute path.
+- The tool gets the pane's width in both `COLUMNS` and `DFT_WIDTH`, and runs
+  under the same limits: at most 10 seconds and 16 MiB of output, and at
+  most 16 MiB per side. Contents are the raw bytes, with no textconv or
+  clean filter applied.
+- Only regular files are shown. A symlink, a submodule or a conflicted file
+  says so instead.
+- **The tool's view is display-only.** Its rows cannot be matched to the
+  changes they show, so hunk and line staging, discard and hunk editing are
+  refused there, and the title says `(display only)`. Press `R` to get back
+  to the built-in view. Staging and discarding whole files from the Files
+  panel work as usual.
+- **Only Kika's global file sets `tool`.** Git's own external diff settings
+  (`diff.external`, `diff.tool`, `difftool.*` and `GIT_EXTERNAL_DIFF`) are
+  never read for it, since git runs those through a shell and a cloned
+  repository can bring them.
 
 **Changes to `[diff]` take effect after a restart.**
 
@@ -460,6 +496,7 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.blame` | `b` | Blame the selected file | |
 | `files.hunks` | `enter` | Work on the hunks of the selected file, or resolve its conflicts | |
 | `files.mergetool` | `M` | Resolve the selected conflicted file in your merge tool | locked |
+| `files.ignore` | `i` | Add to .gitignore | |
 | `files.menu` | `m` | Open the actions menu | |
 | `files.filter` | `/` | Filter the files by typed text | |
 | `files.range` | `V` | Select a range of files from here, for stage and discard; again to clear it | |
@@ -472,6 +509,15 @@ it. `space` then stages the whole range in one go (or unstages it, when
 nothing in it is left to stage), skipping conflicted files, and `d` asks
 once before discarding the range; only `y` answers that question. Keys that
 act on one file are refused while a range is selected.
+
+`i` asks for a pattern to add to the `.gitignore` at the top of the worktree
+(or of the entered submodule), filled with one that matches exactly the
+selected untracked file: anchored with `/`, with glob characters escaped.
+Accept it as it is, or edit it into any pattern. The file is created if there
+is none, and a line already there is not added twice. Only `.gitignore`
+changes: no git command runs and nothing is staged. Kika will not write
+through a `.gitignore` that is a symlink, and tracked files cannot be ignored
+this way.
 
 ### Branches
 
@@ -598,6 +644,7 @@ can be reset, but not marked from Kika.
 | `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
 | `commits.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
+| `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -614,6 +661,14 @@ starts one; it moves nothing until there is both a good and a bad commit, then
 git checks out a commit to test and the Status panel takes over. A bisect
 does not start while tracked files have changes, or while a merge, rebase,
 cherry-pick or revert is in progress. Kika never runs `git bisect run`.
+
+`y` opens the Copy menu: the selected commit's full hash, short hash, subject
+or full message. Kika copies with the OSC 52 terminal escape, so it needs no
+clipboard program and works over SSH. Some terminals do not support OSC 52 or
+turn it off by default, and none says whether a copy worked, so "Copied" means
+it was sent. Inside tmux it needs `set -g set-clipboard on`; GNU screen is not
+supported. Text is cleaned of control characters first, and more than 64 KB
+is refused.
 
 `t` asks for a tag name and tags the selected commit; `T` then asks for a
 one-line message too and makes an annotated tag. The commit is the one
