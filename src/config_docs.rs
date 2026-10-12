@@ -255,3 +255,19 @@ fn every_documented_key_parses_back_to_the_default_it_names() {
         }
     }
 }
+
+#[test]
+fn the_page_documents_every_forge_key_and_the_pull_request_menu() {
+    for needle in [
+        "github = [",
+        "gitlab = [",
+        "browser = [",
+        "Open in browser",
+        "Create pull request",
+    ] {
+        assert!(
+            PAGE.contains(needle),
+            "docs/configuration.md lacks {needle:?}"
+        );
+    }
+}

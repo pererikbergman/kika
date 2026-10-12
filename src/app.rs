@@ -56,6 +56,7 @@ pub async fn run(
         .with_diff_pager(config.diff_pager.clone())
         .with_diff_tool(config.diff_tool.clone())
         .with_forge(forge)
+        .with_command_sink(sink.clone())
         // Resolved by `main` for this terminal; the view reads the same value.
         .with_emoji_zwj(state.emoji_zwj);
     let input = Arc::new(InputGate::default());

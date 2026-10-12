@@ -41,6 +41,8 @@ hooks_detached = true   # commits that only run hooks stay in the background
 
 [forge]
 github = ["github.com"]   # leave out to keep pull requests off
+gitlab = ["gitlab.com"]   # only used to build URLs, never contacted
+browser = ["open"]        # opens forge pages; leave out to keep it off
 
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
@@ -299,6 +301,59 @@ github = ["github.com", "github.example.com"]
   for another repository. It does not retry by itself: the next open,
   fetch, pull or push after the reset asks again. The wait is kept only
   while Kika runs.
+
+### Opening, copying and creating pull requests
+
+`o` in the Branches panel opens the Pull request menu for the selected
+branch:
+
+- **Open in browser** starts the program `browser` names with the page's
+  URL as its last argument. There is no built-in or guessed program: until
+  you set `browser`, this item is off and says so.
+- **Copy URL** puts the page's URL on the clipboard.
+- **Create pull request…** opens a pull request on GitHub (see below).
+
+The page of a GitHub branch is its pull request, so it needs the badge.
+GitLab is never contacted, so no merge request number is known: a GitLab
+branch's page is the list of its merge requests, in any state, filtered to
+the branch. Every URL is built by Kika from the remote's host, owner and
+repository name, always `https://`, never with the user name, password,
+token or port the remote URL may hold.
+
+```toml
+[forge]
+github = ["github.com"]
+gitlab = ["gitlab.com", "gitlab.example.com"]   # only to build URLs
+browser = ["open"]                             # macOS; ["xdg-open"] on Linux
+```
+
+- `gitlab` lists GitLab hosts the same way `github` lists GitHub ones. They
+  are only used to build URLs: Kika never contacts them, and they never
+  turn the pull-request badges on.
+- `browser` is the program and its arguments as a list, run directly with
+  no shell. The program must be a bare name (looked up on your `PATH`) or
+  an absolute path; anything else is an error, and the whole file is
+  ignored. It runs in the background with no input or output, and shows in
+  the Command log.
+- Creating needs a GitHub branch with no pull request yet, pushed to a
+  remote: the head is its upstream. When more than one remote on the same
+  GitHub host could take it, Kika asks which (Target remote), then which of
+  its branches to merge into (Base branch, starting on `main`, else
+  `master`). It then asks for the title, starting from the branch name, and
+  shows the repository, `head → base` and the title. Only `y` creates it;
+  `enter` does nothing there. The call is
+  `gh api --include --hostname <host> --method POST repos/<owner>/<repo>/pulls --input -`,
+  with the title and branch names on its input, never on the command line.
+  A head pushed to another repository (a fork) is sent as `owner:branch`.
+  The new badge shows at once, and the badges are read again. A pull
+  request made on another remote's repository gets no badge, since badges
+  come from `origin`; Kika says its number instead. When GitHub refuses,
+  its message is shown.
+- Kika does not push the branch, fill in a body, mark drafts, or ask for
+  reviewers or labels.
+
+The Commits panel's Copy menu (`y`) has **Forge URL**, the selected commit's
+page.
 
 **Changes to `[forge]` take effect after a restart.**
 
@@ -570,8 +625,8 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
 - **`[forge]` is allowed only in the global file**, since it lets Kika contact
-  a host. A `[forge]` table in `.kika.toml` is an error, and the whole file is
-  ignored.
+  a host and names the browser it runs. A `[forge]` table in `.kika.toml` is
+  an error, and the whole file is ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an
@@ -711,6 +766,7 @@ this way.
 | `branches.rename` | `R` | Rename the selected branch | |
 | `branches.delete` | `d` | Delete the selected branch, asking first | locked |
 | `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
+| `branches.pull_request` | `o` | Open, copy or create the selected branch's pull request | locked |
 | `branches.set_upstream` | `u` | Set the remote branch the selected branch tracks | |
 | `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
 | `branches.switch_tab` | `]` | Show the remotes and their branches | |
@@ -871,8 +927,8 @@ git checks out a commit to test and the Status panel takes over. A bisect
 does not start while tracked files have changes, or while a merge, rebase,
 cherry-pick or revert is in progress. Kika never runs `git bisect run`.
 
-`y` opens the Copy menu: the selected commit's full hash, short hash, subject
-or full message. Kika copies with the OSC 52 terminal escape, so it needs no
+`y` opens the Copy menu: the selected commit's full hash, short hash, subject,
+full message, or its page on the forge (Forge URL; see `[forge]`). Kika copies with the OSC 52 terminal escape, so it needs no
 clipboard program and works over SSH. Some terminals do not support OSC 52 or
 turn it off by default, and none says whether a copy worked, so "Copied" means
 it was sent. Inside tmux it needs `set -g set-clipboard on`; GNU screen is not
@@ -1236,6 +1292,27 @@ commits, so `enter` does not answer it.
 | `travel.yes` | `y` | Yes, do what the question says | locked |
 | `travel.no` | `n`, `esc` | No, leave everything where it is | locked |
 | `travel.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Create this pull request?
+
+The question names the repository, `head → base` and the title. Creating it
+reaches GitHub, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `create_pull_request.yes` | `y` | Yes, create the pull request on GitHub | locked |
+| `create_pull_request.no` | `n`, `esc` | No, create nothing | locked |
+| `create_pull_request.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Pick one (a pull request's target remote or base branch)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `pick_list.next` | `j`, `down` | Select the next row | |
+| `pick_list.prev` | `k`, `up` | Select the previous row | |
+| `pick_list.pick` | `enter` | Take the selected row | |
+| `pick_list.close` | `esc`, `q` | Close the list and stop | |
+| `pick_list.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Submodule list
 

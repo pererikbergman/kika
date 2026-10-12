@@ -23,6 +23,8 @@ pub enum CopyWhat {
     ShortHash,
     Subject,
     Message,
+    /// The commit's page on the remote's forge.
+    ForgeUrl,
 }
 
 impl CopyWhat {
@@ -33,6 +35,7 @@ impl CopyWhat {
             CopyWhat::ShortHash => "short hash",
             CopyWhat::Subject => "subject",
             CopyWhat::Message => "message",
+            CopyWhat::ForgeUrl => "URL",
         }
     }
 }

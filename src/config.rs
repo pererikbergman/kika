@@ -23,6 +23,8 @@
 //! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
 //! [forge]
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
+//! gitlab = ["gitlab.com"]   # only to build URLs; never contacted
+//! browser = ["open"]        # argv that opens a URL, given as its last argument
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! ```
@@ -43,6 +45,7 @@
 //! The user's guide to both files, with every binding id, is
 //! `docs/configuration.md`.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -52,7 +55,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::custom_command::CommandTable;
-use crate::external_diff::parse_command;
+use crate::external_diff::{check_argv, parse_command};
 use crate::forge::ForgeHost;
 use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
@@ -120,6 +123,11 @@ pub struct Loaded {
     pub diff_pager: Option<String>,
     /// The global `[forge] github` hosts; empty keeps the forge off.
     pub forge_hosts: Vec<ForgeHost>,
+    /// The global `[forge] gitlab` hosts, only ever used to build URLs.
+    pub forge_gitlab_hosts: Vec<ForgeHost>,
+    /// The global `[forge] browser` argv, checked by `check_argv`; `None`
+    /// leaves opening a URL off.
+    pub browser: Option<Vec<OsString>>,
     /// The global `[diff] tool` command, checked by `parse_command`.
     pub diff_tool: Option<String>,
     /// The global `[commit] hooks_detached`: hooks alone do not hand a
@@ -138,6 +146,8 @@ struct GlobalSettings {
     watch: WatchConfig,
     diff_pager: Option<String>,
     forge_hosts: Vec<ForgeHost>,
+    forge_gitlab_hosts: Vec<ForgeHost>,
+    browser: Option<Vec<OsString>>,
     diff_tool: Option<String>,
     commit_hooks_detached: bool,
     emoji_zwj_terminals: Vec<String>,
@@ -170,14 +180,18 @@ struct CommitTable {
     hooks_detached: Option<bool>,
 }
 
-/// The hosts Kika may ask about pull requests, by forge. Only here, in
-/// the user's own file: a cloned repository can never make Kika contact
-/// a host.
+/// The hosts Kika may ask about pull requests, by forge, and the program
+/// that opens a forge page. Only here, in the user's own file: a cloned
+/// repository can never make Kika contact a host or run a program.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForgeTable {
     #[serde(default)]
     github: Vec<String>,
+    /// Hosts whose URLs Kika builds; none is ever contacted.
+    #[serde(default)]
+    gitlab: Vec<String>,
+    browser: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -221,6 +235,8 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         watch: DEFAULT_WATCH,
         diff_pager: None,
         forge_hosts: Vec::new(),
+        forge_gitlab_hosts: Vec::new(),
+        browser: None,
         diff_tool: None,
         commit_hooks_detached: false,
         emoji_zwj_terminals: Vec::new(),
@@ -244,6 +260,8 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
             global.commit_hooks_detached,
         );
         loaded.forge_hosts = global.forge_hosts;
+        loaded.forge_gitlab_hosts = global.forge_gitlab_hosts;
+        loaded.browser = global.browser;
         loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
@@ -345,12 +363,19 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(tool) = &file.diff.tool {
         parse_command(tool).map_err(|e| format!("diff.tool: {e}"))?;
     }
-    let forge_hosts = file
+    let hosts = |names: &[String], key: &str| {
+        names
+            .iter()
+            .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.{key}: {e}")))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let forge_hosts = hosts(&file.forge.github, "github")?;
+    let forge_gitlab_hosts = hosts(&file.forge.gitlab, "gitlab")?;
+    let browser = file
         .forge
-        .github
-        .iter()
-        .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.github: {e}")))
-        .collect::<Result<_, _>>()?;
+        .browser
+        .map(|argv| check_argv(argv).map_err(|e| format!("forge.browser: {e}")))
+        .transpose()?;
     let emoji_zwj_terminals = file.display.emoji_zwj_terminals.unwrap_or_default();
     // An empty name would match a terminal that sets no name at all.
     if emoji_zwj_terminals.iter().any(String::is_empty) {
@@ -362,6 +387,8 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         diff_pager: file.diff.pager,
         diff_tool: file.diff.tool,
         forge_hosts,
+        forge_gitlab_hosts,
+        browser,
         commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
         emoji_zwj_terminals,
     })
@@ -595,6 +622,8 @@ mod tests {
                 diff_pager: None,
                 diff_tool: None,
                 forge_hosts: vec![],
+                forge_gitlab_hosts: vec![],
+                browser: None,
                 commit_hooks_detached: false,
                 emoji_zwj_terminals: vec![],
                 errors: vec![],
@@ -882,14 +911,72 @@ output = "none"
                 hosts(&format!("[forge]\ngithub = [\"github.com\", \"{bad}\"]\n")).unwrap_err();
             assert!(err.starts_with("forge.github: "), "{bad}: {err}");
         }
-        let typo = hosts("[forge]\ngitlab = [\"gitlab.com\"]\n").unwrap_err();
-        assert!(typo.contains("unknown field `gitlab`"), "{typo}");
+        let typo = hosts("[forge]\ngitlub = [\"gitlab.com\"]\n").unwrap_err();
+        assert!(typo.contains("unknown field `gitlub`"), "{typo}");
 
         let files = Files::new("forge-bad");
         files.global("[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"GitHub.com\"]\n");
         let loaded = files.load();
         assert_eq!(loaded.forge_hosts, []);
         assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn the_global_file_names_the_gitlab_hosts_and_the_browser() {
+        let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
+        let settings = global(
+            "[forge]\ngitlab = [\"gitlab.com\", \"git.example.org\"]\n\
+             browser = [\"/usr/bin/open\", \"-a\", \"Safari Browser\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings.forge_gitlab_hosts,
+            [
+                ForgeHost::parse("gitlab.com").unwrap(),
+                ForgeHost::parse("git.example.org").unwrap()
+            ]
+        );
+        // GitLab hosts never turn the pull-request load on.
+        assert_eq!(settings.forge_hosts, []);
+        assert_eq!(
+            settings.browser,
+            Some(vec![
+                OsString::from("/usr/bin/open"),
+                "-a".into(),
+                "Safari Browser".into()
+            ])
+        );
+        let bare = global("[forge]\nbrowser = [\"xdg-open\"]\n").unwrap();
+        assert_eq!(bare.browser, Some(vec![OsString::from("xdg-open")]));
+        assert_eq!(global("").unwrap().browser, None);
+
+        let err = |text: &str| global(text).unwrap_err();
+        assert_eq!(
+            err("[forge]\nbrowser = [\"bin/open\"]\n"),
+            "forge.browser: The program must be a bare name or an absolute path"
+        );
+        assert_eq!(
+            err("[forge]\nbrowser = [\"./open\"]\n"),
+            "forge.browser: The program must be a bare name or an absolute path"
+        );
+        assert_eq!(
+            err("[forge]\nbrowser = []\n"),
+            "forge.browser: The command is empty"
+        );
+        assert_eq!(
+            err("[forge]\nbrowser = [\"open\", \"a\\u001bb\"]\n"),
+            "forge.browser: The command contains a control character"
+        );
+        assert!(err("[forge]\nbrowser = \"open\"\n").contains("invalid type"));
+        let bad_host = err("[forge]\ngitlab = [\"GitLab.com\"]\n");
+        assert!(bad_host.starts_with("forge.gitlab: "), "{bad_host}");
+
+        // A bad browser drops the whole file, as any error does.
+        let files = Files::new("forge-browser-bad");
+        files.global("[forge]\ngithub = [\"github.com\"]\nbrowser = [\"x/open\"]\n");
+        let loaded = files.load();
+        assert_eq!((loaded.forge_hosts, loaded.browser), (vec![], None));
         assert_eq!(loaded.errors.len(), 1);
     }
 
@@ -903,6 +990,20 @@ output = "none"
         let loaded = files.load();
         assert_eq!(loaded.forge_hosts, []);
         assert_eq!(loaded.errors.len(), 1);
+
+        // Nor can it name a program to open URLs with, or GitLab hosts.
+        for text in [
+            "[forge]\nbrowser = [\"open\"]\n",
+            "[forge]\ngitlab = [\"gitlab.com\"]\n",
+        ] {
+            let refused = repo(text).unwrap_err();
+            assert!(refused.contains("unknown field `forge`"), "{refused}");
+            files.repo(text);
+            let loaded = files.load();
+            assert_eq!(loaded.browser, None);
+            assert_eq!(loaded.forge_gitlab_hosts, []);
+            assert_eq!(loaded.errors.len(), 1);
+        }
 
         files
             .global("[forge]\ngithub = [\"github.com\", \"github.example.com\"]\n")

@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
+use crate::pick_list::PickList;
 use crate::popup::{CredentialPrompt, ErrorPopup, LineInput, Popup};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::submodule_list::SubmoduleList;
@@ -96,6 +97,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
+            Popup::PickList(list) => render_pick_list(list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
                 let text = format!("{}\n(y/n)", prompt.prompt);
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
@@ -321,6 +323,53 @@ fn render_recent(state: &AppState, list: &RecentList, top: bool, frame: &mut Fra
     frame.render_widget(Clear, popup);
     let shown = usize::from(popup.height.saturating_sub(2)).max(1);
     let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
+    let first = u16::try_from(first).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((first, 0))
+            .block(Block::bordered().title(title)),
+        popup,
+    );
+}
+
+/// The rows to pick from, under the list's purpose, with the cursor row
+/// reversed while the list is on top. Long rows are cut at the end.
+fn render_pick_list(list: &PickList, top: bool, frame: &mut Frame, area: Rect) {
+    let title = format!(" {} ", list.purpose.title());
+    let room = usize::from(area.width.saturating_sub(2));
+    let rows: Vec<String> = list
+        .rows
+        .iter()
+        .map(|row| format!(" {} ", clip(row, 0, room.saturating_sub(2).max(1))))
+        .collect();
+    let width = rows
+        .iter()
+        .map(|row| width_of(row))
+        .chain([width_of(&title)])
+        .max()
+        .unwrap_or(0)
+        .min(room);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let pad = width.saturating_sub(width_of(row));
+            let style = if top && i == list.cursor {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            Line::styled(format!("{row}{}", " ".repeat(pad)), style)
+        })
+        .collect();
+    let popup = centered(
+        area,
+        u16::try_from(width + 2).unwrap_or(u16::MAX),
+        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+    );
+    frame.render_widget(Clear, popup);
+    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
+    let first = list.cursor.saturating_sub(shown - 1);
     let first = u16::try_from(first).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(lines)
@@ -719,6 +768,70 @@ mod tests {
         );
         assert!(
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_pick_list_shows_its_purpose_and_rows_with_the_cursor_reversed() {
+        use crate::pick_list::{PickList, PickPurpose};
+        let mut state = workspace(&["a.rs"]);
+        let rows = vec![
+            "origin  acme/widgets".into(),
+            "upstream  org/widgets".into(),
+        ];
+        state.popups = vec![Popup::PickList(PickList::new(
+            PickPurpose::TargetRemote,
+            rows,
+            1,
+        ))];
+        let (buffer, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Target remote "), "{rows:#?}");
+        let (x, y) = find(&rows, "upstream  org/widgets");
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+            "{rows:#?}"
+        );
+        let (x, y) = find(&rows, "origin  acme/widgets");
+        assert!(!buffer[(x, y)].modifier.contains(Modifier::REVERSED));
+        assert!(
+            rows[11].starts_with(" enter pick  esc close  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_create_question_names_where_what_and_the_title_and_offers_no_enter() {
+        use crate::forge::ForgeRepo;
+        use crate::model::pull_request::PrDraft;
+        use crate::popup::ConfirmKind;
+        let repo = |owner: &str| ForgeRepo {
+            host: "github.com".into(),
+            owner: owner.into(),
+            name: "widgets".into(),
+        };
+        let mut state = workspace(&["a.rs"]);
+        state.pr_draft = Some(PrDraft {
+            branch: "topic".into(),
+            head_remote: "origin".into(),
+            head_repo: repo("me"),
+            head: "topic".into(),
+            targets: vec![],
+            target: Some(("upstream".into(), repo("acme"))),
+            bases: vec!["main".into()],
+            base: Some("main".into()),
+            title: "Add login".into(),
+        });
+        state.popups = vec![Popup::Confirm(ConfirmKind::CreatePullRequest)];
+        let (_, rows) = draw(&state, 100, 14);
+        assert!(contains(&rows, " Create pull request "), "{rows:#?}");
+        assert!(
+            contains(&rows, "acme/widgets: me:topic → main"),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "Add login"), "{rows:#?}");
+        assert!(
+            rows[13].starts_with(" y create  n cancel  ctrl-c quit"),
             "{rows:#?}"
         );
     }
