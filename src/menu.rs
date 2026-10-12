@@ -4,8 +4,10 @@
 use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
+use crate::git::FileEntry;
 use crate::git::bisect::BisectMark;
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode, leading_dirs};
+use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
@@ -272,31 +274,50 @@ pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
 /// Why a staged rename is refused when a file sits at its old path again.
 pub(crate) use crate::git::ops::STASH_RENAME_TAKEN;
 
+/// Why a staged deletion is refused when a file sits at its path again.
+pub(crate) use crate::git::ops::STASH_DELETED_TAKEN;
+
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
 /// cursor's row refuses it, as other row actions are refused. A staged
 /// rename is refused when any listed entry sits at its old path or at a
 /// directory that path needs: the restore after the push would overwrite
-/// or unlink that file. Names are compared ignoring ASCII case, since a
-/// case-insensitive filesystem folds them; on another one this only
-/// refuses more.
+/// or unlink that file. A staged deletion is refused the same way when any
+/// other entry sits at its path or a directory it needs: git checks
+/// `HEAD`'s version out there after the push. Names are compared ignoring
+/// ASCII case, since a case-insensitive filesystem folds them; on another
+/// one this only refuses more.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true)
         .or_else(|| stash_blocked(state))
         .or_else(|| {
             let (entries, _) = state.files_marked();
-            let taken = (entries.iter())
-                .filter_map(|e| GitOp::stash_file_for(e))
-                .flat_map(|set| set.restore)
-                .flat_map(|old| leading_dirs(&old).into_iter().chain([old]))
-                .any(|taken| {
+            let sets: Vec<_> = (entries.iter())
+                .filter_map(|e| GitOp::stash_file_for(e).map(|set| (*e, set)))
+                .collect();
+            // Whether an entry other than `own` sits at `path` or a
+            // directory it needs.
+            let taken = |own: Option<&FileEntry>, path: &RepoPath| {
+                let mut at = leading_dirs(path);
+                at.push(path.clone());
+                at.iter().any(|taken| {
                     (state.files.iter())
+                        .filter(|f| !own.is_some_and(|own| std::ptr::eq(*f, own)))
                         .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
-                });
+                })
+            };
+            let renamed_taken = (sets.iter())
+                .flat_map(|(_, set)| &set.restore)
+                .any(|old| taken(None, old));
+            let deleted_taken = (sets.iter())
+                .flat_map(|(own, set)| set.unstage.iter().map(move |gone| (*own, gone)))
+                .any(|(own, gone)| taken(Some(own), gone));
             if entries.is_empty() {
                 Some("No file selected".into())
-            } else if taken {
+            } else if renamed_taken {
                 Some(STASH_RENAME_TAKEN.into())
+            } else if deleted_taken {
+                Some(STASH_DELETED_TAKEN.into())
             } else if GitOp::stash_files_for(&entries).is_none() {
                 Some(STASH_APART.into())
             } else {
