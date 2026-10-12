@@ -177,6 +177,9 @@ github = ["github.com", "github.example.com"]
   on the standard port, and the host must equal one you listed. Any other
   repository shows nothing. A branch shows the newest pull request
   into that repository whose head branch has the same name.
+- Opening any clone whose origin is on a listed host runs one read-only
+  `gh` query under your account, for that clone's owner/repo and branch
+  names.
 - Kika asks GitHub through the [GitHub CLI](https://cli.github.com), `gh`,
   which must be installed and logged in for the host (`gh auth login
   --hostname <host>`, or `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN`

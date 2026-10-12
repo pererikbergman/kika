@@ -47,7 +47,8 @@ Kika uses a hybrid model: `git2` for fast reads, the `git` executable for everyt
 * **`tokio::sync::mpsc`**: The message bus channeling `AppIntent` events from crossterm listeners and network tasks to the main state loop.
 
 ### Forge Integration (GitHub / GitLab)
-* **GitHub through `gh api`**: Pull request state and CI status come from `gh api graphql --hostname <host> --input -`, run with argv only and the query on stdin. `gh` holds the user's login, proxy and TLS settings, so Kika adds no HTTP client and never handles a token. It is off unless the global config's `[forge] github` names the hosts Kika may contact (see `docs/configuration.md`).
+* **GitHub through the `gh` CLI**: GitHub uses the GitHub CLI (`gh api graphql --hostname <host> --input -`) as its forge transport, instead of `reqwest`. It is run with argv only, and the query goes on stdin. `gh` holds the user's login, proxy and TLS settings, so Kika handles no tokens and needs no TLS crate. The GitHub CLI must be installed. The feature is off unless the global config's `[forge] github` names the hosts Kika may contact (see `docs/configuration.md`).
+* **GitLab**: its transport gets its own decision later.
 * **`serde` & `serde_json`**: Serialization and deserialization of Forge API payloads.
 
 ### Utilities and Ergonomics
