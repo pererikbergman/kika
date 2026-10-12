@@ -2,11 +2,11 @@
 //! `HEAD` moves, find the commits nothing else reaches and ask before
 //! leaving them to the reflog.
 
-use super::AppState;
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
 use crate::git::status::Head;
 use crate::keymap::KeyScope;
+use crate::model::AppState;
 use crate::op::{GitOp, ResetMode};
 use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHardConfirm};
 
@@ -14,7 +14,7 @@ use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHar
 /// started. Its answer only asks if they are still there, so a key meant
 /// for something else cannot answer the question.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LeftBehindCheck {
+pub(crate) struct LeftBehindCheck {
     pub seq: u64,
     pub popups: Vec<Popup>,
     pub focus: KeyScope,
@@ -33,7 +33,7 @@ impl AppState {
     /// first look for the commits it would leave behind; anywhere else, go
     /// on as without the check. One check runs at a time, so two quick
     /// presses never stack two questions.
-    pub(super) fn move_head(&mut self, op: GitOp, target: CommitId) -> Vec<Effect> {
+    pub(crate) fn move_head(&mut self, op: GitOp, target: CommitId) -> Vec<Effect> {
         let Some(head) = self.detached_head() else {
             return self.move_head_now(op, None);
         };
@@ -86,7 +86,7 @@ impl AppState {
     /// Ask before leaving commits behind, or go on if there are none. A
     /// result for a `HEAD` that has since moved, for a user who has since
     /// moved to another popup or input, or a failed read, runs nothing.
-    pub(super) fn left_behind_checked(
+    pub(crate) fn left_behind_checked(
         &mut self,
         tag: Tag,
         op: GitOp,
@@ -144,7 +144,7 @@ impl AppState {
 
     /// Run the op the open question carries, and only if one is open, its
     /// guard still allows it and `HEAD` is still where it was asked from.
-    pub(super) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
+    pub(crate) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::LeaveCommits(_))) {
             return vec![];
         }
@@ -162,7 +162,7 @@ impl AppState {
 
     /// Whether `HEAD` is still the detached `head` a question was asked
     /// from; `None` asks nothing. Says so when it has moved.
-    pub(super) fn head_still(&mut self, head: Option<&CommitId>) -> bool {
+    pub(crate) fn head_still(&mut self, head: Option<&CommitId>) -> bool {
         let Some(head) = head else {
             return true;
         };

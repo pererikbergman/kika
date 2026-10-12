@@ -24,7 +24,7 @@ use crate::features::commits::compare::{MARK_CLEARED, PendingDiff};
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
 use crate::features::commits::reflog;
-use crate::features::commits::rewrite::Rewrite;
+use crate::features::commits::rewrite::{LeftBehindCheck, Rewrite};
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
 use crate::features::diff::renderers::external_diff::map_rows;
@@ -199,7 +199,7 @@ pub struct AppState {
     pub op_seq: Option<u64>,
     /// The left-behind check in flight; one at a time, so a second press
     /// cannot stack a second question.
-    pub left_behind_check: Option<leave_commits::LeftBehindCheck>,
+    pub left_behind_check: Option<LeftBehindCheck>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
@@ -4181,7 +4181,6 @@ fn failure_title(op: &GitOp) -> &'static str {
 
 mod branch_lists;
 mod confirm_guard;
-mod leave_commits;
 mod log_query;
 
 use crate::features::commits::custom_patch::NO_PATCH;
