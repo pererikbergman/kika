@@ -1191,6 +1191,9 @@ impl AppState {
             AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
             AppIntent::ConfirmCheckoutCommit => {
                 let op = self.commits.pending.take().map(GitOp::CheckoutCommit);
+                if op.as_ref().is_some_and(|op| self.confirm_refused(op)) {
+                    return vec![];
+                }
                 return self.start_op(Ok(op));
             }
             AppIntent::RevertCommit => return self.revert_commit(),
@@ -4822,6 +4825,9 @@ impl AppState {
         let Some(Popup::ResetHard(confirm)) = self.popups.pop() else {
             return vec![];
         };
+        if self.confirm_refused(&confirm.op) {
+            return vec![];
+        }
         self.start_op(Ok(Some(confirm.op)))
     }
 
@@ -6355,6 +6361,7 @@ fn failure_title(op: &GitOp) -> &'static str {
 }
 
 mod branch_lists;
+mod confirm_guard;
 mod custom_patch;
 mod fixup;
 pub(crate) mod forge_load;
@@ -14708,6 +14715,128 @@ mod tests {
         assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
         assert_eq!(state.op_seq, None);
+    }
+
+    // --- Re-checking the guards when a move question is answered ---
+
+    const IN_PROGRESS: &str = "Finish or abort the operation in progress";
+
+    /// Each question that moves `HEAD` on `y`, open, with the op it
+    /// carries: built through the flows that open it, never by hand.
+    fn open_move_questions() -> Vec<(String, AppState, GitOp)> {
+        let checkout = GitOp::CheckoutCommit(cid("c1"));
+        let hard = reset_op(ResetMode::Hard);
+        let on_main = |intent: AppIntent| {
+            let mut state = on_commit();
+            state.branch = Some(on_branch("main"));
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            state
+        };
+        let mut questions = vec![
+            (
+                "checkout on a branch".to_string(),
+                on_main(AppIntent::CheckoutCommit),
+                checkout.clone(),
+            ),
+            (
+                "checkout from a detached HEAD".to_string(),
+                checked(AppIntent::CheckoutCommit, Ok(vec![])).0,
+                checkout,
+            ),
+            (
+                "hard reset on a branch".to_string(),
+                on_main(AppIntent::ResetTo(ResetMode::Hard)),
+                hard.clone(),
+            ),
+            (
+                "hard reset from a detached HEAD".to_string(),
+                checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![])).0,
+                hard,
+            ),
+        ];
+        for (intent, op) in moves() {
+            let (state, _) = checked(intent.clone(), Ok(ids(2)));
+            questions.push((format!("leave commits for {intent:?}"), state, op));
+        }
+        for (name, state, _) in &questions {
+            assert_eq!(state.popups.len(), 1, "{name}");
+            assert_eq!(state.op_seq, None, "{name}");
+        }
+        questions
+    }
+
+    /// Answer the open question with `y`, as the key does.
+    fn answer_yes(state: &mut AppState) -> Vec<Effect> {
+        match state.popups.last() {
+            Some(Popup::LeaveCommits(_)) => state.update(AppIntent::ConfirmLeaveCommits),
+            _ => press_char(state, 'y'),
+        }
+    }
+
+    fn start(state: &mut AppState, operations: &[Operation]) {
+        state.notice = None;
+        state.branch.as_mut().unwrap().in_progress = operations.to_vec();
+    }
+
+    fn assert_refused(state: &AppState, effects: &[Effect], reason: &str, name: &str) {
+        assert_eq!(effects, [], "{name}");
+        assert_eq!(state.notice, Some(reason.into()), "{name}");
+        assert_eq!(state.popups, [], "{name}");
+        assert_eq!(state.op_seq, None, "{name}");
+        assert_eq!(state.commits.pending, None, "{name}");
+    }
+
+    #[test]
+    fn y_runs_nothing_once_a_bisect_has_started_since_the_question_opened() {
+        for (name, mut state, _) in open_move_questions() {
+            start(&mut state, &[Operation::Bisect]);
+            let effects = answer_yes(&mut state);
+            assert_refused(&state, &effects, bisect::RESET_FIRST, &name);
+        }
+    }
+
+    #[test]
+    fn y_resets_nothing_once_an_operation_is_in_progress_but_still_checks_out() {
+        for operation in [Operation::Rebase, Operation::Merge, Operation::CherryPick] {
+            for (name, mut state, op) in open_move_questions() {
+                let name = format!("{name} during {operation:?}");
+                start(&mut state, &[operation]);
+                let effects = answer_yes(&mut state);
+                if matches!(op, GitOp::CheckoutCommit(_)) {
+                    // The checkout key allows a checkout here, so its
+                    // question does too.
+                    let (tag, ran) = op_of(&effects);
+                    assert_eq!(ran, op, "{name}");
+                    assert_eq!(state.op_seq, Some(tag.seq), "{name}");
+                } else {
+                    assert_refused(&state, &effects, IN_PROGRESS, &name);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_reset_names_the_operation_before_the_bisect() {
+        for (name, mut state, op) in open_move_questions() {
+            start(&mut state, &[Operation::Bisect, Operation::Merge]);
+            let effects = answer_yes(&mut state);
+            let reason = match op {
+                GitOp::CheckoutCommit(_) => bisect::RESET_FIRST,
+                _ => IN_PROGRESS,
+            };
+            assert_refused(&state, &effects, reason, &name);
+        }
+    }
+
+    #[test]
+    fn with_nothing_in_progress_y_runs_the_op_the_question_carries() {
+        for (name, mut state, op) in open_move_questions() {
+            let (tag, ran) = op_of(&answer_yes(&mut state));
+            assert_eq!(ran, op, "{name}");
+            assert_eq!(state.op_seq, Some(tag.seq), "{name}");
+            assert_eq!(state.popups, [], "{name}");
+            assert_eq!(state.notice, None, "{name}");
+        }
     }
 
     #[test]

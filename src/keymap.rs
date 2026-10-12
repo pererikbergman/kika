@@ -1773,7 +1773,7 @@ pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<Reason> {
 /// a bisect's `HEAD` is the commit it is testing, not one to build on.
 /// The bisect is checked here, not in [`resumable_operation`], which
 /// leaves it out on purpose; the operation to finish is named first.
-fn in_progress_disabled(state: &AppState) -> Option<Reason> {
+pub(crate) fn in_progress_disabled(state: &AppState) -> Option<Reason> {
     resumable_operation(state)
         .is_some()
         .then_some("Finish or abort the operation in progress".into())

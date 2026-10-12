@@ -114,6 +114,9 @@ impl AppState {
         let Some(Popup::LeaveCommits(confirm)) = self.popups.pop() else {
             return vec![];
         };
+        if self.confirm_refused(&confirm.op) {
+            return vec![];
+        }
         self.start_op(Ok(Some(confirm.op)))
     }
 }
