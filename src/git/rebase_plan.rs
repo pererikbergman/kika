@@ -446,30 +446,35 @@ pub enum TodoEntry {
     UpdateRef(Vec<u8>),
 }
 
-/// The commands in git's todo list. Comments and blank lines are dropped;
+/// The commands in git's todo list. Comments led by `comment`, the
+/// prefix git uses (see `comment_prefix`), and blank lines are dropped;
 /// `exec`, `label`, `reset`, `merge` and any unknown word are errors,
 /// since Kika neither writes nor edits them.
-pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
+pub fn parse_todo(todo: &[u8], comment: &[u8]) -> Result<Vec<TodoEntry>, String> {
     // Git reads no further than a NUL, so a line past one would be kept
     // here and dropped by git. Such a list is not Kika's to edit.
     if todo.contains(&0) {
         return Err("The todo list has a NUL byte".into());
     }
-    command_lines(todo).map(parse_line).collect()
+    command_lines(todo, comment).map(parse_line).collect()
 }
 
 /// The lines of a todo list that git does not skip, with the spaces and
 /// tabs git skips before a command taken off. Git skips only blank lines
 /// and comments: after that trim, a line that is empty, starts with `\r`
-/// or starts with `#`. Every other line is a command to git, or a line it
-/// rejects, so it is kept here for [`parse_todo`] to accept or refuse.
-/// Like git, it reads no further than the first NUL.
-pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
-    numbered_lines(todo).map(|(_, line)| line)
+/// or starts with `comment`. Every other line is a command to git, or a
+/// line it rejects, so it is kept here for [`parse_todo`] to accept or
+/// refuse. An empty `comment` marks no line, so a prefix that could not be
+/// read hides nothing. Like git, it reads no further than the first NUL.
+pub fn command_lines<'a>(todo: &'a [u8], comment: &'a [u8]) -> impl Iterator<Item = &'a [u8]> {
+    numbered_lines(todo, comment).map(|(_, line)| line)
 }
 
 /// [`command_lines`] with each line's 1-based number in the file.
-fn numbered_lines(todo: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
+fn numbered_lines<'a>(
+    todo: &'a [u8],
+    comment: &'a [u8],
+) -> impl Iterator<Item = (usize, &'a [u8])> {
     let end = todo.iter().position(|&b| b == 0).unwrap_or(todo.len());
     todo[..end]
         .split(|&b| b == b'\n')
@@ -482,7 +487,11 @@ fn numbered_lines(todo: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
                 .count();
             (i + 1, &line[indent..])
         })
-        .filter(|(_, line)| !matches!(line.first(), None | Some(b'\r' | b'#')))
+        .filter(move |(_, line)| {
+            let skipped = matches!(line.first(), None | Some(b'\r'))
+                || (!comment.is_empty() && line.starts_with(comment));
+            !skipped
+        })
 }
 
 /// What in a todo list keeps Kika from reading it, as [`parse_todo`]
@@ -497,11 +506,11 @@ pub enum Unreadable<'a> {
 }
 
 /// Why [`parse_todo`] refuses `todo`, or `None` when it reads it.
-pub fn unreadable(todo: &[u8]) -> Option<Unreadable<'_>> {
+pub fn unreadable<'a>(todo: &'a [u8], comment: &'a [u8]) -> Option<Unreadable<'a>> {
     if todo.contains(&0) {
         return Some(Unreadable::Nul);
     }
-    numbered_lines(todo)
+    numbered_lines(todo, comment)
         .find(|(_, line)| parse_line(line).is_err())
         .map(|(number, text)| Unreadable::Line { number, text })
 }
@@ -1247,7 +1256,7 @@ mod tests {
                      # Rebase 1..2 onto 1\n\
                      pick abcd  two  spaces \xff\n";
         assert_eq!(
-            parse_todo(todo),
+            parse_todo(todo, b"#"),
             Ok(vec![
                 line("1234abc", "first one"),
                 line("5678def", ""),
@@ -1258,22 +1267,22 @@ mod tests {
                 },
             ])
         );
-        assert_eq!(parse_todo(b"# only comments\n\n"), Ok(vec![]));
+        assert_eq!(parse_todo(b"# only comments\n\n", b"#"), Ok(vec![]));
     }
 
     #[test]
     fn a_nul_byte_ends_the_lines_git_reads_and_makes_the_list_unparsed() {
         let todo = b"pick 1111 one\npick 2222 two\0x\npick 3333 three\n";
-        assert!(parse_todo(todo).is_err());
-        assert!(parse_todo(b"\0").is_err());
-        let lines: Vec<&[u8]> = command_lines(todo).collect();
+        assert!(parse_todo(todo, b"#").is_err());
+        assert!(parse_todo(b"\0", b"#").is_err());
+        let lines: Vec<&[u8]> = command_lines(todo, b"#").collect();
         assert_eq!(lines, [&b"pick 1111 one"[..], b"pick 2222 two"]);
     }
 
     #[test]
     fn only_blanks_and_hash_comments_are_skipped_everything_else_must_parse() {
         assert_eq!(
-            parse_todo(b"# c\n  # c\n\n \t\n \rexec x\r\n\r\npick 1234 a\n"),
+            parse_todo(b"# c\n  # c\n\n \t\n \rexec x\r\n\r\npick 1234 a\n", b"#"),
             Ok(vec![line("1234", "a")])
         );
         for bad in [
@@ -1283,28 +1292,70 @@ mod tests {
             b"; other comment char\n",
             b"1234 a\n",
         ] {
-            assert!(parse_todo(bad).is_err(), "{}", String::from_utf8_lossy(bad));
-            assert_eq!(command_lines(bad).count(), 1);
+            assert!(
+                parse_todo(bad, b"#").is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+            assert_eq!(command_lines(bad, b"#").count(), 1);
         }
     }
 
     #[test]
-    fn unreadable_names_the_first_line_kika_cannot_read_by_its_number() {
-        assert_eq!(unreadable(b"# c\npick 1234 a\n"), None);
+    fn only_lines_led_by_the_comment_prefix_are_comments() {
+        let todo = b"// Rebase 1..2 onto 1\n  // note\n\tpick 1234 a\n//\n";
+        assert_eq!(parse_todo(todo, b"//"), Ok(vec![line("1234", "a")]));
         assert_eq!(
-            unreadable(b"# c\n\npick 1234 a\n  exec make\nlabel x\n"),
+            parse_todo(b"; c\n  ;c\npick 1234 a\n", b";"),
+            Ok(vec![line("1234", "a")])
+        );
+        // `#` is not special once the prefix is something else, and a
+        // prefix is matched whole.
+        for (bad, comment) in [
+            (&b"# help\npick 1234 a\n"[..], &b";"[..]),
+            (b"/ half\npick 1234 a\n", b"//"),
+            (b"exec make\n", b";"),
+        ] {
+            assert!(parse_todo(bad, comment).is_err(), "{bad:?}");
+            assert!(unreadable(bad, comment).is_some(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_comment_prefix_hides_only_blank_and_carriage_return_lines() {
+        let todo = b"\n \t\n\rx\npick 1234 a\n";
+        assert_eq!(parse_todo(todo, b""), Ok(vec![line("1234", "a")]));
+        assert_eq!(command_lines(b"# c\n; c\n", b"").count(), 2);
+        assert!(parse_todo(b"# c\npick 1234 a\n", b"").is_err());
+        assert_eq!(
+            unreadable(b"pick 1234 a\n# c\n", b""),
+            Some(Unreadable::Line {
+                number: 2,
+                text: b"# c"
+            })
+        );
+    }
+
+    #[test]
+    fn unreadable_names_the_first_line_kika_cannot_read_by_its_number() {
+        assert_eq!(unreadable(b"# c\npick 1234 a\n", b"#"), None);
+        assert_eq!(
+            unreadable(b"# c\n\npick 1234 a\n  exec make\nlabel x\n", b"#"),
             Some(Unreadable::Line {
                 number: 4,
                 text: b"exec make"
             })
         );
-        assert_eq!(unreadable(b"pick 1234 a\0\n"), Some(Unreadable::Nul));
+        assert_eq!(unreadable(b"pick 1234 a\0\n", b"#"), Some(Unreadable::Nul));
     }
 
     #[test]
     fn indented_lines_are_commands_as_git_reads_them() {
         assert_eq!(
-            parse_todo(b"  pick 1234 one\n\t pick 5678 two\n  # comment\n\t\n"),
+            parse_todo(
+                b"  pick 1234 one\n\t pick 5678 two\n  # comment\n\t\n",
+                b"#"
+            ),
             Ok(vec![line("1234", "one"), line("5678", "two")])
         );
         for hidden in [
@@ -1313,7 +1364,7 @@ mod tests {
             b"\tlabel l\n",
         ] {
             assert!(
-                parse_todo(hidden).is_err(),
+                parse_todo(hidden, b"#").is_err(),
                 "{}",
                 String::from_utf8_lossy(hidden)
             );
@@ -1327,7 +1378,7 @@ mod tests {
                      update-ref refs/heads/x\n";
         use TodoAction::*;
         assert_eq!(
-            parse_todo(todo),
+            parse_todo(todo, b"#"),
             Ok(vec![
                 commit(Reword, "1111", "a"),
                 commit(Reword, "1112", "b"),
@@ -1369,7 +1420,11 @@ mod tests {
             b"pick\n",
             b"Pick 1234abc s\n",
         ] {
-            assert!(parse_todo(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+            assert!(
+                parse_todo(bad, b"#").is_err(),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
         }
     }
 

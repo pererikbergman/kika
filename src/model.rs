@@ -4755,6 +4755,7 @@ impl AppState {
         };
         let content = rebase_todo::serialize(&entries);
         let (path, expected) = (todo.path.clone(), todo.original.clone());
+        let comment = todo.comment.clone();
         todo.entries = entries;
         self.commits.todo_selected = Some(cursor);
         let seq = self.take_seq();
@@ -4770,6 +4771,7 @@ impl AppState {
             path,
             expected,
             content,
+            comment,
         }]
     }
 
@@ -4793,7 +4795,10 @@ impl AppState {
     fn reload_rebase_todo(&mut self) -> Vec<Effect> {
         let tag = self.background_tag();
         self.commits.todo_seq = Some(tag.seq);
-        vec![Effect::LoadRebaseTodo { tag }]
+        // An older git ignores `core.commentString`, so its value does not
+        // count; an unknown git counts as older.
+        let string_too = self.git_has(crate::git::version::COMMENT_STRING);
+        vec![Effect::LoadRebaseTodo { tag, string_too }]
     }
 
     /// Show the todo list read, if it is the load in flight.
@@ -20175,6 +20180,7 @@ mod tests {
             path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
             todo: todo.to_vec(),
             done: Some(b"pick 0000 x\n".to_vec()),
+            comment: Ok(b"#".to_vec()),
         })));
         state.commits.todo_selected = Some(selected);
         state
@@ -20367,7 +20373,7 @@ mod tests {
             result: Ok(status),
         });
         let load = match effects.as_slice() {
-            [.., Effect::LoadRebaseTodo { tag }] => *tag,
+            [.., Effect::LoadRebaseTodo { tag, .. }] => *tag,
             other => panic!("expected LoadRebaseTodo, got {other:?}"),
         };
         state.update(AppIntent::RebaseTodoLoaded {
@@ -20376,6 +20382,7 @@ mod tests {
                 path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
                 todo: TODO.to_vec(),
                 done: None,
+                comment: Ok(b"#".to_vec()),
             })),
         });
         assert_eq!(
@@ -20398,6 +20405,67 @@ mod tests {
         );
         assert_eq!(state.commits.todo, None);
         assert_eq!(state.commits.todo_selected, None);
+    }
+
+    #[test]
+    fn the_todo_load_reads_core_comment_string_only_from_git_2_45() {
+        for (git, string_too) in [(version(45), true), (version(44), false), (None, false)] {
+            let mut state = on_linear_log();
+            state.git_version = git;
+            let tag = refresh_tag(&mut state);
+            let mut status = repo(vec![]);
+            status.branch.in_progress = vec![Operation::Rebase];
+            let effects = state.update(AppIntent::StatusLoaded {
+                tag,
+                result: Ok(status),
+            });
+            assert!(
+                matches!(
+                    effects.as_slice(),
+                    [.., Effect::LoadRebaseTodo { string_too: s, .. }] if *s == string_too
+                ),
+                "{git:?}: {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_todo_write_carries_the_comment_prefix_the_list_was_loaded_with() {
+        let mut state = stopped(TODO, 0);
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+            todo: b"; help\npick 1111 one\npick 2222 two\n".to_vec(),
+            done: Some(b"pick 0000 x\n".to_vec()),
+            comment: Ok(b";".to_vec()),
+        })));
+        state.commits.todo_selected = Some(0);
+        match press_char(&mut state, 'd').as_slice() {
+            [Effect::WriteRebaseTodo { comment, .. }] => assert_eq!(comment, b";"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_todo_read_with_a_letter_prefix_writes_nothing() {
+        for prefix in [&b"b"[..], b"p"] {
+            let mut state = stopped(TODO, 0);
+            state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+                path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+                todo: b"pick 1111 one\npick 2222 two\n".to_vec(),
+                done: Some(b"pick 0000 x\n".to_vec()),
+                comment: Ok(prefix.to_vec()),
+            })));
+            state.commits.todo_selected = Some(0);
+            assert_eq!(press_char(&mut state, 'd'), vec![], "{prefix:?}");
+            assert!(
+                state
+                    .notice
+                    .as_deref()
+                    .is_some_and(|n| n.contains("hides commands")),
+                "{:?}",
+                state.notice
+            );
+        }
     }
 
     #[test]
