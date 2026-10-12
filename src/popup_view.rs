@@ -1291,6 +1291,7 @@ mod tests {
         state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
             op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
             head: CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
         })];
@@ -1318,6 +1319,7 @@ mod tests {
                 mode: ResetMode::Hard,
             },
             head: CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
         })];
@@ -1329,7 +1331,9 @@ mod tests {
         let (_, rows) = draw(&hard_reset_leaving_eight(), 80, 24);
         assert!(contains(&rows, "thrown away"), "{rows:#?}");
         assert!(contains(&rows, "and 3 more"), "{rows:#?}");
-        assert!(contains(&rows, "(y/n)"), "{rows:#?}");
+        // The keep hint names the old HEAD; wrapping may split the command.
+        assert!(contains(&rows, "git branch <name>"), "{rows:#?}");
+        assert!(contains(&rows, "fedcba9 (y/n)"), "{rows:#?}");
     }
 
     #[test]

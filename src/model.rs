@@ -14661,6 +14661,7 @@ mod tests {
                 [Popup::LeaveCommits(LeaveCommitsConfirm {
                     op: planned,
                     head: cid("c0"),
+                    head_short_oid: "c0".into(),
                     short_oid: "c1".into(),
                     left: vec!["a0".into(), "a1".into(), "a2".into()],
                 })],

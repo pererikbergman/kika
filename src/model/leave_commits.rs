@@ -131,9 +131,11 @@ impl AppState {
         };
         let short_oid = self.commits.short_oid(target);
         let left = left.iter().map(|id| self.commits.short_oid(id)).collect();
+        let head_short_oid = self.commits.short_oid(&head);
         self.popups.push(Popup::LeaveCommits(LeaveCommitsConfirm {
             op,
             head,
+            head_short_oid,
             short_oid,
             left,
         }));

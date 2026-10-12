@@ -280,6 +280,9 @@ pub struct LeaveCommitsConfirm {
     /// The detached `HEAD` the commits were found from, so `y` runs
     /// nothing once `HEAD` has moved.
     pub head: CommitId,
+    /// `head`'s short id, as the log shows it: the question names it so
+    /// the user can branch there before leaving.
+    pub head_short_oid: String,
     /// The target's short id, as the log shows it.
     pub short_oid: String,
     /// The short ids of the commits left behind, newest first.
@@ -306,7 +309,10 @@ impl LeaveCommitsConfirm {
         if count > Self::LISTED {
             ids.push_str(&format!(" and {} more", count - Self::LISTED));
         }
-        let keep = "To keep them, press n, then create a branch at HEAD.";
+        let keep = format!(
+            "To keep them, press n, then run: git branch <name> {}",
+            self.head_short_oid
+        );
         let short_oid = &self.short_oid;
         match &self.op {
             // The warning comes first, so a small terminal that clips the
@@ -919,6 +925,7 @@ mod tests {
         LeaveCommitsConfirm {
             op,
             head: crate::git::commit_files::CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
         }
@@ -941,7 +948,7 @@ mod tests {
             ask.question(),
             "Check out abc1234 and leave 3 commits that no branch or tag reaches behind \
              (000, 111, 222)? Afterwards only the reflog has them. To keep them, press n, \
-             then create a branch at HEAD. (y/n)"
+             then run: git branch <name> fedcba9 (y/n)"
         );
         assert!(
             leave(checkout, 1)
@@ -989,7 +996,7 @@ mod tests {
         ] {
             let q = leave(op, 2).question();
             assert!(
-                q.ends_with("To keep them, press n, then create a branch at HEAD. (y/n)"),
+                q.ends_with("To keep them, press n, then run: git branch <name> fedcba9 (y/n)"),
                 "{q}"
             );
         }
