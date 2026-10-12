@@ -52,10 +52,12 @@ command = ["pbcopy"]   # copies instead of OSC 52; leave out to keep it off
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
-the Stash menu in the Files panel (`files.stash`), so a file that still binds
-`s` to `files.stage` is ignored with the error `key "s" is bound to both
-"files.stash" and "files.stage"`. Pick another key, as the example does with
-`x`, or move `files.stash` off `s` in the same file.
+the Stash menu in the Files panel (`files.stash`), so in a file that still
+binds `s` to `files.stage` that one line is dropped: Kika shows `key "s" is
+bound to both "files.stash" and "files.stage"; the change to "files.stage" was
+dropped`, `files.stage` keeps `space`, `s` keeps opening the Stash menu, and
+the rest of the file applies. Pick another key, as the example does with `x`,
+or move `files.stash` off `s` in the same file.
 
 ## Layering
 
@@ -65,8 +67,10 @@ Settings are applied in three layers, each on top of the one before:
 2. the global file,
 3. the repository's `.kika.toml`.
 
-A file with any error is ignored as a whole, and the layer below it applies.
-Kika shows the error so you can fix it. Unknown fields and unknown binding ids
+A `[keys]` entry that binds a key already taken in the same scope is dropped
+on its own (see [`[keys]`](#keys)); the rest of the file applies. A file with
+any other error is ignored as a whole, and the layer below it applies. Kika
+shows the error so you can fix it. Unknown fields and unknown binding ids
 count as errors, so a typo is reported instead of silently doing nothing.
 
 ## `[keys]`
@@ -86,6 +90,18 @@ and lists the keys it should answer to:
 - One key cannot be bound twice in the same scope (the same table below).
   A binding in a panel may reuse a key from an enclosing scope, such as
   Global; the panel's binding wins while that panel has focus.
+- An entry that breaks the rule above is dropped, not the whole file. Its
+  binding keeps the keys it has in the layer below: the built-in keys for the
+  global file, and the global file's keys (else the built-in ones) for
+  `.kika.toml`. If the file moves two bindings onto one key, both entries are
+  dropped. A key the layer below holds, such as a default binding, a global
+  binding or a global command when the clash is in `.kika.toml`, always stays
+  where it is. Kika shows one error per dropped entry, naming the key and both
+  bindings. Every other problem, such as an unknown id, a key that does not
+  parse, `global.quit = []`, a `.kika.toml` that touches a locked binding,
+  or a key the global file gives both a binding and one of its own
+  `[[commands]]`, still ignores the whole file, even when the same file has a
+  droppable clash.
 
 Key names:
 
@@ -686,7 +702,11 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - A command key may shadow a key of an enclosing scope, but not one of a
   locked binding: `q` in a `files` command would take over `global.quit`,
   and is an error.
-- A repository's `.kika.toml` cannot move a binding onto a command's key.
+- A repository's `.kika.toml` cannot move a binding onto a command's key:
+  that entry is dropped, and the command keeps the key.
+- In the global file, a command key that clashes with a binding (a default
+  one, or one the same file's `[keys]` moved there) or with another command
+  ignores the whole global file. Nothing is dropped on its own in that case.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
 - A `"popup"` or `"none"` command that is still running can be stopped with
