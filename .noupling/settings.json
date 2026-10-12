@@ -30,7 +30,20 @@
   "source_extensions": [
     "rs"
   ],
-  "dependency_rules": [],
+  "dependency_rules": [
+    {
+      "from": "src/git/**",
+      "to": "src/features/**",
+      "allow": false,
+      "message": "git plumbing never imports a feature (ADR-0001)"
+    },
+    {
+      "from": "src/forge/**",
+      "to": "src/features/**",
+      "allow": false,
+      "message": "git plumbing never imports a feature (ADR-0001)"
+    }
+  ],
   "layers": [],
   "allow_inline_suppression": true,
   "modules": [],
