@@ -647,6 +647,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_passed_rate_limit_waits_for_the_user_to_ask_again() {
+        const T: i64 = 1_700_000_000;
+        let limited = || {
+            let mut state = loaded();
+            state.forge.limited.insert("github.com".into(), T);
+            state.forge.limited_until = Some(T);
+            state.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
+            state.now = T + 60;
+            state
+        };
+        let refreshes = |effects: &[Effect]| loads(effects).iter().filter(|(_, r)| *r).count();
+
+        // A branch-list reload only reads the cache.
+        let mut state = limited();
+        let effects = list_branches(&mut state, &["main"]);
+        assert!(matches!(loads(&effects)[..], [(_, false)]), "{effects:?}");
+        assert_eq!(refreshes(&effects), 0, "{effects:?}");
+        assert_eq!(
+            state.forge.status,
+            ForgeView::Problem(ForgeStatus::RateLimited)
+        );
+
+        // So does a refs poll.
+        let mut state = limited();
+        let effects = state.update(AppIntent::Watch(crate::watch::WatchEvent::PollRefs));
+        assert_eq!(refreshes(&effects), 0, "{effects:?}");
+        assert_eq!(
+            state.forge.status,
+            ForgeView::Problem(ForgeStatus::RateLimited)
+        );
+
+        // Asking again does call the forge.
+        let mut state = limited();
+        let effects = state.update(AppIntent::RefreshPullRequests);
+        assert_eq!(refreshes(&effects), 1, "{effects:?}");
+    }
+
+    #[test]
     fn the_refresh_key_does_nothing_outside_the_workspace() {
         let mut state = loaded();
         state.context = Context::Review { number: None };
