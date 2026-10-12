@@ -23,6 +23,7 @@ use crate::git::stash::{StashEntry, StashFile};
 use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 use crate::git::submodule::{Submodule, SubmoduleState};
 use crate::git::tags::TagRef;
+use crate::git::version::GitVersion;
 use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
@@ -851,6 +852,15 @@ pub(crate) fn on_linear_log() -> AppState {
     // No other branch; an unknown git, so no `--update-refs`.
     state.commits.tips = Some(vec![]);
     state
+}
+
+/// Git 2.`minor`.0, as `main` would have found it.
+pub(crate) fn version(minor: u32) -> Option<GitVersion> {
+    Some(GitVersion {
+        major: 2,
+        minor,
+        patch: 0,
+    })
 }
 
 pub(crate) fn rebase_step(action: rebase_plan::TodoAction, digit: char) -> rebase_plan::Step {

@@ -862,7 +862,7 @@ mod tests {
     }
 
     fn stopped_rebase(state: &mut AppState) {
-        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        use crate::features::commits::rewrite::{RebaseTodo, TodoFile};
         let todo = b"pick 1111111aaa first step\nbreak\nreword 2222222bbb second \x1b[31mstep\n\
                      update-ref refs/heads/stack\n# help\n";
         state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
@@ -876,7 +876,7 @@ mod tests {
     /// A stopped rebase whose todo holds `exec`, so Kika shows it
     /// read-only.
     fn read_only_rebase(state: &mut AppState) {
-        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        use crate::features::commits::rewrite::{RebaseTodo, TodoFile};
         state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: b"pick 1111111 one\nexec make test-everything --verbose\n".to_vec(),
@@ -887,7 +887,7 @@ mod tests {
 
     /// A stopped rebase with `n` steps left, longer than a small panel.
     fn long_rebase(state: &mut AppState, n: usize) {
-        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        use crate::features::commits::rewrite::{RebaseTodo, TodoFile};
         let todo: String = (0..n).map(|i| format!("pick {i:07x} step {i}\n")).collect();
         state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
@@ -909,7 +909,7 @@ mod tests {
 
     /// [`read_only_notice`] for `todo` read with comment prefix `comment`.
     fn read_only_notice_with(width: u16, comment: Result<&[u8], &str>, todo: &[u8]) -> String {
-        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        use crate::features::commits::rewrite::{RebaseTodo, TodoFile};
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut state = showing(merge_rows());
         state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
@@ -1105,7 +1105,7 @@ mod tests {
 
     #[test]
     fn a_todo_kika_does_not_edit_shows_its_lines_as_they_are() {
-        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        use crate::features::commits::rewrite::{RebaseTodo, TodoFile};
         let mut state = showing(merge_rows());
         state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
