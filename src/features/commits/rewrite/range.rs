@@ -2,11 +2,12 @@
 //! interactive rebase. Dropping several commits asks first, and the answer
 //! drops only the commits it asked about.
 
-use super::{AppState, Context};
+use super::{range_log_plan, range_rewrite_disabled};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::git::rebase_plan::{Edit, RebasePlan, TodoAction};
 use crate::keymap::{self, Reason};
+use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{ConfirmKind, Popup};
 
@@ -17,7 +18,7 @@ impl AppState {
     /// Rewrite every commit of the log range with `edit`. A fold runs at
     /// once, as a single-row one does; dropping two or more commits asks
     /// first.
-    pub(super) fn rewrite_range(&mut self, edit: Edit) -> Vec<Effect> {
+    pub(crate) fn rewrite_range(&mut self, edit: Edit) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -42,7 +43,7 @@ impl AppState {
     /// exactly `ids`, and the plan is made again from the log as it is now
     /// and runs only if it drops exactly them, so a reload or a moved
     /// cursor while asking drops nothing.
-    pub(super) fn confirm_drop_range(&mut self, ids: Vec<CommitId>) -> Vec<Effect> {
+    pub(crate) fn confirm_drop_range(&mut self, ids: Vec<CommitId>) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -78,10 +79,9 @@ impl AppState {
 
     /// The plan for `edit` over the range, once nothing stops it.
     fn range_plan(&self, edit: Edit) -> Result<RebasePlan, Reason> {
-        match keymap::list_guard(self, true).or_else(|| keymap::range_rewrite_disabled(self, edit))
-        {
+        match keymap::list_guard(self, true).or_else(|| range_rewrite_disabled(self, edit)) {
             Some(reason) => Err(reason),
-            None => keymap::range_log_plan(self, edit),
+            None => range_log_plan(self, edit),
         }
     }
 }

@@ -8,8 +8,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
 use crate::features::branches::{remotes, tags};
-use crate::features::commits::rewrite::{FILTER_HIDES_NEIGHBOUR, Rewrite, rewrite_disabled};
-use crate::features::commits::{Crossing, with_stacked_branches};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::diff::renderers;
 use crate::features::{
@@ -18,7 +16,6 @@ use crate::features::{
 };
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
-use crate::git::rebase_plan::{self, Edit, RebasePlan};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
@@ -1642,89 +1639,6 @@ pub(crate) fn tips_failed(error: &str) -> String {
     format!("Could not read the branches ({first}); press r to retry")
 }
 
-/// The plan that folds every `fixup!` commit in the log into its target,
-/// as it will run. Each fixup moves down past the commits between it and
-/// its target, so with `--update-refs` a branch on the fixup or on one of
-/// those is refused.
-pub(crate) fn autosquash_plan(state: &AppState) -> Result<RebasePlan, Reason> {
-    let rows = state.commits.rows.as_slice();
-    let pairs = rebase_plan::fixup_targets(rows)?;
-    let plan = rebase_plan::plan_autosquash(rows)?;
-    let crossings: Vec<Crossing> = pairs
-        .into_iter()
-        .map(|(fixup, target)| Crossing {
-            moved: fixup,
-            from: fixup,
-            len: target - fixup,
-        })
-        .collect();
-    with_stacked_branches(state, plan, &crossings)
-}
-
-/// Why the fixups cannot be folded now. Like any rewrite of the log: one
-/// operation at a time, none in progress, and the whole log in view, as
-/// the plan is made from its rows.
-pub(crate) fn autosquash_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false)
-        .or_else(|| commits_range_disabled(state))
-        .or_else(|| {
-            state
-                .commits
-                .query
-                .is_active()
-                .then_some(CLEAR_LOG_FILTER.into())
-        })
-        .or_else(|| (!state.commits.filter.is_empty()).then_some(FILTER_HIDES_NEIGHBOUR.into()))
-        .or_else(|| commit_action_disabled(state))
-        .or_else(|| in_progress_disabled(state))
-        .or_else(|| autosquash_plan(state).err())
-}
-
-/// Why the staged change cannot become a `fixup!` of the selected commit
-/// now. The target is named by its id, so a narrowed log is fine.
-pub(crate) fn create_fixup_disabled(state: &AppState) -> Option<Reason> {
-    fixup_target_disabled(state)
-        .or_else(|| in_progress_disabled(state))
-        .or_else(|| nothing_staged(state))
-}
-
-/// Why the commit the staged lines come from cannot be looked for now.
-/// It only reads, so an operation in progress does not stop it.
-pub(crate) fn find_base_disabled(state: &AppState) -> Option<Reason> {
-    fixup_target_disabled(state).or_else(|| nothing_staged(state))
-}
-
-/// One log commit selected, shown, and free to act on.
-fn fixup_target_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false)
-        .or_else(|| commits_range_disabled(state))
-        .or_else(|| commit_action_disabled(state))
-}
-
-fn nothing_staged(state: &AppState) -> Option<Reason> {
-    let staged = state.files.iter().any(|f| !matches!(f.index, '.' | '?'));
-    (!staged).then_some(STAGE_THE_FIX.into())
-}
-
-/// Why a fixup cannot be made or looked for: nothing is staged.
-pub(crate) const STAGE_THE_FIX: &str = "Stage the fix first";
-
-fn squash_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Squash))
-}
-
-fn fixup_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Fixup))
-}
-
-fn drop_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Drop))
-}
-
-fn reword_disabled(state: &AppState) -> Option<Reason> {
-    rewrite_disabled(state, Rewrite::Edit(Edit::Reword))
-}
-
 pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
@@ -1864,65 +1778,6 @@ fn commits_revert_disabled(state: &AppState) -> Option<Reason> {
 
 fn commits_reset_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| reset_disabled(state))
-}
-
-// Squash, fixup and drop act on a range too, in one rebase.
-fn commits_squash_disabled(state: &AppState) -> Option<Reason> {
-    commits_range_rewrite_disabled(state, Edit::Squash, squash_disabled)
-}
-
-fn commits_fixup_disabled(state: &AppState) -> Option<Reason> {
-    commits_range_rewrite_disabled(state, Edit::Fixup, fixup_disabled)
-}
-
-fn commits_drop_disabled(state: &AppState) -> Option<Reason> {
-    commits_range_rewrite_disabled(state, Edit::Drop, drop_disabled)
-}
-
-/// `single`'s reason without a range, [`range_rewrite_disabled`]'s with
-/// one; the list's own reasons come first either way.
-fn commits_range_rewrite_disabled(
-    state: &AppState,
-    edit: Edit,
-    single: fn(&AppState) -> Option<Reason>,
-) -> Option<Reason> {
-    list_guard(state, true).or_else(|| {
-        if state.commits.range_anchor.is_some() {
-            range_rewrite_disabled(state, edit)
-        } else {
-            single(state)
-        }
-    })
-}
-
-/// Why `edit` cannot run over the selected log range now: the range is
-/// in the log, the log is not narrowed (the plan is made from its rows),
-/// one operation at a time with none in progress, and a plan for the
-/// whole range.
-pub(crate) fn range_rewrite_disabled(state: &AppState, edit: Edit) -> Option<Reason> {
-    commits_range_disabled(state)
-        .or_else(|| {
-            state
-                .commits
-                .query
-                .is_active()
-                .then_some(CLEAR_LOG_FILTER.into())
-        })
-        .or_else(|| commit_action_disabled(state))
-        .or_else(|| in_progress_disabled(state))
-        .or_else(|| range_log_plan(state, edit).err())
-}
-
-/// The plan for `edit` over the selected log range, as it will run,
-/// checked against stacked branches like a single-row rewrite.
-pub(crate) fn range_log_plan(state: &AppState, edit: Edit) -> Result<RebasePlan, Reason> {
-    let rows = state.commits.rows.as_slice();
-    let plan = rebase_plan::plan_range(rows, &state.commits.range(), edit)?;
-    with_stacked_branches(state, plan, &[])
-}
-
-fn commits_reword_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| reword_disabled(state))
 }
 
 fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
@@ -2338,83 +2193,6 @@ static COMMITS_KEYS: &[Binding] = &[
         label: "reset",
         bar: true,
         disabled: commits_reset_disabled,
-    },
-];
-
-// Chunk 12: rewrite
-static REWRITE_COMMITS: &[Binding] = &[
-    Binding {
-        id: "commits.squash",
-        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Squash),
-        description: "Squash the selected commit into the one below, combining their messages",
-        label: "squash",
-        bar: true,
-        disabled: commits_squash_disabled,
-    },
-    // `f` is fetch.
-    Binding {
-        id: "commits.fixup",
-        keys: &[KeyPattern::any(KeyCode::Char('F'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Fixup),
-        description: "Fold the selected commit into the one below, keeping that one's message",
-        label: "fixup",
-        bar: true,
-        disabled: commits_fixup_disabled,
-    },
-    Binding {
-        id: "commits.create_fixup",
-        keys: &[KeyPattern::exact(KeyCode::Char('f'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::CreateFixup,
-        description: "Commit the staged change as a fixup! of the selected commit",
-        label: "create fixup",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: create_fixup_disabled,
-    },
-    Binding {
-        id: "commits.autosquash",
-        keys: &[KeyPattern::any(KeyCode::Char('S'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::Autosquash,
-        description: "Fold every fixup! commit into the commit it fixes, after asking",
-        label: "autosquash",
-        bar: false,
-        disabled: autosquash_disabled,
-    },
-    Binding {
-        id: "commits.find_base",
-        keys: &[KeyPattern::exact(KeyCode::Char('b'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::FindFixupBase,
-        description: "Select the commit that last touched the staged lines",
-        label: "find fixup base",
-        bar: false,
-        disabled: find_base_disabled,
-    },
-    Binding {
-        id: "commits.drop",
-        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Drop),
-        description: "Drop the selected commit and its change from the history",
-        label: "drop",
-        bar: true,
-        disabled: commits_drop_disabled,
-    },
-    // `r` is refresh.
-    Binding {
-        id: "commits.reword",
-        keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Reword),
-        description: "Write a new message for the selected commit",
-        label: "reword",
-        bar: true,
-        disabled: commits_reword_disabled,
     },
 ];
 
@@ -3483,84 +3261,6 @@ static REWRITE_LEAVE_COMMITS_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 62: rewrite
-static REWRITE_AUTOSQUASH_CONFIRM: &[Binding] = &[
-    // Enter is left unbound here too: autosquash rewrites commits the user
-    // may not be looking at.
-    Binding {
-        id: "autosquash_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::AutosquashConfirm,
-        intent: AppIntent::ConfirmYes,
-        description: "Yes, fold every fixup! commit into its target",
-        label: "fold",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "autosquash_confirm.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::AutosquashConfirm,
-        intent: AppIntent::ConfirmNo,
-        description: "No, leave the history as it is",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "autosquash_confirm.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::AutosquashConfirm,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 64: rewrite
-static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
-    // Enter is left unbound here too: dropping a range throws away the
-    // changes of several commits at once, so only a deliberate y answers.
-    Binding {
-        id: "drop_range_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::DropRangeConfirm,
-        intent: AppIntent::ConfirmYes,
-        description: "Yes, drop the selected commits and their changes",
-        label: "drop",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "drop_range_confirm.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::DropRangeConfirm,
-        intent: AppIntent::ConfirmNo,
-        description: "No, leave the history as it is",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "drop_range_confirm.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::DropRangeConfirm,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 72: core
 static CORE_FILTER_SEARCH: &[Binding] = &[
     // List filters, ranges and the diff search.
@@ -4046,7 +3746,7 @@ static CHUNKS: &[&[Binding]] = &[
     commits::reflog::keys::REFLOG_WORKSPACE,
     FILES_NAV,
     COMMITS_KEYS,
-    REWRITE_COMMITS,
+    commits::rewrite::keys::REWRITE_COMMITS,
     commits::rewrite::keys::REWRITE_TODO_COMMITS,
     COMMITS_SWITCH_TAB,
     commits::copy::keys::COPY_COMMITS,
@@ -4097,9 +3797,9 @@ static CHUNKS: &[&[Binding]] = &[
     REWRITE_LEAVE_COMMITS_CONFIRM,
     stash::keys::STASH_DROP_CONFIRM,
     operation::keys::OPERATION_ABORT_CONFIRM,
-    REWRITE_AUTOSQUASH_CONFIRM,
+    commits::rewrite::keys::REWRITE_AUTOSQUASH_CONFIRM,
     commits::custom_patch::keys::CUSTOM_PATCH_CONFIRM,
-    REWRITE_DROP_RANGE_CONFIRM,
+    commits::rewrite::keys::REWRITE_DROP_RANGE_CONFIRM,
     commits::reflog::keys::REFLOG_TRAVEL_CONFIRM,
     submodules::keys::SUBMODULES_KEYS,
     worktrees::keys::WORKTREES_KEYS,
@@ -4134,12 +3834,14 @@ mod tests {
     use super::*;
     use crate::features::commits::compare::keys::commits_mark_disabled;
     use crate::features::commits::custom_patch::keys::patch_file_disabled;
-    use crate::features::commits::rewrite::keys::stop_disabled;
+    use crate::features::commits::rewrite::keys::{
+        commits_drop_disabled, commits_fixup_disabled, commits_reword_disabled,
+        commits_squash_disabled,
+    };
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::git::bisect::BisectMark;
-    use crate::git::branch_tips;
     use crate::git::commit_files::{CommitId, CommitRange};
-    use crate::git::rebase_plan::Direction;
+    use crate::git::rebase_plan::{Direction, Edit};
     use crate::git::version;
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
@@ -5435,69 +5137,6 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_say_why_they_cannot_run() {
-        let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
-        let row = |i: usize, parents: Vec<String>| crate::git::log::CommitRow {
-            oid: ids[i].clone(),
-            short_oid: "x".into(),
-            parents,
-            author: "Ann".into(),
-            time: 0,
-            subject: "s".into(),
-            subject_altered: false,
-        };
-        let all = [
-            squash_disabled,
-            fixup_disabled,
-            drop_disabled,
-            reword_disabled,
-            stop_disabled,
-        ];
-        let mut state = AppState::new(Context::Workspace);
-        state.commits.tips = Some(vec![]);
-        for disabled in all {
-            assert_eq!(disabled(&state), Some("No commits".into()));
-        }
-        // `a` on `b`, the root.
-        state.commits.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
-        assert_eq!(drop_disabled(&state), None);
-        assert_eq!(reword_disabled(&state), None);
-        let below_is_root = Some("The commit below is the first commit");
-        assert_eq!(squash_disabled(&state).as_deref(), below_is_root);
-        assert_eq!(fixup_disabled(&state).as_deref(), below_is_root);
-        state.commits.selected = 1;
-        for disabled in all {
-            assert_eq!(
-                disabled(&state),
-                Some("Cannot rewrite the first commit".into())
-            );
-        }
-
-        state.commits.selected = 0;
-        state.commits.rows[1].parents = vec![ids[2].clone()];
-        for disabled in all {
-            assert_eq!(disabled(&state), None);
-        }
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![Operation::Rebase],
-            bisect: None,
-        });
-        for disabled in all {
-            assert_eq!(
-                disabled(&state),
-                Some("Finish or abort the operation in progress".into())
-            );
-        }
-        state.op_seq = Some(1);
-        for disabled in all {
-            assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
-        }
-    }
-
-    #[test]
     fn the_hard_reset_question_has_no_enter_and_n_or_esc_keeps_the_work() {
         let state = AppState::new(Context::Workspace);
         let resolve_in = |key| match resolve(
@@ -6098,122 +5737,6 @@ mod tests {
             commits_mark_disabled(&state).as_deref(),
             Some(CLEAR_RANGE_FIRST)
         );
-    }
-
-    /// A linear log `a`..`d` on `e`, the Commits panel focused, with the
-    /// range from `b` (row 1) to `c` (row 2) selected.
-    fn range_state() -> AppState {
-        let ids = ['a', 'b', 'c', 'd', 'e'].map(|d| d.to_string().repeat(40));
-        let mut state = AppState::new(Context::Workspace);
-        state.focus = Focus::Commits;
-        state.commits.rows = (0..4)
-            .map(|i| crate::git::log::CommitRow {
-                oid: ids[i].clone(),
-                short_oid: ids[i][..7].into(),
-                parents: vec![ids[i + 1].clone()],
-                author: "Ann".into(),
-                time: 0,
-                subject: "keep".into(),
-                subject_altered: false,
-            })
-            .collect();
-        state.commits.tips = Some(vec![]);
-        state.commits.range_anchor = Some(ids[1].clone());
-        state.commits.selected = 2;
-        state
-    }
-
-    const RANGE_KEYS: [&str; 3] = ["commits.squash", "commits.fixup", "commits.drop"];
-
-    fn range_reasons(state: &AppState) -> Vec<Option<Reason>> {
-        RANGE_KEYS
-            .iter()
-            .map(|id| (binding(id).disabled)(state))
-            .collect()
-    }
-
-    #[test]
-    fn squash_fixup_and_drop_take_a_range_and_say_why_not() {
-        let state = range_state();
-        assert_eq!(range_reasons(&state), [None, None, None]);
-        assert_eq!(
-            (binding("commits.reword").disabled)(&state).as_deref(),
-            Some(CLEAR_RANGE_FIRST)
-        );
-        let plan = range_log_plan(&state, Edit::Squash).unwrap();
-        assert_eq!(plan.base.as_str(), "e".repeat(40));
-
-        // A filter that hides `b`, between `a` and `c`.
-        let mut gap = range_state();
-        gap.commits.rows[1].subject = "hide".into();
-        gap.commits.filter = "keep".into();
-        gap.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(gap.commits.range(), [0, 2]);
-        let mut todo = range_state();
-        todo.commits.todo_selected = Some(0);
-        let mut narrowed = range_state();
-        narrowed.commits.query.author = Some("ann".into());
-        let mut running = range_state();
-        running.op_seq = Some(1);
-        let mut rebasing = range_state();
-        in_rebase(&mut rebasing);
-        let mut stacked = range_state();
-        stacked.commits.tips = Some(vec![tip("c", "stack")]);
-        let left_behind = branch_tips::left_behind(b"refs/heads/stack");
-        let cases = [
-            (&gap, rebase_plan::RANGE_GAP),
-            (&todo, "Select a commit in the log first"),
-            (&narrowed, CLEAR_LOG_FILTER),
-            (&running, OP_RUNNING),
-            (&rebasing, "Finish or abort the operation in progress"),
-            (&stacked, left_behind.as_str()),
-        ];
-        for (state, why) in cases {
-            for (id, reason) in RANGE_KEYS.iter().zip(range_reasons(state)) {
-                assert_eq!(reason.as_deref(), Some(why), "{id}");
-            }
-        }
-
-        // With `--update-refs` the stacked branch moves along.
-        stacked.git_version = Some(version::UPDATE_REFS);
-        assert_eq!(range_reasons(&stacked), [None, None, None]);
-    }
-
-    #[test]
-    fn only_y_answers_the_drop_range_question_and_a_repository_cannot_move_it() {
-        let state = range_state();
-        let ask = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::DropRangeConfirm,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Unbound => None,
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let none = KeyModifiers::NONE;
-        assert_eq!(ask(key(KeyCode::Enter, none)), None);
-        assert_eq!(ask(plain('q')), None);
-        assert_eq!(ask(plain('y')), Some(AppIntent::ConfirmYes));
-        assert_eq!(ask(plain('n')), Some(AppIntent::ConfirmNo));
-        assert_eq!(ask(key(KeyCode::Esc, none)), Some(AppIntent::ConfirmNo));
-        assert_eq!(
-            ask(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(AppIntent::Quit)
-        );
-        assert_eq!(KeyScope::DropRangeConfirm.parent(), None);
-        assert_eq!(KeyScope::DropRangeConfirm.title(), "Drop commits");
-        for id in [
-            "drop_range_confirm.yes",
-            "drop_range_confirm.no",
-            "drop_range_confirm.quit",
-        ] {
-            assert!(REPO_LOCKED.contains(&id), "{id}");
-            assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
-            assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
-        }
     }
 
     #[test]
@@ -7706,255 +7229,6 @@ mod tests {
         for id in ["commits.copy_menu", "files.ignore"] {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
-    }
-
-    /// HEAD `fixup! A` (`d…`), then `B` (`b…`), then `A` (`a…`) on `9…`,
-    /// not loaded; `a.txt` staged and the Commits panel focused on `HEAD`.
-    fn fixup_state() -> AppState {
-        let row = |digit: &str, parent: &str, subject: &str| crate::git::log::CommitRow {
-            oid: digit.repeat(40),
-            short_oid: digit.repeat(7),
-            parents: vec![parent.repeat(40)],
-            author: "Ann".into(),
-            time: 0,
-            subject: subject.into(),
-            subject_altered: false,
-        };
-        let mut state = AppState::new(Context::Workspace);
-        state.commits.rows = vec![
-            row("d", "b", "fixup! A"),
-            row("b", "a", "B"),
-            row("a", "9", "A"),
-        ];
-        state.commits.tips = Some(vec![]);
-        state.focus = Focus::Commits;
-        state.files = vec![crate::git::FileEntry {
-            path: crate::git::path::RepoPath::from("a.txt"),
-            orig_path: None,
-            index: 'M',
-            worktree: '.',
-            kind: EntryKind::Changed,
-        }];
-        state
-    }
-
-    fn in_rebase(state: &mut AppState) {
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![Operation::Rebase],
-            bisect: None,
-        });
-    }
-
-    fn tip(digit: &str, name: &str) -> crate::git::branch_tips::Tip {
-        (
-            CommitId::parse(&digit.repeat(40)).unwrap(),
-            format!("refs/heads/{name}").into_bytes(),
-        )
-    }
-
-    #[test]
-    fn a_fixup_needs_a_staged_change_and_one_shown_log_commit() {
-        let state = fixup_state();
-        assert_eq!(create_fixup_disabled(&state), None);
-        assert_eq!(find_base_disabled(&state), None);
-
-        // The target is named by id, so a narrowed log is fine.
-        let mut narrowed = fixup_state();
-        narrowed.commits.query.author = Some("ann".into());
-        assert_eq!(create_fixup_disabled(&narrowed), None);
-
-        let mut unstaged = fixup_state();
-        unstaged.files[0].index = '.';
-        unstaged.files[0].worktree = 'M';
-        let mut untracked = fixup_state();
-        untracked.files[0].index = '?';
-        untracked.files[0].kind = EntryKind::Untracked;
-        let mut clean = fixup_state();
-        clean.files.clear();
-        for state in [&unstaged, &untracked, &clean] {
-            assert_eq!(create_fixup_disabled(state).as_deref(), Some(STAGE_THE_FIX));
-            assert_eq!(find_base_disabled(state).as_deref(), Some(STAGE_THE_FIX));
-        }
-
-        let mut todo = fixup_state();
-        todo.commits.todo_selected = Some(0);
-        let mut hidden = fixup_state();
-        hidden.commits.filter = "zzz".into();
-        let mut range = fixup_state();
-        range.commits.range_anchor = Some("b".repeat(40));
-        let mut running = fixup_state();
-        running.op_seq = Some(1);
-        let mut unborn = fixup_state();
-        unborn.commits.rows.clear();
-        unborn.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Unborn("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![],
-            bisect: None,
-        });
-        let cases = [
-            (&todo, "Select a commit in the log first"),
-            (&hidden, FILTER_HIDES_ROW),
-            (&range, CLEAR_RANGE_FIRST),
-            (&running, OP_RUNNING),
-            (&unborn, "No commits"),
-        ];
-        for (state, why) in cases {
-            assert_eq!(create_fixup_disabled(state).as_deref(), Some(why));
-            assert_eq!(find_base_disabled(state).as_deref(), Some(why));
-        }
-
-        // Finding the base only reads, so a rebase in progress is fine.
-        let mut rebasing = fixup_state();
-        in_rebase(&mut rebasing);
-        assert_eq!(
-            create_fixup_disabled(&rebasing).as_deref(),
-            Some("Finish or abort the operation in progress")
-        );
-        assert_eq!(find_base_disabled(&rebasing), None);
-    }
-
-    #[test]
-    fn autosquash_plans_from_the_whole_log_and_says_why_not() {
-        let state = fixup_state();
-        assert_eq!(autosquash_disabled(&state), None);
-        let plan = autosquash_plan(&state).unwrap();
-        let actions: Vec<_> = plan
-            .steps
-            .iter()
-            .map(|s| (s.action, &s.commit.as_str()[..1]))
-            .collect();
-        assert_eq!(
-            actions,
-            [
-                (rebase_plan::TodoAction::Pick, "a"),
-                (rebase_plan::TodoAction::Fixup, "d"),
-                (rebase_plan::TodoAction::Pick, "b")
-            ]
-        );
-        assert_eq!(plan.base.as_str(), "9".repeat(40));
-
-        let mut narrowed = fixup_state();
-        narrowed.commits.query.author = Some("ann".into());
-        let mut filtered = fixup_state();
-        filtered.commits.filter = "fixup".into();
-        let mut todo = fixup_state();
-        todo.commits.todo_selected = Some(0);
-        let mut running = fixup_state();
-        running.op_seq = Some(1);
-        let mut rebasing = fixup_state();
-        in_rebase(&mut rebasing);
-        let mut none = fixup_state();
-        none.commits.rows[0].subject = "D".into();
-        let cases = [
-            (&narrowed, CLEAR_LOG_FILTER),
-            (&filtered, FILTER_HIDES_NEIGHBOUR),
-            (&todo, "Select a commit in the log first"),
-            (&running, OP_RUNNING),
-            (&rebasing, "Finish or abort the operation in progress"),
-            (&none, rebase_plan::NO_FIXUPS),
-        ];
-        for (state, why) in cases {
-            assert_eq!(autosquash_disabled(state).as_deref(), Some(why));
-        }
-    }
-
-    #[test]
-    fn autosquash_and_stacked_branches() {
-        // Without `--update-refs` any other branch in the range is left behind.
-        let mut old_git = fixup_state();
-        old_git.commits.tips = Some(vec![tip("a", "stack")]);
-        assert_eq!(
-            autosquash_disabled(&old_git).as_deref(),
-            Some(branch_tips::left_behind(b"refs/heads/stack").as_str())
-        );
-        old_git.commits.tips = None;
-        assert_eq!(autosquash_disabled(&old_git).as_deref(), Some(TIPS_UNKNOWN));
-
-        // With it, only a branch the fixup moves past, or on the fixup, is.
-        let with = |tips| {
-            let mut state = fixup_state();
-            state.git_version = Some(version::UPDATE_REFS);
-            state.branch = Some(crate::git::status::BranchStatus {
-                head: Head::Branch("main".into()),
-                upstream: None,
-                ahead_behind: None,
-                in_progress: vec![],
-                bisect: None,
-            });
-            state.commits.tips = Some(tips);
-            autosquash_disabled(&state)
-        };
-        assert_eq!(with(vec![tip("a", "stack"), tip("d", "main")]), None);
-        for on in ["b", "d"] {
-            assert_eq!(
-                with(vec![tip(on, "stack")]).as_deref(),
-                Some(rebase_plan::crossing(&"d".repeat(40), b"refs/heads/stack").as_str()),
-                "{on}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_fixup_keys_and_which_a_repository_may_move() {
-        let state = fixup_state();
-        let on = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::Commits,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => binding.intent.clone(),
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(on(key(KeyCode::Char('f'), ctrl)), AppIntent::CreateFixup);
-        assert_eq!(
-            on(key(KeyCode::Char('S'), KeyModifiers::SHIFT)),
-            AppIntent::Autosquash
-        );
-        assert_eq!(on(key(KeyCode::Char('b'), ctrl)), AppIntent::FindFixupBase);
-        for id in ["commits.create_fixup", "commits.autosquash"] {
-            assert!(REPO_LOCKED.contains(&id), "{id}");
-            assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
-            assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
-        }
-        assert!(!REPO_LOCKED.contains(&"commits.find_base"));
-
-        // The question: only `y` folds; Enter answers nothing.
-        let ask = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::AutosquashConfirm,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Unbound => None,
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let none = KeyModifiers::NONE;
-        assert_eq!(ask(key(KeyCode::Enter, none)), None);
-        assert_eq!(ask(plain('q')), None);
-        assert_eq!(ask(plain('y')), Some(AppIntent::ConfirmYes));
-        assert_eq!(ask(plain('n')), Some(AppIntent::ConfirmNo));
-        assert_eq!(ask(key(KeyCode::Esc, none)), Some(AppIntent::ConfirmNo));
-        assert_eq!(ask(key(KeyCode::Char('c'), ctrl)), Some(AppIntent::Quit));
-        assert_eq!(KeyScope::AutosquashConfirm.parent(), None);
-        for id in [
-            "autosquash_confirm.yes",
-            "autosquash_confirm.no",
-            "autosquash_confirm.quit",
-        ] {
-            assert!(REPO_LOCKED.contains(&id), "{id}");
-            assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
-        }
-        assert!(build(&[("commits.find_base", &["Z"])], Trust::Repo).is_ok());
     }
 
     /// Every binding id in registry order. Order is behaviour: `resolve`

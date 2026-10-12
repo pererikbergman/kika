@@ -1,10 +1,10 @@
 //! The Commits panel's sub-features, and what more than one of them
 //! needs. It owns the stacked-branch check that every history rewrite
 //! runs before it starts: [`with_stacked_branches`] with the
-//! [`Crossing`]s a plan makes. `rewrite::log_plan`, core
-//! `autosquash_plan` and `range_log_plan` call it, and so does the custom
-//! patch's `patch_plan`. The history rewrites themselves, with the
-//! stopped rebase's todo list, are in `rewrite`.
+//! [`Crossing`]s a plan makes. `rewrite`'s `log_plan`, `autosquash_plan`
+//! and `range_log_plan` call it, and so does the custom patch's
+//! `patch_plan`. The history rewrites themselves, with the stopped
+//! rebase's todo list, are in `rewrite`.
 
 pub(crate) mod bisect;
 pub(crate) mod compare;

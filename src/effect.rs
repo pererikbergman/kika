@@ -30,7 +30,6 @@ use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
-use crate::git::fixup_base::find_fixup_base;
 use crate::git::head::read_head_message;
 use crate::git::left_behind::read_left_behind;
 use crate::git::log::{LogQuery, log_page, markers};
@@ -959,20 +958,7 @@ impl Runtime {
             Effect::LoadBlame { tag, path } => {
                 blame::effects::load(runner, tx, tag, path, self.emoji_zwj)
             }
-            Effect::FindFixupBase { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || find_fixup_base(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("Finding the fixup base crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::FixupBaseFound { tag, result });
-                });
-            }
+            Effect::FindFixupBase { tag } => rewrite::effects::find_base(runner, tx, tag),
             Effect::LoadConflict { tag, path } => {
                 // Where git runs now, inside an entered submodule too.
                 conflicts::effects::load(runner, tx, self.runner.workdir(), tag, path)
