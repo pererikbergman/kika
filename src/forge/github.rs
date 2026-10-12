@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
+use super::url::pull_url;
+use super::{CiState, CreateError, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use crate::git::branches::BranchName;
+use crate::git::diff::terminal_safe;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 
 /// Branches asked about in one call.
@@ -35,6 +37,10 @@ const MAX_BACKOFF: i64 = 3600;
 const MAX_ETAG: usize = 256;
 /// The probe's media type header.
 const ACCEPT: &str = "Accept: application/vnd.github+json";
+/// The most of GitHub's refusal shown, in characters.
+const MAX_REFUSAL: usize = 400;
+/// The longest page URL taken from an answer.
+const MAX_URL: usize = 2048;
 
 /// Set on every call: no prompt, no pager, no colour, no update check.
 pub const GH_ENV: [(&str, &str); 5] = [
@@ -62,6 +68,9 @@ pub enum GhCall {
     /// A REST read of `path`, made conditional by `etag`: a cheap way to
     /// learn that nothing changed, since GraphQL has no ETags.
     Probe { path: String, etag: Option<String> },
+    /// A REST `POST` to `path`; `body` is the JSON for stdin, so nothing
+    /// the user typed or a branch is called reaches argv.
+    Create { path: String, body: Vec<u8> },
 }
 
 /// One `gh api` call: the host, and what it asks.
@@ -96,6 +105,19 @@ impl GhCommand {
                 )
                 .chain([path.clone()])
                 .collect(),
+            GhCall::Create { path, .. } => [
+                "api",
+                "--include",
+                "--hostname",
+                host,
+                "--method",
+                "POST",
+                path,
+                "--input",
+                "-",
+            ]
+            .map(String::from)
+            .into(),
         };
         args.into_iter().map(OsString::from).collect()
     }
@@ -120,13 +142,17 @@ impl GhCommand {
                     self.host
                 )
             }
+            GhCall::Create { path, .. } => format!(
+                "gh api --include --hostname {} --method POST {path} --input -",
+                self.host
+            ),
         }
     }
 
-    /// What goes on stdin: the GraphQL body, or nothing.
-    fn stdin(&self) -> Vec<u8> {
+    /// What goes on stdin: the JSON body, or nothing.
+    pub fn stdin(&self) -> Vec<u8> {
         match &self.kind {
-            GhCall::Graphql { body } => body.clone(),
+            GhCall::Graphql { body } | GhCall::Create { body, .. } => body.clone(),
             GhCall::Probe { .. } => Vec::new(),
         }
     }
@@ -323,12 +349,52 @@ impl Gh<'_> {
         Ok(badges)
     }
 
+    /// Open a pull request on `repo` from `head` (`owner:branch` for a
+    /// fork) into `base`. Its number and page come back; the page is
+    /// rebuilt from `repo` when the answer names one off the host.
+    pub fn create_pull(
+        &self,
+        repo: &ForgeRepo,
+        head: &str,
+        base: &str,
+        title: &str,
+    ) -> Result<(u64, String), CreateError> {
+        let body = json!({ "title": title, "head": head, "base": base });
+        let kind = GhCall::Create {
+            path: format!("repos/{}/{}/pulls", repo.owner, repo.name),
+            body: serde_json::to_vec(&body).unwrap_or_default(),
+        };
+        let now = self.now;
+        let host = self.host.as_str();
+        self.run_logged(
+            kind,
+            |output| read_created(output, now, host, repo),
+            |result| match result {
+                Ok(_) => CommandOutcome::Ok,
+                Err(CreateError::Status(ForgeStatus::NoGh)) => CommandOutcome::NotStarted,
+                Err(_) => CommandOutcome::Failed(None),
+            },
+        )
+    }
+
     /// Run one call, shown in the Command log under its own id, and read
     /// its answer with `read`.
     fn call<T>(
         &self,
         kind: GhCall,
         read: impl FnOnce(Answer) -> T,
+        outcome: impl FnOnce(&T) -> CommandOutcome,
+    ) -> T {
+        let now = self.now;
+        self.run_logged(kind, |output| read(classify(output, now)), outcome)
+    }
+
+    /// Run one call, shown in the Command log under its own id, and read
+    /// what `gh` left with `read`.
+    fn run_logged<T>(
+        &self,
+        kind: GhCall,
+        read: impl FnOnce(io::Result<GhOutput>) -> T,
         outcome: impl FnOnce(&T) -> CommandOutcome,
     ) -> T {
         let cmd = GhCommand {
@@ -344,7 +410,7 @@ impl Gh<'_> {
             attached: false,
         });
         let start = Instant::now();
-        let result = read(classify(self.runner.run(&cmd), self.now));
+        let result = read(self.runner.run(&cmd));
         self.sink.send(CommandEvent::Finished {
             id,
             outcome: outcome(&result),
@@ -352,6 +418,86 @@ impl Gh<'_> {
         });
         result
     }
+}
+
+/// What a create call came to. Rate limits, logins and the network are
+/// judged as for any call; a refusal keeps GitHub's message, and only a
+/// 201 with a number counts as made.
+fn read_created(
+    output: io::Result<GhOutput>,
+    now: i64,
+    host: &str,
+    repo: &ForgeRepo,
+) -> Result<(u64, String), CreateError> {
+    let stdout = output
+        .as_ref()
+        .map(|o| o.stdout.clone())
+        .unwrap_or_default();
+    let (status, _, body) = split_include(&stdout);
+    match classify(output, now) {
+        Answer::Limited { until } => Err(CreateError::RateLimited { until }),
+        Answer::Body { .. } if status == Some(201) => {
+            let created: Created = serde_json::from_slice(body)
+                .map_err(|_| CreateError::Status(ForgeStatus::Failed))?;
+            let prefix = format!("https://{host}/");
+            let page = created.html_url.filter(|url| {
+                url.len() <= MAX_URL
+                    && url.to_ascii_lowercase().starts_with(&prefix)
+                    && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+            });
+            let page = page
+                .or_else(|| pull_url(repo, created.number))
+                .ok_or(CreateError::Status(ForgeStatus::Failed))?;
+            Ok((created.number, page))
+        }
+        Answer::Failed(ForgeStatus::Failed) if status.is_some() => Err(refusal(body).map_or(
+            CreateError::Status(ForgeStatus::Failed),
+            CreateError::Refused,
+        )),
+        Answer::Failed(status) => Err(CreateError::Status(status)),
+        Answer::Body { .. } | Answer::NotModified => Err(CreateError::Status(ForgeStatus::Failed)),
+    }
+}
+
+#[derive(Deserialize)]
+struct Created {
+    number: u64,
+    html_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RestError {
+    message: Option<String>,
+    #[serde(default)]
+    errors: Vec<RestErrorDetail>,
+}
+
+#[derive(Deserialize)]
+struct RestErrorDetail {
+    message: Option<String>,
+    field: Option<String>,
+    code: Option<String>,
+}
+
+/// GitHub's reason for refusing a call, from a REST error body: its
+/// message and each detail, terminal-safe and cut to [`MAX_REFUSAL`].
+fn refusal(body: &[u8]) -> Option<String> {
+    let error: RestError = serde_json::from_slice(body).ok()?;
+    let details = error.errors.into_iter().filter_map(|detail| {
+        detail.message.or_else(|| {
+            let parts: Vec<String> = [detail.field, detail.code].into_iter().flatten().collect();
+            (!parts.is_empty()).then(|| parts.join(" "))
+        })
+    });
+    let parts: Vec<String> = error.message.into_iter().chain(details).collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let text = terminal_safe(parts.join(": ").as_bytes());
+    Some(match text.char_indices().nth(MAX_REFUSAL) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
+    })
 }
 
 /// The GraphQL query for `count` branches. Fixed text: aliases are `b0…`,
@@ -735,6 +881,9 @@ pub mod fixtures {
     pub const DNS_STDERR: &str = include_str!("fixtures/dns.stderr");
     pub const TIMEOUT_STDERR: &str = include_str!("fixtures/timeout.stderr");
     pub const OTHER_STDERR: &str = include_str!("fixtures/other.stderr");
+    pub const CREATE_201: &str = include_str!("fixtures/create_201.http");
+    pub const CREATE_422: &str = include_str!("fixtures/create_422.http");
+    pub const CREATE_422_STDERR: &str = include_str!("fixtures/create_422.stderr");
 }
 
 #[cfg(test)]
@@ -1186,6 +1335,170 @@ mod tests {
             Err(Refusal::Status(ForgeStatus::Offline))
         );
         assert_eq!(runner.calls().len(), 1);
+    }
+
+    fn create(runner: &FakeGh, head: &str) -> Result<(u64, String), CreateError> {
+        gh(runner, &CommandSink::new(), &host()).create_pull(&repo(), head, "main", "Add login")
+    }
+
+    #[test]
+    fn a_created_pull_request_gives_its_number_and_page() {
+        let runner = FakeGh::new().reply(answer(CREATE_201));
+        assert_eq!(
+            create(&runner, "topic"),
+            Ok((42, "https://github.com/acme/widgets/pull/42".into()))
+        );
+        let [cmd] = runner.calls().try_into().unwrap();
+        assert_eq!(
+            cmd.args(),
+            [
+                "api",
+                "--include",
+                "--hostname",
+                "github.com",
+                "--method",
+                "POST",
+                "repos/acme/widgets/pulls",
+                "--input",
+                "-",
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(
+            cmd.display_line(),
+            "gh api --include --hostname github.com --method POST repos/acme/widgets/pulls --input -"
+        );
+        assert_eq!(cmd.cwd, PathBuf::from("/cache"));
+        let sent: serde_json::Value = serde_json::from_slice(&cmd.stdin()).unwrap();
+        assert_eq!(
+            sent,
+            json!({ "title": "Add login", "head": "topic", "base": "main" })
+        );
+    }
+
+    #[test]
+    fn names_and_the_title_travel_on_stdin_and_never_in_argv() {
+        let runner = FakeGh::new().reply(answer(CREATE_201));
+        let (sink, host) = (CommandSink::new(), host());
+        let title = "x\"; --method DELETE $(rm -rf ~)";
+        gh(&runner, &sink, &host)
+            .create_pull(&repo(), "me:feat/--force", "release/1.x", title)
+            .unwrap();
+        let cmd = &runner.calls()[0];
+        let argv: Vec<String> = cmd
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for word in ["feat", "release", "DELETE", "rm -rf", "me:"] {
+            assert!(argv.iter().all(|a| !a.contains(word)), "{word}: {argv:?}");
+            assert!(!cmd.display_line().contains(word), "{word}");
+        }
+        let sent: serde_json::Value = serde_json::from_slice(&cmd.stdin()).unwrap();
+        assert_eq!(sent["head"], "me:feat/--force");
+        assert_eq!(sent["base"], "release/1.x");
+        assert_eq!(sent["title"], title);
+    }
+
+    #[test]
+    fn a_refusal_keeps_githubs_message_terminal_safe() {
+        let refused = GhOutput {
+            stderr: CREATE_422_STDERR.into(),
+            ..answer(CREATE_422)
+        };
+        assert_eq!(refused.exit, Some(1));
+        let runner = FakeGh::new().reply(refused);
+        assert_eq!(
+            create(&runner, "topic"),
+            Err(CreateError::Refused(
+                "Validation Failed: A pull request already exists for acme:topic.".into()
+            ))
+        );
+        // A detail with no message says its field and code; escapes go.
+        let odd = "HTTP/2.0 422 Unprocessable Entity\r\n\r\n\
+            {\"message\":\"Bad\\u001b[31m\",\"errors\":[{\"field\":\"base\",\"code\":\"invalid\"}]}";
+        let runner = FakeGh::new().reply(answer(odd));
+        let Err(CreateError::Refused(text)) = create(&runner, "topic") else {
+            panic!()
+        };
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(
+            text.starts_with("Bad") && text.ends_with(": base invalid"),
+            "{text}"
+        );
+        // No readable reason: a plain failure.
+        let runner = FakeGh::new().reply(answer("HTTP/2.0 500 Oops\r\n\r\nnot json"));
+        assert_eq!(
+            create(&runner, "topic"),
+            Err(CreateError::Status(ForgeStatus::Failed))
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_or_failed_create_says_why() {
+        let runner = FakeGh::new().reply(answer(LIMIT_PRIMARY));
+        assert_eq!(
+            create(&runner, "topic"),
+            Err(CreateError::RateLimited {
+                until: 1_700_001_800
+            })
+        );
+        let cases = [
+            (FakeGh::new().missing(), ForgeStatus::NoGh),
+            (
+                FakeGh::new().reply(failure(1, HTTP_401_STDERR)),
+                ForgeStatus::NotLoggedIn,
+            ),
+            (
+                FakeGh::new().reply(failure(1, DNS_STDERR)),
+                ForgeStatus::Offline,
+            ),
+            (
+                FakeGh::new().reply(GhOutput {
+                    stdout: NOT_FOUND.into(),
+                    ..failure(1, NOT_FOUND_STDERR)
+                }),
+                ForgeStatus::NoAccess,
+            ),
+            // Only a 201 is a pull request made.
+            (FakeGh::new().reply(answer(PROBE_200)), ForgeStatus::Failed),
+            (
+                FakeGh::new().reply(answer("HTTP/2.0 201 Created\r\n\r\n{}")),
+                ForgeStatus::Failed,
+            ),
+        ];
+        for (runner, want) in cases {
+            assert_eq!(create(&runner, "topic"), Err(CreateError::Status(want)));
+        }
+    }
+
+    #[test]
+    fn a_page_off_the_host_is_replaced_by_the_one_built_here() {
+        for page in [
+            "https://evil.io/acme/widgets/pull/42",
+            "https://github.com.evil.io/x",
+            "http://github.com/acme/widgets/pull/42",
+            "javascript:alert(1)",
+            "https://github.com/a b",
+            "https://github.com/a\\u001b]52;c;eA==\\u0007",
+        ] {
+            let body = CREATE_201.replace("https://github.com/acme/widgets/pull/42", page);
+            let runner = FakeGh::new().reply(answer(&body));
+            assert_eq!(
+                create(&runner, "topic"),
+                Ok((42, "https://github.com/acme/widgets/pull/42".into())),
+                "{page}"
+            );
+        }
+        let none = CREATE_201.replace(
+            "\"html_url\":\"https://github.com/acme/widgets/pull/42\",",
+            "",
+        );
+        let runner = FakeGh::new().reply(answer(&none));
+        assert_eq!(
+            create(&runner, "topic"),
+            Ok((42, "https://github.com/acme/widgets/pull/42".into()))
+        );
     }
 
     #[test]

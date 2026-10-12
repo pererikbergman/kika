@@ -10,6 +10,7 @@ pub mod cache;
 pub mod github;
 pub mod remote;
 pub mod task;
+pub mod url;
 
 use std::collections::HashMap;
 
@@ -102,6 +103,44 @@ pub enum ForgeStatus {
     RateLimited,
 }
 
+/// Why a pull request was not created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateError {
+    Status(ForgeStatus),
+    /// GitHub refuses calls until this second; none is made before it.
+    RateLimited {
+        until: i64,
+    },
+    /// GitHub answered with a refusal, such as a 422, in its own words:
+    /// terminal-safe and cut short.
+    Refused(String),
+}
+
+impl CreateError {
+    /// What the error popup says.
+    pub fn message(&self) -> String {
+        match self {
+            CreateError::Status(ForgeStatus::NoGh) => "The gh command is not installed.".into(),
+            CreateError::Status(ForgeStatus::NotLoggedIn) => {
+                "gh is not logged in to this host; run gh auth login.".into()
+            }
+            CreateError::Status(ForgeStatus::Offline) => {
+                "GitHub could not be reached, or did not answer in time. If it timed out, \
+                 the pull request may still have been made: fetch to read the badges again."
+                    .into()
+            }
+            CreateError::Status(ForgeStatus::NoAccess) => {
+                "No access to the repository with gh's login.".into()
+            }
+            CreateError::Status(ForgeStatus::RateLimited) | CreateError::RateLimited { .. } => {
+                "GitHub is rate limiting this account.".into()
+            }
+            CreateError::Status(ForgeStatus::Failed) => "GitHub gave no usable answer.".into(),
+            CreateError::Refused(message) => message.clone(),
+        }
+    }
+}
+
 /// What the Branches panel says about the forge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgeView {
@@ -140,6 +179,10 @@ pub struct ForgeState {
     /// When the current repository's host may be asked again, for the
     /// status line.
     pub limited_until: Option<i64>,
+    /// Pull requests Kika created, shown at once and kept over the cache
+    /// and over answers to loads started before them; each with the first
+    /// load sequence number that knows of it.
+    pub created: HashMap<BranchName, (PrBadge, u64)>,
 }
 
 impl Default for ForgeState {
@@ -162,6 +205,7 @@ impl ForgeState {
             unmatched: false,
             limited: HashMap::new(),
             limited_until: None,
+            created: HashMap::new(),
         }
     }
 
@@ -246,6 +290,7 @@ impl ForgeState {
         self.unmatched = false;
         if let Some(badges) = badges {
             self.badges = badges;
+            self.show_created();
         }
         if !self.in_flight && self.status == ForgeView::Off {
             self.status = ForgeView::Cached;
@@ -271,6 +316,10 @@ impl ForgeState {
         match result {
             Ok(badges) => {
                 self.badges = badges;
+                // A load started after the create answers for it.
+                self.created
+                    .retain(|_, (_, known_from)| tag.seq < *known_from);
+                self.show_created();
                 self.status = ForgeView::Fresh;
                 if let Some(host) = host {
                     self.limited.remove(&host);
@@ -282,6 +331,20 @@ impl ForgeState {
                     self.limited.insert(host, until);
                 }
             }
+        }
+    }
+
+    /// Show the pull request just created for `branch` at once. Loads
+    /// numbered `known_from` or later answer for it; older ones and the
+    /// cache do not know it yet, so it is kept over what they say.
+    pub fn add_created(&mut self, branch: BranchName, badge: PrBadge, known_from: u64) {
+        self.badges.insert(branch.clone(), badge);
+        self.created.insert(branch, (badge, known_from));
+    }
+
+    fn show_created(&mut self) {
+        for (branch, (badge, _)) in &self.created {
+            self.badges.insert(branch.clone(), *badge);
         }
     }
 

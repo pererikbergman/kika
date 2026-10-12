@@ -298,6 +298,10 @@ pub enum KeyScope {
     Input,
     /// The git commands Kika ran, on top of the popup stack.
     CommandLog,
+    /// A list to pick one row from, on top of the popup stack.
+    PickList,
+    /// "Create this pull request?" on top of the popup stack.
+    CreatePullRequest,
 }
 
 impl KeyScope {
@@ -348,7 +352,9 @@ impl KeyScope {
             | KeyScope::Credential
             | KeyScope::Travel
             | KeyScope::Input
-            | KeyScope::CommandLog => None,
+            | KeyScope::CommandLog
+            | KeyScope::PickList
+            | KeyScope::CreatePullRequest => None,
         }
     }
 
@@ -399,6 +405,8 @@ impl KeyScope {
             KeyScope::Travel => "Undo or redo",
             KeyScope::Input => "Filter or search",
             KeyScope::CommandLog => "Command log",
+            KeyScope::PickList => "Pick one",
+            KeyScope::CreatePullRequest => "Create pull request",
         }
     }
 
@@ -565,6 +573,11 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.yes",
     "travel.no",
     "travel.quit",
+    "branches.pull_request",
+    "pick_list.quit",
+    "create_pull_request.yes",
+    "create_pull_request.no",
+    "create_pull_request.quit",
     "command_log.quit",
     "commits.paste",
     "files.escape",
@@ -3708,6 +3721,16 @@ static REGISTRY: &[Binding] = &[
         disabled: merge_disabled,
     },
     Binding {
+        id: "branches.pull_request",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Branches,
+        intent: AppIntent::OpenMenu(MenuId::PullRequest),
+        description: "Open, copy or create the selected branch's pull request",
+        label: "pull request",
+        bar: false,
+        disabled: no_branch_selected,
+    },
+    Binding {
         id: "branches.set_upstream",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
         scope: KeyScope::Branches,
@@ -4594,6 +4617,99 @@ static REGISTRY: &[Binding] = &[
         id: "recent.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Recent,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "pick_list.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::PickList,
+        intent: AppIntent::PickNext,
+        description: "Select the next row",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "pick_list.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::PickList,
+        intent: AppIntent::PickPrev,
+        description: "Select the previous row",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "pick_list.pick",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::PickList,
+        intent: AppIntent::PickSelect,
+        description: "Take the selected row",
+        label: "pick",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "pick_list.close",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::exact(KeyCode::Char('q'), NONE),
+        ],
+        scope: KeyScope::PickList,
+        intent: AppIntent::PopPopup,
+        description: "Close the list and stop",
+        label: "close",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "pick_list.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::PickList,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Creating a pull request reaches GitHub, so Enter is left unbound.
+    Binding {
+        id: "create_pull_request.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::CreatePullRequest,
+        intent: AppIntent::ConfirmCreatePullRequest,
+        description: "Yes, create the pull request on GitHub",
+        label: "create",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "create_pull_request.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::CreatePullRequest,
+        intent: AppIntent::ConfirmNo,
+        description: "No, create nothing",
+        label: "cancel",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "create_pull_request.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CreatePullRequest,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -6979,6 +7095,94 @@ mod tests {
     }
 
     #[test]
+    fn o_opens_the_pull_request_menu_in_branches_alone_and_help_lists_it() {
+        // Nothing else in Branches or the scopes around it has `o`.
+        let o = KeyPattern::exact(KeyCode::Char('o'), NONE);
+        let holders: Vec<&str> = registry()
+            .iter()
+            .filter(|b| KeyScope::Branches.chain().any(|scope| scope == b.scope))
+            .filter(|b| b.keys.iter().any(|k| k.overlaps(&o)))
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(holders, ["branches.pull_request"]);
+        assert!(Keymap::build(&Keymap::default(), &KeysTable::default(), Trust::Global).is_ok());
+
+        let mut state = AppState::new(Context::Workspace);
+        let listed = |state: &AppState| {
+            available(registry(), &Keymap::default(), KeyScope::Branches, state)
+                .into_iter()
+                .find(|(b, _)| b.id == "branches.pull_request")
+                .map(|(_, disabled)| disabled)
+        };
+        assert_eq!(listed(&state), Some(Some("No branch selected".into())));
+        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
+            name: "topic".into(),
+            head: false,
+            upstream: None,
+            track: crate::git::branches::Track::None,
+            merged: false,
+        }]));
+        assert_eq!(listed(&state), Some(None));
+        match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Branches,
+            &state,
+            plain('o'),
+        ) {
+            Resolution::Run(binding) => {
+                assert_eq!(binding.intent, AppIntent::OpenMenu(MenuId::PullRequest))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_create_question_has_no_enter_and_the_pick_list_closes_on_esc() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in =
+            |scope, key| match resolve(registry(), &Keymap::default(), scope, &state, key) {
+                Resolution::Run(binding) => Some(binding.intent.clone()),
+                Resolution::Unbound => None,
+                other => panic!("{key:?}: {other:?}"),
+            };
+        let none = KeyModifiers::NONE;
+        let ask = KeyScope::CreatePullRequest;
+        assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(ask, plain('q')), None);
+        assert_eq!(
+            resolve_in(ask, plain('y')),
+            Some(AppIntent::ConfirmCreatePullRequest)
+        );
+        assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(ask, key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(ask.parent(), None);
+        let pick = KeyScope::PickList;
+        assert_eq!(
+            resolve_in(pick, key(KeyCode::Enter, none)),
+            Some(AppIntent::PickSelect)
+        );
+        assert_eq!(resolve_in(pick, plain('j')), Some(AppIntent::PickNext));
+        assert_eq!(
+            resolve_in(pick, key(KeyCode::Esc, none)),
+            Some(AppIntent::PopPopup)
+        );
+        assert_eq!(pick.parent(), None);
+        for id in [
+            "branches.pull_request",
+            "create_pull_request.yes",
+            "create_pull_request.no",
+            "create_pull_request.quit",
+            "pick_list.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
+    }
+
+    #[test]
     fn undo_redo_and_the_travel_answers_are_locked() {
         for id in [
             "workspace.undo",
@@ -7691,6 +7895,8 @@ mod tests {
             KeyScope::Travel => "travel",
             KeyScope::Input => "input",
             KeyScope::CommandLog => "command_log",
+            KeyScope::PickList => "pick_list",
+            KeyScope::CreatePullRequest => "create_pull_request",
         }
     }
 
@@ -7972,6 +8178,8 @@ mod tests {
                     | Redo
                     | ConfirmTravel
                     | ListEscape
+                    | OpenMenu(MenuId::PullRequest)
+                    | ConfirmCreatePullRequest
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

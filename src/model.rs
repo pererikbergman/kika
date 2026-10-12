@@ -2,6 +2,7 @@ use crate::ansi::StyledRow;
 use crate::bisect;
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
@@ -315,6 +316,15 @@ pub struct AppState {
     pub files_anchor: Option<RepoPath>,
     /// Pull requests per branch; off unless the global config names hosts.
     pub forge: ForgeState,
+    /// The global `[forge] gitlab` hosts: only URLs are built for them.
+    pub forge_gitlab_hosts: Vec<ForgeHost>,
+    /// The global `[forge] browser` argv; `None` leaves Open off.
+    pub browser: Option<Vec<OsString>>,
+    /// The pull request being put together, from its first picker to the
+    /// question.
+    pub pr_draft: Option<pull_request::PrDraft>,
+    /// The pull request being created on GitHub; one at a time.
+    pub pr_create: Option<pull_request::PrCreating>,
     /// The message read to copy it; any other answer is stale.
     pub pending_copy: Option<(Tag, CommitId)>,
     /// The pattern the open `.gitignore` prompt was filled with.
@@ -396,6 +406,10 @@ impl AppState {
             files_filter: String::new(),
             files_anchor: None,
             forge: ForgeState::default(),
+            forge_gitlab_hosts: Vec::new(),
+            browser: None,
+            pr_draft: None,
+            pr_create: None,
             pending_copy: None,
             ignore_draft: None,
         }
@@ -413,6 +427,15 @@ impl AppState {
     pub fn with_forge_hosts(self, hosts: Vec<ForgeHost>) -> Self {
         Self {
             forge: ForgeState::new(hosts),
+            ..self
+        }
+    }
+
+    /// The global config's GitLab hosts and browser, for forge links.
+    pub fn with_forge_links(self, gitlab: Vec<ForgeHost>, browser: Option<Vec<OsString>>) -> Self {
+        Self {
+            forge_gitlab_hosts: gitlab,
+            browser,
             ..self
         }
     }
@@ -764,6 +787,14 @@ impl AppState {
                     kind: PromptKind::IgnorePattern,
                     ..
                 }) => self.ignore_draft = None,
+                // Closing a step of a pull request stops it.
+                Some(
+                    Popup::PickList(_)
+                    | Popup::Prompt {
+                        kind: PromptKind::PullRequestTitle,
+                        ..
+                    },
+                ) => self.pr_draft = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -961,6 +992,22 @@ impl AppState {
                 limited_until,
             } => {
                 return self.pull_requests_fetched(tag, result, limited_until);
+            }
+            AppIntent::OpenForgeUrl => return self.open_forge_url(),
+            AppIntent::CopyForgeUrl => return self.copy_forge_url(),
+            AppIntent::OpenUrlFailed(message) => self.push_error(ErrorPopup::new(
+                "Could not open the browser",
+                &message,
+                "Check forge.browser in the global config.",
+            )),
+            AppIntent::CreatePrStart => self.create_pr_start(),
+            AppIntent::PickNext => self.move_pick_cursor(1),
+            AppIntent::PickPrev => self.move_pick_cursor(-1),
+            AppIntent::PickSelect => self.pick_select(),
+            AppIntent::PullRequestTitled(text) => self.pull_request_titled(&text),
+            AppIntent::ConfirmCreatePullRequest => return self.confirm_create_pull_request(),
+            AppIntent::PullRequestCreated { tag, result } => {
+                return self.pull_request_created(tag, result);
             }
             AppIntent::BranchLogLoaded {
                 tag,
@@ -1249,6 +1296,10 @@ impl AppState {
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
+            // It reaches GitHub, so only `y` answers it.
+            Some(Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
+                return KeyScope::CreatePullRequest;
+            }
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
@@ -1264,6 +1315,7 @@ impl AppState {
             Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
             Some(Popup::RemoveWorktree(_)) => return KeyScope::RemoveWorktree,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
+            Some(Popup::PickList(_)) => return KeyScope::PickList,
             // Ssh's yes/no kind is answered like any other question.
             Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
@@ -1522,6 +1574,16 @@ impl AppState {
     /// Close the question on top and run its answer, if it has one.
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
         match self.popups.pop() {
+            // Only `ConfirmCreatePullRequest` creates; yes here keeps the
+            // question, no closes it and drops the draft.
+            Some(popup @ Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
+                if yes {
+                    self.popups.push(popup);
+                } else {
+                    self.pr_draft = None;
+                }
+                vec![]
+            }
             Some(Popup::Confirm(kind)) => {
                 if kind == ConfirmKind::DetachedCheckout && !yes {
                     self.commits.pending = None;
@@ -1997,6 +2059,10 @@ impl AppState {
             (ConfirmKind::Abort(Operation::Bisect), _) => {
                 Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
             }
+            (ConfirmKind::CreatePullRequest, _) => match pull_request::question(self) {
+                Some(question) => Cow::Owned(question),
+                None => Cow::Borrowed(kind.question()),
+            },
             _ => Cow::Borrowed(kind.question()),
         }
     }
@@ -3562,6 +3628,9 @@ impl AppState {
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
         self.forge.reset();
+        // A pull request in the making names the old repository's branches.
+        self.pr_draft = None;
+        self.pr_create = None;
     }
 
     fn refresh_status(&mut self) -> Vec<Effect> {
@@ -4231,6 +4300,13 @@ impl AppState {
                 self.pending_copy = Some((tag, id.clone()));
                 return vec![Effect::LoadCommitMessage { tag, oid: id }];
             }
+            CopyWhat::ForgeUrl => match pull_request::commit_page(self, &id) {
+                Ok(url) => url,
+                Err(reason) => {
+                    self.notice = Some(reason);
+                    return vec![];
+                }
+            },
         };
         self.copy_text(what, text)
     }
@@ -5732,6 +5808,7 @@ fn failure_title(op: &GitOp) -> &'static str {
 
 mod leave_commits;
 mod log_query;
+pub(crate) mod pull_request;
 mod stash_actions;
 
 use log_query::MARK_CLEARED;
@@ -16821,7 +16898,17 @@ mod tests {
         }
         for item in menu::items(MenuId::Copy) {
             assert_eq!((item.disabled)(&state), Some("No commit selected".into()));
-            assert_eq!((item.disabled)(&copy_ready()), None);
+            // A forge URL needs a remote on a forge host as well.
+            let ready = (item.disabled)(&copy_ready());
+            if item.intent == AppIntent::CopyCommitText(CopyWhat::ForgeUrl) {
+                assert!(
+                    ready.is_some_and(|r| r.contains("forge host")),
+                    "{}",
+                    item.label
+                );
+            } else {
+                assert_eq!(ready, None, "{}", item.label);
+            }
         }
     }
 
