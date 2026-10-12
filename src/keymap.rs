@@ -13,7 +13,7 @@ use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
-use crate::features::{command_log, custom_commands, repos, submodules, worktrees};
+use crate::features::{blame, command_log, custom_commands, repos, submodules, worktrees};
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -1283,21 +1283,6 @@ fn renderer_disabled(state: &AppState) -> Option<Reason> {
     state.renderers.is_empty().then_some(NO_RENDERER.into())
 }
 
-/// Why `b` cannot blame the selected file. An untracked or deleted file
-/// has no lines git can blame.
-pub(crate) fn blame_disabled(state: &AppState) -> Option<Reason> {
-    match state.selected.and_then(|i| state.files.get(i)) {
-        None => Some("No file selected".into()),
-        Some(file) if file.kind == EntryKind::Untracked => {
-            Some("Untracked file: nothing to blame".into())
-        }
-        Some(file) if file.worktree == 'D' || file.index == 'D' => {
-            Some("The file is deleted: nothing to blame".into())
-        }
-        Some(_) => None,
-    }
-}
-
 /// Why the conflict view cannot pick a side now: one write at a time, and
 /// only in a file whose blocks were read.
 pub(crate) fn pick_disabled(state: &AppState) -> Option<Reason> {
@@ -2400,10 +2385,6 @@ fn files_discard_disabled(state: &AppState) -> Option<Reason> {
 
 fn files_open_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| open_disabled(state))
-}
-
-fn files_blame_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| blame_disabled(state))
 }
 
 fn files_hunks_disabled(state: &AppState) -> Option<Reason> {
@@ -3819,21 +3800,6 @@ static REVIEW_KEYS: &[Binding] = &[
     },
 ];
 
-// Chunk 28: blame
-#[rustfmt::skip]
-static BLAME_FILES: &[Binding] = &[
-    Binding {
-        id: "files.blame",
-        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenBlame,
-        description: "Blame the selected file",
-        label: "blame",
-        bar: false,
-        disabled: files_blame_disabled,
-    },
-];
-
 // Chunk 29: diff
 #[rustfmt::skip]
 static DIFF_FILES: &[Binding] = &[
@@ -4105,81 +4071,6 @@ static DIFF_LINES: &[Binding] = &[
     },
 ];
 
-// Chunk 35: blame
-static BLAME_KEYS: &[Binding] = &[
-    Binding {
-        id: "blame.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Blame,
-        intent: AppIntent::BlameNext,
-        description: "Move to the next line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Blame,
-        intent: AppIntent::BlamePrev,
-        description: "Move to the previous line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame.page_down",
-        keys: &[KeyPattern::any(KeyCode::PageDown)],
-        scope: KeyScope::Blame,
-        intent: AppIntent::BlamePageDown,
-        description: "Move down a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame.page_up",
-        keys: &[KeyPattern::any(KeyCode::PageUp)],
-        scope: KeyScope::Blame,
-        intent: AppIntent::BlamePageUp,
-        description: "Move up a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame.commit",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Blame,
-        intent: AppIntent::OpenBlameCommit,
-        description: "Show the commit that last changed this line",
-        label: "commit",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "blame.back",
-        // Esc is `blame.escape`, which clears a search first and stands in
-        // for this one in the bar.
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('h'), NONE),
-            KeyPattern::any(KeyCode::Left),
-        ],
-        scope: KeyScope::Blame,
-        intent: AppIntent::CloseBlame,
-        description: "Back to the file list",
-        label: "back",
-        bar: false,
-        disabled: never,
-    },
-];
-
 // Chunk 36: conflicts
 static CONFLICTS_KEYS: &[Binding] = &[
     Binding {
@@ -4256,71 +4147,6 @@ static CONFLICTS_KEYS: &[Binding] = &[
         description: "Back to the file list; picks already written stay",
         label: "back",
         bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 37: blame
-static BLAME_COMMIT: &[Binding] = &[
-    Binding {
-        id: "blame_commit.scroll_down",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::LineDown),
-        description: "Scroll the commit down a line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame_commit.scroll_up",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::LineUp),
-        description: "Scroll the commit up a line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame_commit.page_down",
-        keys: &[KeyPattern::any(KeyCode::PageDown)],
-        scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::PageDown),
-        description: "Scroll the commit down a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame_commit.page_up",
-        keys: &[KeyPattern::any(KeyCode::PageUp)],
-        scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::PageUp),
-        description: "Scroll the commit up a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "blame_commit.back",
-        // Esc is `blame_commit.escape`, which clears a search first and stands in
-        // for this one in the bar.
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('h'), NONE),
-            KeyPattern::any(KeyCode::Left),
-        ],
-        scope: KeyScope::BlameCommit,
-        intent: AppIntent::CloseBlameCommit,
-        description: "Back to the blame, at the same line",
-        label: "back",
-        bar: false,
         disabled: never,
     },
 ];
@@ -6364,16 +6190,16 @@ static CHUNKS: &[&[Binding]] = &[
     command_log::keys::COMMAND_LOG_WORKSPACE,
     repos::keys::REPOS_WORKSPACE,
     REVIEW_KEYS,
-    BLAME_FILES,
+    blame::keys::BLAME_FILES,
     DIFF_FILES,
     CONFLICTS_FILES,
     FILES_IGNORE,
     DIFF_KEYS,
     RENDERERS_DIFF,
     DIFF_LINES,
-    BLAME_KEYS,
+    blame::keys::BLAME_KEYS,
     CONFLICTS_KEYS,
-    BLAME_COMMIT,
+    blame::keys::BLAME_COMMIT,
     FILES_MENU,
     STASH_FROM_FILES,
     COMMIT_KEYS,
@@ -7051,58 +6877,6 @@ mod tests {
         };
         assert_eq!(bound(KeyScope::Lines, plain(' ')), Some(ToggleLinesStage));
         assert_eq!(bound(KeyScope::Diff, plain('v')), Some(EnterLineMode));
-    }
-
-    #[test]
-    fn b_blames_from_files_and_the_blame_scopes_have_their_own_keys() {
-        use AppIntent::*;
-        let none = KeyModifiers::NONE;
-        let b = registry()
-            .iter()
-            .find(|b| b.scope == KeyScope::Files && b.matches(plain('b')))
-            .expect("b is bound in Files");
-        assert_eq!(b.intent, OpenBlame);
-        assert_eq!(b.label, "blame");
-        assert!(!b.bar);
-        assert_eq!(from(KeyScope::Diff, plain('b')), None);
-
-        for scope in [KeyScope::Blame, KeyScope::BlameCommit] {
-            assert_eq!(scope.parent(), Some(KeyScope::Workspace));
-        }
-        assert_eq!(KeyScope::Blame.title(), "Blame");
-        assert_eq!(KeyScope::BlameCommit.title(), "Commit");
-
-        let blame = |k| from(KeyScope::Blame, k);
-        assert_eq!(blame(plain('j')), Some(BlameNext));
-        assert_eq!(blame(key(KeyCode::Down, none)), Some(BlameNext));
-        assert_eq!(blame(plain('k')), Some(BlamePrev));
-        assert_eq!(blame(key(KeyCode::Up, none)), Some(BlamePrev));
-        assert_eq!(blame(key(KeyCode::PageDown, none)), Some(BlamePageDown));
-        assert_eq!(blame(key(KeyCode::PageUp, none)), Some(BlamePageUp));
-        assert_eq!(blame(key(KeyCode::Enter, none)), Some(OpenBlameCommit));
-        // Esc clears a search first, then closes the blame.
-        assert_eq!(blame(key(KeyCode::Esc, none)), Some(PaneEscape));
-        for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(blame(k), Some(CloseBlame), "{k:?}");
-        }
-        assert_eq!(blame(plain('q')), Some(Quit));
-        // File and hunk keys do not reach the blame.
-        for c in [' ', 'a', 'c', 'd', 'o', 'b', 'v', 't', 'e'] {
-            assert_eq!(blame(plain(c)), None, "{c:?}");
-        }
-
-        let commit = |k| from(KeyScope::BlameCommit, k);
-        assert_eq!(commit(plain('j')), Some(ScrollCommit(Scroll::LineDown)));
-        assert_eq!(commit(plain('k')), Some(ScrollCommit(Scroll::LineUp)));
-        assert_eq!(
-            commit(key(KeyCode::PageDown, none)),
-            Some(ScrollCommit(Scroll::PageDown))
-        );
-        assert_eq!(commit(key(KeyCode::Esc, none)), Some(PaneEscape));
-        for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(commit(k), Some(CloseBlameCommit), "{k:?}");
-        }
-        assert_eq!(commit(key(KeyCode::Enter, none)), None);
     }
 
     #[test]
