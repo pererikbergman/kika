@@ -117,6 +117,14 @@ pub fn screen_layout(area: Rect) -> [Rect; 2] {
     Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area)
 }
 
+/// Rows inside a help popup as tall as the panels above the bar: its
+/// height less the two borders, at least 1. Shared so the model's scroll
+/// clamp and the view's agree on how far the list can scroll.
+pub fn help_rows(screen: Rect) -> usize {
+    let [main, _] = screen_layout(screen);
+    usize::from(main.height.saturating_sub(2)).max(1)
+}
+
 /// Rows a collapsed panel takes when there is room: its border and one line.
 const COLLAPSED: u16 = 3;
 /// Rows the expanded panel keeps before the collapsed ones get theirs.
@@ -223,6 +231,14 @@ mod tests {
         Panel::Side(SidePanel::Stash),
         Panel::Diff,
     ];
+
+    #[test]
+    fn help_rows_are_the_panel_rows_less_the_popup_borders() {
+        assert_eq!(help_rows(Rect::new(0, 0, 80, 24)), 21);
+        assert_eq!(help_rows(Rect::new(0, 0, 80, 8)), 5);
+        assert_eq!(help_rows(Rect::new(0, 0, 80, 2)), 1);
+        assert_eq!(help_rows(Rect::new(0, 0, 80, 1)), 1);
+    }
 
     #[test]
     fn side_panels_are_numbered_one_to_five_and_the_diff_zero() {
