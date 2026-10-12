@@ -15,8 +15,6 @@ use crate::features::{
     blame, command_log, commits, conflicts, custom_commands, operation, pull_requests, repos,
     review, stash, submodules, sync, worktrees,
 };
-use crate::git::diff::DiffSide;
-use crate::git::patch::{FileKind, PatchError};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::{EntryKind, Head};
@@ -1155,7 +1153,7 @@ pub(crate) const OP_RUNNING: &str = "An operation is running";
 pub(crate) const WHITESPACE_HIDDEN: &str = "Whitespace is hidden; press w to stage";
 
 /// The Diff pane shows a `-w` diff, which hunk and line keys cannot apply.
-fn whitespace_hidden(state: &AppState) -> Option<Reason> {
+pub(crate) fn whitespace_hidden(state: &AppState) -> Option<Reason> {
     let in_diff = matches!(state.focus, Focus::Diff(_));
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN.into())
 }
@@ -1165,7 +1163,7 @@ fn whitespace_hidden(state: &AppState) -> Option<Reason> {
 pub const DISPLAY_ONLY: &str = "The diff tool view is display-only: press R for the built-in diff";
 
 /// The Diff pane shows a tool's rows, which hunk and line keys cannot act on.
-fn display_only(state: &AppState) -> Option<Reason> {
+pub(crate) fn display_only(state: &AppState) -> Option<Reason> {
     let in_diff = matches!(state.focus, Focus::Diff(_));
     (in_diff && state.display_only()).then_some(DISPLAY_ONLY.into())
 }
@@ -1252,42 +1250,9 @@ pub(crate) fn commit_source_disabled(state: &AppState, open: &CommitFilesList) -
     merge.then_some("Cannot pick from a merge commit".into())
 }
 
-fn no_file_selected(state: &AppState) -> Option<Reason> {
+pub(crate) fn no_file_selected(state: &AppState) -> Option<Reason> {
     let selected = state.selected.and_then(|i| state.files.get(i));
     selected.is_none().then_some("No file selected".into())
-}
-
-/// Why the selected hunk cannot be staged or unstaged right now.
-pub(crate) fn hunk_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    let Focus::Diff(view) = &state.focus else {
-        return Some(NO_CHANGES.into());
-    };
-    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
-        return Some(reason);
-    }
-    if view.loading() {
-        return Some("Loading…".into());
-    }
-    // A commit's file is not the selected working-tree one.
-    let entry = state
-        .selected
-        .and_then(|i| state.files.get(i))
-        .filter(|_| view.commit.is_none());
-    match entry.map(|e| e.kind) {
-        Some(EntryKind::Conflicted) => return Some("Resolve the conflict first".into()),
-        Some(EntryKind::Renamed | EntryKind::Copied) => {
-            return Some(PatchError::Renamed.message().into());
-        }
-        _ => {}
-    }
-    match &view.patch {
-        Some(patch) if patch.kind == FileKind::Binary => Some(PatchError::Binary.message().into()),
-        Some(patch) if !patch.hunks.is_empty() => None,
-        _ => Some(NO_CHANGES.into()),
-    }
 }
 
 /// Why a key that works on the working tree does nothing in a commit's
@@ -1296,22 +1261,9 @@ pub(crate) const NOT_IN_COMMIT: &str = "Not in a commit's change";
 
 /// The Diff pane shows a commit's change, which has no sides, nothing to
 /// discard and no hunk to edit before staging.
-fn in_commit(state: &AppState) -> Option<Reason> {
+pub(crate) fn in_commit(state: &AppState) -> Option<Reason> {
     matches!(&state.focus, Focus::Diff(view) if view.commit.is_some())
         .then_some(NOT_IN_COMMIT.into())
-}
-
-/// An untracked file has only one side to show.
-fn side_disabled(state: &AppState) -> Option<Reason> {
-    if let Some(reason) = in_commit(state) {
-        return Some(reason);
-    }
-    match &state.focus {
-        Focus::Diff(view) if view.side == DiffSide::Untracked => {
-            Some("Untracked file: nothing is staged".into())
-        }
-        _ => None,
-    }
 }
 
 pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
@@ -1379,7 +1331,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// Why `o` cannot open the editor right now.
-fn open_disabled(state: &AppState) -> Option<Reason> {
+pub(crate) fn open_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
     }
@@ -1388,7 +1340,7 @@ fn open_disabled(state: &AppState) -> Option<Reason> {
 
 /// Why `e` cannot edit the selected hunk right now. What kind of change
 /// can be edited is the model's call once it runs.
-fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
+pub(crate) fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = in_commit(state) {
         return Some(reason);
     }
@@ -1723,10 +1675,6 @@ fn files_discard_disabled(state: &AppState) -> Option<Reason> {
 
 fn files_open_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| open_disabled(state))
-}
-
-fn files_hunks_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| no_file_selected(state))
 }
 
 fn commits_open_disabled(state: &AppState) -> Option<Reason> {
@@ -2264,22 +2212,6 @@ static FILES_DISCARD_OPEN: &[Binding] = &[
     },
 ];
 
-// Chunk 29: diff
-#[rustfmt::skip]
-static DIFF_FILES: &[Binding] = &[
-    Binding {
-        id: "files.hunks",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Files,
-        intent: AppIntent::FocusDiff,
-        description: "Work on the hunks of the selected file, or resolve its conflicts",
-        label: "hunks",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: files_hunks_disabled,
-    },
-];
-
 // Chunk 31: files
 #[rustfmt::skip]
 static FILES_IGNORE: &[Binding] = &[
@@ -2293,214 +2225,6 @@ static FILES_IGNORE: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: files_ignore_disabled,
-    },
-];
-
-// Chunk 32: diff
-static DIFF_KEYS: &[Binding] = &[
-    Binding {
-        id: "diff.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Diff,
-        intent: AppIntent::NextHunk,
-        description: "Select the next hunk",
-        label: "",
-        bar: false,
-        // The tool's rows show no hunk, so moving the selection is unseen.
-        disabled: display_only,
-    },
-    Binding {
-        id: "diff.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Diff,
-        intent: AppIntent::PrevHunk,
-        description: "Select the previous hunk",
-        label: "",
-        bar: false,
-        disabled: display_only,
-    },
-    Binding {
-        id: "diff.stage",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::ToggleHunkStage,
-        description: "Stage the selected hunk, or unstage it in the staged view; in a commit's change, pick it for the custom patch or drop it",
-        label: "hunk",
-        bar: true,
-        disabled: hunk_disabled,
-    },
-    Binding {
-        id: "diff.lines",
-        keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::EnterLineMode,
-        description: "Pick changed lines inside the selected hunk",
-        label: "lines",
-        bar: true,
-        disabled: hunk_disabled,
-    },
-    Binding {
-        id: "diff.side",
-        keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::ToggleDiffSide,
-        description: "Switch between the unstaged and the staged changes",
-        label: "staged/unstaged",
-        bar: true,
-        disabled: side_disabled,
-    },
-    Binding {
-        id: "diff.discard",
-        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::Discard,
-        description: "Discard the selected hunk from the working tree",
-        label: "discard",
-        bar: true,
-        disabled: discard_disabled,
-    },
-    Binding {
-        id: "diff.open",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::OpenInEditor,
-        description: "Open the file in your editor at the selected hunk",
-        label: "open in editor",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: open_disabled,
-    },
-    Binding {
-        id: "diff.edit_hunk",
-        keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
-        scope: KeyScope::Diff,
-        intent: AppIntent::EditHunk,
-        description: "Edit the selected hunk in your editor, then stage it",
-        label: "edit hunk",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: edit_hunk_disabled,
-    },
-];
-
-// Chunk 34: diff
-static DIFF_LINES: &[Binding] = &[
-    Binding {
-        id: "diff.back",
-        // Esc is `diff.escape`, which clears a search first and stands in
-        // for this one in the bar.
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('h'), NONE),
-            KeyPattern::any(KeyCode::Left),
-        ],
-        scope: KeyScope::Diff,
-        intent: AppIntent::FocusLeft,
-        description: "Back to the side panel last focused",
-        label: "back",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::exact(KeyCode::Down, NONE),
-        ],
-        scope: KeyScope::Lines,
-        intent: AppIntent::NextLine { extend: false },
-        description: "Move to the next changed line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::exact(KeyCode::Up, NONE),
-        ],
-        scope: KeyScope::Lines,
-        intent: AppIntent::PrevLine { extend: false },
-        description: "Move to the previous changed line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.extend_down",
-        keys: &[
-            KeyPattern::any(KeyCode::Char('J')),
-            KeyPattern::exact(KeyCode::Down, KeyModifiers::SHIFT),
-        ],
-        scope: KeyScope::Lines,
-        intent: AppIntent::NextLine { extend: true },
-        description: "Grow the selection down a changed line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.extend_up",
-        keys: &[
-            KeyPattern::any(KeyCode::Char('K')),
-            KeyPattern::exact(KeyCode::Up, KeyModifiers::SHIFT),
-        ],
-        scope: KeyScope::Lines,
-        intent: AppIntent::PrevLine { extend: true },
-        description: "Grow the selection up a changed line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.stage",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::Lines,
-        intent: AppIntent::ToggleLinesStage,
-        description: "Stage the selected lines, or unstage them in the staged view; in a commit's change, pick them for the custom patch or drop them",
-        label: "lines",
-        bar: true,
-        disabled: hunk_disabled,
-    },
-    Binding {
-        id: "lines.back",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('v'), NONE),
-        ],
-        scope: KeyScope::Lines,
-        intent: AppIntent::ExitLineMode,
-        description: "Back to whole hunks",
-        label: "hunks",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "lines.discard",
-        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
-        scope: KeyScope::Lines,
-        intent: AppIntent::Discard,
-        description: "Discard the selected lines from the working tree",
-        label: "discard",
-        bar: true,
-        disabled: discard_disabled,
-    },
-    Binding {
-        id: "lines.open",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Lines,
-        intent: AppIntent::OpenInEditor,
-        description: "Open the file in your editor at the selected line",
-        label: "open in editor",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: open_disabled,
     },
 ];
 
@@ -3595,12 +3319,12 @@ static CHUNKS: &[&[Binding]] = &[
     repos::keys::REPOS_WORKSPACE,
     review::keys::REVIEW_KEYS,
     blame::keys::BLAME_FILES,
-    DIFF_FILES,
+    diff::keys::DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
     FILES_IGNORE,
-    DIFF_KEYS,
+    diff::keys::DIFF_KEYS,
     renderers::keys::RENDERERS_DIFF,
-    DIFF_LINES,
+    diff::keys::DIFF_LINES,
     blame::keys::BLAME_KEYS,
     conflicts::keys::CONFLICTS_KEYS,
     blame::keys::BLAME_COMMIT,
@@ -3928,93 +3652,6 @@ mod tests {
         assert_eq!(files(plain('c')), Some(OpenCommit));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
-    }
-
-    #[test]
-    fn the_diff_pane_has_its_own_keys_and_esc_goes_back() {
-        use AppIntent::*;
-        let none = KeyModifiers::NONE;
-        assert_eq!(
-            from(KeyScope::Files, key(KeyCode::Enter, none)),
-            Some(FocusDiff)
-        );
-        let diff = |k| from(KeyScope::Diff, k);
-        assert_eq!(diff(plain('j')), Some(NextHunk));
-        assert_eq!(diff(key(KeyCode::Down, none)), Some(NextHunk));
-        assert_eq!(diff(plain('k')), Some(PrevHunk));
-        assert_eq!(diff(key(KeyCode::Up, none)), Some(PrevHunk));
-        assert_eq!(diff(plain('t')), Some(ToggleDiffSide));
-        for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(diff(k), Some(FocusLeft), "{k:?}");
-        }
-        // Esc clears a search first, and goes back with none.
-        assert_eq!(diff(key(KeyCode::Esc, none)), Some(DiffEscape));
-        // Workspace and global keys still reach through.
-        assert_eq!(diff(plain('r')), Some(RefreshStatus));
-        assert_eq!(diff(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
-        assert_eq!(diff(plain('q')), Some(Quit));
-        // File keys do not.
-        assert_eq!(diff(plain('a')), None);
-        assert_eq!(diff(plain('c')), None);
-    }
-
-    #[test]
-    fn line_mode_has_its_own_keys_and_falls_through_to_the_diff() {
-        use AppIntent::*;
-        let none = KeyModifiers::NONE;
-        let shift = KeyModifiers::SHIFT;
-        assert_eq!(KeyScope::Lines.parent(), Some(KeyScope::Diff));
-        assert_eq!(KeyScope::Lines.title(), "Lines");
-        let lines = |k| from(KeyScope::Lines, k);
-        let next = NextLine { extend: false };
-        let prev = PrevLine { extend: false };
-        assert_eq!(lines(plain('j')), Some(next.clone()));
-        assert_eq!(lines(key(KeyCode::Down, none)), Some(next));
-        assert_eq!(lines(plain('k')), Some(prev.clone()));
-        assert_eq!(lines(key(KeyCode::Up, none)), Some(prev));
-        for mods in [none, shift] {
-            assert_eq!(
-                lines(key(KeyCode::Char('J'), mods)),
-                Some(NextLine { extend: true })
-            );
-            assert_eq!(
-                lines(key(KeyCode::Char('K'), mods)),
-                Some(PrevLine { extend: true })
-            );
-        }
-        assert_eq!(
-            lines(key(KeyCode::Down, shift)),
-            Some(NextLine { extend: true })
-        );
-        assert_eq!(
-            lines(key(KeyCode::Up, shift)),
-            Some(PrevLine { extend: true })
-        );
-        assert_eq!(lines(key(KeyCode::Esc, none)), Some(ExitLineMode));
-        assert_eq!(lines(plain('v')), Some(ExitLineMode));
-        // Other Diff keys, and workspace and global ones, reach through.
-        assert_eq!(lines(plain('t')), Some(ToggleDiffSide));
-        assert_eq!(lines(plain('h')), Some(FocusLeft));
-        assert_eq!(lines(plain('r')), Some(RefreshStatus));
-        assert_eq!(lines(plain('q')), Some(Quit));
-
-        // Space and `v` share the hunk key's refusals; with no hunks here,
-        // that is the same reason.
-        let state = AppState::new(Context::Workspace);
-        for (scope, k) in [(KeyScope::Lines, plain(' ')), (KeyScope::Diff, plain('v'))] {
-            assert!(matches!(
-                resolve(registry(), &Keymap::default(), scope, &state, k),
-                Resolution::Disabled(ref reason) if reason == NO_CHANGES
-            ));
-        }
-        let bound = |scope, k| {
-            registry()
-                .iter()
-                .find(|b| b.scope == scope && b.matches(k))
-                .map(|b| b.intent.clone())
-        };
-        assert_eq!(bound(KeyScope::Lines, plain(' ')), Some(ToggleLinesStage));
-        assert_eq!(bound(KeyScope::Diff, plain('v')), Some(EnterLineMode));
     }
 
     #[test]
@@ -5858,171 +5495,6 @@ mod tests {
                 resolve(registry(), &Keymap::default(), KeyScope::Files, &state, k),
                 Resolution::Disabled(ref reason) if reason == "No file selected"
             ));
-        }
-    }
-
-    #[test]
-    fn hidden_whitespace_disables_the_patch_keys_in_the_diff_only() {
-        use crate::git::patch::parse;
-        use crate::hunk_view::{HunkView, LineCursor};
-
-        let mut state = AppState::new(Context::Workspace);
-        state.files = vec![crate::git::FileEntry {
-            path: "a.rs".into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }];
-        state.selected = Some(0);
-        state.diff_options.ignore_whitespace = true;
-        let reason = |state: &AppState, scope, c| match resolve(
-            registry(),
-            &Keymap::default(),
-            scope,
-            state,
-            plain(c),
-        ) {
-            Resolution::Disabled(reason) => Some(reason),
-            Resolution::Run(_) => None,
-            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
-        };
-        // Whole-file keys are unaffected.
-        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
-        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
-
-        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
-        view.patch =
-            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
-        for c in [' ', 'v', 'd', 'e'] {
-            assert_eq!(
-                reason(&state, KeyScope::Diff, c),
-                Some(WHITESPACE_HIDDEN.into()),
-                "{c:?}"
-            );
-        }
-        view.lines = Some(LineCursor {
-            anchor: 0,
-            cursor: 0,
-        });
-        state.focus = Focus::Diff(view);
-        for c in [' ', 'd'] {
-            assert_eq!(
-                reason(&state, KeyScope::Lines, c),
-                Some(WHITESPACE_HIDDEN.into()),
-                "{c:?}"
-            );
-        }
-        state.diff_options.ignore_whitespace = false;
-        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
-    }
-
-    #[test]
-    fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
-        use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
-        use crate::git::patch::parse;
-        use crate::hunk_view::{HunkView, LineCursor};
-
-        let mut state = AppState::new(Context::Workspace);
-        state.files = vec![crate::git::FileEntry {
-            path: "a.rs".into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }];
-        state.selected = Some(0);
-        state.renderers = vec![ExternalRenderer {
-            label: "difft".into(),
-            argv: vec!["difft".into()],
-            kind: RendererKind::Tool,
-        }];
-        state.renderer = Some(0);
-        let reason = |state: &AppState, scope, c| match resolve(
-            registry(),
-            &Keymap::default(),
-            scope,
-            state,
-            plain(c),
-        ) {
-            Resolution::Disabled(reason) => Some(reason),
-            Resolution::Run(_) => None,
-            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
-        };
-        // Whole-file keys are unaffected.
-        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
-        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
-
-        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
-        view.patch =
-            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
-        for c in [' ', 'v', 'd', 'e'] {
-            assert_eq!(
-                reason(&state, KeyScope::Diff, c),
-                Some(DISPLAY_ONLY.into()),
-                "{c:?}"
-            );
-        }
-        view.lines = Some(LineCursor {
-            anchor: 0,
-            cursor: 0,
-        });
-        state.focus = Focus::Diff(view);
-        for c in [' ', 'd'] {
-            assert_eq!(
-                reason(&state, KeyScope::Lines, c),
-                Some(DISPLAY_ONLY.into()),
-                "{c:?}"
-            );
-        }
-        state.renderer = None;
-        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
-    }
-
-    #[test]
-    fn a_diff_tool_view_disables_the_hunk_keys_with_its_notice() {
-        use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
-        use crate::hunk_view::HunkView;
-
-        let mut state = AppState::new(Context::Workspace);
-        state.focus = Focus::Diff(HunkView::new("a.rs".into(), DiffSide::Worktree));
-        state.renderers = vec![ExternalRenderer {
-            label: "difft".into(),
-            argv: vec!["difft".into()],
-            kind: RendererKind::Tool,
-        }];
-        let keys = [
-            (plain('j'), AppIntent::NextHunk),
-            (key(KeyCode::Down, KeyModifiers::NONE), AppIntent::NextHunk),
-            (plain('k'), AppIntent::PrevHunk),
-            (key(KeyCode::Up, KeyModifiers::NONE), AppIntent::PrevHunk),
-        ];
-        let resolved = |state: &AppState, key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::Diff,
-            state,
-            key,
-        ) {
-            Resolution::Run(binding) => Ok(binding.intent.clone()),
-            Resolution::Disabled(reason) => Err(reason),
-            other => panic!("{key:?} resolved to {other:?}"),
-        };
-
-        state.renderer = Some(0);
-        for (key, _) in &keys {
-            assert_eq!(resolved(&state, *key), Err(DISPLAY_ONLY.into()), "{key:?}");
-        }
-        // A pager's rows map to the patch, and the built-in view is the patch.
-        state.renderers[0].kind = RendererKind::Pager;
-        for (key, intent) in &keys {
-            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
-        }
-        state.renderer = None;
-        for (key, intent) in &keys {
-            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
         }
     }
 
