@@ -15,7 +15,7 @@ use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
-    blame, conflicts, custom_commands, pull_requests, repos, submodules, worktrees,
+    blame, conflicts, custom_commands, pull_requests, repos, submodules, sync, worktrees,
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
@@ -30,7 +30,6 @@ use crate::git::branches::{branch_log, list_branches};
 use crate::git::comment_prefix::read_comment_prefix;
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
-use crate::git::fetch::run_fetch;
 use crate::git::fixup_base::find_fixup_base;
 use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::left_behind::read_left_behind;
@@ -41,7 +40,7 @@ use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
-use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
+use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::{RemoteName, list_remotes};
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
@@ -1343,17 +1342,7 @@ impl Runtime {
                     let _ = tx.send(AppIntent::ReflogLoaded { tag, result });
                 });
             }
-            Effect::Fetch { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or auto-fetch would stop for good.
-                    let result = tokio::task::spawn_blocking(move || run_fetch(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(format!("git fetch crashed: {e}").as_bytes()))
-                        });
-                    let _ = tx.send(AppIntent::FetchFinished { tag, result });
-                });
-            }
+            Effect::Fetch { tag } => sync::effects::fetch(runner, tx, tag),
             Effect::LoadConfig { repo } => {
                 let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
                 tokio::spawn(async move {
@@ -1386,23 +1375,7 @@ impl Runtime {
             }
             Effect::CancelCommand => custom_commands::effects::cancel(lock(&self.command).take()),
             Effect::Remote { tag, op } => {
-                let slot = Arc::clone(&self.credential);
-                tokio::spawn(async move {
-                    let bridge_tx = tx.clone();
-                    // A panic still reports back, or `op_seq` would block every later op.
-                    let task_op = op.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        let bridge = Bridge::open(tag, bridge_tx, slot);
-                        run_remote(runner.as_ref(), &task_op, bridge.env.as_ref())
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(RemoteFailure::Failed(terminal_safe(
-                            format!("git crashed: {e}").as_bytes(),
-                        )))
-                    });
-                    let _ = tx.send(AppIntent::RemoteFinished { tag, op, result });
-                });
+                sync::effects::remote(runner, tx, tag, op, Arc::clone(&self.credential))
             }
             Effect::LoadCommitMessage { tag, oid } => {
                 tokio::spawn(async move {
@@ -1699,22 +1672,22 @@ fn append_ignore(workdir: &std::path::Path, line: &[u8]) -> Result<IgnoreAdded, 
 }
 
 /// Where a running remote operation waits for the user's answer.
-type AnswerSlot = Arc<Mutex<Option<std::sync::mpsc::Sender<Option<Secret>>>>>;
+pub(crate) type AnswerSlot = Arc<Mutex<Option<std::sync::mpsc::Sender<Option<Secret>>>>>;
 
 /// The askpass bridge for one remote operation, wired to the loop: each
 /// question goes out as an intent, and its answer comes back through the
 /// runtime's slot. Without one (not on unix, or it would not start) `env`
 /// is `None` and git runs closed to questions.
-struct Bridge {
+pub(crate) struct Bridge {
     #[cfg(unix)]
     server: Option<crate::git::askpass::AskpassServer>,
     slot: AnswerSlot,
-    env: Option<AskpassEnv>,
+    pub(crate) env: Option<AskpassEnv>,
 }
 
 impl Bridge {
     #[cfg(unix)]
-    fn open(tag: Tag, tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
+    pub(crate) fn open(tag: Tag, tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
         use crate::git::askpass::{AskpassServer, Question};
 
         let (answer_tx, answer_rx) = std::sync::mpsc::channel();
@@ -1753,7 +1726,7 @@ impl Bridge {
     }
 
     #[cfg(not(unix))]
-    fn open(_tag: Tag, _tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
+    pub(crate) fn open(_tag: Tag, _tx: UnboundedSender<AppIntent>, slot: AnswerSlot) -> Self {
         Self { slot, env: None }
     }
 }
@@ -1782,6 +1755,7 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
+    use crate::git::remote::RemoteFailure;
     use crate::test_support::forge_tag;
 
     #[tokio::test]
