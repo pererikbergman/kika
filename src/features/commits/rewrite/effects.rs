@@ -1,7 +1,7 @@
 //! The I/O behind the rewrites' effects: reading the stopped rebase's
-//! todo list, writing an edited one back, and looking for the commits the
-//! staged lines come from, off the event loop, each reporting back with
-//! its tag.
+//! todo list, writing an edited one back, looking for the commits the
+//! staged lines come from, and listing the commits a detached `HEAD` would
+//! leave behind, off the event loop, each reporting back with its tag.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
