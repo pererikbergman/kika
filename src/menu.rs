@@ -447,6 +447,51 @@ mod tests {
     }
 
     #[test]
+    fn during_a_bisect_reset_merge_commit_and_amend_items_say_to_reset_it_first() {
+        use crate::git::repo_state::Operation;
+        use crate::git::status::{BranchStatus, Head};
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![file("a", 'M', '.', EntryKind::Changed)];
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc".into(),
+            short_oid: "abc".into(),
+            parents: vec!["p".into()],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+            subject_altered: false,
+        }];
+        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
+            name: "topic".into(),
+            head: false,
+            upstream: None,
+            track: crate::git::branches::Track::None,
+            merged: false,
+        }]));
+        state.branch = Some(BranchStatus {
+            head: Head::Detached("abc".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![Operation::Bisect],
+            bisect: None,
+        });
+        let reset_first = Some(crate::bisect::RESET_FIRST.into());
+        let refused = items(MenuId::Reset)
+            .iter()
+            .chain(items(MenuId::Merge))
+            .chain(&items(MenuId::Actions)[1..3]);
+        for item in refused {
+            assert_eq!((item.disabled)(&state), reset_first, "{}", item.label);
+        }
+        let labels: Vec<_> = items(MenuId::Actions)[1..3]
+            .iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels, ["Commit…", "Amend last commit…"]);
+    }
+
+    #[test]
     fn every_stash_item_waits_for_conflicts_and_running_ops() {
         let files = vec![
             file("a", 'M', 'M', EntryKind::Changed),
