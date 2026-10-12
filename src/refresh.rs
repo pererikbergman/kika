@@ -338,17 +338,17 @@ mod tests {
                 mode: ResetMode::Hard,
             },
             GitOp::Travel {
-                direction: crate::git::undo::Direction::Undo,
-                step: crate::git::undo::Step::MoveTo(oid()),
-                expect: crate::git::undo::Expected {
+                direction: crate::features::commits::reflog::Direction::Undo,
+                step: crate::features::commits::reflog::Step::MoveTo(oid()),
+                expect: crate::features::commits::reflog::Expected {
                     head_ref: None,
                     oid: oid(),
                 },
             },
             GitOp::Travel {
-                direction: crate::git::undo::Direction::Redo,
-                step: crate::git::undo::Step::CheckoutBranch("main".into()),
-                expect: crate::git::undo::Expected {
+                direction: crate::features::commits::reflog::Direction::Redo,
+                step: crate::features::commits::reflog::Step::CheckoutBranch("main".into()),
+                expect: crate::features::commits::reflog::Expected {
                     head_ref: Some(b"refs/heads/side".to_vec()),
                     oid: oid(),
                 },

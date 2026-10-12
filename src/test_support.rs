@@ -4,6 +4,7 @@
 
 use crate::commit_editor::CommitEditor;
 use crate::effect::{Effect, Tag};
+use crate::features::commits::reflog::Reflog;
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
 use crate::git::bisect::{BisectMark, BisectState};
@@ -878,6 +879,73 @@ pub(crate) fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp 
 pub(crate) fn rev_parse(dir: &Path, rev: &str) -> CommitId {
     let out = crate::git::fake::git(dir, &["rev-parse", rev]);
     cid(String::from_utf8(out).unwrap().trim())
+}
+
+/// `a.txt` committed as `one`, then as `two`, with an identity and no
+/// signing. Returns the repo and the first commit's id.
+pub(crate) fn two_commit_repo() -> (crate::git::fake::TempDir, CommitId) {
+    use crate::git::fake::{TempDir, git};
+
+    let tmp = TempDir::new("history");
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "--template="]);
+    for (key, value) in [
+        ("user.name", "Kika Test"),
+        ("user.email", "test@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(dir, &["config", key, value]);
+    }
+    std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", "first"]);
+    let first = rev_parse(dir, "HEAD");
+    std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+    git(dir, &["commit", "-q", "-am", "second"]);
+    (tmp, first)
+}
+
+/// `with_commits` on branch `main`, which is loaded as a local branch.
+pub(crate) fn undoable() -> AppState {
+    let mut state = with_commits(3, true);
+    state.branch = Some(on_branch("main"));
+    state.branches.branches = vec![Branch {
+        name: "main".into(),
+        head: true,
+        upstream: None,
+        track: crate::git::branches::Track::None,
+        merged: true,
+    }];
+    state
+}
+
+pub(crate) fn reflog_tag(effects: &[Effect]) -> Tag {
+    match effects {
+        [Effect::LoadReflog { tag }] => *tag,
+        other => panic!("expected one LoadReflog, got {other:?}"),
+    }
+}
+
+/// Two commits on `main` after the first, `HEAD` at `ccc…`.
+pub(crate) fn commit_reflog(head: char) -> Reflog {
+    Reflog {
+        head: CommitId::parse(&head.to_string().repeat(40)),
+        head_ref: Some(b"refs/heads/main".to_vec()),
+        branch_entries: vec![],
+        entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
+            "git/fixtures/reflog/commit.bin"
+        )),
+    }
+}
+
+/// `state` after an undo whose fresh reflog read answered with
+/// `reflog`.
+pub(crate) fn undo_with(state: &mut AppState, reflog: Reflog) -> Vec<Effect> {
+    let tag = reflog_tag(&state.update(AppIntent::Undo));
+    state.update(AppIntent::ReflogLoaded {
+        tag,
+        result: Ok(reflog),
+    })
 }
 
 pub(crate) fn stash_entry(index: usize, oid: &str, subject: &str) -> StashEntry {

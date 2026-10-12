@@ -6,10 +6,10 @@
 //! the reflog alone says how far undo has gone: each undo marker steps
 //! back over one more action, and each redo marker takes one back.
 
-use super::branches::{Branch, BranchName};
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::reflog::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER, finishes_rebase_of};
+use super::git::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER, finishes_rebase_of};
+use crate::git::branches::{Branch, BranchName};
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
 
 /// Characters any reflog-derived text may take in the preview.
 const ELIDE: usize = 60;
@@ -441,18 +441,19 @@ fn elide(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::commits::reflog::git::parse_records;
     use crate::git::branches::Track;
-    use crate::git::reflog::parse_records;
 
-    const COMMIT: &[u8] = include_bytes!("fixtures/reflog/commit.bin");
-    const CHECKOUT: &[u8] = include_bytes!("fixtures/reflog/checkout.bin");
-    const DETACHED: &[u8] = include_bytes!("fixtures/reflog/checkout_detached.bin");
-    const STASH: &[u8] = include_bytes!("fixtures/reflog/stash.bin");
-    const REBASE: &[u8] = include_bytes!("fixtures/reflog/rebase.bin");
-    const REBASE_2_15: &[u8] = include_bytes!("fixtures/reflog/rebase_2_15.bin");
-    const REBASE_2_15_I: &[u8] = include_bytes!("fixtures/reflog/rebase_2_15_interactive.bin");
-    const ABORTED: &[u8] = include_bytes!("fixtures/reflog/aborted_rebase.bin");
-    const FROM_OTHER: &[u8] = include_bytes!("fixtures/reflog/rebase_from_other.bin");
+    const COMMIT: &[u8] = include_bytes!("../../../git/fixtures/reflog/commit.bin");
+    const CHECKOUT: &[u8] = include_bytes!("../../../git/fixtures/reflog/checkout.bin");
+    const DETACHED: &[u8] = include_bytes!("../../../git/fixtures/reflog/checkout_detached.bin");
+    const STASH: &[u8] = include_bytes!("../../../git/fixtures/reflog/stash.bin");
+    const REBASE: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase.bin");
+    const REBASE_2_15: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase_2_15.bin");
+    const REBASE_2_15_I: &[u8] =
+        include_bytes!("../../../git/fixtures/reflog/rebase_2_15_interactive.bin");
+    const ABORTED: &[u8] = include_bytes!("../../../git/fixtures/reflog/aborted_rebase.bin");
+    const FROM_OTHER: &[u8] = include_bytes!("../../../git/fixtures/reflog/rebase_from_other.bin");
 
     fn id(c: char) -> String {
         c.to_string().repeat(40)

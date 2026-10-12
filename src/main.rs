@@ -43,8 +43,6 @@ mod popup_view;
 mod program;
 mod prompts;
 mod rebase_todo;
-mod reflog;
-mod reflog_view;
 mod refresh;
 mod remote_run;
 mod remotes;
