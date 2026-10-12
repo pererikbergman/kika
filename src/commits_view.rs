@@ -10,9 +10,9 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
-use crate::copied::CopiedCommits;
 use crate::custom_patch::{CustomPatch, FilePick};
 use crate::diff_mark::DiffMark;
+use crate::features::commits::copy::CopiedCommits;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::{sanitize, terminal_safe};
@@ -731,11 +731,13 @@ mod tests {
     fn two_copied() -> AppState {
         let mut state = showing(merge_rows());
         for oid in ["b000000aaa", "a000000aaa"] {
-            state.copied.toggle(crate::copied::CopiedCommit {
-                id: CommitId::parse(oid).unwrap(),
-                short: oid[..7].into(),
-                subject: String::new(),
-            });
+            state
+                .copied
+                .toggle(crate::features::commits::copy::copied::CopiedCommit {
+                    id: CommitId::parse(oid).unwrap(),
+                    short: oid[..7].into(),
+                    subject: String::new(),
+                });
         }
         state
     }

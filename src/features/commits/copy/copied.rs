@@ -3,7 +3,7 @@
 //!
 //! Copy order is kept only so the set reads as the user built it. A paste
 //! never picks in this order; it asks git for parents before children
-//! (see `crate::git::cherry_pick`).
+//! (see `super::git`).
 
 use crate::git::commit_files::CommitId;
 
@@ -20,7 +20,7 @@ pub struct CopiedCommit {
 impl CopiedCommit {
     /// `short` is made from `id`, never taken from the log's text.
     pub fn new(id: CommitId, subject: String) -> Self {
-        let short = crate::git::cherry_pick::short(&id).to_string();
+        let short = super::git::short(&id).to_string();
         Self { id, short, subject }
     }
 }

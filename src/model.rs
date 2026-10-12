@@ -11,7 +11,6 @@ use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
-use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_patch::CustomPatch;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
@@ -24,6 +23,7 @@ use crate::features::branches::remotes::{RemotePending, RemoteRow};
 use crate::features::branches::tags::PendingTag;
 use crate::features::branches::tags::keys::delete_tag_disabled;
 use crate::features::command_log::CommandLog;
+use crate::features::commits::copy::CopiedCommits;
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
@@ -3510,22 +3510,6 @@ impl AppState {
         }
     }
 
-    /// Add the selected commit to the copied set, or take it out. Pure, so
-    /// it works while an operation runs.
-    fn copy_commit(&mut self) {
-        let Some((id, _)) = self.commit_for_action(keymap::copy_disabled) else {
-            return;
-        };
-        let row = self.commits.rows.get(self.commits.selected);
-        let subject = row.map(|r| r.subject.clone()).unwrap_or_default();
-        let entry = CopiedCommit::new(id, subject);
-        let short = entry.short.clone();
-        let added = self.copied.toggle(entry);
-        let verb = if added { "Copied" } else { "Removed" };
-        let n = self.copied.len();
-        self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
-    }
-
     /// Copy the selected commit's hash, short hash or subject now, or
     /// read its full message first. Pure, so it works while an operation
     /// runs.
@@ -3684,20 +3668,6 @@ impl AppState {
                 vec![]
             }
         }
-    }
-
-    /// Cherry-pick the copied commits on the terminal, so hooks and
-    /// signing work as on the command line. The hand-off puts them parents
-    /// first. The set stays, to paste onto another branch too.
-    fn paste_commits(&mut self) -> Vec<Effect> {
-        if self.context != Context::Workspace {
-            return vec![];
-        }
-        if let Some(reason) = keymap::paste_disabled(self) {
-            self.notice = Some(reason);
-            return vec![];
-        }
-        self.run_op_where_it_belongs(GitOp::CherryPick(self.copied.ids()))
     }
 
     /// Reset to the selected commit. Soft and mixed keep the work; hard
@@ -4479,41 +4449,6 @@ impl AppState {
             path: String::new(),
             op,
         }));
-    }
-
-    /// Copy the range's commits, in screen order, or take them all out
-    /// when every one is copied already. Merge commits are skipped.
-    fn copy_range(&mut self) {
-        if let Some(reason) = keymap::commits_copy_disabled(self) {
-            self.notice = Some(reason);
-            return;
-        }
-        let mut merges = 0;
-        let mut picks = Vec::new();
-        for i in self.commits.range() {
-            let row = &self.commits.rows[i];
-            if row.parents.len() > 1 {
-                merges += 1;
-            } else if let Some(id) = CommitId::parse(&row.oid) {
-                picks.push(CopiedCommit::new(id, row.subject.clone()));
-            }
-        }
-        let remove = picks.iter().all(|pick| self.copied.contains(&pick.id));
-        let count = picks.len();
-        for pick in picks {
-            if self.copied.contains(&pick.id) == remove {
-                self.copied.toggle(pick);
-            }
-        }
-        self.commits.range_anchor = None;
-        let verb = if remove { "Removed" } else { "Copied" };
-        let skipped = match merges {
-            0 => String::new(),
-            1 => "1 merge skipped, ".to_string(),
-            n => format!("{n} merges skipped, "),
-        };
-        let total = self.copied.len();
-        self.notice_text = Some(format!("{verb} {count} ({skipped}{total} copied)"));
     }
 }
 
@@ -10440,153 +10375,6 @@ mod tests {
         assert_eq!(op, GitOp::Abort(Operation::Revert));
     }
 
-    // --- Copy and paste ---
-
-    /// `copy_ready`, with the selected commit copied.
-    fn one_copied() -> AppState {
-        let mut state = copy_ready();
-        press_char(&mut state, 'c');
-        assert_eq!(state.copied.len(), 1);
-        state
-    }
-
-    #[test]
-    fn c_copies_the_rows_full_id_and_c_again_takes_it_out() {
-        let mut state = copy_ready();
-        assert_eq!(press_char(&mut state, 'c'), vec![]);
-        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
-        assert!(!state.copied.contains(&cid("1111111")));
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Copied 1111111 (1 copied)")
-        );
-        assert_eq!(press_char(&mut state, 'c'), vec![]);
-        assert!(state.copied.is_empty());
-        assert_eq!(
-            state.notice_text.as_deref(),
-            Some("Removed 1111111 (0 copied)")
-        );
-        // The next key clears the notice.
-        press_char(&mut state, 'j');
-        assert_eq!(state.notice_text, None);
-    }
-
-    #[test]
-    fn copying_works_while_an_op_runs_but_never_copies_a_merge() {
-        let mut state = copy_ready();
-        state.op_seq = Some(4);
-        press_char(&mut state, 'c');
-        assert_eq!(state.copied.len(), 1);
-
-        let mut merge = one_copied();
-        merge.commits.selected = 0;
-        merge.commits.rows[0].parents = vec!["c1".into(), "d0".into()];
-        assert_eq!(press_char(&mut merge, 'c'), vec![]);
-        assert_eq!(
-            merge.notice,
-            Some("Cannot cherry-pick a merge commit".into())
-        );
-        assert_eq!(merge.update(AppIntent::CopyCommit), vec![]);
-        assert_eq!(merge.copied.ids(), [cid(COPIED_OID)]);
-    }
-
-    #[test]
-    fn shift_c_clears_the_set() {
-        let mut state = one_copied();
-        assert_eq!(press_char(&mut state, 'C'), vec![]);
-        assert!(state.copied.is_empty());
-        assert_eq!(state.notice, Some("Cleared copied commits".into()));
-    }
-
-    #[test]
-    fn v_cherry_picks_the_copied_ids_on_the_terminal() {
-        let mut state = one_copied();
-        state.commits.selected = 2;
-        state.commits.rows[2].oid = "2".repeat(40);
-        press_char(&mut state, 'c');
-        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
-        assert_eq!(
-            op,
-            GitOp::CherryPick(vec![cid(COPIED_OID), cid(&"2".repeat(40))])
-        );
-        assert_eq!(state.op_seq, Some(tag.seq));
-        // The set stays, to paste on another branch too.
-        assert_eq!(state.copied.len(), 2);
-    }
-
-    #[test]
-    fn v_says_why_it_cannot_paste_and_starts_nothing() {
-        let busy = "Finish or abort the operation in progress";
-        let changes = "Commit or stash your changes first";
-        type Setup = fn(&mut AppState);
-        let cases: [(&str, Setup, &str); 6] = [
-            ("empty set", |s| s.copied.clear(), "Nothing copied"),
-            (
-                "unborn HEAD",
-                |s| s.branch.as_mut().unwrap().head = Head::Unborn("main".into()),
-                "No commit to cherry-pick onto",
-            ),
-            (
-                "merge in progress",
-                |s| s.branch.as_mut().unwrap().in_progress = vec![Operation::Merge],
-                busy,
-            ),
-            (
-                "staged change",
-                |s| s.files = vec![changed("a.rs", 'M', '.')],
-                changes,
-            ),
-            (
-                "unstaged change",
-                |s| s.files = vec![changed("a.rs", '.', 'M')],
-                changes,
-            ),
-            ("op running", |s| s.op_seq = Some(9), keymap::OP_RUNNING),
-        ];
-        for (case, setup, reason) in cases {
-            let mut state = one_copied();
-            setup(&mut state);
-            assert_eq!(press_char(&mut state, 'v'), vec![], "{case}");
-            assert_eq!(state.notice, Some(reason.into()), "{case}");
-            assert_eq!(state.update(AppIntent::PasteCommits), vec![], "{case}");
-        }
-    }
-
-    #[test]
-    fn an_untracked_file_alone_does_not_stop_a_paste() {
-        let mut state = one_copied();
-        state.files = vec![untracked("new.txt")];
-        let (_, op) = attached_of(&press_char(&mut state, 'v'));
-        assert_eq!(op, GitOp::CherryPick(vec![cid(COPIED_OID)]));
-    }
-
-    #[test]
-    fn the_set_survives_a_checkout_and_goes_with_the_repository() {
-        let mut state = one_copied();
-        let (tag, op) = op_of(&state.start_op(Ok(Some(GitOp::Checkout("topic".into())))));
-        state.update(finished(tag, op, Ok(())));
-        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
-        state.switch_repo();
-        assert!(state.copied.is_empty());
-    }
-
-    #[test]
-    fn a_failed_paste_says_could_not_cherry_pick_and_how_to_go_on() {
-        let mut state = one_copied();
-        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
-        state.update(finished(tag, op, Err("CONFLICT in a.txt".into())));
-        match state.popups.as_slice() {
-            [Popup::Error(error)] => {
-                assert_eq!(error.title, "Could not cherry-pick");
-                assert_eq!(
-                    error.next,
-                    "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
-                );
-            }
-            other => panic!("expected one error, got {other:?}"),
-        }
-    }
-
     #[test]
     fn a_credential_answer_never_reaches_the_command_log() {
         use crate::git::command_line::display_line;
@@ -11759,16 +11547,6 @@ mod tests {
         assert_eq!(state.files_anchor, None);
     }
 
-    /// Four commits with full-length ids, the second a merge.
-    fn with_merge() -> AppState {
-        let mut state = with_commits(4, true);
-        for (i, row) in state.commits.rows.iter_mut().enumerate() {
-            row.oid = format!("{i}").repeat(40);
-        }
-        state.commits.rows[1].parents = vec!["2".repeat(40), "9".repeat(40)];
-        state
-    }
-
     #[test]
     fn c_copies_a_range_skipping_merges_and_again_takes_them_out() {
         let mut state = with_merge();
@@ -11805,19 +11583,6 @@ mod tests {
             state.notice_text.as_deref(),
             Some("Removed 2 (1 merge skipped, 0 copied)")
         );
-    }
-
-    #[test]
-    fn a_range_of_only_merges_cannot_be_copied() {
-        let mut state = with_merge();
-        press_char(&mut state, 'j');
-        press_char(&mut state, 'V');
-        press_char(&mut state, 'c');
-        assert_eq!(
-            state.notice,
-            Some("Cannot cherry-pick a merge commit".into())
-        );
-        assert!(state.copied.is_empty());
     }
 
     /// Two hunks; "needle" once in the first changed line of the second
