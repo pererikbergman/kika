@@ -26,7 +26,7 @@ use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
-use crate::git::diff::{DiffRequest, load_patch, sanitize, terminal_safe};
+use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
 use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::log::{log_page, markers};
@@ -400,6 +400,9 @@ pub struct Runtime {
     diff_pager: Option<String>,
     /// The global config's `[diff] tool`, read once at startup.
     diff_tool: Option<String>,
+    /// How diff and blame body lines draw emoji ZWJ sequences, resolved
+    /// once at startup for the running terminal.
+    emoji_zwj: EmojiZwj,
     /// Stops the last captured command; aborting a finished one is a no-op.
     command: Mutex<Option<tokio::task::AbortHandle>>,
     /// Where the running remote operation waits for an answer.
@@ -420,6 +423,7 @@ impl Runtime {
             recent_store: None,
             diff_pager: None,
             diff_tool: None,
+            emoji_zwj: EmojiZwj::Escape,
             command: Mutex::new(None),
             credential: AnswerSlot::default(),
             forge: None,
@@ -457,6 +461,16 @@ impl Runtime {
     /// `FindRenderers`.
     pub fn with_diff_tool(self, diff_tool: Option<String>) -> Self {
         Self { diff_tool, ..self }
+    }
+
+    /// Draw emoji ZWJ sequences in streamed diffs, blame and blamed
+    /// commits as `emoji` says, for the whole session.
+    pub fn with_emoji_zwj(mut self, emoji: EmojiZwj) -> Self {
+        self.diff.set_emoji_zwj(emoji);
+        Self {
+            emoji_zwj: emoji,
+            ..self
+        }
     }
 
     pub fn with_recent_store(self, recent_store: Option<PathBuf>) -> Self {
@@ -651,14 +665,16 @@ impl Runtime {
                 });
             }
             Effect::LoadBlame { tag, path } => {
+                let emoji = self.emoji_zwj;
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_blame(runner.as_ref(), &path))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
-                            });
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_blame(runner.as_ref(), &path, emoji)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
+                    });
                     let _ = tx.send(AppIntent::BlameLoaded { tag, result });
                 });
             }
@@ -706,14 +722,16 @@ impl Runtime {
                 });
             }
             Effect::LoadCommit { tag, oid } => {
+                let emoji = self.emoji_zwj;
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_commit(runner.as_ref(), &oid))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
-                            });
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_commit(runner.as_ref(), &oid, emoji)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(format!("git show crashed: {e}").as_bytes()))
+                    });
                     let _ = tx.send(AppIntent::CommitLoaded { tag, result });
                 });
             }
@@ -3125,6 +3143,64 @@ mod tests {
             other => panic!("expected renderers, got {other:?}"),
         }
         runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn the_emoji_policy_reaches_blame_and_the_blamed_commit() {
+        let family = "👨\u{200D}👩";
+        let oid = "a".repeat(40);
+        let blame = format!("{oid} 1 1 1\nauthor Ann\n\t{family}\n");
+        let show = format!("commit {oid}\n\ndiff --git a/a b/a\n@@ -1 +1 @@\n+{family}\n");
+        for (emoji, text) in [
+            (EmojiZwj::Keep, family.to_string()),
+            (EmojiZwj::Escape, "👨<U+200D>👩".to_string()),
+        ] {
+            let runner = Arc::new(
+                FakeRunner::new()
+                    .expect(&["blame", "--porcelain", "--", "a"], ok(blame.as_bytes()))
+                    .expect(
+                        &[
+                            "show",
+                            "--no-color",
+                            "--no-ext-diff",
+                            "--pretty=medium",
+                            "--date=iso",
+                            &oid,
+                            "--",
+                        ],
+                        ok(show.as_bytes()),
+                    ),
+            );
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let runtime = Runtime::new(runner.clone(), tx).with_emoji_zwj(emoji);
+            let tag = Tag {
+                generation: 0,
+                seq: 1,
+                user: false,
+            };
+
+            runtime.spawn(Effect::LoadBlame {
+                tag,
+                path: "a".into(),
+            });
+            match rx.recv().await {
+                Some(AppIntent::BlameLoaded {
+                    result: Ok(lines), ..
+                }) => assert_eq!(lines[0].text, text, "{emoji:?}"),
+                other => panic!("expected a blame, got {other:?}"),
+            }
+            runtime.spawn(Effect::LoadCommit {
+                tag,
+                oid: oid.clone(),
+            });
+            match rx.recv().await {
+                Some(AppIntent::CommitLoaded {
+                    result: Ok(lines), ..
+                }) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
+                other => panic!("expected a commit, got {other:?}"),
+            }
+            runner.assert_done();
+        }
     }
 
     #[tokio::test]

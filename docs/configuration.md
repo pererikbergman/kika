@@ -3,14 +3,15 @@
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
 made outside it, choose a program to draw the Diff pane, keep commits whose
-hooks never ask anything in the background, and show GitHub pull requests
-beside your branches.
+hooks never ask anything in the background, show GitHub pull requests
+beside your branches, and say which terminals draw emoji sequences as one
+picture.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -40,6 +41,9 @@ hooks_detached = true   # commits that only run hooks stay in the background
 
 [forge]
 github = ["github.com"]   # leave out to keep pull requests off
+
+[display]
+emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
@@ -272,6 +276,49 @@ github = ["github.com", "github.example.com"]
 
 **Changes to `[forge]` take effect after a restart.**
 
+## `[display]` (global file only)
+
+Some emoji are a sequence of several emoji joined by a zero-width joiner
+(ZWJ, U+200D): a family, a person at a laptop, a heart on fire. A terminal
+that clusters them draws the sequence as one picture, two columns wide.
+Others draw each part, which takes more columns than Kika reserved and
+pushes the row out of its pane. Kika cannot tell which kind of terminal it
+runs in, so by default it shows every such joiner as `<U+200D>`.
+
+`emoji_zwj_terminals` lists the terminals that draw these sequences as one
+picture. In a listed terminal, diff and blame body lines show the picture.
+
+```toml
+[display]
+emoji_zwj_terminals = ["WezTerm", "ghostty"]
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `emoji_zwj_terminals` | Terminal names, each matched exactly (case counts) against `$TERM_PROGRAM`, or against `$TERM` when `$TERM_PROGRAM` is unset or empty | empty: emoji joiners stay escaped everywhere |
+
+- To find the name to list, run `echo "$TERM_PROGRAM"` in the terminal, or
+  `echo "$TERM"` if that prints nothing. An empty name is refused, and the
+  whole file is ignored with an error.
+- Inside tmux, `$TERM_PROGRAM` is `tmux`, and tmux decides the width there.
+  List `tmux` only if your tmux draws these sequences as one picture.
+- Only a well-formed sequence of at most four emoji that measures two
+  columns is drawn as a picture, and each emoji in it must be two columns
+  wide on its own. A longer chain stays escaped. A
+  symbol drawn as text, one column wide, such as `©`, `™`, `→` or a `❤`
+  without U+FE0F, never counts as an emoji here, so a joiner next to one
+  stays escaped. So does a joiner next to a letter, at the start or end of a
+  line, in a run of joiners, or next to a hidden or direction-changing
+  character.
+- If joiners still show as `<U+200D>`, check the name with the commands
+  above, capitals included. If rows run past the pane's edge instead, the
+  terminal does not draw these sequences as one picture: take it off the
+  list.
+- File names, authors, commit headers, hunk headers, the conflict view and a
+  `[diff]` program's output always escape emoji joiners.
+
+**Changes to `[display]` take effect after a restart.**
+
 ## Custom commands
 
 `[[commands]]` binds a key to a program of your own. Each entry works in one
@@ -488,6 +535,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
+- **`[display]` is allowed only in the global file.** It is off by default.
+  A `[display]` table in `.kika.toml` is an error, and the whole file is
+  ignored.
 - **`[commit]` is allowed only in the global file**, since it decides whether
   hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
   the whole file is ignored.
