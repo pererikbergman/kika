@@ -3,10 +3,10 @@
 //! `cherry-pick`'s command line one by one in argv order, so this order is
 //! the argv.
 
-use super::GitRunner;
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::runner::GitCommand;
+use crate::git::GitRunner;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::runner::GitCommand;
 
 /// `picks` in the order `stdout`, a `rev-list --topo-order --reverse`
 /// listing, has them. Lines that are not picks are dropped. A pick the
@@ -87,7 +87,8 @@ mod tests {
     use crate::git::fake::{FakeRunner, TempDir, git, ok, try_git};
     use crate::git::repo_state::Operation;
     use crate::git::status::read_status;
-    use crate::op::{GitOp, run_op};
+    use crate::op::{GitOp, op_command, run_op};
+    use crate::test_support::{argv, cid};
 
     fn id(hex: char) -> CommitId {
         CommitId::parse(&hex.to_string().repeat(40)).unwrap()
@@ -173,6 +174,15 @@ mod tests {
         );
         assert_eq!(ordered(&none, &[]), Err("Nothing copied".into()));
         none.assert_done();
+    }
+
+    #[test]
+    fn cherry_pick_names_each_commit_in_order_and_sets_no_env() {
+        let (one, two) = ("1".repeat(40), "2".repeat(40));
+        let cmd = op_command(&GitOp::CherryPick(vec![cid(&one), cid(&two)]));
+        assert_eq!(argv(&cmd), ["cherry-pick", one.as_str(), two.as_str()]);
+        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
+        assert_eq!(cmd.input(), None);
     }
 
     /// An empty repository with an identity, no signing and branch `main`.
