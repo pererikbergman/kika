@@ -79,6 +79,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::LeaveCommits(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::DropStash(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
@@ -622,6 +628,44 @@ mod tests {
     }
 
     #[test]
+    fn the_abort_question_wraps_whole_inside_a_narrow_terminal() {
+        use crate::git::repo_state::Operation;
+
+        let mut state = workspace(&["a.rs"]);
+        let kind = ConfirmKind::Abort(Operation::Rebase);
+        state.popups = vec![Popup::Confirm(kind)];
+        let (_, rows) = draw(&state, 40, 12);
+        for needle in [" Abort rebase ", "Abort the rebase", "(y/n)"] {
+            assert!(contains(&rows, needle), "{needle}: {rows:#?}");
+        }
+        assert!(rows[11].starts_with(" y abort  n keep"), "{rows:#?}");
+
+        // Read the box back row by row: every text row is closed by the
+        // right border, and together they hold the whole question.
+        let (x, top) = find(&rows, " Abort rebase ");
+        let chars = |y: u16| rows[usize::from(y)].chars().collect::<Vec<_>>();
+        let left = usize::from(x) - 1;
+        let right = chars(top)
+            .iter()
+            .rposition(|c| *c == '┐')
+            .expect("top-right corner");
+        let mut text = Vec::new();
+        for y in top + 1.. {
+            let row = chars(y);
+            if row[left] == '└' {
+                break;
+            }
+            assert_eq!(row[left], '│', "{rows:#?}");
+            assert_eq!(row[right], '│', "row {y} is cut off: {rows:#?}");
+            let inner: String = row[left + 1..right].iter().collect();
+            text.push(inner.trim().to_string());
+        }
+        let text = text.join(" ");
+        assert!(text.contains("Resolved conflicts are lost."), "{rows:#?}");
+        assert_eq!(text, kind.question(), "{rows:#?}");
+    }
+
+    #[test]
     fn the_discard_question_names_the_file_and_only_y_discards() {
         let mut state = workspace(&["src/a.rs"]);
         state.popups = vec![Popup::Discard(DiscardConfirm {
@@ -719,6 +763,28 @@ mod tests {
         );
         assert!(
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_leave_commits_question_names_the_count_and_ids_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::popup::LeaveCommitsConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
+            op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
+            short_oid: "abc1234".into(),
+            left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
+        })];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Leave commits behind "), "{rows:#?}");
+        assert!(contains(&rows, "leave 3 commits"), "{rows:#?}");
+        for id in ["c1a2b3c", "d4e5f6a", "0b1c2d3"] {
+            assert!(contains(&rows, id), "{id}: {rows:#?}");
+        }
+        assert!(
+            rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
             "{rows:#?}"
         );
     }

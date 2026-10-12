@@ -363,8 +363,11 @@ pub fn editor_argv(editor: &str, file: &Path, line: Option<u32>) -> Vec<OsString
 #[cfg(unix)]
 fn launch(editor: &str, file: &Path, line: Option<u32>, workdir: &Path) -> Result<(), String> {
     let argv = editor_argv(editor, file, line);
-    let status = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
+    let Some((program, args)) = argv.split_first() else {
+        return Err("Could not start the editor: no program".into());
+    };
+    let status = std::process::Command::new(program)
+        .args(args)
         .current_dir(workdir)
         .status()
         .map_err(|e| terminal_safe(format!("Could not start the editor: {e}").as_bytes()))?;

@@ -1236,6 +1236,18 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Leave commits behind?
+
+Asked before a detached `HEAD` moves off commits that no branch, tag or
+remote-tracking branch reaches. Afterwards only the reflog has them, so
+`enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `leave_commits.yes` | `y` | Yes, move HEAD and leave the commits behind | locked |
+| `leave_commits.no` | `n`, `esc` | No, stay where HEAD is | locked |
+| `leave_commits.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Drop stash?
 
 A dropped stash is gone from the stash list, so `enter` does not answer it.
@@ -1245,6 +1257,28 @@ A dropped stash is gone from the stash list, so `enter` does not answer it.
 | `drop_stash.yes` | `y` | Yes, drop the stash | locked |
 | `drop_stash.no` | `n`, `esc` | No, keep the stash | locked |
 | `drop_stash.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Abort the operation in progress?
+
+Aborting a merge, rebase, cherry-pick or revert loses resolved conflicts,
+and resetting a bisect drops its marks, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `abort_confirm.yes` | `y` | Yes, abort the operation | locked |
+| `abort_confirm.no` | `n`, `esc` | No, keep the operation going | locked |
+| `abort_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Fold every fixup! commit?
+
+Autosquash rewrites commits you may not be looking at, so `enter` does not
+answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `autosquash_confirm.yes` | `y` | Yes, fold every fixup! commit into its target | locked |
+| `autosquash_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `autosquash_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 

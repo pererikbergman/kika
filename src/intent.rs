@@ -618,6 +618,16 @@ pub enum AppIntent {
     ResetTo(ResetMode),
     /// Reset hard, as the question asked.
     ConfirmResetHard,
+    /// The read of the commits a detached `HEAD` would leave behind: which
+    /// op was planned, from which `HEAD`, and what was found or why not.
+    LeftBehindChecked {
+        tag: Tag,
+        op: GitOp,
+        head: CommitId,
+        result: Result<Vec<CommitId>, String>,
+    },
+    /// Leave the commits behind, as the question asked.
+    ConfirmLeaveCommits,
     /// Rewrite the selected commit with git's interactive rebase, or
     /// change the selected todo row's action while a rebase is stopped.
     RewriteCommit(Edit),

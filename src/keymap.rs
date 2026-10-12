@@ -274,8 +274,14 @@ pub enum KeyScope {
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
+    /// "Leave these commits behind?" on top of the popup stack.
+    LeaveCommits,
     /// "Drop this stash?" on top of the popup stack.
     DropStash,
+    /// "Abort the operation in progress?" on top of the popup stack.
+    AbortConfirm,
+    /// "Fold every fixup! commit?" on top of the popup stack.
+    AutosquashConfirm,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -334,7 +340,10 @@ impl KeyScope {
             | KeyScope::RemoveRemote
             | KeyScope::DeleteTag
             | KeyScope::ResetHard
+            | KeyScope::LeaveCommits
             | KeyScope::DropStash
+            | KeyScope::AbortConfirm
+            | KeyScope::AutosquashConfirm
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -381,7 +390,10 @@ impl KeyScope {
             KeyScope::RemoveRemote => "Remove remote",
             KeyScope::DeleteTag => "Delete tag",
             KeyScope::ResetHard => "Reset hard",
+            KeyScope::LeaveCommits => "Leave commits behind",
             KeyScope::DropStash => "Drop stash",
+            KeyScope::AbortConfirm => "Abort",
+            KeyScope::AutosquashConfirm => "Autosquash",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -512,6 +524,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "reset_hard.yes",
     "reset_hard.no",
     "reset_hard.quit",
+    "leave_commits.yes",
+    "leave_commits.no",
+    "leave_commits.quit",
     "files.stash",
     "stash.files",
     "stash.apply",
@@ -521,6 +536,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "drop_stash.yes",
     "drop_stash.no",
     "drop_stash.quit",
+    "abort_confirm.yes",
+    "abort_confirm.no",
+    "abort_confirm.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -541,6 +559,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "commits.pick",
     "commits.create_fixup",
     "commits.autosquash",
+    "autosquash_confirm.yes",
+    "autosquash_confirm.no",
+    "autosquash_confirm.quit",
     "worktrees.open",
     "worktrees.add",
     "worktrees.remove",
@@ -4249,6 +4270,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // As with a hard reset, Enter is left unbound: commits left behind
+    // are only in the reflog.
+    Binding {
+        id: "leave_commits.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::LeaveCommits,
+        intent: AppIntent::ConfirmLeaveCommits,
+        description: "Yes, move HEAD and leave the commits behind",
+        label: "leave",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "leave_commits.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::LeaveCommits,
+        intent: AppIntent::ConfirmNo,
+        description: "No, stay where HEAD is",
+        label: "stay",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "leave_commits.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::LeaveCommits,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // As with a hard reset, Enter is left unbound: a dropped stash is gone
     // from the list.
     Binding {
@@ -4278,6 +4334,76 @@ static REGISTRY: &[Binding] = &[
         id: "drop_stash.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DropStash,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // As with discarding, Enter is left unbound: aborting loses resolved
+    // conflicts.
+    Binding {
+        id: "abort_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, abort the operation",
+        label: "abort",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "abort_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the operation going",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "abort_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+    // Enter is left unbound here too: autosquash rewrites commits the user
+    // may not be looking at.
+    Binding {
+        id: "autosquash_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::AutosquashConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, fold every fixup! commit into its target",
+        label: "fold",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "autosquash_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::AutosquashConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, leave the history as it is",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "autosquash_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::AutosquashConfirm,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -5153,6 +5279,64 @@ mod tests {
         );
         assert_eq!(KeyScope::DropStash.parent(), None);
         assert_eq!(KeyScope::DropStash.title(), "Drop stash");
+    }
+
+    #[test]
+    fn the_abort_question_has_no_enter_and_n_or_esc_keeps_the_operation() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::AbortConfirm,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::AbortConfirm.parent(), None);
+        assert_eq!(KeyScope::AbortConfirm.title(), "Abort");
+
+        let enter = key(KeyCode::Enter, none);
+        for b in registry()
+            .iter()
+            .filter(|b| b.scope == KeyScope::AbortConfirm)
+        {
+            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
+        }
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_put_enter_back_on_the_abort_question() {
+        for id in [
+            "abort_confirm.yes",
+            "abort_confirm.no",
+            "abort_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
+        assert_eq!(
+            build(&[("abort_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""abort_confirm.yes" can only be changed in the global config file"#
+        );
+        assert_eq!(
+            build(&[("discard_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""discard_confirm.yes" can only be changed in the global config file"#
+        );
     }
 
     #[test]
@@ -6884,6 +7068,61 @@ mod tests {
     }
 
     #[test]
+    fn the_leave_commits_question_has_no_enter_and_n_or_esc_stays() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::LeaveCommits,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmLeaveCommits));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::LeaveCommits.parent(), None);
+        assert_eq!(KeyScope::LeaveCommits.title(), "Leave commits behind");
+
+        let enter = key(KeyCode::Enter, none);
+        for b in registry()
+            .iter()
+            .filter(|b| b.id.starts_with("leave_commits."))
+        {
+            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
+        }
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_rebind_the_leave_commits_answers() {
+        for id in [
+            "leave_commits.yes",
+            "leave_commits.no",
+            "leave_commits.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert_eq!(
+                build(&[(id, &["enter"])], Trust::Repo).unwrap_err(),
+                format!("\"{id}\" can only be changed in the global config file")
+            );
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+    }
+
+    #[test]
     fn the_travel_question_has_no_enter_and_n_or_esc_leave_everything() {
         let state = AppState::new(Context::Workspace);
         let resolve_in = |key| match resolve(
@@ -7615,7 +7854,10 @@ mod tests {
             KeyScope::RemoveRemote => "remove_remote",
             KeyScope::DeleteTag => "delete_tag",
             KeyScope::ResetHard => "reset_hard",
+            KeyScope::LeaveCommits => "leave_commits",
             KeyScope::DropStash => "drop_stash",
+            KeyScope::AbortConfirm => "abort_confirm",
+            KeyScope::AutosquashConfirm => "autosquash_confirm",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
@@ -7880,6 +8122,7 @@ mod tests {
                     | PasteCommits
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard
+                    | ConfirmLeaveCommits
                     | OpenMenu(MenuId::Stash)
                     | OpenStashFiles
                     | ApplyStash
@@ -8533,6 +8776,35 @@ mod tests {
             assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
         }
         assert!(!REPO_LOCKED.contains(&"commits.find_base"));
+
+        // The question: only `y` folds; Enter answers nothing.
+        let ask = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::AutosquashConfirm,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(ask(key(KeyCode::Enter, none)), None);
+        assert_eq!(ask(plain('q')), None);
+        assert_eq!(ask(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(ask(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(ask(key(KeyCode::Esc, none)), Some(AppIntent::ConfirmNo));
+        assert_eq!(ask(key(KeyCode::Char('c'), ctrl)), Some(AppIntent::Quit));
+        assert_eq!(KeyScope::AutosquashConfirm.parent(), None);
+        for id in [
+            "autosquash_confirm.yes",
+            "autosquash_confirm.no",
+            "autosquash_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
+        }
         assert!(build(&[("commits.find_base", &["Z"])], Trust::Repo).is_ok());
     }
 }
