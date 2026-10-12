@@ -69,6 +69,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    # Explicit bash adds pipefail, so a failing command inside a pipe fails the step.
+    defaults:
+      run:
+        shell: bash
     env:
       NOUPLING_VERSION: v0.9.2
       # Digest of noupling-linux-x86_64 for NOUPLING_VERSION. Hard-coded so a
