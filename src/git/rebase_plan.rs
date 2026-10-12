@@ -313,10 +313,11 @@ pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
     command_lines(todo).map(parse_line).collect()
 }
 
-/// The lines of a todo list that git reads as commands, with the spaces
-/// and tabs git skips before a command taken off. Git skips them too, so
-/// an indented line is a command, never a comment. The comment char is
-/// configurable and unknown here; a command always starts with a letter.
+/// The lines of a todo list that git does not skip, with the spaces and
+/// tabs git skips before a command taken off. Git skips only blank lines
+/// and comments: after that trim, a line that is empty, starts with `\r`
+/// or starts with `#`. Every other line is a command to git, or a line it
+/// rejects, so it is kept here for [`parse_todo`] to accept or refuse.
 /// Like git, it reads no further than the first NUL.
 pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
     let end = todo.iter().position(|&b| b == 0).unwrap_or(todo.len());
@@ -330,7 +331,7 @@ pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
                 .count();
             &line[indent..]
         })
-        .filter(|line| line.first().is_some_and(u8::is_ascii_alphanumeric))
+        .filter(|line| !matches!(line.first(), None | Some(b'\r' | b'#')))
 }
 
 fn parse_line(line: &[u8]) -> Result<TodoEntry, String> {
@@ -911,7 +912,6 @@ mod tests {
                      p 5678def\n\
                      \n\
                      # Rebase 1..2 onto 1\n\
-                     ; a different comment char\n\
                      pick abcd  two  spaces \xff\n";
         assert_eq!(
             parse_todo(todo),
@@ -935,6 +935,24 @@ mod tests {
         assert!(parse_todo(b"\0").is_err());
         let lines: Vec<&[u8]> = command_lines(todo).collect();
         assert_eq!(lines, [&b"pick 1111 one"[..], b"pick 2222 two"]);
+    }
+
+    #[test]
+    fn only_blanks_and_hash_comments_are_skipped_everything_else_must_parse() {
+        assert_eq!(
+            parse_todo(b"# c\n  # c\n\n \t\n \rexec x\r\n\r\npick 1234 a\n"),
+            Ok(vec![line("1234", "a")])
+        );
+        for bad in [
+            &b"\xef\xbb\xbfpick 1234 a\n"[..],
+            b"-pick 1234 a\n",
+            b"\x0bpick 1234 a\n",
+            b"; other comment char\n",
+            b"1234 a\n",
+        ] {
+            assert!(parse_todo(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+            assert_eq!(command_lines(bad).count(), 1);
+        }
     }
 
     #[test]

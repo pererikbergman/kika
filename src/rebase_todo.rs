@@ -280,6 +280,22 @@ mod tests {
     }
 
     #[test]
+    fn a_line_git_rejects_makes_the_list_read_only_and_stays_in_view() {
+        for odd in [
+            &b"\xef\xbb\xbfpick 2222 two"[..],
+            b"-pick 2222 two",
+            b"\x0bpick 2222 two",
+        ] {
+            let mut bytes = b"pick 1111 one\n".to_vec();
+            bytes.extend_from_slice(odd);
+            bytes.push(b'\n');
+            let todo = RebaseTodo::load(file(&bytes, Some(b"")));
+            assert_eq!(todo.editable, Err(NOT_EDITABLE), "{odd:?}");
+            assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], odd], "{odd:?}");
+        }
+    }
+
+    #[test]
     fn done_is_empty_only_when_it_was_read_and_has_no_commands() {
         let load = |done| RebaseTodo::load(file(b"pick 1234 a\n", done)).done_empty;
         assert!(load(Some(&b""[..])));

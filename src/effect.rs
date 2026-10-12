@@ -2725,6 +2725,17 @@ mod tests {
             assert!(write_rebase_todo(&path, TODO, bad).is_err(), "{bad:?}");
             assert_eq!(std::fs::read(&path).unwrap(), TODO);
         }
+        // A line git rejects is not a comment: a list holding one is not
+        // edited, whatever the edit.
+        for odd in [&b"\xef\xbb\xbf"[..], b"-", b"\x0b"] {
+            let mut listed = TODO.to_vec();
+            listed.extend_from_slice(odd);
+            listed.extend_from_slice(b"pick 3333 three\n");
+            std::fs::write(&path, &listed).unwrap();
+            let edit = b"pick 1111 one\nupdate-ref refs/heads/x\ndrop 2222 two\n";
+            assert!(write_rebase_todo(&path, &listed, edit).is_err(), "{odd:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), listed);
+        }
         // Git stops at a NUL; a list holding one is not edited.
         let nul = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\0\n";
         std::fs::write(&path, nul).unwrap();
