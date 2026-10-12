@@ -6,6 +6,7 @@
 use super::{AppState, Context, SELECTION_CLEARED};
 use crate::branches::BranchesTab;
 use crate::effect::Effect;
+use crate::features::branches::tags;
 use crate::keymap::{self, Reason};
 use crate::list_filter::InputTarget;
 use crate::op::GitOp;
@@ -57,7 +58,7 @@ impl AppState {
         }
         let disabled: fn(&AppState) -> Option<Reason> = match kind {
             RangeKind::Branches => keymap::delete_branch_disabled,
-            RangeKind::Tags => keymap::delete_tag_disabled,
+            RangeKind::Tags => tags::keys::delete_tag_disabled,
             RangeKind::Remotes => keymap::change_remote_disabled,
             RangeKind::Stashes => keymap::drop_stash_disabled,
         };
