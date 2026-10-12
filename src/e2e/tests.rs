@@ -2632,6 +2632,48 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     assert_eq!(gh.calls().len(), 2);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
+    use std::sync::Arc;
+
+    use crate::forge::ForgeView;
+    use crate::forge::github::fixtures::{PROBE_200, STATES};
+    use crate::forge::github::{FakeGh, answer};
+
+    let repo = on_main();
+    repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);
+
+    // No host opted in: the key says why and nothing reaches gh.
+    let gh = Arc::new(FakeGh::new());
+    let mut app = Harness::start_with_forge_hosts(&repo, Arc::clone(&gh), vec![]).await;
+    app.press(KeyCode::Char('3')).await;
+    app.type_text("B").await;
+    assert_eq!(gh.calls(), []);
+    assert_eq!(
+        app.state().notice.as_deref(),
+        Some("Name GitHub hosts under [forge] in the global config")
+    );
+
+    // github.com opted in: a reload matches the remote, then `B` runs
+    // exactly one more refresh, a probe and the query.
+    let gh = Arc::new(
+        FakeGh::new()
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES))
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES)),
+    );
+    let mut app = Harness::start_with_forge(&repo, Arc::clone(&gh)).await;
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('r')).await;
+    assert_eq!(gh.calls().len(), 2);
+    assert_eq!(app.state().forge.status, ForgeView::Fresh);
+    app.type_text("B").await;
+    assert_eq!(gh.calls().len(), 4);
+    assert_eq!(app.state().forge.status, ForgeView::Fresh);
+    assert_eq!(app.state().notice, None);
+}
+
 /// Twenty numbered lines, with `changes` (line number, new text) made.
 #[cfg(unix)]
 fn numbered(changes: &[(usize, &str)]) -> String {

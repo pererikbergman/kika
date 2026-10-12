@@ -1025,6 +1025,7 @@ impl AppState {
             }
             AppIntent::OpenForgeUrl => return self.open_forge_url(),
             AppIntent::CopyForgeUrl => return self.copy_forge_url(),
+            AppIntent::RefreshPullRequests => return self.refresh_pull_requests(),
             AppIntent::OpenUrlFailed(message) => self.push_error(ErrorPopup::new(
                 "Could not open the browser",
                 &message,

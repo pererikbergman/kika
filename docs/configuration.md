@@ -275,7 +275,9 @@ github = ["github.com", "github.example.com"]
   branches). The `If-None-Match` part is left out when nothing is cached,
   and the log shows `<etag>`, never the value.
 - Pull requests load when the repository opens, and again after a fetch,
-  pull or push you start. There is no timer.
+  pull or push you start, or when you press `B` in the Branches panel.
+  There is no timer. `B` says why when it cannot ask: no host listed, the
+  remote on none of them, a refresh already running, or a rate limit.
 - When the pull requests have not changed, GitHub answers that first
   conditional request for free (it does not count against your rate
   limit), and the cached badges are kept without the GraphQL query. The
@@ -302,8 +304,8 @@ github = ["github.com", "github.example.com"]
   though the line leaves out `· cached` to keep room for the time). Kika then runs no `gh` call to that
   host until the limit resets (at least a minute, at most an hour), even
   for another repository. It does not retry by itself: the next open,
-  fetch, pull or push after the reset asks again. The wait is kept only
-  while Kika runs.
+  fetch, pull, push or `B` after the reset asks again. Until then `B` is
+  refused with a notice. The wait is kept only while Kika runs.
 
 ### Opening, copying and creating pull requests
 
@@ -865,6 +867,7 @@ this way.
 | `branches.delete` | `d` | Delete the selected branch, asking first | locked |
 | `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
 | `branches.pull_request` | `o` | Open, copy or create the selected branch's pull request | locked |
+| `branches.refresh_pull_requests` | `B` | Ask GitHub again for the branches' pull requests | locked |
 | `branches.set_upstream` | `u` | Set the remote branch the selected branch tracks | |
 | `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
 | `branches.switch_tab` | `]` | Show the remotes and their branches | |
