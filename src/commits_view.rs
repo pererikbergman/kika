@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::commit_files::CommitFilesList;
+use crate::commit_files::{CommitFilesList, drawn_path};
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
@@ -270,10 +270,7 @@ pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static>
         'R' | 'C' => Color::Cyan,
         _ => Color::Reset,
     };
-    let path = match &file.orig_path {
-        Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
-        None => file.path.display().to_string(),
-    };
+    let path = drawn_path(file);
     Line::from(vec![
         Span::styled(file.status.to_string(), Style::new().fg(colour)),
         Span::raw(" "),

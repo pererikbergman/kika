@@ -17837,8 +17837,7 @@ mod tests {
         assert!(!state.should_quit);
     }
 
-    /// `c5` open with a file, a rename and another file, the first one's
-    /// diff streaming.
+    /// A file, a rename and another file.
     fn three_commit_files() -> Vec<CommitFile> {
         vec![
             commit_file('M', "src/lib.rs", None),
@@ -17847,6 +17846,7 @@ mod tests {
         ]
     }
 
+    /// `c5` open with `three_commit_files`, the first one's diff streaming.
     fn commit_files_open() -> AppState {
         let mut state = on_commit_five();
         opened(&mut state, three_commit_files());

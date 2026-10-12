@@ -81,7 +81,7 @@ impl CommitFilesList {
         if self.filter.is_empty() {
             return (0..self.files.len()).collect();
         }
-        let texts: Vec<String> = self.files.iter().map(filter_text).collect();
+        let texts: Vec<String> = self.files.iter().map(drawn_path).collect();
         list_filter::visible(&self.filter, texts.iter().map(String::as_str))
     }
 
@@ -92,7 +92,7 @@ impl CommitFilesList {
             && self
                 .files
                 .get(self.selected)
-                .is_some_and(|f| !list_filter::matches(&self.filter, &filter_text(f)))
+                .is_some_and(|f| !list_filter::matches(&self.filter, &drawn_path(f)))
     }
 
     /// Put a cursor the filter hides on the first row shown; leave it be
@@ -119,9 +119,10 @@ impl CommitFilesList {
     }
 }
 
-/// The text the filter matches a row by: its path as drawn, with the old
-/// name before it for a rename or copy. The status letter is not matched.
-fn filter_text(file: &CommitFile) -> String {
+/// A row's path as drawn, with the old name before it for a rename or
+/// copy. The filter matches this and not the status letter, so a row
+/// matches by what the user reads in it.
+pub(crate) fn drawn_path(file: &CommitFile) -> String {
     match &file.orig_path {
         Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
         None => file.path.display().to_string(),

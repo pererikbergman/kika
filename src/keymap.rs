@@ -1097,8 +1097,8 @@ fn no_command_running(state: &AppState) -> Option<Reason> {
 }
 
 /// Why the diff cannot take focus: with a commit's files open, the hunks
-/// are its selected file's, picked for the custom patch; otherwise the
-/// selected working-tree file's.
+/// are its selected file's, picked for the custom patch, so the filter must
+/// show that file; otherwise the selected working-tree file's.
 fn focus_diff_disabled(state: &AppState) -> Option<Reason> {
     match &state.commits.open {
         Some(open) if state.focus == Focus::Commits => list_guard(state, false)
