@@ -289,16 +289,18 @@ impl AppState {
     }
 
     /// Take the picked row and go on to the next step.
-    pub(super) fn pick_select(&mut self) {
+    pub(super) fn pick_select(&mut self) -> Vec<Effect> {
         let Some(Popup::PickList(list)) = self.popups.last() else {
-            return;
+            return vec![];
         };
         let (purpose, cursor) = (list.purpose, list.cursor);
         self.popups.pop();
         match purpose {
             PickPurpose::TargetRemote => self.choose_target(cursor),
             PickPurpose::BaseBranch => self.choose_base(cursor),
+            PickPurpose::CheckDetails => return self.pick_check(cursor),
         }
+        vec![]
     }
 
     /// Target `targets[i]`, then pick its base branch: `main`, else
@@ -827,7 +829,7 @@ mod tests {
             [Popup::Confirm(ConfirmKind::CreatePullRequest)]
         );
         assert_eq!(
-            state.confirm_question(ConfirmKind::CreatePullRequest),
+            state.confirm_question(&ConfirmKind::CreatePullRequest),
             "Press y to create it on GitHub, n or Esc to cancel\nacme/widgets: topic → main\ntopic"
         );
     }
@@ -860,7 +862,7 @@ mod tests {
         let mut state = one_remote();
         state.update(AppIntent::CreatePrStart);
         answer_title(&mut state, &"t".repeat(200));
-        let question = state.confirm_question(ConfirmKind::CreatePullRequest);
+        let question = state.confirm_question(&ConfirmKind::CreatePullRequest);
         let lines: Vec<&str> = question.lines().collect();
         assert_eq!(
             lines[0],
@@ -952,7 +954,7 @@ mod tests {
         );
         assert!(
             state
-                .confirm_question(ConfirmKind::CreatePullRequest)
+                .confirm_question(&ConfirmKind::CreatePullRequest)
                 .ends_with("\nacme-org/widgets: acme:topic → main\nAdd login")
         );
 

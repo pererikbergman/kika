@@ -9,6 +9,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
+use crate::custom_patch::PatchAction;
 use crate::git::askpass::Secret;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
@@ -500,7 +501,7 @@ impl DropStashConfirm {
 }
 
 /// A yes/no question. Its answer is an intent, so the asker needs no callback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
     Quit,
     /// A plain push was rejected because the remote moved on.
@@ -520,10 +521,14 @@ pub enum ConfirmKind {
     /// Open the pull request `AppState::pr_draft` describes. It reaches
     /// GitHub, so only `y` answers it: never Enter.
     CreatePullRequest,
+    /// Rewrite history with the custom patch. It carries the action, its
+    /// target or message fixed when asked, and rewrites commits the user
+    /// may not be looking at, so only `y` answers.
+    CustomPatch(PatchAction),
 }
 
 impl ConfirmKind {
-    pub fn title(self) -> &'static str {
+    pub fn title(&self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit",
             ConfirmKind::ForcePush => "Push rejected",
@@ -536,10 +541,11 @@ impl ConfirmKind {
             ConfirmKind::DetachedCheckout => "Detached checkout",
             ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
+            ConfirmKind::CustomPatch(_) => "Custom patch",
         }
     }
 
-    pub fn question(self) -> &'static str {
+    pub fn question(&self) -> &'static str {
         match self {
             ConfirmKind::Quit => "Quit Kika? (y/n)",
             ConfirmKind::ForcePush => {
@@ -586,23 +592,27 @@ impl ConfirmKind {
             ConfirmKind::CreatePullRequest => {
                 "Create the pull request on GitHub?\nPress y to create, n or Esc to cancel"
             }
+            // `AppState::confirm_question` names the commits; this is the
+            // fallback when it cannot.
+            ConfirmKind::CustomPatch(_) => "Rewrite the history with the custom patch? (y/n)",
         }
     }
 
-    pub fn yes(self) -> AppIntent {
+    pub fn yes(&self) -> AppIntent {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::ForcePush => AppIntent::ForcePush,
             ConfirmKind::Abort(Operation::Bisect) => AppIntent::ConfirmBisectReset,
-            ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
+            ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(*op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
             ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
+            ConfirmKind::CustomPatch(action) => AppIntent::ConfirmPatchAction(action.clone()),
         }
     }
 
-    pub fn no(self) -> Option<AppIntent> {
+    pub fn no(&self) -> Option<AppIntent> {
         match self {
             ConfirmKind::Quit
             | ConfirmKind::ForcePush
@@ -610,7 +620,8 @@ impl ConfirmKind {
             | ConfirmKind::StageResolved
             | ConfirmKind::DetachedCheckout
             | ConfirmKind::Autosquash
-            | ConfirmKind::CreatePullRequest => None,
+            | ConfirmKind::CreatePullRequest
+            | ConfirmKind::CustomPatch(_) => None,
         }
     }
 }
@@ -651,6 +662,8 @@ pub enum PromptKind {
     IgnorePattern,
     /// A new pull request's title, filled with the branch name.
     PullRequestTitle,
+    /// The message of the commit the custom patch is split off into.
+    PatchCommitMessage,
 }
 
 impl PromptKind {
@@ -672,6 +685,7 @@ impl PromptKind {
             PromptKind::TagMessage => "Tag message",
             PromptKind::IgnorePattern => "Add to .gitignore",
             PromptKind::PullRequestTitle => "Pull request title",
+            PromptKind::PatchCommitMessage => "New commit message",
         }
     }
 
@@ -693,6 +707,7 @@ impl PromptKind {
             PromptKind::TagMessage => AppIntent::TagMessaged(text),
             PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
             PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
+            PromptKind::PatchCommitMessage => AppIntent::PatchCommitMessage(text),
         }
     }
 }

@@ -25,6 +25,10 @@ pub enum InputTarget {
     LogPath,
     /// The author git narrows the log to; read on Enter, not as typed.
     LogAuthor,
+    /// Narrows the shown review queue.
+    ReviewFilter,
+    /// Narrows the Worktrees popup's list.
+    WorktreesFilter,
 }
 
 impl InputTarget {
@@ -36,7 +40,9 @@ impl InputTarget {
             | InputTarget::BranchesFilter
             | InputTarget::RemotesFilter
             | InputTarget::TagsFilter
-            | InputTarget::DiffSearch => "/",
+            | InputTarget::DiffSearch
+            | InputTarget::ReviewFilter
+            | InputTarget::WorktreesFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }

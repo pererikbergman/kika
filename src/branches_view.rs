@@ -319,7 +319,7 @@ fn forge_line(forge: &ForgeState, width: usize) -> Option<String> {
 
 /// `HH:MM` of the UTC day `secs` (since the epoch) falls in, by plain
 /// arithmetic: no clock is read and no time zone is known.
-fn clock(secs: i64) -> String {
+pub(crate) fn clock(secs: i64) -> String {
     let of_day = secs.rem_euclid(86_400);
     format!("{:02}:{:02}", of_day / 3600, of_day % 3600 / 60)
 }

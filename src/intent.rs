@@ -8,8 +8,10 @@ use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
+use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
+use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
@@ -649,6 +651,21 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<FixupBase, String>,
     },
+    /// Pick the selected commit file whole into the custom patch, or drop
+    /// it.
+    PatchToggleFile,
+    /// Show what can be done with the custom patch.
+    OpenPatchMenu,
+    /// A rewrite chosen from the patch menu: ask its message first, or
+    /// ask whether to go ahead.
+    ChoosePatchAction(PatchChoice),
+    /// The new commit's message for "New commit after source", as typed.
+    PatchCommitMessage(String),
+    /// Run the rewrite, as the question asked.
+    ConfirmPatchAction(PatchAction),
+    /// Drop the custom patch. Only Kika's selection goes; the repository
+    /// does not change.
+    ResetPatch,
     /// Stop the rebase after the selected commit, or toggle the stop
     /// after the selected todo row.
     InsertBreak,
@@ -773,6 +790,39 @@ pub enum AppIntent {
     PullRequestCreated {
         tag: Tag,
         result: Result<(u64, String), CreateError>,
+    },
+    /// Leave the workspace for review mode and load its queues.
+    EnterReview,
+    /// Show the next review queue, or the previous one.
+    NextQueue,
+    PrevQueue,
+    /// Open the pull request under the cursor in the queue.
+    OpenPr,
+    /// Back from a pull request to its queue, or from the queue to the
+    /// workspace.
+    CloseReviewDetail,
+    /// Ask GitHub again for what review mode shows.
+    RefreshReview,
+    /// Open a failing check's page in the browser, picking one when
+    /// several fail.
+    OpenCheckDetails,
+    /// Move the queue's cursor, or scroll the pull request, by a line.
+    ReviewNext,
+    ReviewPrev,
+    /// The review queues, or why not; `repo` is the repository found,
+    /// when one was.
+    ReviewQueuesLoaded {
+        tag: Tag,
+        repo: Option<ForgeRepo>,
+        result: Result<Queues, ReviewError>,
+    },
+    /// Pull request `number`, `None` when GitHub has no such one, or why
+    /// it could not be read; `repo` as for the queues.
+    PrDetailLoaded {
+        tag: Tag,
+        number: u64,
+        repo: Option<ForgeRepo>,
+        result: Result<Option<PrDetail>, ReviewError>,
     },
 }
 

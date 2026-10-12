@@ -2472,3 +2472,395 @@ async fn a_todo_list_that_differs_from_the_autosquash_plan_aborts_and_changes_no
     assert_eq!(subjects(&repo), "fixup! A\nB\nA\ninit\n");
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
+
+/// Twenty numbered lines, with `changes` (line number, new text) made.
+#[cfg(unix)]
+fn numbered(changes: &[(usize, &str)]) -> String {
+    (1..=20)
+        .map(|n| match changes.iter().find(|(at, _)| *at == n) {
+            Some((_, text)) => format!("{text}\n"),
+            None => format!("{n}\n"),
+        })
+        .collect()
+}
+
+/// `init`, `X` (another file), `A` adding `f.txt`, `B` changing its lines
+/// 2 and `far` (into `two` and `far`'s text), and `C` (tip) adding
+/// `g.txt`; the Commits panel focused on `HEAD`.
+#[cfg(unix)]
+async fn custom_patch_repo(far: usize) -> (TestRepo, Harness) {
+    let repo = on_main()
+        .write("x.txt", "x\n")
+        .commit("X")
+        .write("f.txt", &numbered(&[]))
+        .commit("A")
+        .write("f.txt", &numbered(&[(2, "two"), (far, "changed")]))
+        .commit("B")
+        .write("g.txt", "g\n")
+        .commit("C");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    (repo, app)
+}
+
+/// Open `B` (row 1), focus `f.txt`'s change, pick the `2` → `two` line
+/// pair in line mode, and go back to the log with the cursor on `row`.
+#[cfg(unix)]
+async fn pick_line_two_of_b(app: &mut Harness, row: usize) {
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char('l')).await;
+    app.press(KeyCode::Char('v')).await;
+    app.press_with(KeyCode::Char('J'), KeyModifiers::SHIFT)
+        .await;
+    app.press(KeyCode::Char(' ')).await;
+    assert!(app.state().custom_patch.is_some());
+    app.assert_screen_contains("◐ M f.txt");
+    app.press(KeyCode::Esc).await;
+    app.press(KeyCode::Esc).await;
+    app.press(KeyCode::Esc).await;
+    assert!(app.state().commits.open.is_none());
+    while app.state().commits.selected > row {
+        app.press(KeyCode::Char('k')).await;
+    }
+    while app.state().commits.selected < row {
+        app.press(KeyCode::Char('j')).await;
+    }
+}
+
+/// Choose menu item `item` of the patch menu, then answer `y`.
+#[cfg(unix)]
+async fn patch_menu(app: &mut Harness, item: usize) {
+    app.press_with(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .await;
+    for _ in 0..item {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+}
+
+#[cfg(unix)]
+async fn confirm_patch(app: &mut Harness) {
+    app.assert_screen_contains("Custom patch");
+    // Enter does not answer.
+    app.press(KeyCode::Enter).await;
+    assert!(!app.state().popups.is_empty());
+    app.press(KeyCode::Char('y')).await;
+}
+
+#[cfg(unix)]
+fn show(repo: &TestRepo, what: &str) -> String {
+    String::from_utf8(repo.git(["show", what])).unwrap()
+}
+
+#[cfg(unix)]
+fn tree(repo: &TestRepo, rev: &str) -> Vec<u8> {
+    repo.git(["rev-parse", &format!("{rev}^{{tree}}")])
+}
+
+#[cfg(unix)]
+fn clean(repo: &TestRepo) -> bool {
+    repo.git(["status", "--porcelain"]).is_empty()
+}
+
+#[cfg(unix)]
+fn commit_diff(repo: &TestRepo, rev: &str) -> String {
+    String::from_utf8(repo.git(["diff-tree", "-p", "--format=", rev])).unwrap()
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_removed_from_its_commit_leaves_it_and_the_tip_without_the_line() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    let c_diff = commit_diff(&repo, "HEAD");
+    pick_line_two_of_b(&mut app, 0).await;
+
+    patch_menu(&mut app, 0).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nB\nA\nX\ninit\n");
+    assert_eq!(show(&repo, "HEAD~1:f.txt"), numbered(&[(15, "changed")]));
+    assert_eq!(show(&repo, "HEAD:f.txt"), numbered(&[(15, "changed")]));
+    assert_eq!(commit_diff(&repo, "HEAD"), c_diff);
+    assert!(clean(&repo));
+    assert_eq!(current_branch(&repo), "main");
+    assert!(app.state().custom_patch.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_moved_to_a_newer_commit_leaves_the_tip_tree_as_it_was() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    let tip = tree(&repo, "HEAD");
+    pick_line_two_of_b(&mut app, 0).await;
+
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nB\nA\nX\ninit\n");
+    assert_eq!(show(&repo, "HEAD~1:f.txt"), numbered(&[(15, "changed")]));
+    let c = commit_diff(&repo, "HEAD");
+    assert!(c.contains("-2\n+two\n"), "{c}");
+    assert!(c.contains("+g\n"), "{c}");
+    assert_eq!(tree(&repo, "HEAD"), tip);
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_moved_to_the_index_is_staged_and_out_of_head() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    pick_line_two_of_b(&mut app, 0).await;
+
+    patch_menu(&mut app, 2).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(show(&repo, "HEAD~1:f.txt"), numbered(&[(15, "changed")]));
+    assert_eq!(show(&repo, "HEAD:f.txt"), numbered(&[(15, "changed")]));
+    let staged = String::from_utf8(repo.git(["diff", "--cached", "-U0"])).unwrap();
+    let changed: Vec<&str> = staged
+        .lines()
+        .filter(|l| {
+            (l.starts_with('-') || l.starts_with('+'))
+                && !l.starts_with("---")
+                && !l.starts_with("+++")
+        })
+        .collect();
+    assert_eq!(changed, ["-2", "+two"], "{staged}");
+    assert!(
+        repo.git(["diff"]).is_empty(),
+        "the worktree matches the index"
+    );
+    assert!(app.state().custom_patch.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_split_off_becomes_a_commit_right_after_its_source() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    let tip = tree(&repo, "HEAD");
+    pick_line_two_of_b(&mut app, 0).await;
+
+    patch_menu(&mut app, 3).await;
+    // An empty message is refused and asked again.
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("New commit message");
+    app.type_text("Split off").await;
+    app.press(KeyCode::Enter).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nSplit off\nB\nA\nX\ninit\n");
+    assert_eq!(show(&repo, "HEAD~2:f.txt"), numbered(&[(15, "changed")]));
+    let split = commit_diff(&repo, "HEAD~1");
+    assert!(split.contains("-2\n+two\n"), "{split}");
+    assert!(!split.contains("changed"), "{split}");
+    assert_eq!(tree(&repo, "HEAD"), tip);
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_none());
+}
+
+/// The spec's assumption, checked against git: moving a change to an
+/// older commit needs one stop, at the target, when the commit it leaves
+/// changes nothing right next to it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_moved_to_an_older_commit_stops_once_and_keeps_the_tip_tree() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    let tip = tree(&repo, "HEAD");
+    pick_line_two_of_b(&mut app, 2).await;
+
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nB\nA\nX\ninit\n");
+    assert_eq!(show(&repo, "HEAD~2:f.txt"), numbered(&[(2, "two")]));
+    let b = commit_diff(&repo, "HEAD~1");
+    assert!(!b.contains("+two"), "{b}");
+    assert!(b.contains("+changed"), "{b}");
+    assert_eq!(tree(&repo, "HEAD"), tip);
+    assert!(clean(&repo));
+}
+
+/// Where the change sits right next to another change of its commit, git
+/// cannot pick that commit cleanly after the move to an older one: the
+/// whole rewrite is undone.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_to_an_older_commit_next_to_another_change_is_undone() {
+    let (repo, mut app) = custom_patch_repo(3).await;
+    let head = repo.head();
+    pick_line_two_of_b(&mut app, 2).await;
+
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+
+    app.assert_screen_contains("Could not apply the custom patch");
+    assert_eq!(repo.head(), head);
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_that_cannot_apply_to_its_target_changes_nothing() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    let head = repo.head();
+    // `X`, older than the file the line is in.
+    pick_line_two_of_b(&mut app, 3).await;
+
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+
+    app.assert_screen_contains("Could not apply the custom patch");
+    assert_eq!(repo.head(), head);
+    assert_eq!(current_branch(&repo), "main");
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+    assert!(clean(&repo));
+    assert_eq!(subjects(&repo), "C\nB\nA\nX\ninit\n");
+    assert!(app.state().custom_patch.is_some());
+}
+
+/// The patch is checked at the tip before the rebase ends: when a later
+/// commit changed the lines around it, the move to the index is refused
+/// there, and the rebase is aborted rather than reset afterwards.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_custom_patch_that_cannot_go_to_the_index_changes_nothing() {
+    let repo = on_main()
+        .write("x.txt", "x\n")
+        .commit("X")
+        .write("f.txt", &numbered(&[]))
+        .commit("A")
+        .write("f.txt", &numbered(&[(2, "two"), (15, "changed")]))
+        .commit("B")
+        .write(
+            "f.txt",
+            &numbered(&[(2, "two"), (5, "five"), (15, "changed")]),
+        )
+        .commit("C");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    let head = repo.head();
+    pick_line_two_of_b(&mut app, 0).await;
+
+    patch_menu(&mut app, 2).await;
+    confirm_patch(&mut app).await;
+
+    app.assert_screen_contains("Could not apply the custom patch");
+    assert_eq!(repo.head(), head);
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_some());
+}
+
+#[cfg(unix)]
+fn rev(repo: &TestRepo, what: &str) -> String {
+    String::from_utf8(repo.git(["rev-parse", what]))
+        .unwrap()
+        .trim()
+        .to_string()
+}
+
+/// With `--update-refs`, a branch on the rewritten source moves to its
+/// new copy; when the rewrite fails, it stays where it was.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stacked_branch_follows_a_rewrite_and_stays_put_when_one_fails() {
+    let (repo, mut app) = custom_patch_repo(15).await;
+    repo.git(["branch", "stack", "HEAD~1"]);
+    app.press(KeyCode::Char('r')).await;
+    let (head, stack) = (repo.head(), rev(&repo, "stack"));
+    pick_line_two_of_b(&mut app, 3).await;
+
+    // Into `X`, before the file existed: it fails and changes nothing.
+    patch_menu(&mut app, 1).await;
+    confirm_patch(&mut app).await;
+    app.assert_screen_contains("Could not apply the custom patch");
+    assert_eq!(repo.head(), head);
+    assert_eq!(rev(&repo, "stack"), stack);
+    app.press(KeyCode::Esc).await;
+
+    // Out of `B` altogether: the branch moves with it.
+    patch_menu(&mut app, 0).await;
+    confirm_patch(&mut app).await;
+    assert_no_failure(&mut app);
+    assert_ne!(rev(&repo, "stack"), stack);
+    assert_eq!(rev(&repo, "stack"), rev(&repo, "HEAD~1"));
+    assert_eq!(show(&repo, "stack:f.txt"), numbered(&[(15, "changed")]));
+    assert!(clean(&repo));
+}
+
+/// `init`, `A` with `old.txt`, `B` adding `new.txt` and deleting
+/// `old.txt`, `C` (tip) adding `g.txt`; both of `B`'s files picked whole.
+#[cfg(unix)]
+async fn added_and_deleted_picked() -> (TestRepo, Harness) {
+    let repo = on_main()
+        .write("old.txt", "old\nfile\n")
+        .commit("A")
+        .write("new.txt", "brand\nnew\nstuff\n");
+    repo.remove("old.txt");
+    let repo = repo.commit("B").write("g.txt", "g\n").commit("C");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Enter).await;
+    app.press(KeyCode::Char(' ')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char(' ')).await;
+    app.assert_screen_contains("● A new.txt");
+    app.assert_screen_contains("● D old.txt");
+    app.press(KeyCode::Esc).await;
+    app.press(KeyCode::Char('k')).await;
+    (repo, app)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_and_a_deleted_file_picked_whole_come_out_of_their_commit() {
+    let (repo, mut app) = added_and_deleted_picked().await;
+
+    patch_menu(&mut app, 0).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nB\nA\ninit\n");
+    assert!(commit_diff(&repo, "HEAD~1").is_empty(), "B is empty now");
+    assert_eq!(show(&repo, "HEAD:old.txt"), "old\nfile\n");
+    assert!(!repo.try_git(["cat-file", "-e", "HEAD:new.txt"]));
+    assert!(repo.exists("old.txt") && !repo.exists("new.txt"));
+    assert!(clean(&repo));
+    assert!(app.state().custom_patch.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_added_and_a_deleted_file_picked_whole_split_off_into_a_new_commit() {
+    let (repo, mut app) = added_and_deleted_picked().await;
+    let tip = tree(&repo, "HEAD");
+
+    patch_menu(&mut app, 3).await;
+    app.type_text("Files").await;
+    app.press(KeyCode::Enter).await;
+    confirm_patch(&mut app).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "C\nFiles\nB\nA\ninit\n");
+    let split = commit_diff(&repo, "HEAD~1");
+    assert!(split.contains("new file mode"), "{split}");
+    assert!(split.contains("deleted file mode"), "{split}");
+    assert_eq!(tree(&repo, "HEAD"), tip);
+    assert!(clean(&repo));
+}

@@ -6,12 +6,14 @@ use std::collections::BTreeMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::bisect;
+use crate::commit_files::CommitFilesList;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandTable, CustomCommand};
+use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::git::bisect::BisectMark;
-use crate::git::commit_files::CommitId;
+use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
@@ -285,6 +287,9 @@ pub enum KeyScope {
     AbortConfirm,
     /// "Fold every fixup! commit?" on top of the popup stack.
     AutosquashConfirm,
+    /// "Rewrite the history with the custom patch?" on top of the popup
+    /// stack.
+    PatchConfirm,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -352,6 +357,7 @@ impl KeyScope {
             | KeyScope::DropStash
             | KeyScope::AbortConfirm
             | KeyScope::AutosquashConfirm
+            | KeyScope::PatchConfirm
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -405,6 +411,7 @@ impl KeyScope {
             KeyScope::DropStash => "Drop stash",
             KeyScope::AbortConfirm => "Abort",
             KeyScope::AutosquashConfirm => "Autosquash",
+            KeyScope::PatchConfirm => "Custom patch",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -578,10 +585,15 @@ pub const REPO_LOCKED: &[&str] = &[
     "autosquash_confirm.yes",
     "autosquash_confirm.no",
     "autosquash_confirm.quit",
+    "workspace.patch_menu",
+    "patch_confirm.yes",
+    "patch_confirm.no",
+    "patch_confirm.quit",
     "worktrees.open",
     "worktrees.add",
     "worktrees.remove",
     "worktrees.quit",
+    "worktrees.escape",
     "remove_worktree.yes",
     "remove_worktree.no",
     "remove_worktree.quit",
@@ -592,6 +604,12 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.quit",
     "branches.pull_request",
     "pick_list.quit",
+    "pick_list.pick",
+    "workspace.review",
+    "review.open",
+    "review.refresh",
+    "review.open_check",
+    "review.back",
     "create_pull_request.yes",
     "create_pull_request.no",
     "create_pull_request.quit",
@@ -1045,6 +1063,66 @@ fn no_command_running(state: &AppState) -> Option<Reason> {
     (!state.command_running).then_some("No command is running".into())
 }
 
+/// Why the diff cannot take focus: with a commit's files open, the hunks
+/// are its selected file's, picked for the custom patch; otherwise the
+/// selected working-tree file's.
+fn focus_diff_disabled(state: &AppState) -> Option<Reason> {
+    match &state.commits.open {
+        Some(open) if state.focus == Focus::Commits => {
+            commit_source_disabled(state, open).or_else(|| {
+                open.selected_file()
+                    .is_none()
+                    .then_some("No file selected".into())
+            })
+        }
+        _ => no_file_selected(state),
+    }
+}
+
+/// Why changes cannot be picked from the open commit's files: only one
+/// commit, with a parent and no second one.
+pub(crate) fn commit_source_disabled(state: &AppState, open: &CommitFilesList) -> Option<Reason> {
+    if open.against.is_some() {
+        return Some("Only one commit's changes can be picked, not a comparison".into());
+    }
+    if open.range.parent.is_none() {
+        return Some("Cannot pick from the first commit".into());
+    }
+    let merge = state
+        .commits
+        .rows
+        .iter()
+        .any(|row| row.oid == open.range.oid.as_str() && row.parents.len() > 1);
+    merge.then_some("Cannot pick from a merge commit".into())
+}
+
+/// Why picks from `range` cannot join the custom patch: it holds another
+/// commit's.
+pub(crate) fn other_commit_disabled(state: &AppState, range: &CommitRange) -> Option<Reason> {
+    match &state.custom_patch {
+        Some(patch) if !patch.is_from(range) => Some(patch.other_commit_notice().into()),
+        _ => None,
+    }
+}
+
+/// Why the selected commit file cannot be picked whole.
+pub(crate) fn patch_file_disabled(state: &AppState) -> Option<Reason> {
+    let Some(open) = &state.commits.open else {
+        return Some("No commit open".into());
+    };
+    if let Some(reason) =
+        commit_source_disabled(state, open).or_else(|| other_commit_disabled(state, &open.range))
+    {
+        return Some(reason);
+    }
+    match open.selected_file().map(|f| f.status) {
+        None => Some("No file selected".into()),
+        Some('R') => Some(PatchError::Renamed.message().into()),
+        Some('C') => Some(PatchError::Copied.message().into()),
+        Some(_) => None,
+    }
+}
+
 fn no_file_selected(state: &AppState) -> Option<Reason> {
     let selected = state.selected.and_then(|i| state.files.get(i));
     selected.is_none().then_some("No file selected".into())
@@ -1064,7 +1142,11 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<Reason> {
     if view.loading() {
         return Some("Loading…".into());
     }
-    let entry = state.selected.and_then(|i| state.files.get(i));
+    // A commit's file is not the selected working-tree one.
+    let entry = state
+        .selected
+        .and_then(|i| state.files.get(i))
+        .filter(|_| view.commit.is_none());
     match entry.map(|e| e.kind) {
         Some(EntryKind::Conflicted) => return Some("Resolve the conflict first".into()),
         Some(EntryKind::Renamed | EntryKind::Copied) => {
@@ -1079,8 +1161,22 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<Reason> {
     }
 }
 
+/// Why a key that works on the working tree does nothing in a commit's
+/// change: the commit is history, not the worktree.
+pub(crate) const NOT_IN_COMMIT: &str = "Not in a commit's change";
+
+/// The Diff pane shows a commit's change, which has no sides, nothing to
+/// discard and no hunk to edit before staging.
+fn in_commit(state: &AppState) -> Option<Reason> {
+    matches!(&state.focus, Focus::Diff(view) if view.commit.is_some())
+        .then_some(NOT_IN_COMMIT.into())
+}
+
 /// An untracked file has only one side to show.
 fn side_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = in_commit(state) {
+        return Some(reason);
+    }
     match &state.focus {
         Focus::Diff(view) if view.side == DiffSide::Untracked => {
             Some("Untracked file: nothing is staged".into())
@@ -1134,6 +1230,9 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
 /// Why `d` cannot ask right now. What it would discard, and why that is
 /// refused, is the model's call once it runs.
 pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = in_commit(state) {
+        return Some(reason);
+    }
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
     }
@@ -1157,6 +1256,9 @@ fn open_disabled(state: &AppState) -> Option<Reason> {
 /// Why `e` cannot edit the selected hunk right now. What kind of change
 /// can be edited is the model's call once it runs.
 fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = in_commit(state) {
+        return Some(reason);
+    }
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
     }
@@ -1715,6 +1817,104 @@ pub(crate) fn autosquash_disabled(state: &AppState) -> Option<Reason> {
         .or_else(|| commit_action_disabled(state))
         .or_else(|| in_progress_disabled(state))
         .or_else(|| autosquash_plan(state).err())
+}
+
+/// Why the custom patch's rewrite `choice` cannot run now, the first of:
+/// nothing picked, an operation running or in progress, a tracked change
+/// (it would mix into the rewrite), a narrowed log (the plan is made from
+/// its rows), a source not loaded or not rewritable, and the plan itself,
+/// which for a move needs the cursor on another log commit.
+pub(crate) fn patch_rewrite_disabled(state: &AppState, choice: PatchChoice) -> Option<Reason> {
+    patch_state_disabled(state).or_else(|| match patch_action(state, choice) {
+        Ok(action) => patch_plan(state, &action).err(),
+        Err(reason) => Some(reason),
+    })
+}
+
+/// [`patch_rewrite_disabled`] for `action` as it was asked about, its
+/// target fixed then.
+pub(crate) fn patch_action_disabled(state: &AppState, action: &PatchAction) -> Option<Reason> {
+    patch_state_disabled(state).or_else(|| patch_plan(state, action).err())
+}
+
+/// Why the patch is empty.
+pub(crate) const PATCH_EMPTY: &str = "The custom patch is empty";
+
+fn patch_state_disabled(state: &AppState) -> Option<Reason> {
+    let Some(patch) = state.custom_patch.as_ref().filter(|p| !p.is_empty()) else {
+        return Some(PATCH_EMPTY.into());
+    };
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING.into());
+    }
+    if let Some(reason) = in_progress_disabled(state) {
+        return Some(reason);
+    }
+    if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
+        return Some("Commit or stash your changes first".into());
+    }
+    if state.commits.query.is_active() || !state.commits.filter.is_empty() {
+        return Some(CLEAR_LOG_FILTER.into());
+    }
+    let rows = &state.commits.rows;
+    let source = patch.source.oid.as_str();
+    match rows.iter().find(|row| row.oid == source) {
+        None => Some("The patch's commit is not loaded; move down to load more".into()),
+        Some(row) if row.parents.is_empty() => Some("Cannot rewrite the first commit".into()),
+        Some(row) if row.parents.len() > 1 => Some("Cannot rewrite a merge commit".into()),
+        Some(_) => None,
+    }
+}
+
+/// The action `choice` names now: a move goes to the commit under the
+/// cursor; a new commit's message is asked for later.
+pub(crate) fn patch_action(state: &AppState, choice: PatchChoice) -> Result<PatchAction, Reason> {
+    Ok(match choice {
+        PatchChoice::Remove => PatchAction::Remove,
+        PatchChoice::ToIndex => PatchAction::ToIndex,
+        PatchChoice::NewCommit => PatchAction::NewCommit(String::new()),
+        PatchChoice::MoveToSelected => {
+            if state.commits.todo_selected.is_some() {
+                return Err("Select a commit in the log first".into());
+            }
+            let row = state.commits.rows.get(state.commits.selected);
+            let target = row.and_then(|row| CommitId::parse(&row.oid));
+            PatchAction::MoveTo(target.ok_or("No commits")?)
+        }
+    })
+}
+
+/// Why a move cannot go to the commit the patch comes from.
+pub(crate) const TARGET_IS_SOURCE: &str =
+    "The patch comes from this commit; select the commit to move it to";
+
+/// The rebase plan for `action`, as it will run: a stop at the source,
+/// and at a move's target, every other commit picked. A move to an older
+/// commit stops at the target only: when git picks the source later, the
+/// change is there already and drops out of it. The index gets the patch
+/// checked at the last commit too, while the rebase can still be aborted.
+pub(crate) fn patch_plan(state: &AppState, action: &PatchAction) -> Result<RebasePlan, Reason> {
+    let patch = state.custom_patch.as_ref().ok_or(PATCH_EMPTY)?;
+    let rows = state.commits.rows.as_slice();
+    let row_of = |id: &CommitId| rows.iter().position(|row| row.oid == id.as_str());
+    let source = row_of(&patch.source.oid).ok_or("The patch's commit is not loaded")?;
+    let stops = match action {
+        PatchAction::Remove | PatchAction::NewCommit(_) => vec![source],
+        PatchAction::ToIndex => vec![source, 0],
+        PatchAction::MoveTo(target) => {
+            let target = row_of(target).ok_or("The target commit is not loaded")?;
+            if target == source {
+                return Err(TARGET_IS_SOURCE.into());
+            }
+            if target > source {
+                vec![target]
+            } else {
+                vec![source, target]
+            }
+        }
+    };
+    let plan = rebase_plan::plan_stops(rows, &stops)?;
+    with_stacked_branches(state, plan, &[])
 }
 
 /// Why the staged change cannot become a `fixup!` of the selected commit
@@ -2317,10 +2517,10 @@ static REGISTRY: &[Binding] = &[
         ],
         scope: KeyScope::Workspace,
         intent: AppIntent::FocusPanel(Panel::Diff),
-        description: "Focus the diff, to work on the selected file's hunks",
+        description: "Focus the diff, to work on the selected file's hunks, or pick lines of a commit's file",
         label: "diff",
         bar: false,
-        disabled: no_file_selected,
+        disabled: focus_diff_disabled,
     },
     Binding {
         id: "workspace.next_panel",
@@ -2349,6 +2549,17 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::CycleScreenMode,
         description: "Zoom the focused panel: normal, half, full",
         label: "zoom",
+        bar: false,
+        disabled: never,
+    },
+    // Out of the bar, which is full at 80 columns; the help menu lists it.
+    Binding {
+        id: "workspace.patch_menu",
+        keys: &[KeyPattern::exact(KeyCode::Char('p'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::OpenPatchMenu,
+        description: "Show what can be done with the custom patch: remove, move or split it off",
+        label: "patch",
         bar: false,
         disabled: never,
     },
@@ -2733,6 +2944,16 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commit_files.patch",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::PatchToggleFile,
+        description: "Pick the selected file's whole change for the custom patch, or drop it",
+        label: "patch",
+        bar: true,
+        disabled: patch_file_disabled,
+    },
+    Binding {
         id: "commit_files.back",
         keys: &[
             KeyPattern::any(KeyCode::Esc),
@@ -2967,6 +3188,113 @@ static REGISTRY: &[Binding] = &[
         bar: false,
         disabled: never,
     },
+    // Free in the workspace, every panel and the global scope.
+    Binding {
+        id: "workspace.review",
+        keys: &[KeyPattern::any(KeyCode::Char('G'))],
+        scope: KeyScope::Workspace,
+        intent: AppIntent::EnterReview,
+        description: "Review this repository's pull requests on GitHub",
+        label: "review",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Review,
+        intent: AppIntent::ReviewNext,
+        description: "Select the next pull request, or scroll the open one down",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Review,
+        intent: AppIntent::ReviewPrev,
+        description: "Select the previous pull request, or scroll the open one up",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "review.open",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenPr,
+        description: "Open the selected pull request",
+        label: "open",
+        bar: true,
+        disabled: crate::model::review::open_pr_disabled,
+    },
+    Binding {
+        id: "review.next_queue",
+        keys: &[KeyPattern::any(KeyCode::Tab)],
+        scope: KeyScope::Review,
+        intent: AppIntent::NextQueue,
+        description: "Show the next queue",
+        label: "queue",
+        bar: true,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.prev_queue",
+        keys: &[KeyPattern::any(KeyCode::BackTab)],
+        scope: KeyScope::Review,
+        intent: AppIntent::PrevQueue,
+        description: "Show the previous queue",
+        label: "",
+        bar: false,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the queue by number, title or author",
+        label: "filter",
+        bar: false,
+        disabled: crate::model::review::queue_keys_disabled,
+    },
+    Binding {
+        id: "review.refresh",
+        keys: &[KeyPattern::exact(KeyCode::Char('r'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::RefreshReview,
+        description: "Ask GitHub again for the queues or the open pull request",
+        label: "refresh",
+        bar: true,
+        disabled: crate::model::review::refresh_review_disabled,
+    },
+    Binding {
+        id: "review.open_check",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Review,
+        intent: AppIntent::OpenCheckDetails,
+        description: "Open a failing check's page in the browser",
+        label: "check page",
+        bar: true,
+        disabled: crate::model::review::open_check_disabled,
+    },
+    Binding {
+        id: "review.back",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Review,
+        intent: AppIntent::CloseReviewDetail,
+        description: "Back to the queue; in the queue, clear the filter, else back to the workspace",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
     Binding {
         id: "files.blame",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
@@ -3041,7 +3369,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Diff,
         intent: AppIntent::ToggleHunkStage,
-        description: "Stage the selected hunk, or unstage it in the staged view",
+        description: "Stage the selected hunk, or unstage it in the staged view; in a commit's change, pick it for the custom patch or drop it",
         label: "hunk",
         bar: true,
         disabled: hunk_disabled,
@@ -3180,7 +3508,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Lines,
         intent: AppIntent::ToggleLinesStage,
-        description: "Stage the selected lines, or unstage them in the staged view",
+        description: "Stage the selected lines, or unstage them in the staged view; in a commit's change, pick them for the custom patch or drop them",
         label: "lines",
         bar: true,
         disabled: hunk_disabled,
@@ -4533,6 +4861,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // Enter is left unbound here too: a custom patch rewrites commits the
+    // user may not be looking at.
+    Binding {
+        id: "patch_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::PatchConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, rewrite the history with the custom patch",
+        label: "rewrite",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "patch_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::PatchConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, leave the history as it is",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "patch_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::PatchConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -4704,11 +5067,28 @@ static REGISTRY: &[Binding] = &[
         disabled: remove_worktree_disabled,
     },
     Binding {
+        id: "worktrees.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Worktrees,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the worktrees by branch or path",
+        label: "filter",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "worktrees.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Worktrees,
+        intent: AppIntent::ListEscape,
+        description: "Clear the filter, else close the list",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "worktrees.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char('q'), NONE)],
         scope: KeyScope::Worktrees,
         intent: AppIntent::PopPopup,
         description: "Close the list",
@@ -5937,7 +6317,7 @@ mod tests {
     #[test]
     fn review_has_no_workspace_keys_but_still_quits() {
         let review = |k| from(KeyScope::Review, k);
-        assert_eq!(review(plain('r')), None);
+        assert_eq!(review(plain('r')), Some(AppIntent::RefreshReview));
         assert_eq!(review(plain(' ')), None);
         assert_eq!(review(plain('a')), None);
         assert_eq!(review(plain('q')), Some(AppIntent::Quit));
@@ -6352,8 +6732,9 @@ mod tests {
         assert_eq!(run(key(KeyCode::Up, none)), Some(WorktreePrev));
         assert_eq!(run(key(KeyCode::Enter, none)), Some(OpenWorktree));
         assert_eq!(run(plain('d')), Some(RemoveWorktree));
-        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));
+        assert_eq!(run(plain('/')), Some(OpenFilter));
         assert_eq!(
             run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Quit)
@@ -6361,6 +6742,55 @@ mod tests {
         for k in [plain('?'), plain('r'), plain('W')] {
             assert_eq!(run(k), None, "{k:?}");
         }
+    }
+
+    #[test]
+    fn a_filter_hiding_every_worktree_disables_switch_and_remove_but_not_add() {
+        use crate::git::worktrees::parse_list;
+        use crate::popup::Popup;
+        use crate::worktree_list::WorktreeList;
+        let mut state = AppState::new(Context::Workspace);
+        state.repo = Some("/r/a".into());
+        let mut list = WorktreeList::loading(0);
+        list.loaded(Ok(parse_list(
+            b"worktree /r/a\0branch refs/heads/main\0\0\
+              worktree /r/b\0branch refs/heads/topic\0\0",
+            0,
+        )));
+        list.move_cursor(1);
+        list.filter = "zzz".into();
+        state.popups = vec![Popup::Worktrees(list)];
+        let found = |k| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Worktrees,
+                &state,
+                k,
+            )
+        };
+        for k in [key(KeyCode::Enter, KeyModifiers::NONE), plain('d')] {
+            assert!(
+                matches!(found(k), Resolution::Disabled(ref why) if why == FILTER_HIDES_ROW),
+                "{k:?}"
+            );
+        }
+        // Adding is for the Branches panel's branch, not a listed row.
+        assert!(
+            !matches!(found(plain('a')), Resolution::Disabled(ref why) if why == FILTER_HIDES_ROW)
+        );
+        assert_eq!(
+            crate::worktree_list::add_worktree_disabled(&state),
+            Some("Select a local branch in the Branches panel".into())
+        );
+    }
+
+    #[test]
+    fn the_worktrees_escape_is_locked_and_its_filter_is_not() {
+        assert!(REPO_LOCKED.contains(&"worktrees.escape"));
+        assert!(build(&[("worktrees.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"worktrees.filter"));
+        assert!(build(&[("worktrees.filter", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -8429,6 +8859,7 @@ mod tests {
             KeyScope::DropStash => "drop_stash",
             KeyScope::AbortConfirm => "abort_confirm",
             KeyScope::AutosquashConfirm => "autosquash_confirm",
+            KeyScope::PatchConfirm => "patch_confirm",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
@@ -8726,6 +9157,16 @@ mod tests {
                     | ListEscape
                     | OpenMenu(MenuId::PullRequest)
                     | ConfirmCreatePullRequest
+                    | OpenPatchMenu
+                    // Review mode reaches GitHub or starts the browser, and
+                    // a pick may open a check's page.
+                    | EnterReview
+                    | OpenPr
+                    | RefreshReview
+                    | OpenCheckDetails
+                    | PickSelect
+                    // Esc falls through to quit without it.
+                    | CloseReviewDetail
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }

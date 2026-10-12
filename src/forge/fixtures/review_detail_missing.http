@@ -1,0 +1,9 @@
+HTTP/2.0 200 OK
+Content-Type: application/json; charset=utf-8
+X-Github-Media-Type: github.v4; format=json
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4980
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: graphql
+
+{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"locations":[{"line":1,"column":90}],"message":"Could not resolve to a PullRequest with the number of 999."}]}
