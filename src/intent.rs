@@ -644,6 +644,9 @@ pub enum AppIntent {
     Autosquash,
     /// Autosquash, as the question asked.
     ConfirmAutosquash,
+    /// Drop a log range, as the question asked: the full ids it held then,
+    /// newest first, so a range that changed since is not dropped.
+    ConfirmDropRange(Vec<CommitId>),
     /// Find which commit last touched the staged lines.
     FindFixupBase,
     /// The commits the staged lines come from, or why they are not known.

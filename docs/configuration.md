@@ -945,7 +945,7 @@ can be reset, but not marked from Kika.
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |
 | `commits.filter` | `/` | Filter the loaded commits by typed text | |
-| `commits.range` | `V` | Select a range of commits from here, for copy; again to clear it | |
+| `commits.range` | `V` | Select a range of commits from here, for copy, squash, fixup and drop; again to clear it | |
 | `commits.escape` | `esc` | Clear the selection, else the filter, else the diff mark, else the log filter, else quit Kika | locked |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 | `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
@@ -1058,7 +1058,18 @@ with `git rebase --edit-todo`, or continue or abort from the Status panel.
 Rebases Kika starts itself always use `#` for comments, whatever
 `core.commentChar` says, so their todo list stays editable.
 
-Moves, edit, break and pick act on one row: they wait while a range is
+`s`, `F` and `d` also act on a range of log rows, in one rebase. `s` and `F`
+turn every commit in the range into a squash or a fixup, so the whole range
+folds into the commit just below it; to fold only the selected commits
+together, leave the oldest of them out of the range. `d` drops every commit in
+the range, and asks first, naming how many, when that is two or more; only `y`
+answers. The whole range is checked before git runs, and anything a single
+commit would be refused for refuses the range. A range the `/` filter has
+gaps in, because it hides commits inside the selection, is refused rather
+than widened to commits you cannot see; clear the filter first. If the range
+changes while the drop question is open, `y` drops nothing.
+
+Reword, moves, edit, break and pick act on one row: they wait while a range is
 selected (`esc` clears it), and on a log row the filter hides. While the log is
 filtered, `alt-k` and `alt-j` do not move log commits at all, since the commit
 next to the selected one may be hidden; clear the filter first. The filter
@@ -1484,6 +1495,18 @@ not answer it.
 | `patch_confirm.yes` | `y` | Yes, rewrite the history with the custom patch | locked |
 | `patch_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
 | `patch_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Drop the selected commits?
+
+Dropping a range throws away the changes of several commits at once, so
+`enter` does not answer it. The question counts the commits; `y` drops them
+only if the range still holds the same ones.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `drop_range_confirm.yes` | `y` | Yes, drop the selected commits and their changes | locked |
+| `drop_range_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `drop_range_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 

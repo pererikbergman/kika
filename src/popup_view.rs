@@ -772,6 +772,23 @@ mod tests {
         assert_eq!(rows.len(), 5);
     }
 
+    #[test]
+    fn the_drop_range_question_counts_the_commits_and_only_y_drops() {
+        use crate::git::commit_files::CommitId;
+        let mut state = workspace(&["a.rs"]);
+        let ids = ['a', 'b', 'c'].map(|d| CommitId::parse(&d.to_string().repeat(40)).unwrap());
+        state.popups = vec![Popup::Confirm(ConfirmKind::DropRange(ids.to_vec()))];
+        let (_, rows) = draw(&state, 80, 24);
+        assert_eq!(
+            box_text(&rows, " Drop commits "),
+            "Drop 3 commits and their changes from the history? (y/n)",
+            "{rows:#?}"
+        );
+        let bar = &rows[23];
+        assert!(bar.starts_with(" y drop  n keep  ctrl-c quit"), "{rows:#?}");
+        assert!(!bar.contains("enter"), "{rows:#?}");
+    }
+
     /// `workspace` with a custom patch of one file from `bbbbbbb`.
     fn with_patch() -> AppState {
         use crate::custom_patch::CustomPatch;
