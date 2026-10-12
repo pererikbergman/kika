@@ -10,6 +10,8 @@ use ratatui::text::{Line, Span};
 const QUOTE_BAR: &str = "│ ";
 /// How deep code and nested lists are indented per level.
 const INDENT: &str = "  ";
+/// The deepest a nested list is drawn.
+const MAX_DEPTH: usize = 8;
 
 fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
@@ -19,8 +21,8 @@ fn dim() -> Style {
     Style::new().add_modifier(Modifier::DIM)
 }
 
-/// `text` as lines at most `width` columns wide, except fenced code,
-/// which is kept as written.
+/// `text` as lines at most `width` columns wide (at least 8). Fenced code
+/// is not wrapped: a line too wide is cut and ends in a dim `…`.
 pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
     let width = width.max(8);
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -31,7 +33,7 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
             if raw.trim_start().starts_with(marker) {
                 fence = None;
             } else {
-                out.push(Line::from(Span::styled(format!("{INDENT}{raw}"), dim())));
+                out.push(code_line(raw, width));
             }
             continue;
         }
@@ -61,7 +63,13 @@ pub fn render(text: &str, width: usize) -> Vec<Line<'static>> {
                     .map(dim_bar),
             );
         } else if let Some((marker, rest)) = list_item(trimmed) {
-            let depth = (line.len() - trimmed.len()) / 2;
+            // Depth comes from untrusted indentation: capped, and kept to
+            // half the width so the text always has room.
+            let marker_cols = width_of(&marker) + 1;
+            let mut depth = (indent_cols(&line) / 2).min(MAX_DEPTH);
+            while depth > 0 && depth * INDENT.len() + marker_cols > width / 2 {
+                depth -= 1;
+            }
             let first = format!("{}{marker} ", INDENT.repeat(depth));
             let hang = " ".repeat(first.chars().count());
             out.extend(wrap(inline(rest, Style::new()), width, &first, &hang));
@@ -158,94 +166,131 @@ fn dim_bar(line: Line<'static>) -> Line<'static> {
 
 /// `text`'s inline markup as styled spans, on top of `base`: code spans,
 /// `**bold**` and `_em_` lose their markers, and `[text](url)` reads
-/// `text (url)`.
+/// `text (url)`. One pass over the chars: each closing marker is looked
+/// up through a [`Finder`], so a line full of openers costs no more than
+/// its length.
 fn inline(text: &str, base: Style) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut finders = Finders::default();
     let mut spans = Vec::new();
     let mut plain = String::new();
-    let mut rest = text;
-    let flush = |plain: &mut String, spans: &mut Vec<Span<'static>>| {
-        if !plain.is_empty() {
-            spans.push(Span::styled(std::mem::take(plain), base));
-        }
-    };
-    while let Some(c) = rest.chars().next() {
-        let styled = match c {
-            '`' => rest[1..].find('`').map(|end| {
-                let code = &rest[1..1 + end];
-                (
-                    code.to_string(),
-                    base.add_modifier(Modifier::REVERSED),
-                    2 + end,
-                )
-            }),
-            '*' if rest.starts_with("**") => rest[2..].find("**").filter(|&e| e > 0).map(|end| {
-                let inner = &rest[2..2 + end];
-                (
-                    inner.to_string(),
-                    base.add_modifier(Modifier::BOLD),
-                    4 + end,
-                )
-            }),
-            '_' if word_start(text, rest) => closing_underscore(&rest[1..]).map(|end| {
-                let inner = &rest[1..1 + end];
-                (
-                    inner.to_string(),
-                    base.add_modifier(Modifier::ITALIC),
-                    2 + end,
-                )
-            }),
-            '[' => link(rest).map(|(label, url, len)| (format!("{label} ({url})"), base, len)),
-            _ => None,
-        };
-        match styled {
-            Some((content, style, len)) => {
-                flush(&mut plain, &mut spans);
+    let mut i = 0;
+    while i < chars.len() {
+        match finders.markup(&chars, i, base) {
+            Some((content, style, next)) => {
+                if !plain.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut plain), base));
+                }
                 spans.push(Span::styled(content, style));
-                rest = &rest[len..];
+                i = next;
             }
             None => {
-                plain.push(c);
-                rest = &rest[c.len_utf8()..];
+                plain.push(chars[i]);
+                i += 1;
             }
         }
     }
-    flush(&mut plain, &mut spans);
+    if !plain.is_empty() {
+        spans.push(Span::styled(plain, base));
+    }
     spans
 }
 
-/// Whether `rest`, a tail of `text`, starts a word: emphasis inside a
-/// word, as in `snake_case_name`, is not emphasis.
-fn word_start(text: &str, rest: &str) -> bool {
-    let before = &text[..text.len() - rest.len()];
-    before
-        .chars()
-        .next_back()
-        .is_none_or(|c| !c.is_alphanumeric())
+/// The next place at or after a start where a fixed test holds, cached.
+/// Starts only grow during a pass, so each char is tested at most once:
+/// a found place answers every start up to it, and "none from here"
+/// answers every later start.
+#[derive(Default)]
+struct Finder {
+    /// The start of the last search, and what it found.
+    last: Option<(usize, Option<usize>)>,
 }
 
-/// Where the `_` that closes emphasis is in `after`: not first, and not
-/// followed by a letter or digit.
-fn closing_underscore(after: &str) -> Option<usize> {
-    after.char_indices().find_map(|(i, c)| {
-        let next = after[i + 1..].chars().next();
-        (c == '_' && i > 0 && next.is_none_or(|n| !n.is_alphanumeric())).then_some(i)
-    })
+impl Finder {
+    fn find(
+        &mut self,
+        chars: &[char],
+        start: usize,
+        test: impl Fn(&[char], usize) -> bool,
+    ) -> Option<usize> {
+        if let Some((from, found)) = self.last
+            && start >= from
+        {
+            match found {
+                Some(at) if at >= start => return Some(at),
+                None => return None,
+                Some(_) => {}
+            }
+        }
+        let found = (start..chars.len()).find(|&k| test(chars, k));
+        self.last = Some((start, found));
+        found
+    }
 }
 
-/// `[label](url)` at the start of `rest`: its label, its url and its length.
-fn link(rest: &str) -> Option<(&str, &str, usize)> {
-    let close = rest.find("](")?;
-    let label = &rest[1..close];
-    if label.contains('[') {
-        return None;
+/// One finder per marker the inline pass closes.
+#[derive(Default)]
+struct Finders {
+    tick: Finder,
+    stars: Finder,
+    underscore: Finder,
+    label_end: Finder,
+    bracket: Finder,
+    paren: Finder,
+    space: Finder,
+}
+
+impl Finders {
+    /// The markup starting at `chars[i]`: its shown text, its style and
+    /// the index after it. `None` when `chars[i]` is just a character.
+    fn markup(&mut self, chars: &[char], i: usize, base: Style) -> Option<(String, Style, usize)> {
+        let text = |from: usize, to: usize| chars[from..to].iter().collect::<String>();
+        match chars[i] {
+            '`' => {
+                let end = self.tick.find(chars, i + 1, |cs, k| cs[k] == '`')?;
+                Some((
+                    text(i + 1, end),
+                    base.add_modifier(Modifier::REVERSED),
+                    end + 1,
+                ))
+            }
+            '*' if chars.get(i + 1) == Some(&'*') => {
+                let end = self.stars.find(chars, i + 2, |cs, k| {
+                    cs[k] == '*' && cs.get(k + 1) == Some(&'*')
+                })?;
+                (end > i + 2)
+                    .then(|| (text(i + 2, end), base.add_modifier(Modifier::BOLD), end + 2))
+            }
+            // Inside a word, as in `snake_case_name`, it is not emphasis.
+            '_' if i == 0 || !chars[i - 1].is_alphanumeric() => {
+                let end = self.underscore.find(chars, i + 2, |cs, k| {
+                    cs[k] == '_' && cs.get(k + 1).is_none_or(|n| !n.is_alphanumeric())
+                })?;
+                Some((
+                    text(i + 1, end),
+                    base.add_modifier(Modifier::ITALIC),
+                    end + 1,
+                ))
+            }
+            '[' => {
+                let close = self.label_end.find(chars, i + 1, |cs, k| {
+                    cs[k] == ']' && cs.get(k + 1) == Some(&'(')
+                })?;
+                let nested = self.bracket.find(chars, i + 1, |cs, k| cs[k] == '[');
+                if nested.is_some_and(|at| at < close) {
+                    return None;
+                }
+                let end = self.paren.find(chars, close + 2, |cs, k| cs[k] == ')')?;
+                let spaced = self.space.find(chars, close + 2, |cs, k| cs[k] == ' ');
+                if end == close + 2 || spaced.is_some_and(|at| at < end) {
+                    return None;
+                }
+                let shown = format!("{} ({})", text(i + 1, close), text(close + 2, end));
+                Some((shown, base, end + 1))
+            }
+            _ => None,
+        }
     }
-    let after = &rest[close + 2..];
-    let end = after.find(')')?;
-    let url = &after[..end];
-    if url.is_empty() || url.contains(' ') {
-        return None;
-    }
-    Some((label, url, close + 2 + end + 1))
 }
 
 /// Word-wrap `spans` into lines of at most `width` columns, the first
@@ -254,8 +299,7 @@ fn link(rest: &str) -> Option<(&str, &str, usize)> {
 fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = vec![Span::raw(first.to_string())];
-    let mut used = Span::raw(first).width();
-    let room = |prefix: &str| width.saturating_sub(Span::raw(prefix).width()).max(1);
+    let mut used = width_of(first);
     let mut pending_space = false;
     for word in words(spans) {
         let Some((text, style)) = word else {
@@ -264,7 +308,7 @@ fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec
         };
         let mut text = text;
         loop {
-            let w = Span::raw(text.as_str()).width();
+            let w = width_of(&text);
             let space = usize::from(pending_space && used > prefix_width(&current));
             if used + space + w <= width {
                 if space == 1 {
@@ -277,16 +321,16 @@ fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec
             if used > prefix_width(&current) {
                 lines.push(Line::from(std::mem::take(&mut current)));
                 current = vec![Span::raw(hang.to_string())];
-                used = Span::raw(hang).width();
+                used = width_of(hang);
                 pending_space = false;
                 continue;
             }
-            // Longer than a whole line: cut it.
-            let (head, tail) = split_at_width(&text, room(hang).min(width - used));
+            // Longer than a whole line: cut it, at least a char a line.
+            let (head, tail) = split_at_width(&text, width.saturating_sub(used).max(1));
             current.push(Span::styled(head, style));
             lines.push(Line::from(std::mem::take(&mut current)));
             current = vec![Span::raw(hang.to_string())];
-            used = Span::raw(hang).width();
+            used = width_of(hang);
             text = tail;
             if text.is_empty() {
                 break;
@@ -298,6 +342,21 @@ fn wrap(spans: Vec<Span<'static>>, width: usize, first: &str, hang: &str) -> Vec
         lines.push(Line::from(current));
     }
     lines
+}
+
+/// `text` in `style`, word-wrapped to `width`, for one-line fields that
+/// may be long.
+pub fn wrap_text(text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+    wrap(
+        vec![Span::styled(text.to_string(), style)],
+        width.max(1),
+        "",
+        "",
+    )
+}
+
+fn width_of(text: &str) -> usize {
+    Span::raw(text).width()
 }
 
 fn prefix_width(current: &[Span<'_>]) -> usize {
@@ -327,17 +386,37 @@ fn words(spans: Vec<Span<'static>>) -> Vec<Option<(String, Style)>> {
     out
 }
 
-/// `text` cut after at most `cols` columns, and what is left.
+/// `text` cut after at most `cols` columns (at least one char), and what
+/// is left.
 fn split_at_width(text: &str, cols: usize) -> (String, String) {
     let mut used = 0;
     for (i, c) in text.char_indices() {
-        let w = Span::raw(c.to_string()).width();
+        let w = width_of(c.encode_utf8(&mut [0; 4]));
         if used + w > cols && i > 0 {
             return (text[..i].to_string(), text[i..].to_string());
         }
         used += w;
     }
     (text.to_string(), String::new())
+}
+
+/// A fenced code line, indented and dim, cut to `width` with a dim `…`
+/// when it does not fit, so the reader knows text is missing.
+fn code_line(raw: &str, width: usize) -> Line<'static> {
+    let text = format!("{INDENT}{raw}");
+    if width_of(&text) <= width {
+        return Line::from(Span::styled(text, dim()));
+    }
+    let (head, _) = split_at_width(&text, width.saturating_sub(1).max(1));
+    Line::from(vec![Span::styled(head, dim()), Span::styled("…", dim())])
+}
+
+/// Columns of indentation before `line`'s text, a tab counting four.
+fn indent_cols(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| c.is_whitespace())
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
 }
 
 #[cfg(test)]
@@ -402,18 +481,21 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_is_kept_indented_dim_and_unwrapped() {
+    fn fenced_code_is_kept_indented_dim_and_cut_with_a_mark() {
         let long = "let x = a_very_long_call(with, many, arguments, past, forty);";
         let lines = render(&format!("```rust\n{long}\n  **not bold**\n```\nafter"), 40);
         assert_eq!(
             texts(&lines),
             [
-                format!("  {long}"),
+                format!("  {}…", &long[..37]),
                 "    **not bold**".into(),
                 "after".into()
             ]
         );
-        assert!(lines[0].spans[0].style.add_modifier.contains(Modifier::DIM));
+        assert_eq!(lines[0].width(), 40);
+        for span in &lines[0].spans {
+            assert!(span.style.add_modifier.contains(Modifier::DIM), "{span:?}");
+        }
     }
 
     #[test]
@@ -481,5 +563,93 @@ mod tests {
             texts(&render(md, 40)),
             ["| a | b |", "|---|---|", "<img src=x>", "[not a link] (x)"]
         );
+    }
+
+    #[test]
+    fn markers_next_to_multibyte_text_never_split_a_char() {
+        for md in [
+            "see _é_ here",
+            "_über_ and _日本",
+            "a _e\u{301}_ b",
+            "_👍_ _👍",
+            "**é** **日本**x",
+            "`é` `日",
+            "[é](日) [日本](https://x.io/é) [é",
+            "_",
+            "é_",
+            "**",
+            "[](",
+        ] {
+            let lines = render(md, 40);
+            assert!(!lines.is_empty() || md.trim().is_empty(), "{md:?}");
+        }
+        assert_eq!(texts(&render("see _é_ here", 40)), ["see é here"]);
+    }
+
+    /// Random text from markup characters and multibyte, combining and
+    /// wide ones renders without a panic and within the width.
+    #[test]
+    fn random_unicode_renders_within_the_width() {
+        const ALPHABET: &[char] = &[
+            '_', '*', '`', '[', ']', '(', ')', '#', '>', '-', '1', '.', ' ', ' ', '\n', '\t', 'a',
+            'é', '\u{301}', '日', '👍', '\u{200D}', '<', '!', '~', 'x', ':',
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..500 {
+            let len = (next() % 120) as usize;
+            let text: String = (0..len)
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect();
+            let width = 8 + (next() % 50) as usize;
+            for line in render(&text, width) {
+                assert!(line.width() <= width, "{text:?} at {width}: {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn deep_indentation_is_capped_and_stays_within_the_width() {
+        let md = format!("{}- {}", " ".repeat(200), "y".repeat(300));
+        for width in [8, 40] {
+            let lines = render(&md, width);
+            for line in &lines {
+                assert!(line.width() <= width, "{width}: {:?}", text(line));
+            }
+            assert!(text(&lines[0]).contains('•'), "{:?}", texts(&lines));
+        }
+        let lines = render(&format!("{}- deep", " ".repeat(200)), 80);
+        assert_eq!(texts(&lines), [format!("{}• deep", "  ".repeat(MAX_DEPTH))]);
+    }
+
+    #[test]
+    fn tab_indentation_nests_a_list() {
+        let lines = render("- top\n\t- under a tab\n\t\t- two tabs", 40);
+        assert_eq!(
+            texts(&lines),
+            ["• top", "    • under a tab", "        • two tabs"]
+        );
+    }
+
+    /// Lines of openers that never close, at the 64 KiB description cap,
+    /// render in linear time.
+    #[test]
+    fn hostile_descriptions_render_within_a_time_budget() {
+        let size = 64 * 1024;
+        for unit in ["[", "_a ", "**a ", "`", "[a](", "[x]( ", "*"] {
+            let text = unit.repeat(size / unit.len());
+            let start = std::time::Instant::now();
+            render(&text, 78);
+            let took = start.elapsed();
+            assert!(
+                took < std::time::Duration::from_secs(2),
+                "{unit:?} took {took:?}"
+            );
+        }
     }
 }

@@ -920,6 +920,17 @@ pub(crate) mod tests {
         assert_eq!(queues(&runner), Err(Refusal::Status(ForgeStatus::Failed)));
     }
 
+    /// `queues` with pull request `number`'s title replaced everywhere.
+    pub(crate) fn with_title(queues: Queues, number: u64, title: &str) -> Queues {
+        let mut lists = queues.0;
+        for list in &mut lists {
+            for pr in list.iter_mut().filter(|pr| pr.number == number) {
+                pr.title = title.to_string();
+            }
+        }
+        Queues(lists)
+    }
+
     const HOSTILE: &str = "x\u{1b}[31mred\u{1b}]52;c;eA==\u{7}\r\u{202e}evil";
 
     fn no_controls(text: &str) {

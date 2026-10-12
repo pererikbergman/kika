@@ -13,6 +13,7 @@ use crate::keymap::Reason;
 use crate::list_filter;
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::Popup;
+use ratatui::text::Line;
 
 pub const NO_FORGE: &str = "The remote is on no forge host in the global config";
 const NO_BROWSER: &str = "Set forge.browser in the global config";
@@ -82,6 +83,16 @@ pub struct ReviewState {
     pub repo: Option<ForgeRepo>,
     /// The pages the open "Check details" list offers, by row.
     pub check_urls: Vec<String>,
+    /// The open pull request's description, rendered once for the
+    /// panel's width rather than on every frame and key.
+    pub body: Option<RenderedBody>,
+}
+
+/// A description as drawn at `width`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedBody {
+    pub width: usize,
+    pub lines: Vec<Line<'static>>,
 }
 
 impl Default for ReviewState {
@@ -98,6 +109,7 @@ impl Default for ReviewState {
             detail_fetch: ReviewFetch::default(),
             repo: None,
             check_urls: Vec::new(),
+            body: None,
         }
     }
 }
@@ -327,6 +339,7 @@ impl AppState {
     fn open_review_detail(&mut self, number: u64) -> Vec<Effect> {
         self.review.screen = ReviewScreen::Detail(number);
         self.review.detail = None;
+        self.review.body = None;
         self.review.detail_scroll = 0;
         self.load_review_detail(number)
     }
@@ -405,6 +418,8 @@ impl AppState {
                 self.review.detail_fetch.error =
                     found.is_none().then_some(ReviewProblem::Missing(number));
                 self.review.detail = found;
+                self.review.body = None;
+                self.render_review_body();
             }
             Err(error) => self.review.detail_fetch.error = Some(self.review_failed(repo, error)),
         }
@@ -430,13 +445,33 @@ impl AppState {
         }
     }
 
-    /// The furthest the detail scrolls, with its last line at the bottom.
-    fn review_max_scroll(&self) -> usize {
+    /// Where the detail is drawn, at the current screen size.
+    fn review_area(&self) -> ratatui::layout::Rect {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
-        match &self.review.detail {
-            Some(detail) => crate::review_view::detail_max_scroll(detail, main),
-            None => 0,
+        crate::review_view::detail_area(main)
+    }
+
+    /// Render the open description for the panel's width, once: on load
+    /// and when the screen is resized.
+    pub(super) fn render_review_body(&mut self) {
+        let width = usize::from(self.review_area().width);
+        if self.review.body.as_ref().is_some_and(|b| b.width == width) {
+            return;
+        }
+        self.review.body = self.review.detail.as_ref().map(|detail| RenderedBody {
+            width,
+            lines: crate::markdown::render(&detail.body, width),
+        });
+    }
+
+    /// The furthest the detail scrolls, with its last line at the bottom.
+    fn review_max_scroll(&self) -> usize {
+        match (&self.review.detail, &self.review.body) {
+            (Some(detail), Some(body)) => {
+                crate::review_view::detail_max_scroll(detail, &body.lines, self.review_area())
+            }
+            _ => 0,
         }
     }
 
@@ -467,6 +502,7 @@ impl AppState {
             ReviewScreen::Detail(_) => {
                 self.review.screen = ReviewScreen::Queue;
                 self.review.detail = None;
+                self.review.body = None;
                 self.review.detail_fetch = ReviewFetch::default();
                 // A session started on one pull request loads its queues
                 // only now.
@@ -1013,5 +1049,25 @@ pub(crate) mod tests {
             type_char(&mut state, 'j');
         }
         assert!(state.review.detail_scroll > 0);
+    }
+
+    #[test]
+    fn the_description_is_rendered_once_per_width() {
+        let mut state = in_detail(Vec::new());
+        let body = state.review.body.clone().expect("rendered on load");
+        assert_eq!(body.width, 78);
+        assert!(!body.lines.is_empty());
+        // Keys and frames reuse it.
+        type_char(&mut state, 'j');
+        assert_eq!(state.review.body.as_ref(), Some(&body));
+        // A resize renders it for the new width.
+        state.update(AppIntent::Resize {
+            width: 50,
+            height: 20,
+        });
+        assert_eq!(state.review.body.as_ref().map(|b| b.width), Some(48));
+        // Leaving the pull request drops it.
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.review.body, None);
     }
 }

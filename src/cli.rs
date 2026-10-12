@@ -11,9 +11,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Open a pull/merge request for review.
+    /// Open a GitHub pull request for review.
     Review {
-        /// The pull/merge request number.
+        /// The pull request number.
         number: u64,
     },
 }

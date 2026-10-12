@@ -530,6 +530,7 @@ impl AppState {
             AppIntent::Resize { width, height } => {
                 let cols = self.pane_cols();
                 self.size = (width, height);
+                self.render_review_body();
                 let mut effects = self.diff.demand(self.pane_rows());
                 if self.pane_cols() != cols {
                     effects.extend(self.render_shown());
