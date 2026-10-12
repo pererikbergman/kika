@@ -142,8 +142,8 @@ impl AppState {
         vec![]
     }
 
-    /// Run the op the open question carries, and only if one is open and
-    /// `HEAD` is still where it was asked from.
+    /// Run the op the open question carries, and only if one is open, its
+    /// guard still allows it and `HEAD` is still where it was asked from.
     pub(super) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::LeaveCommits(_))) {
             return vec![];
@@ -151,6 +151,9 @@ impl AppState {
         let Some(Popup::LeaveCommits(confirm)) = self.popups.pop() else {
             return vec![];
         };
+        if self.confirm_refused(&confirm.op) {
+            return vec![];
+        }
         if !self.head_still(Some(&confirm.head)) {
             return vec![];
         }
