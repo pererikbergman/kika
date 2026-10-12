@@ -31,10 +31,10 @@
 //! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
 //! ```
 //!
-//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[clipboard]`
-//! are read from the global file only, at startup. `[display] emoji_zwj_terminals` is off
-//! (empty) by default; [`emoji_zwj`] matches it against the running
-//! terminal once.
+//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and
+//! `[clipboard]` are read from the global file only, at startup.
+//! `[display] emoji_zwj_terminals` is off (empty) by default;
+//! [`emoji_zwj`] matches it against the running terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
