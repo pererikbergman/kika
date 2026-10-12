@@ -903,7 +903,7 @@ mod tests {
 
     /// `workspace` with a custom patch of one file from `bbbbbbb`.
     fn with_patch() -> AppState {
-        use crate::custom_patch::CustomPatch;
+        use crate::features::commits::custom_patch::CustomPatch;
         use crate::git::commit_files::{CommitId, CommitRange};
         let mut state = workspace(&["a.rs"]);
         state.files.clear();
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn the_custom_patch_question_keeps_y_n_in_sight_at_every_size() {
-        use crate::custom_patch::PatchAction;
+        use crate::features::commits::custom_patch::PatchAction;
         use crate::git::commit_files::CommitId;
         let long = "A rather long message with wide 漢字漢字 and 👩\u{200D}💻 in it, past any box";
         let actions = [

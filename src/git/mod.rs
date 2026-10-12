@@ -10,7 +10,6 @@ pub mod cherry_pick;
 pub mod command_line;
 pub mod comment_prefix;
 pub mod commit_files;
-pub mod custom_patch;
 pub mod diff;
 pub(crate) mod emoji;
 #[cfg(test)]

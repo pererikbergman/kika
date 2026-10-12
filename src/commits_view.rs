@@ -11,8 +11,8 @@ use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
 use crate::commits::{CommitsPanel, CommitsTab, Marker};
 use crate::copied::CopiedCommits;
-use crate::custom_patch::{CustomPatch, FilePick};
 use crate::diff_mark::DiffMark;
+use crate::features::commits::custom_patch::{CustomPatch, FilePick};
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::{sanitize, terminal_safe};
@@ -1370,7 +1370,7 @@ mod tests {
     /// A patch picked from `a000000`: `added.rs` whole, a line of
     /// `modified.rs`.
     fn with_patch(state: &mut AppState) {
-        use crate::custom_patch::CustomPatch;
+        use crate::features::commits::custom_patch::CustomPatch;
         use crate::git::patch::LineId;
         let range = state.commits.open.as_ref().unwrap().range.clone();
         let mut patch = CustomPatch::new(range, "a000000".into());

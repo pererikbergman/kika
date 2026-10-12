@@ -1,7 +1,7 @@
 //! A custom patch: changes picked from one commit, whole files or single
 //! changed lines, to take out of it, move to another commit, move to the
 //! index or split off as a commit of their own. Pure state; the rewrite
-//! runs in `git::custom_patch`.
+//! runs in `custom_patch::git`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
