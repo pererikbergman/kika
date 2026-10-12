@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "timestamp": "1791783051",
+  "issue_count": 11,
+  "fingerprints": [
+    "coupling_violation:src/e2e -> src/forge",
+    "coupling_violation:src/e2e -> src/git",
+    "coupling_violation:src/forge -> src/git",
+    "coupling_violation:src/model -> src/git",
+    "coupling_violation:src/model -> src/forge",
+    "gravity_well:src/git/branches.rs",
+    "red_flag:fused_sibling:src/model -> src/git",
+    "coupling_violation:src/e2e -> src/model",
+    "zone_flag:src/forge",
+    "zone_flag:src/git",
+    "low_cohesion:src/model"
+  ]
+}
