@@ -584,13 +584,21 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // base is hex digits only. The keys are newer config that an older
         // git ignores; they keep the todo list to what the sequence editor
         // accepts. `--update-refs` (git 2.38) or the key turning it off
-        // always wins over the user's `rebase.updateRefs`.
+        // always wins over the user's `rebase.updateRefs`. Comments in the
+        // todo use `#`, the only comment character Kika reads, whatever
+        // the user's `core.commentChar`; the command line's `-c` wins
+        // over every config file.
         GitOp::InteractiveRebase(plan) => {
             let mut cmd = GitCommand::new("-c");
             if !plan.update_refs {
                 cmd = cmd.arg("rebase.updateRefs=false").arg("-c");
             }
-            cmd = cmd.arg("rebase.rebaseMerges=false").arg("rebase").arg("-i");
+            cmd = cmd
+                .arg("rebase.rebaseMerges=false")
+                .arg("-c")
+                .arg("core.commentChar=#")
+                .arg("rebase")
+                .arg("-i");
             if plan.update_refs {
                 cmd = cmd.arg("--update-refs");
             }
@@ -1264,6 +1272,8 @@ mod tests {
                 "rebase.updateRefs=false",
                 "-c",
                 "rebase.rebaseMerges=false",
+                "-c",
+                "core.commentChar=#",
                 "rebase",
                 "-i",
                 "--autostash",
@@ -1293,6 +1303,8 @@ mod tests {
             [
                 "-c",
                 "rebase.rebaseMerges=false",
+                "-c",
+                "core.commentChar=#",
                 "rebase",
                 "-i",
                 "--update-refs",

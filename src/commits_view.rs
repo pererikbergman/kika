@@ -211,31 +211,33 @@ fn todo_lines(panel: &CommitsPanel, width: usize) -> Vec<Line<'static>> {
         return Vec::new();
     };
     let dim = Style::new().fg(Color::DarkGray);
-    let mut rows: Vec<Line<'static>> = match todo.editable {
-        Ok(()) => todo
-            .entries
+    let mut rows: Vec<Line<'static>> = if todo.editable.is_ok() {
+        todo.entries
             .iter()
             .map(|entry| todo_line(entry, width))
-            .collect(),
-        Err(_) => todo
-            .raw_lines()
+            .collect()
+    } else {
+        todo.raw_lines()
             .into_iter()
             .map(|line| Line::raw(elide_right(&terminal_safe(line), width)))
-            .collect(),
+            .collect()
     };
-    let left = match todo.editable {
-        Ok(()) => todo
+    // A list Kika does not edit says so; its line count would also count
+    // lines that are not steps.
+    let heading = if todo.editable.is_ok() {
+        let left = todo
             .entries
             .iter()
             .filter(|entry| matches!(entry, TodoEntry::Commit { .. }))
-            .count(),
-        Err(_) => rows.len(),
+            .count();
+        format!("Rebase todo ({left} left)")
+    } else {
+        "Rebase todo (read-only)".to_string()
     };
     if let Some(i) = panel.todo_selected.filter(|&i| i < rows.len()) {
         rows[i] = reversed(std::mem::take(&mut rows[i]), width);
     }
     rows.reverse();
-    let heading = format!("Rebase todo ({left} left)");
     let mut lines = vec![Line::styled(elide_right(&heading, width), dim)];
     lines.extend(rows);
     lines
@@ -783,7 +785,7 @@ mod tests {
         let rows = buffer_rows(&draw(&state, 100, 30));
         let heading = rows
             .iter()
-            .position(|r| r.contains("Rebase todo (2 left)"))
+            .position(|r| r.contains("Rebase todo (read-only)"))
             .unwrap();
         assert!(rows[heading + 1].contains("exec make test"));
         assert!(rows[heading + 2].contains("pick 1111111 one"));

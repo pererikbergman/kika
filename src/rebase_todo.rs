@@ -4,12 +4,57 @@
 
 use std::path::PathBuf;
 
+use crate::git::diff::terminal_safe;
 use crate::git::rebase_plan::{
-    Direction, Edit, NOTHING_TO_FOLD, TodoAction, TodoEntry, command_lines, crossing, parse_todo,
+    Direction, Edit, NOTHING_TO_FOLD, TodoAction, TodoEntry, Unreadable, command_lines, crossing,
+    parse_todo, unreadable,
 };
 
-/// Why a todo list is shown but not edited.
+/// Why a todo list is shown but not edited, when no single line says it.
 pub const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";
+
+/// What to do instead, said after every reason a list is not edited.
+const EDIT_IT_IN_GIT: &str =
+    "edit it with git rebase --edit-todo, or continue or abort from the Status panel";
+
+/// The most characters of a todo line a reason quotes.
+const QUOTED: usize = 40;
+
+/// Why `todo` is shown but not edited: the line that stops it, by number,
+/// as the user can find it in the file, and what to do instead.
+pub fn not_editable(todo: &[u8]) -> String {
+    match unreadable(todo) {
+        Some(Unreadable::Nul) => {
+            format!("The todo list has a NUL byte, after which git reads nothing; {EDIT_IT_IN_GIT}")
+        }
+        Some(Unreadable::Line { number, text }) => {
+            // Every command starts with a letter; a line led by another
+            // mark is most likely a comment, written with the comment
+            // character a user's core.commentChar chose instead of `#`.
+            let cause = if text.first().is_some_and(u8::is_ascii_punctuation) {
+                "looks like a comment with a comment character other than #"
+            } else {
+                "is not a todo command Kika edits"
+            };
+            format!(
+                "Todo line {number} {cause}: \"{}\"; {EDIT_IT_IN_GIT}",
+                quoted(text)
+            )
+        }
+        None => format!("{NOT_EDITABLE}; {EDIT_IT_IN_GIT}"),
+    }
+}
+
+/// `text`, safe to print and cut to [`QUOTED`] characters.
+fn quoted(text: &[u8]) -> String {
+    let safe = terminal_safe(text);
+    if safe.chars().count() <= QUOTED {
+        return safe;
+    }
+    let mut cut: String = safe.chars().take(QUOTED - 1).collect();
+    cut.push('…');
+    cut
+}
 
 /// Why an edit was not saved: git or the user changed the list since it
 /// was read. The panel reloads it.
@@ -39,9 +84,9 @@ pub struct RebaseTodo {
     /// The bytes read, which a write must still find on disk.
     pub original: Vec<u8>,
     pub entries: Vec<TodoEntry>,
-    /// `Err` when the list holds commands Kika does not edit; its lines
-    /// are then shown as they are.
-    pub editable: Result<(), &'static str>,
+    /// `Err` when the list holds a line Kika does not edit, saying which
+    /// and what to do instead; its lines are then shown as they are.
+    pub editable: Result<(), String>,
     /// Git has done no step yet, so there is nothing to fold into.
     pub done_empty: bool,
 }
@@ -50,7 +95,7 @@ impl RebaseTodo {
     pub fn load(file: TodoFile) -> Self {
         let (entries, editable) = match parse_todo(&file.todo) {
             Ok(entries) => (entries, Ok(())),
-            Err(_) => (Vec::new(), Err(NOT_EDITABLE)),
+            Err(_) => (Vec::new(), Err(not_editable(&file.todo))),
         };
         let done_empty = file.done.as_deref().is_some_and(nothing_done);
         Self {
@@ -69,16 +114,17 @@ impl RebaseTodo {
 
     /// How many rows the panel shows for it.
     pub fn len(&self) -> usize {
-        match self.editable {
-            Ok(()) => self.entries.len(),
-            Err(_) => self.raw_lines().len(),
+        if self.editable.is_ok() {
+            self.entries.len()
+        } else {
+            self.raw_lines().len()
         }
     }
 
     /// The list after `rewrite` on row `i`, and the row the cursor moves
     /// to, or why it cannot be done.
     pub fn edit(&self, i: usize, rewrite: Rewrite) -> Result<(Vec<TodoEntry>, usize), String> {
-        self.editable?;
+        self.editable.clone()?;
         match rewrite {
             Rewrite::Move(direction) => move_entry(&self.entries, i, direction),
             Rewrite::Edit(edit) => {
@@ -246,13 +292,37 @@ mod tests {
     #[test]
     fn a_todo_with_commands_kika_does_not_edit_is_shown_read_only() {
         let todo = RebaseTodo::load(file(b"pick 1234 a\nexec make\n# help\n", Some(b"")));
-        assert_eq!(todo.editable, Err(NOT_EDITABLE));
+        let why = "Todo line 2 is not a todo command Kika edits: \"exec make\"; edit it with \
+                   git rebase --edit-todo, or continue or abort from the Status panel";
+        assert_eq!(todo.editable, Err(why.to_string()));
         assert_eq!(todo.raw_lines(), [&b"pick 1234 a"[..], b"exec make"]);
         assert_eq!(todo.len(), 2);
+        assert_eq!(todo.edit(0, Rewrite::Edit(Edit::Drop)), Err(why.into()));
+    }
+
+    #[test]
+    fn a_comment_with_another_comment_char_is_named_as_such() {
+        let todo = RebaseTodo::load(file(b"; Rebase 1..2 onto 1\npick 1234 a\n", None));
         assert_eq!(
-            todo.edit(0, Rewrite::Edit(Edit::Drop)),
-            Err(NOT_EDITABLE.into())
+            todo.editable,
+            Err(
+                "Todo line 1 looks like a comment with a comment character other than #: \
+                 \"; Rebase 1..2 onto 1\"; edit it with git rebase --edit-todo, or continue \
+                 or abort from the Status panel"
+                    .to_string()
+            )
         );
+    }
+
+    #[test]
+    fn a_quoted_line_is_made_safe_and_cut_short() {
+        let mut line = b"exec \x1b[31m".to_vec();
+        line.extend_from_slice("é".repeat(60).as_bytes());
+        let why = not_editable(&line);
+        assert!(!why.contains('\x1b'), "{why}");
+        let quote = why.split('"').nth(1).unwrap();
+        assert_eq!(quote.chars().count(), QUOTED);
+        assert!(quote.ends_with('…'), "{quote}");
     }
 
     #[test]
@@ -263,7 +333,12 @@ mod tests {
         assert_eq!(serialize(&todo.entries), b"pick 1111 one\npick 2222 two\n");
 
         let todo = RebaseTodo::load(file(b"pick 1111 one\n\texec touch x\n", Some(b"")));
-        assert_eq!(todo.editable, Err(NOT_EDITABLE));
+        assert!(
+            todo.editable
+                .as_ref()
+                .unwrap_err()
+                .starts_with("Todo line 2 ")
+        );
         assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"exec touch x"]);
         assert!(!nothing_done(b"  pick 1111 one\n"));
     }
@@ -274,8 +349,13 @@ mod tests {
             b"pick 1111 one\npick 2222 two\0x\npick 3333 c\n",
             Some(b""),
         ));
-        assert_eq!(todo.editable, Err(NOT_EDITABLE));
-        assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"pick 2222 two"]);
+        assert!(
+            todo.editable
+                .unwrap_err()
+                .starts_with("The todo list has a NUL byte")
+        );
+        let todo = RebaseTodo::load(file(b"pick 1111 one\0\n", None));
+        assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..]]);
         assert!(nothing_done(b"\0pick 1111 one\n"));
     }
 
@@ -290,7 +370,8 @@ mod tests {
             bytes.extend_from_slice(odd);
             bytes.push(b'\n');
             let todo = RebaseTodo::load(file(&bytes, Some(b"")));
-            assert_eq!(todo.editable, Err(NOT_EDITABLE), "{odd:?}");
+            let why = todo.editable.clone().unwrap_err();
+            assert!(why.starts_with("Todo line 2 "), "{why}");
             assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], odd], "{odd:?}");
         }
     }

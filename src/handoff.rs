@@ -753,6 +753,8 @@ mod tests {
                     "rebase.updateRefs=false",
                     "-c",
                     "rebase.rebaseMerges=false",
+                    "-c",
+                    "core.commentChar=#",
                     "rebase",
                     "-i",
                     "--autostash",

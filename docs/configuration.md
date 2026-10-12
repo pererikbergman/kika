@@ -742,7 +742,12 @@ on into the log. On a todo row, `alt-k` and `alt-j` move it, `s`, `F`, `d`,
 after it. Each change is checked and written to git's todo list at once,
 only if the list on disk is still the one shown; git's help comments are not
 kept. A commit never moves past another branch's update line. A todo list
-holding commands Kika does not edit, such as `exec`, is shown but not edited.
+holding a line Kika does not edit, such as `exec` or a comment written with a
+`core.commentChar` other than `#`, is shown as it is under "Rebase todo
+(read-only)"; an edit key then names the line and its number. Edit such a list
+with `git rebase --edit-todo`, or continue or abort from the Status panel.
+Rebases Kika starts itself always use `#` for comments, whatever
+`core.commentChar` says, so their todo list stays editable.
 
 `c` copies the selected commit, or takes it out of the copied set; mark each
 commit you want in turn. Copied rows show `+` before their hash, and the

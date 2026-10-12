@@ -16759,8 +16759,11 @@ mod tests {
             let mut state = stopped(todo, 0);
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
             assert_eq!(
-                state.notice,
-                Some(rebase_todo::NOT_EDITABLE.into()),
+                state.notice.as_deref(),
+                Some(
+                    "Todo line 2 is not a todo command Kika edits: \"exec make\"; edit it \
+                     with git rebase --edit-todo, or continue or abort from the Status panel"
+                ),
                 "{key}"
             );
         }

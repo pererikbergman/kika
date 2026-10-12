@@ -320,18 +320,45 @@ pub fn parse_todo(todo: &[u8]) -> Result<Vec<TodoEntry>, String> {
 /// rejects, so it is kept here for [`parse_todo`] to accept or refuse.
 /// Like git, it reads no further than the first NUL.
 pub fn command_lines(todo: &[u8]) -> impl Iterator<Item = &[u8]> {
+    numbered_lines(todo).map(|(_, line)| line)
+}
+
+/// [`command_lines`] with each line's 1-based number in the file.
+fn numbered_lines(todo: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     let end = todo.iter().position(|&b| b == 0).unwrap_or(todo.len());
     todo[..end]
         .split(|&b| b == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
-        .map(|line| {
+        .enumerate()
+        .map(|(i, line)| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
             let indent = line
                 .iter()
                 .take_while(|&&b| b == b' ' || b == b'\t')
                 .count();
-            &line[indent..]
+            (i + 1, &line[indent..])
         })
-        .filter(|line| !matches!(line.first(), None | Some(b'\r' | b'#')))
+        .filter(|(_, line)| !matches!(line.first(), None | Some(b'\r' | b'#')))
+}
+
+/// What in a todo list keeps Kika from reading it, as [`parse_todo`]
+/// refuses it, for saying why it is not edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable<'a> {
+    /// A NUL byte, after which git reads nothing.
+    Nul,
+    /// The first line that is not a command Kika reads, by its 1-based
+    /// number in the file, without its indent.
+    Line { number: usize, text: &'a [u8] },
+}
+
+/// Why [`parse_todo`] refuses `todo`, or `None` when it reads it.
+pub fn unreadable(todo: &[u8]) -> Option<Unreadable<'_>> {
+    if todo.contains(&0) {
+        return Some(Unreadable::Nul);
+    }
+    numbered_lines(todo)
+        .find(|(_, line)| parse_line(line).is_err())
+        .map(|(number, text)| Unreadable::Line { number, text })
 }
 
 fn parse_line(line: &[u8]) -> Result<TodoEntry, String> {
@@ -953,6 +980,19 @@ mod tests {
             assert!(parse_todo(bad).is_err(), "{}", String::from_utf8_lossy(bad));
             assert_eq!(command_lines(bad).count(), 1);
         }
+    }
+
+    #[test]
+    fn unreadable_names_the_first_line_kika_cannot_read_by_its_number() {
+        assert_eq!(unreadable(b"# c\npick 1234 a\n"), None);
+        assert_eq!(
+            unreadable(b"# c\n\npick 1234 a\n  exec make\nlabel x\n"),
+            Some(Unreadable::Line {
+                number: 4,
+                text: b"exec make"
+            })
+        );
+        assert_eq!(unreadable(b"pick 1234 a\0\n"), Some(Unreadable::Nul));
     }
 
     #[test]

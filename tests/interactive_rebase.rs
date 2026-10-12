@@ -147,7 +147,13 @@ fn rebase_with(dir: &Path, base: &str, plan: &str, editor: &OsString, update_ref
     if !update_refs {
         args.extend(["rebase.updateRefs=false", "-c"]);
     }
-    args.extend(["rebase.rebaseMerges=false", "rebase", "-i"]);
+    args.extend([
+        "rebase.rebaseMerges=false",
+        "-c",
+        "core.commentChar=#",
+        "rebase",
+        "-i",
+    ]);
     if update_refs {
         args.push("--update-refs");
     }
@@ -272,6 +278,18 @@ fn a_move_swaps_two_commits_and_keeps_their_changes() {
     let messages: Vec<String> = history(dir).into_iter().map(|(_, m)| m).collect();
     assert_eq!(messages, ["third", "fourth", "second", "first"]);
     assert_eq!(tree_files(dir, "HEAD"), "a\nb\nc\nd\n");
+}
+
+#[test]
+fn a_custom_comment_char_does_not_stop_kika_s_rebase() {
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [_, second, third, fourth] = ids(dir);
+    git(dir, &["config", "core.commentChar", ";"]);
+    let plan = format!("pick {fourth}\npick {third}\n");
+    assert_ok(&rebase(dir, &second, &plan, &"false".into()));
+    let messages: Vec<String> = history(dir).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages, ["third", "fourth", "second", "first"]);
 }
 
 #[test]
