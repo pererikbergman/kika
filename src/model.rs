@@ -19710,6 +19710,7 @@ mod tests {
                 message: Some("wip".into()),
                 paths: vec!["b.rs".into()],
                 restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.stash_draft, None);
@@ -19732,6 +19733,7 @@ mod tests {
                     message: None,
                     paths: vec![],
                     restore: vec![],
+                    unstage: vec![],
                 },
                 "{index}"
             );
@@ -19751,6 +19753,7 @@ mod tests {
                 message: None,
                 paths: vec!["c.txt".into()],
                 restore: vec![],
+                unstage: vec![],
             }
         );
     }
@@ -19793,6 +19796,7 @@ mod tests {
             message: None,
             paths: vec![],
             restore: vec![],
+            unstage: vec![],
         };
         let cases = [
             (push, "Could not stash", files),
@@ -19834,6 +19838,7 @@ mod tests {
             mode: StashMode::All,
             paths: vec![],
             restore: vec![],
+            unstage: vec![],
             from_range: false,
         });
         state.switch_repo();
@@ -19904,6 +19909,7 @@ mod tests {
                 message: None,
                 paths: vec!["new.rs".into(), "u.txt".into()],
                 restore: vec!["old.rs".into()],
+                unstage: vec![],
             }
         );
     }
@@ -19953,6 +19959,53 @@ mod tests {
     }
 
     #[test]
+    fn a_staged_deletion_whose_path_is_taken_again_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_DELETED_TAKEN.into());
+        // An untracked file at the path, or folded onto it or a directory
+        // it needs by a case-insensitive filesystem.
+        for taken in ["gone.rs", "Gone.rs"] {
+            let files = vec![changed("gone.rs", 'D', '.'), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        for taken in ["d", "D"] {
+            let files = vec![changed("d/gone.rs", 'D', '.'), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // Marked as well, it is still refused, with the same reason.
+        let files = vec![changed("gone.rs", 'D', '.'), untracked("gone.rs")];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(crate::menu::stash_file_disabled(&state), reason);
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, reason);
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn a_lone_staged_deletion_is_stashed_with_its_path_unstaged_first() {
+        // Its own entry does not count as taking its path, nor does a file
+        // beside it.
+        let files = vec![changed("d/gone.rs", 'D', '.'), untracked("d/other.rs")];
+        let (mut state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::All,
+                message: None,
+                paths: vec!["d/gone.rs".into()],
+                restore: vec![],
+                unstage: vec!["d/gone.rs".into()],
+            }
+        );
+    }
+
+    #[test]
     fn stashing_a_range_pushes_its_files_and_drops_the_range() {
         let (mut state, _) = with_files(three_files(), 24);
         press_char(&mut state, 'V');
@@ -19970,6 +20023,7 @@ mod tests {
                 message: Some("pair".into()),
                 paths: vec!["a.rs".into(), "b.rs".into()],
                 restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.files_anchor, None, "the range is done with");
@@ -19998,6 +20052,7 @@ mod tests {
                 message: None,
                 paths: vec!["b.rs".into(), "c.txt".into()],
                 restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.files_anchor, None);
@@ -20044,6 +20099,7 @@ mod tests {
                 message: None,
                 paths: vec!["b.rs".into()],
                 restore: vec![],
+                unstage: vec![],
             }
         );
     }
@@ -20095,12 +20151,28 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         stash_menu_item(&mut state, 3);
-        // Same paths, so the range stays, but b.rs is now staged as deleted.
+        // Same paths, so the range stays, but b.rs is now staged as
+        // deleted: the push would now need it unstaged first.
         reload(
             &mut state,
             vec![changed("a.rs", '.', 'M'), changed("b.rs", 'D', '.')],
         );
         assert!(state.files_anchor.is_some());
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
+
+        let (mut state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", 'M', '.')],
+            24,
+        );
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        // b.rs's change moved to the worktree: same set, same push.
+        reload(
+            &mut state,
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", '.', 'M')],
+        );
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
         assert!(matches!(op, GitOp::StashPush { .. }), "same set, same push");
 

@@ -2454,6 +2454,66 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
     assert_eq!(repo.read("a.txt"), "mine\n");
 }
 
+/// Put the Files cursor on the staged deletion of `path`.
+async fn select_deleted(app: &mut Harness, path: &str) {
+    let at = (app.state().files.iter())
+        .position(|f| f.path.display() == path && f.index == 'D')
+        .unwrap();
+    for _ in 0..at {
+        app.press(KeyCode::Char('j')).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lone_staged_deletion_is_stashed_and_the_rest_stays() {
+    let repo = on_main().write("d/gone.txt", "gone\n").commit("gone");
+    repo.git(["rm", "-q", "--", "d/gone.txt"]);
+    let repo = repo.write("a.txt", "changed\n").write("b.txt", "b\n");
+    repo.git(["add", "--", "b.txt"]);
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(before, " M a.txt\nA  b.txt\nD  d/gone.txt\n");
+    select_deleted(&mut app, "d/gone.txt").await;
+
+    choose_stash_selected(&mut app).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(stash_count(&repo), 1);
+    assert_eq!(repo.read("d/gone.txt"), "gone\n");
+    assert_eq!(repo.read("a.txt"), "changed\n");
+    assert_eq!(repo.read("b.txt"), "b\n");
+    let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(after, " M a.txt\nA  b.txt\n");
+    let held =
+        String::from_utf8(repo.git(["stash", "show", "--name-status", "stash@{0}"])).unwrap();
+    assert!(held.lines().any(|l| l == "D\td/gone.txt"), "{held}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_staged_deletion_with_a_file_back_at_its_path_stashes_nothing() {
+    for (back, listed) in [("a.txt", "a.txt"), ("A.txt", "A.txt")] {
+        let repo = on_main();
+        repo.git(["rm", "-q", "--", "a.txt"]);
+        let repo = repo.write(back, "mine\n");
+        let mut app = Harness::start_sized(&repo, 120, 30).await;
+        let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+        assert_eq!(before, format!("D  a.txt\n?? {listed}\n"));
+        select_deleted(&mut app, "a.txt").await;
+
+        choose_stash_selected(&mut app).await;
+        assert_eq!(
+            app.state().notice.as_deref(),
+            Some(crate::menu::STASH_DELETED_TAKEN),
+            "{back}"
+        );
+        assert_eq!(stash_count(&repo), 0);
+        let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(repo.read(back), "mine\n");
+    }
+}
+
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
     let rows = &app.state().commits.rows;
