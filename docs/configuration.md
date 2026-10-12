@@ -2,14 +2,15 @@
 
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
-made outside it, choose a program to draw the Diff pane, and keep commits
-whose hooks never ask anything in the background.
+made outside it, choose a program to draw the Diff pane, keep commits whose
+hooks never ask anything in the background, and show GitHub pull requests
+beside your branches.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]`, `[forge]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -36,6 +37,9 @@ tool = "difft --color=always"    # a display-only diff tool
 
 [commit]
 hooks_detached = true   # commits that only run hooks stay in the background
+
+[forge]
+github = ["github.com"]   # leave out to keep pull requests off
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
@@ -214,6 +218,57 @@ hooks_detached = true   # default false: any commit hook hands the terminal over
   until you quit Kika.
 
 **Changes to `[commit]` take effect after a restart.**
+
+## `[forge]` (global file only)
+
+Kika can show each local branch's GitHub pull request in the Branches panel:
+its number, its state (`open`, `draft`, `merged` or `closed`) and its checks
+(`✓` passed, `✗` failed, `●` running, nothing when there are none), as in
+`main  origin/main  #123 open ✓`. **It is off by default.** It turns on only
+when you name the hosts Kika may ask:
+
+```toml
+[forge]
+github = ["github.com", "github.example.com"]
+```
+
+- Leave the table out, or give an empty list, and the feature is off. Kika
+  then never runs `gh`, never reads or writes the cache below, and never
+  reaches the network for it.
+- Each host is written as lower-case ASCII: letters, digits and `-`, in
+  labels joined by dots, such as `github.com`. No scheme (`https://`), port,
+  user name, path, wildcard (`*`) or trailing dot. Write an international
+  domain name in its `xn--` form. A host that breaks these rules is an
+  error, and the whole file is ignored.
+- A repository is matched by its `origin` remote, or by its only remote when
+  there is no `origin`. Its URL must be `https://host/owner/repo`,
+  `ssh://host/owner/repo` or `user@host:owner/repo` (with or without `.git`),
+  on the standard port, and the host must equal one you listed. Any other
+  repository shows nothing. A branch shows the newest pull request
+  into that repository whose head branch has the same name.
+- Opening any clone whose origin is on a listed host runs one read-only
+  `gh` query under your account, for that clone's owner/repo and branch
+  names.
+- Kika asks GitHub through the [GitHub CLI](https://cli.github.com), `gh`,
+  which must be installed and logged in for the host (`gh auth login
+  --hostname <host>`, or `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN`
+  in the environment). `gh` holds your login: Kika never reads, stores,
+  passes or shows a token. Each call shows in the Command log as
+  `gh api graphql --hostname <host> --input -`.
+- Pull requests load when the repository opens, and again after a fetch,
+  pull or push you start. There is no timer.
+- The last result is cached so it shows at once on the next start, in
+  `$XDG_CACHE_HOME/kika/forge`, else `~/Library/Caches/kika/forge` (macOS),
+  `~/.cache/kika/forge` (Linux) or `%LOCALAPPDATA%\kika\cache\forge`
+  (Windows). It holds the host, owner, repository name and path, and each
+  branch's number, state and checks, nothing else. Only you can read it.
+- When GitHub cannot be reached, a line at the bottom of the Branches panel
+  says why (`GitHub: offline`, `GitHub: not logged in`, `GitHub: gh not
+  found`, …), and the badges already shown stay, marked `· cached`. Where
+  the panel is wide enough, the line also says what to do, such as
+  `run gh auth login --hostname github.com`. Nothing else waits on it.
+
+**Changes to `[forge]` take effect after a restart.**
 
 ## Custom commands
 
@@ -436,6 +491,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   the whole file is ignored.
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
+- **`[forge]` is allowed only in the global file**, since it lets Kika contact
+  a host. A `[forge]` table in `.kika.toml` is an error, and the whole file is
+  ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an
