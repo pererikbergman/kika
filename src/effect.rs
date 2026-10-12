@@ -18,7 +18,8 @@ use crate::features::commits::copy;
 use crate::features::commits::reflog;
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
-    blame, conflicts, custom_commands, pull_requests, repos, review, submodules, sync, worktrees,
+    blame, conflicts, custom_commands, pull_requests, repos, review, stash, submodules, sync,
+    worktrees,
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::task::ForgeContext;
@@ -42,7 +43,7 @@ use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{git_dir_command, git_dir_from};
-use crate::git::stash::{StashEntry, list_stashes, stash_files};
+use crate::git::stash::StashEntry;
 use crate::git::status::read_status;
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
@@ -1216,32 +1217,9 @@ impl Runtime {
                     let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
                 });
             }
-            Effect::LoadStashes { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the panel would wait forever.
-                    let result = tokio::task::spawn_blocking(move || list_stashes(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
-                                format!("git stash list crashed: {e}").as_bytes(),
-                            ))
-                        });
-                    let _ = tx.send(AppIntent::StashesLoaded { tag, result });
-                });
-            }
+            Effect::LoadStashes { tag } => stash::effects::load(runner, tx, tag),
             Effect::LoadStashFiles { tag, entry } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || stash_files(runner.as_ref(), &entry))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("git diff-tree crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::StashFilesLoaded { tag, result });
-                });
+                stash::effects::load_files(runner, tx, tag, entry)
             }
             Effect::LoadMarkers { tag } => {
                 tokio::spawn(async move {
@@ -1599,6 +1577,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::io;
 
     use tokio::sync::mpsc;
@@ -1607,7 +1586,7 @@ mod tests {
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::git::remote::RemoteFailure;
-    use crate::test_support::forge_tag;
+    use crate::test_support::{HostilePanic, forge_tag};
 
     #[tokio::test]
     async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
@@ -1702,6 +1681,7 @@ mod tests {
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
+    #[cfg(unix)]
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
@@ -2122,19 +2102,6 @@ mod tests {
                     facts: None,
                 })
             );
-        }
-    }
-
-    /// Panics with terminal control bytes, like a panic that quotes a path.
-    struct HostilePanic;
-
-    impl GitRunner for HostilePanic {
-        fn run(&self, _: &GitCommand) -> io::Result<GitOutput> {
-            panic!("bad \x1b[2J name");
-        }
-
-        fn spawn(&self, _: &GitCommand) -> io::Result<GitChild> {
-            panic!("bad \x1b[2J name");
         }
     }
 
@@ -3009,97 +2976,6 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed MarkersLoaded, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn stash_loads_report_back_with_the_same_tag_even_on_a_panic() {
-        use crate::git::commit_files::CommitId;
-        let tag = Tag {
-            generation: 3,
-            seq: 9,
-            user: true,
-        };
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &["stash", "list", "-z", "--format=%H%x1f%P%x1f%gs"],
-                    ok(b"aa\x1fbb cc\x1fOn main: wip\0"),
-                )
-                .expect(
-                    &[
-                        "diff-tree",
-                        "-r",
-                        "-z",
-                        "--no-commit-id",
-                        "--name-status",
-                        "-M",
-                        "--root",
-                        "bb",
-                        "aa",
-                        "--",
-                    ],
-                    ok(b"M\0a.rs\0"),
-                ),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-
-        runtime.spawn(Effect::LoadStashes { tag });
-        let Some(AppIntent::StashesLoaded {
-            tag: got,
-            result: Ok(entries),
-        }) = rx.recv().await
-        else {
-            panic!("expected StashesLoaded");
-        };
-        assert_eq!(got, tag);
-        assert_eq!(entries[0].oid, CommitId::parse("aa").unwrap());
-
-        runtime.spawn(Effect::LoadStashFiles {
-            tag,
-            entry: entries[0].clone(),
-        });
-        let Some(AppIntent::StashFilesLoaded {
-            tag: got,
-            result: Ok(files),
-        }) = rx.recv().await
-        else {
-            panic!("expected StashFilesLoaded");
-        };
-        assert_eq!(got, tag);
-        assert_eq!(files[0].file.path, "a.rs".into());
-        runner.assert_done();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-        runtime.spawn(Effect::LoadStashes { tag });
-        match rx.recv().await {
-            Some(AppIntent::StashesLoaded {
-                tag: got,
-                result: Err(message),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(
-                    message.starts_with("git stash list crashed: "),
-                    "{message:?}"
-                );
-            }
-            other => panic!("expected a failed StashesLoaded, got {other:?}"),
-        }
-        runtime.spawn(Effect::LoadStashFiles {
-            tag,
-            entry: entries[0].clone(),
-        });
-        match rx.recv().await {
-            Some(AppIntent::StashFilesLoaded {
-                tag: got,
-                result: Err(message),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed StashFilesLoaded, got {other:?}"),
         }
     }
 

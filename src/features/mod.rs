@@ -46,6 +46,7 @@ pub(crate) mod operation;
 pub(crate) mod pull_requests;
 pub(crate) mod repos;
 pub(crate) mod review;
+pub(crate) mod stash;
 pub(crate) mod submodules;
 pub(crate) mod sync;
 pub(crate) mod worktrees;

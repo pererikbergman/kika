@@ -10,6 +10,7 @@ use crate::features::blame;
 use crate::features::branches::remotes;
 use crate::features::conflicts;
 use crate::features::operation;
+use crate::features::stash;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, EmojiZwj, LineKind, sanitize};
@@ -24,7 +25,6 @@ use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use crate::remote_run::RemoteRun;
 use crate::rendered_view::RenderedDiff;
-use crate::stash_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -95,7 +95,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
             SidePanel::Stash => {
-                stash_view::render_stash_panel(&state.stash, &look, expanded, frame, area)
+                stash::view::render_stash_panel(&state.stash, &look, expanded, frame, area)
             }
         }
     }
