@@ -1,4 +1,4 @@
-use crate::ansi::StyledRow;
+use super::ansi::StyledRow;
 use crate::git::diff::DiffSide;
 use crate::git::path::RepoPath;
 use crate::intent::Scroll;
@@ -120,7 +120,7 @@ impl RenderedDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ansi::parse;
+    use crate::features::diff::renderers::ansi::parse;
 
     fn rendered(rows: usize) -> RenderedDiff {
         let mut view = RenderedDiff::new(1, "a.rs".into(), DiffSide::Worktree);

@@ -1389,8 +1389,9 @@ pub(crate) mod screen {
     use crate::features::blame::BlameView;
     use crate::git::FileEntry;
     use crate::git::blame::BlameLine;
-    use crate::git::diff::{DiffLine, LineKind};
+    use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::status::{BranchStatus, EntryKind, Head};
+    use crate::hunk_view::HunkView;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};
@@ -1502,6 +1503,33 @@ pub(crate) mod screen {
             }
         }
         panic!("{needle:?} not on screen");
+    }
+
+    /// A workspace with one file selected and `lines` fully loaded.
+    pub(crate) fn with_diff(lines: Vec<DiffLine>) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.diff.seq = Some(0);
+        state.diff.path = Some("a.rs".into());
+        state.diff.lines = lines;
+        state.diff.done = true;
+        state
+    }
+
+    /// `a.rs` in two hunks, the second titled with an escape.
+    pub(crate) const TWO_HUNKS: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+        @@ -1,2 +1,2 @@\n-old one\n+new one\n same\n\
+        @@ -9 +9 @@ fn \x1b[2Jx\n-old nine\n+new nine\n";
+
+    /// A workspace with `a.rs` selected and the Diff pane focused on `side`,
+    /// its patch loaded from `bytes`.
+    pub(crate) fn hunks(side: DiffSide, bytes: &[u8]) -> AppState {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        let mut view = HunkView::new("a.rs".into(), side);
+        view.loaded(crate::git::patch::parse(bytes).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        state
     }
 
     /// No cell holds part of an emoji sequence: each holds all of `family`

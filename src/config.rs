@@ -65,8 +65,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::external_diff::{check_argv, parse_command};
 use crate::features::custom_commands::CommandTable;
+use crate::features::diff::renderers::external_diff::{check_argv, parse_command};
 use crate::forge::ForgeHost;
 use crate::forge::allow::AllowRule;
 use crate::git::diff::EmojiZwj;

@@ -19,7 +19,7 @@ use crate::app;
 use crate::clipboard::RecordingSink;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
-use crate::external_diff::ExternalRenderer;
+use crate::features::diff::renderers::ExternalRenderer;
 use crate::forge::ForgeHost;
 use crate::forge::github::FakeGh;
 use crate::forge::task::ForgeContext;

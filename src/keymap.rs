@@ -7,9 +7,9 @@ use std::sync::LazyLock;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
-use crate::external_diff::NO_RENDERER;
 use crate::features::branches::{remotes, tags};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
+use crate::features::diff::renderers;
 use crate::features::{
     blame, command_log, commits, conflicts, custom_commands, operation, pull_requests, repos,
     review, stash, submodules, sync, worktrees,
@@ -1223,11 +1223,6 @@ pub(crate) fn ignore_disabled(state: &AppState) -> Option<Reason> {
         Some(file) if file.kind == EntryKind::Untracked => None,
         _ => Some("Only untracked files can be ignored".into()),
     }
-}
-
-/// With no renderer configured there is nothing to cycle.
-fn renderer_disabled(state: &AppState) -> Option<Reason> {
-    state.renderers.is_empty().then_some(NO_RENDERER.into())
 }
 
 pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
@@ -2465,21 +2460,6 @@ static DIFF_KEYS: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: edit_hunk_disabled,
-    },
-];
-
-// Chunk 33: renderers
-#[rustfmt::skip]
-static RENDERERS_DIFF: &[Binding] = &[
-    Binding {
-        id: "diff.renderer",
-        keys: &[KeyPattern::any(KeyCode::Char('R'))],
-        scope: KeyScope::Diff,
-        intent: AppIntent::CycleRenderer,
-        description: "Cycle diff renderer",
-        label: "renderer",
-        bar: false,
-        disabled: renderer_disabled,
     },
 ];
 
@@ -3788,7 +3768,7 @@ static CHUNKS: &[&[Binding]] = &[
     conflicts::keys::CONFLICTS_FILES,
     FILES_IGNORE,
     DIFF_KEYS,
-    RENDERERS_DIFF,
+    renderers::keys::RENDERERS_DIFF,
     DIFF_LINES,
     blame::keys::BLAME_KEYS,
     conflicts::keys::CONFLICTS_KEYS,
@@ -6217,7 +6197,7 @@ mod tests {
 
     #[test]
     fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
-        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
         use crate::git::patch::parse;
         use crate::hunk_view::{HunkView, LineCursor};
 
@@ -6280,7 +6260,7 @@ mod tests {
 
     #[test]
     fn a_diff_tool_view_disables_the_hunk_keys_with_its_notice() {
-        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::features::diff::renderers::{ExternalRenderer, RendererKind};
         use crate::hunk_view::HunkView;
 
         let mut state = AppState::new(Context::Workspace);

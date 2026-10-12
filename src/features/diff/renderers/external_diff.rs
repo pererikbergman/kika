@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::ansi::StyledRow;
+use super::ansi::StyledRow;
 use crate::git::diff::{
     DiffRequest, EmojiZwj, diff_command, run_diff, sanitize, sanitize_body, terminal_safe,
 };
@@ -444,7 +444,7 @@ fn squeeze(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ansi::parse;
+    use crate::features::diff::renderers::ansi::parse;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::patch;

@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::external_diff::{self, ExternalRenderer, LIMITS, Limits, MAX_BYTES};
+use super::external_diff::{self, ExternalRenderer, LIMITS, Limits, MAX_BYTES};
 use crate::git::diff::{DiffRequest, DiffSide, terminal_safe};
 use crate::git::path::RepoPath;
 use crate::git::runner::{GitCommand, GitRunner};
@@ -348,7 +348,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::external_diff::RendererKind;
+    use crate::features::diff::renderers::external_diff::RendererKind;
     #[cfg(unix)]
     use crate::git::fake::fail;
     use crate::git::fake::{FakeRunner, TempDir, ok};
