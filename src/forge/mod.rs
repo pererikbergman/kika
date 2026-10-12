@@ -124,7 +124,11 @@ impl CreateError {
             CreateError::Status(ForgeStatus::NotLoggedIn) => {
                 "gh is not logged in to this host; run gh auth login.".into()
             }
-            CreateError::Status(ForgeStatus::Offline) => "GitHub could not be reached.".into(),
+            CreateError::Status(ForgeStatus::Offline) => {
+                "GitHub could not be reached, or did not answer in time. If it timed out, \
+                 the pull request may still have been made: fetch to read the badges again."
+                    .into()
+            }
             CreateError::Status(ForgeStatus::NoAccess) => {
                 "No access to the repository with gh's login.".into()
             }

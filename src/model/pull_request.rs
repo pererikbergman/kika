@@ -144,19 +144,28 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
     state.pr_create.is_some().then_some(CREATING.into())
 }
 
-/// The question before a create: where, what into what, and the title.
+/// The most of a title the question shows, in characters.
+const QUESTION_TITLE: usize = 72;
+
+/// The question before a create: what to press first, so a short screen
+/// cuts the details rather than the answer, then where, what into what,
+/// and the title, cut to [`QUESTION_TITLE`].
 pub(crate) fn question(state: &AppState) -> Option<String> {
     let draft = state.pr_draft.as_ref()?;
     let (_, target) = draft.target.as_ref()?;
     let base = draft.base.as_ref()?;
     let safe = |text: &str| terminal_safe(text.as_bytes());
+    let title = safe(&draft.title);
+    let title = match title.char_indices().nth(QUESTION_TITLE) {
+        Some((cut, _)) => format!("{}…", &title[..cut]),
+        None => title,
+    };
     Some(format!(
-        "{}/{}: {} → {}\n{}\nPress y to create it on GitHub, n or Esc to cancel",
-        target.owner,
-        target.name,
+        "Press y to create it on GitHub, n or Esc to cancel\n{}/{}: {} → {}\n{title}",
+        safe(&target.owner),
+        safe(&target.name),
         safe(&head_ref(draft, target)),
         safe(base),
-        safe(&draft.title),
     ))
 }
 
@@ -217,7 +226,10 @@ impl AppState {
                 let rows: Vec<String> = draft
                     .targets
                     .iter()
-                    .map(|(name, repo)| format!("{}  {}/{}", name.display(), repo.owner, repo.name))
+                    .map(|(name, repo)| {
+                        let row = format!("{}  {}/{}", name.display(), repo.owner, repo.name);
+                        terminal_safe(row.as_bytes())
+                    })
                     .collect();
                 let single = rows.len() == 1;
                 self.pr_draft = Some(draft);
@@ -815,8 +827,48 @@ mod tests {
         );
         assert_eq!(
             state.confirm_question(ConfirmKind::CreatePullRequest),
-            "acme/widgets: topic → main\ntopic\nPress y to create it on GitHub, n or Esc to cancel"
+            "Press y to create it on GitHub, n or Esc to cancel\nacme/widgets: topic → main\ntopic"
         );
+    }
+
+    #[test]
+    fn a_remote_name_with_control_characters_is_drawn_safe() {
+        let mut state = on_github(vec![
+            origin(&["main", "topic"]),
+            remote(
+                "up\x1b[31m\u{9b}stream",
+                "https://github.com/acme-org/widgets",
+                &["main"],
+            ),
+        ]);
+        state.update(AppIntent::CreatePrStart);
+        let list = top_pick(&state);
+        assert_eq!(list.rows.len(), 2);
+        for row in &list.rows {
+            assert!(!row.chars().any(char::is_control), "{row:?}");
+        }
+        assert!(
+            list.rows[1].ends_with("  acme-org/widgets"),
+            "{:?}",
+            list.rows
+        );
+    }
+
+    #[test]
+    fn the_question_puts_the_answer_keys_first_and_cuts_a_long_title() {
+        let mut state = one_remote();
+        state.update(AppIntent::CreatePrStart);
+        answer_title(&mut state, &"t".repeat(200));
+        let question = state.confirm_question(ConfirmKind::CreatePullRequest);
+        let lines: Vec<&str> = question.lines().collect();
+        assert_eq!(
+            lines[0],
+            "Press y to create it on GitHub, n or Esc to cancel"
+        );
+        assert_eq!(lines[2], format!("{}…", "t".repeat(QUESTION_TITLE)));
+        // The title sent is the whole one.
+        let (.., title) = created(&press_char(&mut state, 'y'));
+        assert_eq!(title, "t".repeat(200));
     }
 
     #[test]
@@ -900,7 +952,7 @@ mod tests {
         assert!(
             state
                 .confirm_question(ConfirmKind::CreatePullRequest)
-                .starts_with("acme-org/widgets: acme:topic → main\nAdd login\n")
+                .ends_with("\nacme-org/widgets: acme:topic → main\nAdd login")
         );
 
         let busy = state.busy;
