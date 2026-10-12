@@ -41,6 +41,19 @@ impl RepoPath {
     }
 }
 
+/// By the raw bytes, like equality, so names can key a sorted map.
+impl Ord for RepoPath {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw.cmp(&other.raw)
+    }
+}
+
+impl PartialOrd for RepoPath {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 impl From<&str> for RepoPath {
     fn from(name: &str) -> Self {
         Self::from_bytes(name.as_bytes())

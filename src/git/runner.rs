@@ -120,7 +120,9 @@ pub trait GitRunner: Send + Sync {
 
     /// Run a command on the inherited terminal, so it can ask the user
     /// things, and wait for it. Only for hand-offs, while Kika has given
-    /// the terminal up; `stdin` bytes on `cmd` are ignored.
+    /// the terminal up. With `stdin` bytes on `cmd`, git reads those
+    /// instead of the terminal, which it still writes to; a signing
+    /// prompt finds the terminal through `GPG_TTY`.
     fn run_attached(&self, _cmd: &GitCommand) -> io::Result<AttachedExit> {
         Err(io::ErrorKind::Unsupported.into())
     }
@@ -348,12 +350,24 @@ impl GitRunner for CliRunner {
     /// terminal reaches git and its hooks directly, while the loop keeps
     /// Kika alive through it.
     fn run_attached(&self, cmd: &GitCommand) -> io::Result<AttachedExit> {
-        let status = self
-            .command(cmd)
-            .stdin(Stdio::inherit())
+        let mut command = self.command(cmd);
+        let stdin = match cmd.input() {
+            Some(_) => Stdio::piped(),
+            None => Stdio::inherit(),
+        };
+        let mut child = command
+            .stdin(stdin)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
+            .spawn()?;
+        // Dropped once written, so git sees the end of it; git is waited
+        // for even when the write fails.
+        let written = match (child.stdin.take(), cmd.input()) {
+            (Some(mut pipe), Some(input)) => pipe.write_all(input),
+            _ => Ok(()),
+        };
+        let status = child.wait()?;
+        written?;
         Ok(AttachedExit {
             success: status.success(),
             status: describe_exit(status),
@@ -793,6 +807,27 @@ mod tests {
         // Git's group is not Kika's, so `interrupt` can stop it as a whole.
         let group = lines.next().unwrap().trim().to_string();
         assert_ne!(group, pgid_of(&std::process::id().to_string()));
+    }
+
+    #[test]
+    fn run_attached_feeds_stdin_bytes_to_git() {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("attached-stdin");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        let runner = CliRunner::isolated(dir);
+        let cmd = GitCommand::new("commit")
+            .arg("-q")
+            .arg("--allow-empty")
+            .arg("-F")
+            .arg("-")
+            .stdin(b"from stdin\n".to_vec());
+
+        let exit = runner.run_attached(&cmd).unwrap();
+
+        assert!(exit.success, "{exit:?}");
+        assert_eq!(git(dir, &["log", "-1", "--format=%s"]), b"from stdin\n");
     }
 
     #[test]

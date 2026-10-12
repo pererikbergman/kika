@@ -87,6 +87,7 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
+        | GitOp::CustomPatch { .. }
         | GitOp::Continue(_)
         | GitOp::Skip(_)
         | GitOp::Abort(_) => (

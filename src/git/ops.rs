@@ -19,6 +19,7 @@ use super::status::{EntryKind, FileEntry};
 use super::tags::{TagName, validate_tag_name};
 use super::undo::{Direction, Expected, Step};
 use super::version::{GitVersion, parse_version, version_command};
+use crate::custom_patch::{CustomPatch, PatchAction};
 use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
@@ -106,6 +107,17 @@ pub enum GitOp {
     /// `crate::sequence_editor`). Uncommitted changes are stashed and put
     /// back.
     InteractiveRebase(RebasePlan),
+    /// Rewrite history with the custom patch `picks`, as `action` says:
+    /// the interactive rebase of `plan`, stopping at each commit the patch
+    /// changes (see `super::custom_patch`). Refused unless `HEAD` is still
+    /// `orig_head`; any failure puts `HEAD`, the index and the worktree
+    /// back as they were.
+    CustomPatch {
+        plan: RebasePlan,
+        action: PatchAction,
+        picks: CustomPatch,
+        orig_head: CommitId,
+    },
     /// Go on with the operation git stopped, once its conflicts are
     /// resolved and staged.
     Continue(Operation),
@@ -664,6 +676,10 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 .arg(plan.base.as_str())
                 .env(PLAN_ENV, encode(&plan.steps));
         }
+        // Its first step; the rest run from `super::custom_patch::run`.
+        GitOp::CustomPatch { plan, .. } => {
+            return op_command(&GitOp::InteractiveRebase(plan.clone()));
+        }
         GitOp::Continue(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--continue");
         }
@@ -882,7 +898,7 @@ fn run_op_with(
 }
 
 /// Run `cmd`, with git's message, made safe to draw, as the error.
-fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
+pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
     let output = runner.run(cmd).map_err(|e| e.to_string())?;
     if output.success {
         return Ok(output);
@@ -1016,6 +1032,9 @@ pub fn refusal(op: &GitOp) -> Option<&'static str> {
         {
             Some("Only full commit ids can be cherry-picked")
         }
+        // Only its first step is one command; run alone it would leave
+        // the rebase stopped.
+        GitOp::CustomPatch { .. } => Some("A custom patch only runs on the terminal"),
         _ => None,
     }
 }

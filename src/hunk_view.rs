@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::diff_search::DiffSearch;
+use crate::git::commit_files::CommitRange;
 use crate::git::diff::{DiffSide, EmojiZwj, sanitize, sanitize_body};
 use crate::git::patch::{self, FilePatch, LineId, PatchLineKind};
 use crate::git::path::RepoPath;
@@ -16,6 +17,9 @@ pub struct HunkView {
     pub seq: Option<u64>,
     pub path: RepoPath,
     pub side: DiffSide,
+    /// The commit whose change of `path` this is; `None` for the working
+    /// tree. A commit's lines are picked for the custom patch, not staged.
+    pub commit: Option<CommitRange>,
     /// `None` until the first load lands, or after one fails.
     pub patch: Option<FilePatch>,
     /// Index of the selected hunk.
@@ -74,6 +78,7 @@ impl HunkView {
             seq: None,
             path,
             side,
+            commit: None,
             patch: None,
             hunk: 0,
             scroll: 0,
@@ -81,6 +86,33 @@ impl HunkView {
             search: None,
             search_emoji: EmojiZwj::Escape,
         }
+    }
+
+    /// `path`'s change in the commit `range` names.
+    pub fn for_commit(path: RepoPath, range: CommitRange) -> Self {
+        Self {
+            commit: Some(range),
+            ..Self::new(path, DiffSide::Index)
+        }
+    }
+
+    /// Every changed line of the loaded patch, from every hunk.
+    pub fn all_lines(&self) -> BTreeSet<LineId> {
+        self.patch
+            .iter()
+            .flat_map(|p| &p.hunks)
+            .flat_map(|h| h.line_ids())
+            .flatten()
+            .collect()
+    }
+
+    /// The ids of the selected hunk's changed lines.
+    pub fn hunk_lines(&self) -> BTreeSet<LineId> {
+        self.patch
+            .as_ref()
+            .and_then(|p| p.hunks.get(self.hunk))
+            .map(|h| h.line_ids().into_iter().flatten().collect())
+            .unwrap_or_default()
     }
 
     /// A load is in flight, so the hunks on screen may be about to change.

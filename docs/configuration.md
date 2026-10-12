@@ -706,10 +706,11 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.focus_branches` | `3` | Focus the Branches panel | |
 | `workspace.focus_commits` | `4` | Focus the Commits panel | |
 | `workspace.focus_stash` | `5` | Focus the Stash panel | |
-| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks | |
+| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks, or pick lines of a commit's file | |
 | `workspace.next_panel` | `tab` | Focus the next panel | |
 | `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
 | `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
+| `workspace.patch_menu` | `ctrl-p` | Show what can be done with the custom patch: remove, move or split it off | locked |
 | `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
 | `workspace.undo` | `ctrl-z` | Undo the last commit, checkout, reset or rebase, saying first what moves | locked |
 | `workspace.redo` | `ctrl-r` | Redo what the last undo reversed, saying first what moves | locked |
@@ -1072,7 +1073,47 @@ goes back to the log.
 |---|---|---|---|
 | `commit_files.next` | `j`, `down` | Select the next file and show its change | |
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `commit_files.patch` | `space` | Pick the selected file's whole change for the custom patch, or drop it | |
 | `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
+
+#### Custom patches
+
+A custom patch is a set of changes picked from one commit, to take out of
+it. In a commit's files, `space` picks the selected file's whole change, or
+drops it. `l` (or `0`, `right`) focuses the diff on the file's change in the
+commit, where `space` picks the selected hunk's changed lines, or in line
+mode (`v`) the selected lines; picking the same lines again drops them.
+Nothing is staged and git does not run. Picked files show `●` (whole) or `◐`
+(some lines), picked lines a `●` beside them, and the Commits panel's title
+names the patch's commit and counts its files. `t`, `d` and `e` do nothing in
+a commit's change. A first commit, a merge commit and a comparison cannot be
+picked from, nor renamed or copied files; a binary or submodule file is
+refused when the rewrite starts, before anything changes. A patch holds
+one commit's changes: picking from another commit is refused until the
+patch is reset. It lives only while Kika runs.
+
+`ctrl-p` shows what can be done with it:
+
+- **Remove from commit** takes it out of its commit.
+- **Move to selected commit** takes it out and puts it into the commit under
+  the Commits panel's cursor, newer or older.
+- **Move to index** takes it out and leaves it staged.
+- **New commit after source…** asks for a message, takes it out, and commits
+  it right after its commit.
+- **Reset patch** forgets the picks; nothing in the repository changes.
+
+Each rewrite asks first, and only `y` answers it. Kika rebases with a stop at
+each commit the patch changes and applies it there with `git apply --index`,
+amending with `--no-verify` as the rebase's own picks do; signing follows
+your config. Moving to an older commit stops only there: when git picks the
+patch's commit again, the change is already in place and drops out of it.
+If the patch's lines sit right next to other changes of their commit, that
+pick conflicts. A rewrite needs a clean worktree (untracked files may stay),
+no operation in progress, the whole log in view and the patch's commit
+loaded. If any step fails, including a conflict, the rebase is aborted (or,
+once it has finished, the branch is reset with `--keep`), so `HEAD`, the
+index and the worktree end as they were and the patch is kept. On success
+the patch is dropped.
 
 ### Stash
 
@@ -1112,7 +1153,7 @@ another panel goes back to the list.
 |---|---|---|---|
 | `diff.next` | `j`, `down` | Select the next hunk | |
 | `diff.prev` | `k`, `up` | Select the previous hunk | |
-| `diff.stage` | `space` | Stage the selected hunk, or unstage it in the staged view | |
+| `diff.stage` | `space` | Stage the selected hunk, or unstage it in the staged view; in a commit's change, pick it for the custom patch or drop it | |
 | `diff.lines` | `v` | Pick changed lines inside the selected hunk | |
 | `diff.side` | `t` | Switch between the unstaged and the staged changes | |
 | `diff.discard` | `d` | Discard the selected hunk from the working tree | locked |
@@ -1133,7 +1174,7 @@ another panel goes back to the list.
 | `lines.prev` | `k`, `up` | Move to the previous changed line | |
 | `lines.extend_down` | `J`, `down` | Grow the selection down a changed line | |
 | `lines.extend_up` | `K`, `up` | Grow the selection up a changed line | |
-| `lines.stage` | `space` | Stage the selected lines, or unstage them in the staged view | |
+| `lines.stage` | `space` | Stage the selected lines, or unstage them in the staged view; in a commit's change, pick them for the custom patch or drop them | |
 | `lines.back` | `esc`, `v` | Back to whole hunks | |
 | `lines.discard` | `d` | Discard the selected lines from the working tree | locked |
 | `lines.open` | `o` | Open the file in your editor at the selected line | locked |
@@ -1363,6 +1404,17 @@ answer it.
 | `autosquash_confirm.yes` | `y` | Yes, fold every fixup! commit into its target | locked |
 | `autosquash_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
 | `autosquash_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Rewrite with the custom patch?
+
+A custom patch rewrites commits you may not be looking at, so `enter` does
+not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `patch_confirm.yes` | `y` | Yes, rewrite the history with the custom patch | locked |
+| `patch_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `patch_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 

@@ -164,6 +164,9 @@ fn commit_diff_command(range: &CommitRange, request: &DiffRequest) -> GitCommand
 /// parses: no colour, external drivers or textconv, renames off so one path
 /// gives one file, and fixed `a/` `b/` prefixes whatever the user's config.
 pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
+    if let Some(range) = &request.commit {
+        return commit_patch_command(range, &request.path, request.options);
+    }
     let mut cmd = GitCommand::new("diff")
         .arg("--no-color")
         .arg("--no-ext-diff")
@@ -179,6 +182,35 @@ pub fn patch_diff_command(request: &DiffRequest) -> GitCommand {
         DiffSide::Untracked => cmd.arg("--no-index").arg("--").arg("/dev/null"),
     };
     cmd.arg(request.path.as_os_str())
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+        .env("GIT_LITERAL_PATHSPECS", "1")
+}
+
+/// `path`'s change in the commit `range` names, in the same plain form as
+/// [`patch_diff_command`], for picking lines from a commit and building
+/// the patch from them. Plumbing, so the user's diff config cannot change
+/// it between the two.
+pub fn commit_patch_command(
+    range: &CommitRange,
+    path: &RepoPath,
+    options: DiffOptions,
+) -> GitCommand {
+    let cmd = GitCommand::new("diff-tree")
+        .arg("-p")
+        .arg("-r")
+        .arg("--no-commit-id")
+        .arg("--no-color")
+        .arg("--no-ext-diff")
+        .arg("--no-textconv")
+        .arg("--no-renames");
+    let cmd = options.args().fold(cmd, |cmd, arg| cmd.arg(arg));
+    let cmd = cmd.arg("--src-prefix=a/").arg("--dst-prefix=b/");
+    range
+        .args()
+        .fold(cmd.arg("--root"), |cmd, arg| cmd.arg(arg))
+        .arg("--")
+        .arg(path.as_os_str())
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("LC_ALL", "C")
         .env("GIT_LITERAL_PATHSPECS", "1")
@@ -893,6 +925,50 @@ mod tests {
                 "{side:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_commit_patch_diffs_the_commit_against_its_parent_with_renames_off() {
+        let parent = "a".repeat(40);
+        let oid = "b".repeat(40);
+        let range = CommitRange {
+            oid: crate::git::commit_files::CommitId::parse(&oid).unwrap(),
+            parent: crate::git::commit_files::CommitId::parse(&parent),
+        };
+        let request = DiffRequest {
+            commit: Some(range),
+            ..request(DiffSide::Index, Some("old.rs"))
+        };
+        let cmd = patch_diff_command(&request);
+        assert_eq!(
+            argv(&cmd),
+            [
+                "diff-tree",
+                "-p",
+                "-r",
+                "--no-commit-id",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "-U3",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                "--root",
+                parent.as_str(),
+                oid.as_str(),
+                "--",
+                "new name.rs",
+            ]
+        );
+        assert_eq!(
+            env(&cmd),
+            [
+                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                ("LC_ALL".into(), "C".into()),
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into())
+            ]
+        );
     }
 
     fn patch_argv(tail: &[&'static str]) -> Vec<&'static str> {
