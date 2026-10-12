@@ -10,7 +10,7 @@ use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
-use crate::features::branches::{remotes, tags};
+use crate::features::branches::{self, remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::commits::rewrite;
 use crate::features::commits::{compare, copy};
@@ -28,7 +28,6 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
-use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::head::read_head_message;
@@ -895,36 +894,9 @@ impl Runtime {
             Effect::RemoveWorktree { tag, path } => {
                 worktrees::effects::remove(runner, tx, tag, path)
             }
-            Effect::LoadBranches { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || list_branches(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("git for-each-ref crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::BranchesLoaded { tag, result });
-                });
-            }
+            Effect::LoadBranches { tag } => branches::effects::load(runner, tx, tag),
             Effect::LoadBranchLog { tag, refname } => {
-                tokio::spawn(async move {
-                    let read = crate::git::path::os_string(&refname);
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || branch_log(runner.as_ref(), &read))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
-                            });
-                    let _ = tx.send(AppIntent::BranchLogLoaded {
-                        tag,
-                        refname,
-                        result,
-                    });
-                });
+                branches::effects::load_log(runner, tx, tag, refname)
             }
             Effect::LoadRemotes { tag } => remotes::effects::load(runner, tx, tag),
             Effect::LoadTags { tag } => tags::effects::load(runner, tx, tag),
@@ -2146,102 +2118,6 @@ mod tests {
             })
         );
         runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn branch_loads_report_back_with_the_same_tag_and_name() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &[
-                        "for-each-ref",
-                        "--format=%(refname)%00%(HEAD)%00%(upstream:short)%00\
-                         %(upstream:track,nobracket)%00%(committerdate:unix)",
-                        "refs/heads",
-                    ],
-                    ok(b""),
-                )
-                .expect(
-                    &[
-                        "log",
-                        "-n",
-                        "200",
-                        "--date=short",
-                        "--format=%h%x1f%ad%x1f%an%x1f%s",
-                        "refs/heads/main",
-                        "--",
-                    ],
-                    ok(b"abc\x1f2024-01-02\x1fAnn\x1fWork\n"),
-                ),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 4,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadBranches { tag });
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::BranchesLoaded {
-                tag,
-                result: Ok(vec![]),
-            })
-        );
-        runtime.spawn(Effect::LoadBranchLog {
-            tag,
-            refname: b"refs/heads/main".to_vec(),
-        });
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::BranchLogLoaded {
-                tag,
-                refname: b"refs/heads/main".to_vec(),
-                result: Ok(vec![crate::git::branches::LogRow {
-                    short_oid: "abc".into(),
-                    date: "2024-01-02".into(),
-                    author: "Ann".into(),
-                    subject: "Work".into(),
-                }]),
-            })
-        );
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_panicking_branch_load_still_reports_back() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-        let tag = Tag {
-            generation: 0,
-            seq: 2,
-            user: true,
-        };
-        runtime.spawn(Effect::LoadBranches { tag });
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppIntent::BranchesLoaded { result: Err(_), .. })
-        ));
-        runtime.spawn(Effect::LoadBranchLog {
-            tag,
-            refname: b"refs/heads/x".to_vec(),
-        });
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppIntent::BranchLogLoaded { result: Err(_), .. })
-        ));
-        runtime.spawn(Effect::LoadRemotes { tag });
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppIntent::RemotesLoaded { result: Err(_), .. })
-        ));
-        runtime.spawn(Effect::LoadTags { tag });
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppIntent::TagsLoaded { result: Err(_), .. })
-        ));
     }
 
     #[tokio::test]

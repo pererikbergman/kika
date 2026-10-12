@@ -7,7 +7,8 @@ use std::sync::LazyLock;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
-use crate::features::branches::{remotes, tags};
+use crate::features::branches::keys::new_branch_disabled;
+use crate::features::branches::{self, remotes, tags};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::diff::renderers;
 use crate::features::{
@@ -1444,12 +1445,6 @@ pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| branch_selected_disabled(state))
 }
 
-/// Why no branch can be created from the selected one now: creating it
-/// checks it out, which moves `HEAD`.
-pub(crate) fn new_branch_disabled(state: &AppState) -> Option<Reason> {
-    branch_action_disabled(state).or_else(|| crate::bisect::head_move_disabled(state))
-}
-
 /// [`branch_action_disabled`] without the filter and range guard.
 fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
@@ -1459,16 +1454,6 @@ fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     } else {
         None
     }
-}
-
-pub(crate) fn checkout_branch_disabled(state: &AppState) -> Option<Reason> {
-    branch_action_disabled(state).or_else(|| {
-        let selected = state.branches.selected_branch();
-        selected
-            .is_some_and(|b| b.head)
-            .then_some("Already on this branch".into())
-            .or_else(|| crate::bisect::head_move_disabled(state))
-    })
 }
 
 /// Over a range, `d` asks about the range, which skips the current
@@ -2982,44 +2967,8 @@ static FILES_DISCARD_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 45: branches
-static BRANCHES_KEYS: &[Binding] = &[
-    Binding {
-        id: "branches.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Branches,
-        intent: AppIntent::BranchNext,
-        description: "Select the next branch",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "branches.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Branches,
-        intent: AppIntent::BranchPrev,
-        description: "Select the previous branch",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "branches.checkout",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::CheckoutBranch,
-        description: "Check out the selected branch",
-        label: "checkout",
-        bar: true,
-        disabled: checkout_branch_disabled,
-    },
+// Chunk 45 (new, rename, delete): branches
+static BRANCHES_CHANGE: &[Binding] = &[
     Binding {
         id: "branches.new",
         keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
@@ -3053,8 +3002,8 @@ static BRANCHES_KEYS: &[Binding] = &[
     },
 ];
 
-// Chunk 48: branches
-static BRANCHES_UPSTREAM_TABS: &[Binding] = &[
+// Chunk 48 (upstream): branches
+static BRANCHES_UPSTREAM: &[Binding] = &[
     Binding {
         id: "branches.set_upstream",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
@@ -3074,26 +3023,6 @@ static BRANCHES_UPSTREAM_TABS: &[Binding] = &[
         label: "unset upstream",
         bar: false,
         disabled: unset_upstream_disabled,
-    },
-    Binding {
-        id: "branches.switch_tab",
-        keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::SwitchBranchesTab,
-        description: "Show the remotes and their branches",
-        label: "remotes",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "branches.prev_tab",
-        keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::PrevBranchesTab,
-        description: "Show the tags",
-        label: "tags",
-        bar: false,
-        disabled: never,
     },
 ];
 
@@ -3741,10 +3670,12 @@ static CHUNKS: &[&[Binding]] = &[
     sync::keys::SYNC_CREDENTIAL,
     CORE_ERROR,
     FILES_DISCARD_CONFIRM,
-    BRANCHES_KEYS,
+    branches::keys::BRANCHES_KEYS,
+    BRANCHES_CHANGE,
     operation::keys::OPERATION_BRANCHES,
     pull_requests::keys::PULL_REQUESTS_BRANCHES,
-    BRANCHES_UPSTREAM_TABS,
+    BRANCHES_UPSTREAM,
+    branches::keys::BRANCHES_TABS,
     remotes::keys::REMOTES_KEYS,
     tags::keys::TAGS_KEYS,
     commits::bisect::keys::BISECT_COMMITS,
@@ -5770,7 +5701,7 @@ mod tests {
 
     /// The Branches panel focused on `tab`, with a branch, a remote with
     /// a branch, and a tag loaded, and nothing running.
-    fn branch_lists(tab: crate::branches::BranchesTab) -> AppState {
+    fn branch_lists(tab: crate::features::branches::BranchesTab) -> AppState {
         use crate::git::branches::{Branch, Track};
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Branches;
@@ -5836,7 +5767,7 @@ mod tests {
 
     #[test]
     fn a_range_in_the_branch_lists_leaves_only_d_and_a_free_of_row_actions() {
-        use crate::branches::BranchesTab;
+        use crate::features::branches::BranchesTab;
         for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
             let mut state = branch_lists(tab);
             let scope = state.panel_focus();
@@ -5861,7 +5792,7 @@ mod tests {
 
     #[test]
     fn a_filter_that_hides_every_row_in_the_branch_lists_refuses_row_actions() {
-        use crate::branches::BranchesTab;
+        use crate::features::branches::BranchesTab;
         for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
             let mut state = branch_lists(tab);
             match tab {

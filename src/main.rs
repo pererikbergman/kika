@@ -1,7 +1,5 @@
 mod app;
 mod bisect;
-mod branches;
-mod branches_view;
 mod cli;
 mod clipboard;
 mod commit_editor;
@@ -37,6 +35,7 @@ mod popup;
 mod popup_view;
 mod program;
 mod prompts;
+mod range_delete;
 mod refresh;
 mod remote_run;
 mod rows;

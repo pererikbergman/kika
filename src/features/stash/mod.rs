@@ -29,7 +29,7 @@
 //! What stays in core, and why:
 //! - `Focus::Stash`/`SidePanel::Stash`, `KeyScope::Stash`/`StashFiles`/
 //!   `DropStash`, `Popup::DropStash`, `PromptKind::StashMessage`/
-//!   `RenameStash`, `RangeKind::Stashes` and `model/branch_lists.rs`: shared
+//!   `RenameStash`, `RangeKind::Stashes` and `range_delete.rs`: shared
 //!   core dispatch, as are the stash branches of `key_focus`,
 //!   `open_filter`, the filter apply, `list_escape` and `range_toggle`;
 //! - the refresh plan (`Scope::Stash`), the repository switch reset, and

@@ -4,8 +4,8 @@
 
 use super::RemotePending;
 use super::keys;
-use crate::branches::BranchesTab;
 use crate::effect::{Effect, Tag};
+use crate::features::branches::BranchesTab;
 use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::keymap::{self, Reason};
 use crate::model::{AppState, Context};
@@ -216,8 +216,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::branches::BranchesTab;
     use crate::effect::Effect;
+    use crate::features::branches::BranchesTab;
     use crate::features::branches::remotes::RemoteRow;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
