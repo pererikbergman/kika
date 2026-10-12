@@ -355,6 +355,30 @@ browser = ["open"]                             # macOS; ["xdg-open"] on Linux
 The Commits panel's Copy menu (`y`) has **Forge URL**, the selected commit's
 page.
 
+### Reviewing pull requests
+
+`G` anywhere in the workspace enters review mode for the repository's
+GitHub pull requests; `kika review <number>` starts on one pull request.
+Review mode lists four queues of the repository's open pull requests:
+assigned to you, review requested from you, authored by you, and all open
+(`tab` and `shift-tab` move between them, `/` filters by number, title or
+author). `enter` opens one: its title, author, state, `base ← head`,
+whether it can be merged, labels, reviewers, CI checks and description.
+`o` opens a failing check's page with `browser`, asking which when several
+fail. `esc` goes back to the queue, then to the workspace.
+
+- GitHub is asked only when you enter review mode, open a pull request or
+  press `r`; nothing refreshes by itself, and nothing is cached on disk.
+- Only a `github` host is asked. With none, or with the remote on another
+  host, review mode says so and asks nobody; a rate-limited host is not
+  asked until its limit resets.
+- Each request is one
+  `gh api graphql --include --hostname <host> --input -`, shown in the
+  Command log; the repository, searches and number travel on its input.
+- Only the first 50 pull requests of each queue show. Descriptions show
+  headings, lists, quotes, code, emphasis and links; images, tables and
+  HTML show as text.
+
 **Changes to `[forge]` take effect after a restart.**
 
 ## `[display]` (global file only)
@@ -676,6 +700,7 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
 | `workspace.command_log` | `@` | Show the git commands Kika ran | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
+| `workspace.review` | `G` | Review this repository's pull requests on GitHub | locked |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
 | `workspace.focus_branches` | `3` | Focus the Branches panel | |
@@ -1361,15 +1386,29 @@ reaches GitHub, so `enter` does not answer it.
 | `create_pull_request.no` | `n`, `esc` | No, create nothing | locked |
 | `create_pull_request.quit` | `ctrl-c` | Quit Kika | locked |
 
-### Pick one (a pull request's target remote or base branch)
+### Pick one (a pull request's target remote or base branch, or a failing check)
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `pick_list.next` | `j`, `down` | Select the next row | |
 | `pick_list.prev` | `k`, `up` | Select the previous row | |
-| `pick_list.pick` | `enter` | Take the selected row | |
+| `pick_list.pick` | `enter` | Take the selected row | locked |
 | `pick_list.close` | `esc`, `q` | Close the list and stop | |
 | `pick_list.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Review (GitHub pull request queues and one pull request)
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review.next` | `j`, `down` | Select the next pull request, or scroll the open one down | |
+| `review.prev` | `k`, `up` | Select the previous pull request, or scroll the open one up | |
+| `review.open` | `enter` | Open the selected pull request | locked |
+| `review.next_queue` | `tab` | Show the next queue | |
+| `review.prev_queue` | `shift-tab` | Show the previous queue | |
+| `review.filter` | `/` | Filter the queue by number, title or author | |
+| `review.refresh` | `r` | Ask GitHub again for the queues or the open pull request | locked |
+| `review.open_check` | `o` | Open a failing check's page in the browser | locked |
+| `review.back` | `esc` | Back to the queue; in the queue, clear the filter, else back to the workspace | locked |
 
 ### Submodule list
 
