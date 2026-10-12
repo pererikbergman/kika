@@ -4,9 +4,11 @@
 //!
 //! The path comes from the repository, which may be hostile, so no call
 //! follows a symlink anywhere along it or leaves the worktree. Nor does
-//! a repo path with a `.git` part, or on Windows a device name or a part
-//! ending in a dot or space, reach the filesystem: those would land in
-//! git's own directory or a device instead of a file. A replace
+//! a repo path with a `.git` part, or a spelling some filesystem reads as
+//! `.git` (a dotless `ı`, an invisible code point, on Windows a short name
+//! such as `GIT~2`), or on Windows a device name or a part ending in a dot
+//! or space, reach the filesystem: those would land in git's own directory
+//! or a device instead of a file. Errors show paths terminal-safe. A replace
 //! is atomic: a temp file beside the target is written, synced and renamed
 //! over it, so a crash never leaves half a file. A create links its temp
 //! file into place, which fails on anything already there.
@@ -54,12 +56,8 @@ pub fn read_file(file: &Path, max: u64) -> Result<Vec<u8>, String> {
     plain_file(file)?;
     match read_capped(file, max) {
         Ok(Some(bytes)) => Ok(bytes),
-        Ok(None) => Err(format!(
-            "{} is larger than {} KB",
-            file.display(),
-            max / 1024
-        )),
-        Err(e) => Err(format!("Could not read {}: {e}", file.display())),
+        Ok(None) => Err(format!("{} is larger than {} KB", shown(file), max / 1024)),
+        Err(e) => Err(format!("Could not read {}: {e}", shown(file))),
     }
 }
 
@@ -68,7 +66,7 @@ pub fn read_file(file: &Path, max: u64) -> Result<Vec<u8>, String> {
 /// written, synced and renamed over it, keeping its permissions.
 pub fn replace_file(file: &Path, expected: &[u8], content: &[u8]) -> Result<(), String> {
     plain_file(file)?;
-    let fail = |e: std::io::Error| format!("Could not write {}: {e}", file.display());
+    let fail = |e: std::io::Error| format!("Could not write {}: {e}", shown(file));
     // One byte past `expected` tells a longer file apart, so a file that
     // grew huge, or never ends, is not read into memory.
     match read_capped(file, expected.len() as u64).map_err(fail)? {
@@ -94,7 +92,7 @@ pub fn replace_file(file: &Path, expected: &[u8], content: &[u8]) -> Result<(), 
 /// Refuse `file` unless it is a regular file, not a symlink, in a
 /// directory that is not a symlink either, so no write lands elsewhere.
 fn plain_file(file: &Path) -> Result<(), String> {
-    let refuse = |why: &str| format!("Kika will not touch {}: {why}", file.display());
+    let refuse = |why: &str| format!("Kika will not touch {}: {why}", shown(file));
     let meta = fs::symlink_metadata(file).map_err(|e| refuse(&e.to_string()))?;
     if meta.file_type().is_symlink() {
         return Err(refuse("it is a symlink"));
@@ -111,6 +109,12 @@ fn plain_file(file: &Path) -> Result<(), String> {
         return Err(refuse("its directory is a symlink"));
     }
     Ok(())
+}
+
+/// `file` as text safe to draw: a hostile name could carry ESC or a
+/// newline, which `Path::display` would pass to the terminal.
+fn shown(file: &Path) -> String {
+    crate::git::diff::sanitize(file.as_os_str().as_encoded_bytes())
 }
 
 /// The bytes of `file`, or `None` when there are more than `max`.
@@ -369,14 +373,15 @@ fn components(path: &RepoPath) -> Result<Vec<OsString>, &'static str> {
         .collect()
 }
 
-/// Why the plain name `part` is refused, if it is. `.git` in any case
-/// would reach git's own directory. On Windows, which drops a trailing
-/// dot or space and opens a device for a reserved name in any folder,
-/// these would reach another file or a device, and `GIT~1` is the short
-/// name of `.git`.
+/// Why the plain name `part` is refused, if it is. `.git` in any case,
+/// or a spelling of it with `ı`, `İ` or an ignorable code point, would
+/// reach git's own directory. On Windows, which drops a trailing dot or
+/// space and opens a device for a reserved name in any folder, these
+/// would reach another file or a device, and `GIT~N` or `GI250A~N` can
+/// be the short name of `.git`.
 fn refused_name(part: &[u8]) -> Option<&'static str> {
     const DOT_GIT: &str = "a part is named .git";
-    if part.eq_ignore_ascii_case(b".git") {
+    if dot_git_alias(part) {
         return Some(DOT_GIT);
     }
     if !cfg!(windows) {
@@ -384,13 +389,54 @@ fn refused_name(part: &[u8]) -> Option<&'static str> {
     }
     if matches!(part.last(), Some(b'.' | b' ')) {
         Some("a part ends in a dot or space")
-    } else if part.eq_ignore_ascii_case(b"git~1") {
+    } else if dot_git_short_name(part) {
         Some(DOT_GIT)
     } else if device_name(part) {
         Some("a part is a Windows device name")
     } else {
         None
     }
+}
+
+/// Whether some filesystem may open git's own directory for `part`: it
+/// is `.git`, ignoring ASCII case, once the code points HFS+ ignores are
+/// dropped and `ı` and `İ` read as `i`, as case-folding tables may. A part
+/// that is not UTF-8 is no alias. Compiled everywhere so it is tested
+/// everywhere.
+fn dot_git_alias(part: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(part) else {
+        return false;
+    };
+    let folded: String = text
+        .chars()
+        .filter(|&c| !hfs_ignored(c))
+        .map(|c| match c {
+            '\u{130}' | '\u{131}' => 'i',
+            c => c,
+        })
+        .collect();
+    folded.eq_ignore_ascii_case(".git")
+}
+
+/// The joiners, direction marks and byte-order mark HFS+ leaves out of
+/// a name when it compares two.
+fn hfs_ignored(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200C}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{206A}'..='\u{206F}' | '\u{FEFF}'
+    )
+}
+
+/// Whether `part` can be the 8.3 short name NTFS gives `.git`: `GIT~N`,
+/// or the hashed `GI250A~N` it falls back to after many clashes, in any
+/// case, with `N` a number not starting with `0`. Compiled everywhere so
+/// it is tested everywhere.
+fn dot_git_short_name(part: &[u8]) -> bool {
+    let part = part.to_ascii_lowercase();
+    let number = part
+        .strip_prefix(b"git~")
+        .or_else(|| part.strip_prefix(b"gi250a~"));
+    matches!(number, Some([b'1'..=b'9', rest @ ..]) if rest.iter().all(u8::is_ascii_digit))
 }
 
 /// Whether Windows opens a device, not a file, for `part`: its base
@@ -437,6 +483,48 @@ mod name_tests {
         }
         for name in [".gitignore", ".git2", "x.git", "git", "dir/.gitattributes"] {
             assert!(components(&RepoPath::from(name)).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn unicode_spellings_of_dot_git_are_refused_on_every_platform() {
+        for name in [
+            ".g\u{131}t",
+            ".G\u{130}T",
+            ".g\u{200C}it",
+            "\u{FEFF}.git",
+            ".gi\u{200D}t/config",
+            "dir/.g\u{206A}it",
+            ".\u{202A}git\u{200F}",
+        ] {
+            assert_eq!(
+                components(&RepoPath::from(name)),
+                Err("a part is named .git"),
+                "{name:?}"
+            );
+        }
+        for name in [
+            ".gitignore",
+            ".g\u{131}tignore",
+            "g\u{131}t",
+            ".g\u{200C}itx",
+            ".g\u{2010}it",
+        ] {
+            assert!(components(&RepoPath::from(name)).is_ok(), "{name:?}");
+        }
+        assert!(!dot_git_alias(b".g\xffit"));
+        assert!(!dot_git_alias(b".git\xff"));
+    }
+
+    #[test]
+    fn short_names_of_dot_git_match_any_number_from_one() {
+        for name in ["GIT~1", "git~2", "Git~10", "GI250A~1", "gi250a~9"] {
+            assert!(dot_git_short_name(name.as_bytes()), "{name:?}");
+        }
+        for name in [
+            "git~0", "git~", "git~1a", "git~01", "gi250b~1", "xgit~1", "git~1.", "git1",
+        ] {
+            assert!(!dot_git_short_name(name.as_bytes()), "{name:?}");
         }
     }
 
@@ -535,6 +623,8 @@ mod tests {
             "CON",
             "nul.txt",
             "GIT~1",
+            "GIT~2",
+            "GI250A~1",
         ] {
             assert!(components(&RepoPath::from(name)).is_ok(), "{name:?}");
         }
@@ -827,6 +917,50 @@ mod tests {
     }
 
     #[test]
+    fn errors_for_a_name_with_control_characters_draw_none_of_them() {
+        let tmp = TempDir::new("worktree-file");
+        let dir = tmp.path();
+        let name = "a\x1b[31m\nb";
+        let file = dir.join(name);
+        fs::write(&file, vec![b'x'; 2049]).unwrap();
+        let link = dir.join(format!("{name}-link"));
+        symlink(&file, &link).unwrap();
+        let missing = dir.join(format!("{name}-missing"));
+        let clean = |err: &str| !err.bytes().any(|b| b < 0x20 || b == 0x7F);
+
+        let touch = "Kika will not touch".to_string();
+        let mut errors = vec![
+            (touch.clone(), replace_file(&link, b"", b"x").unwrap_err()),
+            (touch, read_file(&missing, 1024).unwrap_err()),
+            (
+                format!("{} is larger than 1 KB", shown(&file)),
+                read_file(&file, 1024).unwrap_err(),
+            ),
+        ];
+        // A directory nobody may write to and a file nobody may read;
+        // root ignores both, so those errors only come up for anyone else.
+        let locked = dir.join(format!("{name}-locked"));
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("f"), "old\n").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+        if let Err(e) = replace_file(&locked.join("f"), b"old\n", b"new\n") {
+            errors.push(("Could not write".to_string(), e));
+        }
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        let unreadable = dir.join(format!("{name}-unreadable"));
+        fs::write(&unreadable, "x").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        if let Err(e) = read_file(&unreadable, 1024) {
+            errors.push(("Could not read".to_string(), e));
+        }
+
+        for (prefix, err) in errors {
+            assert!(err.starts_with(&prefix), "{err:?} starts with {prefix:?}");
+            assert!(clean(&err), "{err:?}");
+        }
+    }
+
+    #[test]
     fn the_open_itself_refuses_a_symlink_swapped_in_after_the_check() {
         let tmp = TempDir::new("worktree-file");
         let root = tmp.path();
@@ -895,7 +1029,14 @@ mod windows_tests {
                 "{name:?}"
             );
         }
-        for name in ["GIT~1", "git~1/config", ".git."] {
+        for name in [
+            "GIT~1",
+            "git~1/config",
+            ".git.",
+            "GIT~2",
+            "git~3/config",
+            "GI250A~1",
+        ] {
             let why = refused(name);
             assert!(
                 matches!(
@@ -913,7 +1054,7 @@ mod windows_tests {
         let root = tmp.path().join("repo");
         fs::create_dir(&root).unwrap();
         let add = |_: Option<&[u8]>| Some(b"pwned\n".to_vec());
-        for name in ["NUL", "GIT~1/config"] {
+        for name in ["NUL", "GIT~1/config", "GIT~2/config"] {
             let path = RepoPath::from(name);
             let results = [
                 read(&root, &path, 1024).map(|_| ()),
