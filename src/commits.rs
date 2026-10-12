@@ -5,11 +5,11 @@
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphBuilder, GraphRow};
 use crate::features::commits::reflog::ReflogList;
+use crate::features::commits::rewrite::RebaseTodo;
 use crate::git::branch_tips::Tip;
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, LogQuery, Markers};
 use crate::list_filter;
-use crate::rebase_todo::RebaseTodo;
 
 /// Commits per page.
 pub const PAGE: usize = 200;

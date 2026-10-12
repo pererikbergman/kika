@@ -11,7 +11,7 @@ use crate::git::rebase_plan::{
 };
 
 /// Why a todo list is shown but not edited, when no single line says it.
-pub const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";
+pub(crate) const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";
 
 /// How every reason a list is not edited starts: what it is and how to
 /// fix it first, so a narrow bar still shows them.
@@ -32,7 +32,7 @@ const CONFIG_WHY: usize = 40;
 /// prefix git would use could not be read or could hide a command, or the
 /// line that stops it, by number, as the user can find it in the file.
 /// `comment` is the prefix read through `git config`.
-pub fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
+pub(crate) fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
     let prefix = match comment {
         Ok(prefix) if hides_commands(prefix) => {
             return format!(
@@ -88,47 +88,47 @@ fn cut(safe: String, max: usize) -> String {
 
 /// Why an edit was not saved: git or the user changed the list since it
 /// was read. The panel reloads it.
-pub const TODO_CHANGED: &str = "The todo list changed on disk; reloaded it, try again";
+pub(crate) const TODO_CHANGED: &str = "The todo list changed on disk; reloaded it, try again";
 
 /// A todo list as read from git's dir, with the list of steps done so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TodoFile {
+pub(crate) struct TodoFile {
     /// `<git dir>/rebase-merge/git-rebase-todo`.
-    pub path: PathBuf,
-    pub todo: Vec<u8>,
+    pub(crate) path: PathBuf,
+    pub(crate) todo: Vec<u8>,
     /// `rebase-merge/done`; `None` when it could not be read.
-    pub done: Option<Vec<u8>>,
+    pub(crate) done: Option<Vec<u8>>,
     /// The prefix git skips lines by, or why it could not be read.
-    pub comment: Result<Vec<u8>, String>,
+    pub(crate) comment: Result<Vec<u8>, String>,
 }
 
 /// What a key asks of a commit, on a log row or a todo row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rewrite {
+pub(crate) enum Rewrite {
     Edit(Edit),
     Move(Direction),
     Break,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebaseTodo {
-    pub path: PathBuf,
+pub(crate) struct RebaseTodo {
+    pub(crate) path: PathBuf,
     /// The bytes read, which a write must still find on disk.
-    pub original: Vec<u8>,
-    pub entries: Vec<TodoEntry>,
+    pub(crate) original: Vec<u8>,
+    pub(crate) entries: Vec<TodoEntry>,
     /// `Err` when the list holds a line Kika does not edit, saying which
     /// and what to do instead; its lines are then shown as they are.
-    pub editable: Result<(), String>,
+    pub(crate) editable: Result<(), String>,
     /// Git has done no step yet, so there is nothing to fold into.
-    pub done_empty: bool,
+    pub(crate) done_empty: bool,
     /// The comment prefix the list was read with, which a write checks
     /// it with again. Empty when it could not be read: no line is then a
     /// comment, and the list is not edited.
-    pub comment: Vec<u8>,
+    pub(crate) comment: Vec<u8>,
 }
 
 impl RebaseTodo {
-    pub fn load(file: TodoFile) -> Self {
+    pub(crate) fn load(file: TodoFile) -> Self {
         let comment = file.comment.clone().unwrap_or_default();
         let parsed = match &file.comment {
             Ok(prefix) if !hides_commands(prefix) => parse_todo(&file.todo, &comment).ok(),
@@ -153,12 +153,12 @@ impl RebaseTodo {
     }
 
     /// The command lines as git wrote them, for a list that is not edited.
-    pub fn raw_lines(&self) -> Vec<&[u8]> {
+    pub(crate) fn raw_lines(&self) -> Vec<&[u8]> {
         command_lines(&self.original, &self.comment).collect()
     }
 
     /// How many rows the panel shows for it.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         if self.editable.is_ok() {
             self.entries.len()
         } else {
@@ -168,7 +168,11 @@ impl RebaseTodo {
 
     /// The list after `rewrite` on row `i`, and the row the cursor moves
     /// to, or why it cannot be done.
-    pub fn edit(&self, i: usize, rewrite: Rewrite) -> Result<(Vec<TodoEntry>, usize), String> {
+    pub(crate) fn edit(
+        &self,
+        i: usize,
+        rewrite: Rewrite,
+    ) -> Result<(Vec<TodoEntry>, usize), String> {
         self.editable.clone()?;
         match rewrite {
             Rewrite::Move(direction) => move_entry(&self.entries, i, direction),
@@ -182,14 +186,14 @@ impl RebaseTodo {
 
 /// Whether git's `done` list holds no step yet, lines led by `comment`
 /// skipped.
-pub fn nothing_done(done: &[u8], comment: &[u8]) -> bool {
+pub(crate) fn nothing_done(done: &[u8], comment: &[u8]) -> bool {
     command_lines(done, comment).next().is_none()
 }
 
 /// Swap row `i` with the next to run (`Up`, as the list reads like future
 /// history) or the one before it (`Down`). A `break` moves freely; nothing
 /// crosses an `update-ref`, which would change what its branch holds.
-pub fn move_entry(
+pub(crate) fn move_entry(
     entries: &[TodoEntry],
     i: usize,
     direction: Direction,
@@ -220,7 +224,7 @@ const UPDATES_STAY: &str = "Branch updates stay where git put them";
 
 /// Give commit `i` the action for `edit`. The first commit cannot fold
 /// while git has done nothing yet.
-pub fn set_action(
+pub(crate) fn set_action(
     entries: &[TodoEntry],
     i: usize,
     edit: Edit,
@@ -259,7 +263,10 @@ fn already(action: TodoAction) -> &'static str {
 
 /// Add a `break` right after commit `i`, or take away the one there. On a
 /// `break` row, take that one away. The cursor stays on the commit.
-pub fn toggle_break(entries: &[TodoEntry], i: usize) -> Result<(Vec<TodoEntry>, usize), String> {
+pub(crate) fn toggle_break(
+    entries: &[TodoEntry],
+    i: usize,
+) -> Result<(Vec<TodoEntry>, usize), String> {
     let mut out = entries.to_vec();
     match entries.get(i) {
         Some(TodoEntry::Break) => {
@@ -280,7 +287,7 @@ pub fn toggle_break(entries: &[TodoEntry], i: usize) -> Result<(Vec<TodoEntry>, 
 
 /// The list as git reads it: one LF line per entry. Git's help comments
 /// are not kept; it does not need them once the rebase has started.
-pub fn serialize(entries: &[TodoEntry]) -> Vec<u8> {
+pub(crate) fn serialize(entries: &[TodoEntry]) -> Vec<u8> {
     let mut out = Vec::new();
     for entry in entries {
         match entry {

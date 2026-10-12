@@ -37,7 +37,6 @@ mod popup;
 mod popup_view;
 mod program;
 mod prompts;
-mod rebase_todo;
 mod refresh;
 mod remote_run;
 mod rows;

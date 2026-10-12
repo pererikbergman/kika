@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "timestamp": "1791814846",
+  "timestamp": "1791815004",
   "issue_count": 23,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/features",
