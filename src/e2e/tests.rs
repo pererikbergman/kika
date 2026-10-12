@@ -1170,7 +1170,7 @@ async fn a_submodule_is_listed_updated_entered_and_left() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_line_is_staged_through_a_renderer_view() {
-    use crate::external_diff::ExternalRenderer;
+    use crate::features::diff::renderers::ExternalRenderer;
 
     let repo = TestRepo::new()
         .write("a.txt", "one\n")
@@ -1180,7 +1180,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
     app.use_renderers(vec![ExternalRenderer {
         label: "cat".into(),
         argv: vec!["cat".into()],
-        kind: crate::external_diff::RendererKind::Pager,
+        kind: crate::features::diff::renderers::RendererKind::Pager,
     }])
     .await;
 
