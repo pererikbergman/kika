@@ -212,6 +212,10 @@ pub enum KeyScope {
     Commits,
     /// The Commits panel showing one commit's files.
     CommitFiles,
+    /// The Stash panel, with a cursor on the stash list.
+    Stash,
+    /// The Stash panel showing one stash's files.
+    StashFiles,
     /// The Status panel with focus: controls for the operation in progress.
     Status,
     /// The Diff pane with focus, working on hunks.
@@ -255,6 +259,8 @@ pub enum KeyScope {
     /// "Reset hard and lose every uncommitted change?" on top of the popup
     /// stack.
     ResetHard,
+    /// "Drop this stash?" on top of the popup stack.
+    DropStash,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -288,6 +294,8 @@ impl KeyScope {
             | KeyScope::Tags
             | KeyScope::Commits
             | KeyScope::CommitFiles
+            | KeyScope::Stash
+            | KeyScope::StashFiles
             | KeyScope::Status
             | KeyScope::Diff
             | KeyScope::Blame
@@ -311,6 +319,7 @@ impl KeyScope {
             | KeyScope::RemoveRemote
             | KeyScope::DeleteTag
             | KeyScope::ResetHard
+            | KeyScope::DropStash
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -333,6 +342,8 @@ impl KeyScope {
             KeyScope::Tags => "Tags",
             KeyScope::Commits => "Commits",
             KeyScope::CommitFiles => "Commit files",
+            KeyScope::Stash => "Stash",
+            KeyScope::StashFiles => "Stash files",
             KeyScope::Status => "Status",
             KeyScope::Diff => "Diff",
             KeyScope::Lines => "Lines",
@@ -355,6 +366,7 @@ impl KeyScope {
             KeyScope::RemoveRemote => "Remove remote",
             KeyScope::DeleteTag => "Delete tag",
             KeyScope::ResetHard => "Reset hard",
+            KeyScope::DropStash => "Drop stash",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -485,6 +497,15 @@ pub const REPO_LOCKED: &[&str] = &[
     "reset_hard.yes",
     "reset_hard.no",
     "reset_hard.quit",
+    "files.stash",
+    "stash.files",
+    "stash.apply",
+    "stash.pop",
+    "stash.drop",
+    "stash.rename",
+    "drop_stash.yes",
+    "drop_stash.no",
+    "drop_stash.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -840,6 +861,27 @@ fn least_context(state: &AppState) -> Option<&'static str> {
 /// Enter has no commit to open before the log has rows.
 fn no_commit(state: &AppState) -> Option<&'static str> {
     state.commits.rows.is_empty().then_some("No commits")
+}
+
+/// Nothing in the Stash panel can be opened or acted on before it lists
+/// an entry.
+fn no_stash(state: &AppState) -> Option<&'static str> {
+    state.stash.entries.is_empty().then_some("No stashes")
+}
+
+/// Why the selected stash cannot be applied, popped, dropped or renamed
+/// now: git runs one operation at a time, and the list needs an entry.
+pub(crate) fn stash_action_disabled(state: &AppState) -> Option<&'static str> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING)
+    } else {
+        no_stash(state)
+    }
+}
+
+/// The Stash menu has nothing to offer on a clean tree.
+fn stash_menu_disabled(state: &AppState) -> Option<&'static str> {
+    state.files.is_empty().then_some("No changes to stash")
 }
 
 /// Why nothing can be copied from the Commits panel.
@@ -1510,7 +1552,8 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<&'static st
 /// Space stages a range too, so long as one of its files can be staged.
 pub(crate) fn files_stage_disabled(state: &AppState) -> Option<&'static str> {
     list_guard(state, true).or_else(|| {
-        if state.files_anchor.is_none() {
+        // As the action: the range counts only where it shows.
+        if state.files_anchor.is_none() || state.focus != Focus::Files {
             return stage_disabled(state);
         }
         let range = state.files_range();
@@ -2184,6 +2227,121 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "stash.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::Stash,
+        intent: AppIntent::StashNext,
+        description: "Select the next stash",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::Stash,
+        intent: AppIntent::StashPrev,
+        description: "Select the previous stash",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.files",
+        keys: &[KeyPattern::any(KeyCode::Enter)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::OpenStashFiles,
+        description: "Show the files the selected stash holds",
+        label: "files",
+        bar: true,
+        disabled: no_stash,
+    },
+    Binding {
+        id: "stash.apply",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::ApplyStash,
+        description: "Apply the selected stash to the worktree and keep it",
+        label: "apply",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.pop",
+        keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::PopStash,
+        description: "Apply the selected stash and drop it; a conflict keeps it",
+        label: "pop",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.drop",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::DropStash,
+        description: "Drop the selected stash, asking first",
+        label: "drop",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.rename",
+        keys: &[KeyPattern::any(KeyCode::Char('R'))],
+        scope: KeyScope::Stash,
+        intent: AppIntent::RenameStash,
+        description: "Give the selected stash a new message; it moves to stash@{0}",
+        label: "rename",
+        bar: true,
+        disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash_files.next",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('j'), NONE),
+            KeyPattern::any(KeyCode::Down),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::StashFileNext,
+        description: "Select the next file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash_files.prev",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('k'), NONE),
+            KeyPattern::any(KeyCode::Up),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::StashFilePrev,
+        description: "Select the previous file and show its change",
+        label: "",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash_files.close",
+        keys: &[
+            KeyPattern::any(KeyCode::Esc),
+            KeyPattern::any(KeyCode::Backspace),
+        ],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::CloseStashFiles,
+        description: "Back to the stash list, at the same stash",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
         id: "files.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Files,
@@ -2756,6 +2914,17 @@ static REGISTRY: &[Binding] = &[
         label: "menu",
         bar: true,
         disabled: never,
+    },
+    Binding {
+        id: "files.stash",
+        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenMenu(MenuId::Stash),
+        description: "Stash changes: all, with untracked files, staged only, or this file",
+        label: "stash",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: stash_menu_disabled,
     },
     Binding {
         id: "commit_confirm.stage_all",
@@ -3660,6 +3829,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // As with a hard reset, Enter is left unbound: a dropped stash is gone
+    // from the list.
+    Binding {
+        id: "drop_stash.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DropStash,
+        intent: AppIntent::ConfirmDropStash,
+        description: "Yes, drop the stash",
+        label: "drop",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_stash.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DropStash,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the stash",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_stash.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DropStash,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -4329,8 +4533,15 @@ mod tests {
 
     fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         // Every binding is enabled on a workspace with a stageable file
-        // selected and a commit in the log.
+        // selected, a commit in the log and a stash in the list.
         let mut state = AppState::new(Context::Workspace);
+        state.stash.entries = vec![crate::git::stash::StashEntry {
+            index: 0,
+            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+            untracked: None,
+            subject: "On main: wip".into(),
+        }];
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
@@ -4351,6 +4562,120 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
+        }
+    }
+
+    #[test]
+    fn the_stash_panel_opens_applies_pops_drops_and_renames_the_selected_stash() {
+        use AppIntent::*;
+        assert_eq!(KeyScope::Stash.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::Stash.title(), "Stash");
+        let stash = |k| from(KeyScope::Stash, k);
+        let none = KeyModifiers::NONE;
+        assert_eq!(stash(key(KeyCode::Enter, none)), Some(OpenStashFiles));
+        assert_eq!(stash(plain(' ')), Some(ApplyStash));
+        assert_eq!(stash(plain('g')), Some(PopStash));
+        assert_eq!(stash(plain('d')), Some(DropStash));
+        assert_eq!(
+            stash(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
+            Some(RenameStash)
+        );
+        assert_eq!(stash(plain('j')), Some(StashNext));
+        assert_eq!(stash(key(KeyCode::Down, none)), Some(StashNext));
+        assert_eq!(stash(plain('k')), Some(StashPrev));
+        assert_eq!(stash(key(KeyCode::Up, none)), Some(StashPrev));
+        assert_eq!(stash(plain('q')), Some(Quit));
+
+        assert_eq!(KeyScope::StashFiles.parent(), Some(KeyScope::Workspace));
+        assert_eq!(KeyScope::StashFiles.title(), "Stash files");
+        let files = |k| from(KeyScope::StashFiles, k);
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(CloseStashFiles));
+        assert_eq!(files(key(KeyCode::Backspace, none)), Some(CloseStashFiles));
+        assert_eq!(files(plain('j')), Some(StashFileNext));
+        assert_eq!(files(key(KeyCode::Up, none)), Some(StashFilePrev));
+        assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
+
+        assert_eq!(
+            from(KeyScope::Files, plain('s')),
+            Some(OpenMenu(MenuId::Stash))
+        );
+    }
+
+    #[test]
+    fn stash_actions_say_why_they_cannot_run() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(stash_action_disabled(&state), Some("No stashes"));
+        assert_eq!(no_stash(&state), Some("No stashes"));
+        assert_eq!(stash_menu_disabled(&state), Some("No changes to stash"));
+        state.stash.entries = vec![crate::git::stash::StashEntry {
+            index: 0,
+            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+            untracked: None,
+            subject: String::new(),
+        }];
+        assert_eq!(stash_action_disabled(&state), None);
+        state.op_seq = Some(1);
+        assert_eq!(stash_action_disabled(&state), Some(OP_RUNNING));
+        assert_eq!(no_stash(&state), None);
+    }
+
+    #[test]
+    fn the_drop_stash_question_has_no_enter_and_n_or_esc_keeps_it() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::DropStash,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmDropStash));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::DropStash.parent(), None);
+        assert_eq!(KeyScope::DropStash.title(), "Drop stash");
+    }
+
+    #[test]
+    fn the_stash_actions_and_answers_are_locked_but_moving_around_is_not() {
+        for id in [
+            "files.stash",
+            "stash.files",
+            "stash.apply",
+            "stash.pop",
+            "stash.drop",
+            "stash.rename",
+            "drop_stash.yes",
+            "drop_stash.no",
+            "drop_stash.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_err(), "{id}");
+        }
+        for id in [
+            "stash.next",
+            "stash.prev",
+            "stash_files.next",
+            "stash_files.prev",
+            "stash_files.close",
+        ] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["F"])], Trust::Repo).is_ok(), "{id}");
         }
     }
 
@@ -6565,6 +6890,8 @@ mod tests {
             KeyScope::Tags => "tags",
             KeyScope::Commits => "commits",
             KeyScope::CommitFiles => "commit_files",
+            KeyScope::Stash => "stash",
+            KeyScope::StashFiles => "stash_files",
             KeyScope::Status => "status",
             KeyScope::Diff => "diff",
             KeyScope::Lines => "lines",
@@ -6587,6 +6914,7 @@ mod tests {
             KeyScope::RemoveRemote => "remove_remote",
             KeyScope::DeleteTag => "delete_tag",
             KeyScope::ResetHard => "reset_hard",
+            KeyScope::DropStash => "drop_stash",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
@@ -6840,6 +7168,13 @@ mod tests {
                     | PasteCommits
                     | OpenMenu(MenuId::Reset)
                     | ConfirmResetHard
+                    | OpenMenu(MenuId::Stash)
+                    | OpenStashFiles
+                    | ApplyStash
+                    | PopStash
+                    | DropStash
+                    | RenameStash
+                    | ConfirmDropStash
                     | RemoveRemote
                     | ConfirmRemoveRemote
                     | DeleteTag

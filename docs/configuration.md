@@ -2,13 +2,14 @@
 
 Kika works without any configuration. Two optional TOML files let you remap
 keys, bind your own programs to keys, tune how often Kika looks for changes
-made outside it, and choose a program to draw the Diff pane.
+made outside it, choose a program to draw the Diff pane, and keep commits
+whose hooks never ask anything in the background.
 
 ## Files and locations
 
 | File | Where | Holds |
 |---|---|---|
-| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]` and `[[commands]]` |
+| Global | `$XDG_CONFIG_HOME/kika/config.toml`, else `~/.config/kika/config.toml` (Linux, macOS); `%APPDATA%\kika\config.toml` (Windows) | `[keys]`, `[watch]`, `[diff]`, `[commit]` and `[[commands]]` |
 | Repository | `.kika.toml` at the top level of the repository | `[keys]` only |
 
 - Neither file is required. A missing file is not an error.
@@ -21,7 +22,7 @@ A global file that uses every setting:
 
 ```toml
 [keys]
-"files.stage" = ["s", "ctrl-s"]   # replace this binding's keys
+"files.stage" = ["x", "ctrl-s"]   # replace this binding's keys
 "files.discard" = []              # disable it
 
 [watch]
@@ -32,7 +33,16 @@ fetch = 300     # leave out to keep auto-fetch off
 [diff]
 pager = "delta --paging=never"   # a program that draws the Diff pane
 tool = "difft --color=always"    # a display-only diff tool
+
+[commit]
+hooks_detached = true   # commits that only run hooks stay in the background
 ```
+
+Earlier versions of this example bound `files.stage` to `s`. `s` now opens
+the Stash menu in the Files panel (`files.stash`), so a file that still binds
+`s` to `files.stage` is ignored with the error `key "s" is bound to both
+"files.stash" and "files.stage"`. Pick another key, as the example does with
+`x`, or move `files.stash` off `s` in the same file.
 
 ## Layering
 
@@ -181,6 +191,29 @@ tool = "difft --color=always"
   repository can bring them.
 
 **Changes to `[diff]` take effect after a restart.**
+
+## `[commit]` (global file only)
+
+By default a commit in a repository with an installed commit hook hands the
+terminal to git, so a hook can ask you something. The screen switches away
+and back on every such commit. If your hooks never ask anything, set
+`hooks_detached` to keep those commits in the background, like a commit with
+no hooks.
+
+```toml
+[commit]
+hooks_detached = true   # default false: any commit hook hands the terminal over
+```
+
+- Only a commit whose sole reason to hand over is a hook runs detached. A
+  commit that signs (`commit.gpgsign`) still hands the terminal over, since
+  signing may ask for a passphrase.
+- Rebase, cherry-pick, revert, a merge commit, continue and skip still run on
+  the terminal, since they may also open git's editor.
+- **Risk:** a hook that waits for input gets no terminal. It may fail, or wait
+  until you quit Kika.
+
+**Changes to `[commit]` take effect after a restart.**
 
 ## Custom commands
 
@@ -398,6 +431,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[diff]` is allowed only in the global file**, since it names a program
   for Kika to run. A `[diff]` table in `.kika.toml` is an error, and the whole
   file is ignored.
+- **`[commit]` is allowed only in the global file**, since it decides whether
+  hooks get the terminal. A `[commit]` table in `.kika.toml` is an error, and
+  the whole file is ignored.
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
@@ -416,7 +452,7 @@ global file.
 
 Each id is `<scope>.<action>`. Keys are looked up in the focused scope first,
 then its enclosing scopes: the status, file list, branch list, commits, commit
-files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
+files, stash, stash files, diff, blame and conflict panels fall back to Workspace, and Workspace falls
 back to Global. Popups, menus and the commit editor do not fall back, so `q` and
 `?` do not quit or open help there; each popup that can stay open has its own `ctrl-c` to quit.
 
@@ -509,6 +545,14 @@ it. `space` then stages the whole range in one go (or unstages it, when
 nothing in it is left to stage), skipping conflicted files, and `d` asks
 once before discarding the range; only `y` answers that question. Keys that
 act on one file are refused while a range is selected.
+
+| `files.stash` | `s` | Stash changes: all, with untracked files, staged only, or this file | locked |
+
+`s` opens a menu that puts work aside without committing it: every tracked
+change, every change with the untracked files too, only the staged changes,
+or only the selected file. Each asks for an optional message. Stashing only
+the staged changes needs git 2.35 or newer; an older git is refused with a
+message and nothing changes. Nothing can be stashed while conflicts exist.
 
 `i` asks for a pattern to add to the `.gitignore` at the top of the worktree
 (or of the entered submodule), filled with one that matches exactly the
@@ -729,6 +773,38 @@ goes back to the log.
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
 | `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
 
+### Stash
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `stash.next` | `j`, `down` | Select the next stash | |
+| `stash.prev` | `k`, `up` | Select the previous stash | |
+| `stash.files` | `enter` | Show the files the selected stash holds | locked |
+| `stash.apply` | `space` | Apply the selected stash to the worktree and keep it | locked |
+| `stash.pop` | `g` | Apply the selected stash and drop it; a conflict keeps it | locked |
+| `stash.drop` | `d` | Drop the selected stash, asking first | locked |
+| `stash.rename` | `R` | Give the selected stash a new message; it moves to stash@{0} | locked |
+
+Git has no rename for a stash, so `R` stores the entry again with the new
+message, as `stash@{0}`, and drops it from its old place. Git adds no entry
+for the commit already on top, so a stash that shares its commit with
+`stash@{0}`, or `stash@{0}` when `stash@{1}` is the same commit, cannot be
+renamed: drop the copy first, then rename. Nothing changes when it is refused. Each action checks
+the entry is still where it was when the key was pressed; if the list changed
+under Kika, it is refused and the list reloads.
+
+### Stash files (a stash opened from the Stash panel)
+
+The diff pane shows the selected file's change in that stash, against the
+commit it was made on. Untracked files the stash took show as added. Focusing
+another panel goes back to the list.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `stash_files.next` | `j`, `down` | Select the next file and show its change | |
+| `stash_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `stash_files.close` | `esc`, `bksp` | Back to the stash list, at the same stash | |
+
 ### Diff (hunks)
 
 | Binding id | Default keys | Action | Repo file |
@@ -942,6 +1018,16 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.yes` | `y` | Yes, reset and throw away every uncommitted change | locked |
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Drop stash?
+
+A dropped stash is gone from the stash list, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `drop_stash.yes` | `y` | Yes, drop the stash | locked |
+| `drop_stash.no` | `n`, `esc` | No, keep the stash | locked |
+| `drop_stash.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 
