@@ -1,4 +1,7 @@
+use ratatui::text::Span;
+
 use super::commit_files::{CommitFile, CommitRange};
+use super::emoji;
 use super::joiner;
 use super::patch::{self, FilePatch};
 use super::path::RepoPath;
@@ -223,6 +226,20 @@ pub enum LineKind {
     Context,
 }
 
+/// Whether a ZWJ inside an emoji sequence is drawn or escaped. Emoji
+/// joiners cannot disguise text, since a dropped one visibly splits the
+/// picture; only the width differs, so the answer is the terminal's: keep
+/// them only where the user said it draws a sequence as one picture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EmojiZwj {
+    /// Every emoji ZWJ shows as `<U+200D>`, as a terminal that draws each
+    /// part of the sequence would otherwise push the row past its pane.
+    #[default]
+    Escape,
+    /// A ZWJ inside a well-formed, two-column emoji sequence is drawn.
+    Keep,
+}
+
 /// One classified, terminal-safe diff line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffLine {
@@ -239,14 +256,18 @@ pub struct DiffChunk {
 
 /// Classifies raw diff lines in order. Stateful because `---`/`+++` mean
 /// "file header" before the first `@@` and "removed/added" after it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Classifier {
     in_hunk: bool,
+    emoji: EmojiZwj,
 }
 
 impl Classifier {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(emoji: EmojiZwj) -> Self {
+        Self {
+            in_hunk: false,
+            emoji,
+        }
     }
 
     pub fn classify(&mut self, raw: &[u8]) -> DiffLine {
@@ -271,7 +292,9 @@ impl Classifier {
             }
         };
         let text = match kind {
-            LineKind::Added | LineKind::Removed | LineKind::Context => sanitize_body(raw),
+            LineKind::Added | LineKind::Removed | LineKind::Context => {
+                sanitize_body(raw, self.emoji)
+            }
             LineKind::Header | LineKind::Hunk => sanitize(raw),
         };
         DiffLine { kind, text }
@@ -302,27 +325,75 @@ pub fn sanitize(raw: &[u8]) -> String {
 ///
 /// Known limits: a terminal that does not shape these scripts draws a kept
 /// joiner as nothing, so there `می\u{200C}خواهم` and `میخواهم` look alike.
-/// Emoji ZWJ sequences stay escaped: a terminal without grapheme clustering
-/// draws each part, wider than the two columns the layout reserves, which
-/// pushes the row past its pane.
-pub fn sanitize_body(raw: &[u8]) -> String {
-    let mut text = String::with_capacity(raw.len());
-    let mut before = None;
+///
+/// Emoji ZWJ sequences follow `emoji`. With `Escape` they stay escaped: a
+/// terminal without grapheme clustering draws each part, wider than the two
+/// columns the layout reserves, which pushes the row past its pane. With
+/// `Keep`, a ZWJ is drawn when it joins two emoji elements (a pictographic
+/// character, optionally followed by U+FE0F or a skin-tone modifier) and
+/// the whole sequence measures two columns. A sequence that is not fully
+/// qualified measures wider, so all of its joiners stay escaped, as does a
+/// joiner next to anything else.
+pub fn sanitize_body(raw: &[u8], emoji: EmojiZwj) -> String {
     let decoded = String::from_utf8_lossy(raw);
-    let mut chars = decoded.chars().peekable();
-    while let Some(c) = chars.next() {
-        if matches!(c, '\u{200C}' | '\u{200D}')
-            && before
-                .zip(chars.peek().copied())
-                .is_some_and(|(before, after)| joiner::shapes(c, before, after))
+    let chars: Vec<char> = decoded.chars().collect();
+    let kept = match emoji {
+        EmojiZwj::Escape => Vec::new(),
+        EmojiZwj::Keep => emoji_joiners(&chars),
+    };
+    let mut text = String::with_capacity(raw.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let before = i.checked_sub(1).map(|b| chars[b]);
+        let after = chars.get(i + 1).copied();
+        if kept.binary_search(&i).is_ok()
+            || matches!(c, '\u{200C}' | '\u{200D}')
+                && before
+                    .zip(after)
+                    .is_some_and(|(before, after)| joiner::shapes(c, before, after))
         {
             text.push(c);
         } else {
             push_safe(&mut text, c);
         }
-        before = Some(c);
     }
     text
+}
+
+/// The indexes, in order, of every ZWJ inside a maximal emoji ZWJ
+/// sequence, `element (ZWJ element)+`, that measures two columns.
+fn emoji_joiners(chars: &[char]) -> Vec<usize> {
+    // The end of the emoji element starting at `i`, if one does.
+    let element = |i: usize| {
+        let c = *chars.get(i)?;
+        if !emoji::is_pictographic(c) {
+            return None;
+        }
+        let attached = chars
+            .get(i + 1)
+            .is_some_and(|&n| n == '\u{FE0F}' || emoji::is_modifier(n));
+        Some(i + 1 + usize::from(attached))
+    };
+    let mut kept = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let Some(mut end) = element(i) else {
+            i += 1;
+            continue;
+        };
+        let mut joiners = Vec::new();
+        while chars.get(end) == Some(&'\u{200D}')
+            && let Some(next) = element(end + 1)
+        {
+            joiners.push(end);
+            end = next;
+        }
+        let sequence: String = chars[i..end].iter().collect();
+        if !joiners.is_empty() && Span::raw(sequence).width() == 2 {
+            kept.extend(joiners);
+        }
+        i = end;
+    }
+    kept
 }
 
 /// The one escaping rule both sanitisers share, so they cannot drift apart.
@@ -894,7 +965,7 @@ mod tests {
     }
 
     fn kinds(lines: &[&str]) -> Vec<LineKind> {
-        let mut classifier = Classifier::new();
+        let mut classifier = Classifier::new(EmojiZwj::Escape);
         lines
             .iter()
             .map(|l| classifier.classify(l.as_bytes()).kind)
@@ -939,7 +1010,7 @@ mod tests {
 
     #[test]
     fn strips_line_endings() {
-        let mut c = Classifier::new();
+        let mut c = Classifier::new(EmojiZwj::Escape);
         assert_eq!(c.classify(b"index abc\r\n").text, "index abc");
         assert_eq!(c.classify(b"index abc\n").text, "index abc");
         assert_eq!(c.classify(b"index abc").text, "index abc");
@@ -947,7 +1018,7 @@ mod tests {
 
     #[test]
     fn expands_tabs_and_replaces_control_bytes() {
-        let mut c = Classifier::new();
+        let mut c = Classifier::new(EmojiZwj::Escape);
         c.classify(b"@@ -1 +1 @@\n");
         let line = c.classify(b"+\tx\x1b[31m\x07\n");
         assert_eq!(line.kind, LineKind::Added);
@@ -956,7 +1027,7 @@ mod tests {
 
     #[test]
     fn invalid_utf8_is_decoded_lossily() {
-        let mut c = Classifier::new();
+        let mut c = Classifier::new(EmojiZwj::Escape);
         assert_eq!(c.classify(b"a\xffb\n").text, "a\u{FFFD}b");
     }
 
@@ -1041,6 +1112,9 @@ mod tests {
         );
     }
 
+    /// Both emoji policies: script-joiner results never depend on them.
+    const POLICIES: [EmojiZwj; 2] = [EmojiZwj::Escape, EmojiZwj::Keep];
+
     #[test]
     fn body_text_keeps_joiners_that_change_how_letters_join() {
         for text in [
@@ -1068,7 +1142,9 @@ mod tests {
             "র\u{200D}্য",
             "ක\u{200D}්ව",
         ] {
-            assert_eq!(sanitize_body(text.as_bytes()), text);
+            for emoji in POLICIES {
+                assert_eq!(sanitize_body(text.as_bytes(), emoji), text, "{emoji:?}");
+            }
         }
     }
 
@@ -1083,12 +1159,17 @@ mod tests {
                 for (before, after) in [('a', 'b'), ('é', 'ü'), ('👨', '👩'), ('م', 'ی')] {
                     let raw = format!("{before}{c}{after}");
                     let expected = format!("{before}{escape}{after}");
-                    assert_eq!(sanitize_body(raw.as_bytes()), expected, "{class} {c:?}");
+                    for emoji in POLICIES {
+                        let got = sanitize_body(raw.as_bytes(), emoji);
+                        assert_eq!(got, expected, "{class} {c:?} {emoji:?}");
+                    }
                 }
             }
         }
-        assert_eq!(sanitize_body("م\u{202E}ی".as_bytes()), "م<U+202E>ی");
-        assert_eq!(sanitize_body("क\u{2066}ष".as_bytes()), "क<U+2066>ष");
+        for emoji in POLICIES {
+            assert_eq!(sanitize_body("م\u{202E}ی".as_bytes(), emoji), "م<U+202E>ی");
+            assert_eq!(sanitize_body("क\u{2066}ष".as_bytes(), emoji), "क<U+2066>ष");
+        }
     }
 
     #[test]
@@ -1174,9 +1255,6 @@ mod tests {
             ("é\u{200D}ü", "é<U+200D>ü"),
             ("α\u{200C}β", "α<U+200C>β"),
             ("한\u{200D}국", "한<U+200D>국"),
-            // Emoji sequences: their width depends on the terminal.
-            ("👨\u{200D}👩\u{200D}👧", "👨<U+200D>👩<U+200D>👧"),
-            ("❤\u{FE0F}\u{200D}🔥", "❤\u{FE0F}<U+200D>🔥"),
             // Only one neighbour in a joining script.
             ("is\u{200D}admin", "is<U+200D>admin"),
             ("م\u{200D}a", "م<U+200D>a"),
@@ -1200,7 +1278,13 @@ mod tests {
             ("م\u{200D}\u{FDD0}", "م<U+200D>\u{FDD0}"),
         ];
         for (raw, expected) in cases {
-            assert_eq!(sanitize_body(raw.as_bytes()), expected, "{raw:?}");
+            for emoji in POLICIES {
+                assert_eq!(
+                    sanitize_body(raw.as_bytes(), emoji),
+                    expected,
+                    "{raw:?} {emoji:?}"
+                );
+            }
         }
     }
 
@@ -1220,7 +1304,10 @@ mod tests {
                             format!("{escape}<U+200C>{letter}"),
                         ),
                     ] {
-                        assert_eq!(sanitize_body(raw.as_bytes()), expected, "{class} {c:?}");
+                        for emoji in POLICIES {
+                            let got = sanitize_body(raw.as_bytes(), emoji);
+                            assert_eq!(got, expected, "{class} {c:?} {emoji:?}");
+                        }
                     }
                 }
             }
@@ -1230,7 +1317,9 @@ mod tests {
     #[test]
     fn body_text_expands_tabs_and_replaces_controls_like_strict() {
         let raw = b"\tx\x1b[31m\x07\xff";
-        assert_eq!(sanitize_body(raw), sanitize(raw));
+        for emoji in POLICIES {
+            assert_eq!(sanitize_body(raw, emoji), sanitize(raw), "{emoji:?}");
+        }
     }
 
     #[test]
@@ -1245,7 +1334,7 @@ mod tests {
 
     #[test]
     fn classify_keeps_joiners_in_body_lines_and_escapes_them_in_headers() {
-        let mut c = Classifier::new();
+        let mut c = Classifier::new(EmojiZwj::Escape);
         let header = c.classify("+++ b/می\u{200C}خواهم.txt\n".as_bytes());
         assert_eq!(header.kind, LineKind::Header);
         assert_eq!(header.text, "+++ b/می<U+200C>خواهم.txt");
@@ -1261,5 +1350,110 @@ mod tests {
             assert_eq!(line.kind, kind);
             assert_eq!(line.text, raw);
         }
+    }
+
+    /// Fully qualified emoji ZWJ sequences: a family, a skin tone before
+    /// the joiner, U+FE0F before it, and U+FE0F after the last element.
+    const EMOJI_SEQUENCES: [&str; 4] = [
+        "👨\u{200D}👩\u{200D}👧",
+        "👩\u{1F3FD}\u{200D}💻",
+        "❤\u{FE0F}\u{200D}🔥",
+        "🏳\u{FE0F}\u{200D}⚧\u{FE0F}",
+    ];
+
+    #[test]
+    fn body_text_keeps_emoji_joiners_only_when_the_terminal_clusters_them() {
+        for raw in EMOJI_SEQUENCES {
+            assert_eq!(sanitize_body(raw.as_bytes(), EmojiZwj::Keep), raw);
+            let escaped = raw.replace('\u{200D}', "<U+200D>");
+            assert_eq!(sanitize_body(raw.as_bytes(), EmojiZwj::Escape), escaped);
+        }
+        // Inside a longer line, between words and next to another sequence.
+        let line = "a 👨\u{200D}👩\u{200D}👧 b ❤\u{FE0F}\u{200D}🔥👩\u{1F3FD}\u{200D}💻";
+        assert_eq!(sanitize_body(line.as_bytes(), EmojiZwj::Keep), line);
+    }
+
+    #[test]
+    fn with_keep_a_joiner_outside_a_two_column_emoji_sequence_stays_escaped() {
+        let cases = [
+            // Between an emoji and a letter.
+            ("👨\u{200D}a", "👨<U+200D>a"),
+            ("a\u{200D}👨", "a<U+200D>👨"),
+            // Leading or trailing.
+            ("\u{200D}👨", "<U+200D>👨"),
+            ("👨\u{200D}", "👨<U+200D>"),
+            ("👨\u{200D}👩\u{200D}", "👨\u{200D}👩<U+200D>"),
+            // A run of two.
+            ("👨\u{200D}\u{200D}👩", "👨<U+200D><U+200D>👩"),
+            // A modifier or U+FE0F with no emoji before it.
+            ("a\u{1F3FD}\u{200D}💻", "a\u{1F3FD}<U+200D>💻"),
+            ("a\u{FE0F}\u{200D}🔥", "a\u{FE0F}<U+200D>🔥"),
+            // U+FE0E asks for text presentation; it is no emoji element.
+            ("👨\u{FE0E}\u{200D}👩", "👨\u{FE0E}<U+200D>👩"),
+            // Not fully qualified: wider than two columns, so every joiner
+            // of the sequence stays escaped.
+            ("❤\u{200D}🔥", "❤<U+200D>🔥"),
+            ("🏳\u{FE0F}\u{200D}⚧", "🏳\u{FE0F}<U+200D>⚧"),
+            (
+                "👨\u{200D}👩\u{200D}❤\u{200D}🔥",
+                "👨<U+200D>👩<U+200D>❤<U+200D>🔥",
+            ),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                sanitize_body(raw.as_bytes(), EmojiZwj::Keep),
+                expected,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_keep_strict_characters_stay_escaped_inside_and_next_to_emoji() {
+        for (class, chars) in STRICT_CLASSES {
+            for &c in chars {
+                let e = format!("<U+{:04X}>", c as u32);
+                for (raw, expected) in [
+                    // A ZWJ next to it stays escaped.
+                    (format!("👨\u{200D}{c}👩"), format!("👨<U+200D>{e}👩")),
+                    (format!("👨{c}\u{200D}👩"), format!("👨{e}<U+200D>👩")),
+                    // Around a kept sequence, it is escaped and the sequence kept.
+                    (format!("{c}👨\u{200D}👩{c}"), format!("{e}👨\u{200D}👩{e}")),
+                ] {
+                    let got = sanitize_body(raw.as_bytes(), EmojiZwj::Keep);
+                    assert_eq!(got, expected, "{class} {c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_keep_classifier_keeps_emoji_joiners_in_body_lines_only() {
+        let family = "👨\u{200D}👩\u{200D}👧";
+        let escaped = "👨<U+200D>👩<U+200D>👧";
+        let mut c = Classifier::new(EmojiZwj::Keep);
+        let header = c.classify(format!("diff --git a/{family} b/{family}\n").as_bytes());
+        assert_eq!(header.text, format!("diff --git a/{escaped} b/{escaped}"));
+        let header = c.classify(format!("+++ b/{family}\n").as_bytes());
+        assert_eq!(header.kind, LineKind::Header);
+        assert_eq!(header.text, format!("+++ b/{escaped}"));
+        let hunk = c.classify(format!("@@ -1 +1 @@ {family}\n").as_bytes());
+        assert_eq!(hunk.kind, LineKind::Hunk);
+        assert_eq!(hunk.text, format!("@@ -1 +1 @@ {escaped}"));
+        for (prefix, kind) in [
+            ('+', LineKind::Added),
+            ('-', LineKind::Removed),
+            (' ', LineKind::Context),
+        ] {
+            let line = c.classify(format!("{prefix}{family}").as_bytes());
+            assert_eq!(line.kind, kind);
+            assert_eq!(line.text, format!("{prefix}{family}"));
+        }
+        let mut c = Classifier::new(EmojiZwj::Escape);
+        c.classify(b"@@ -1 +1 @@\n");
+        assert_eq!(
+            c.classify(format!("+{family}").as_bytes()).text,
+            format!("+{escaped}")
+        );
     }
 }

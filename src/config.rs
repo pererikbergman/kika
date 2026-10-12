@@ -18,9 +18,13 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! [display]
+//! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! ```
 //!
-//! `[watch]` and `[diff]` are read from the global file only, at startup.
+//! `[watch]`, `[diff]` and `[display]` are read from the global file only,
+//! at startup. `[display] emoji_zwj_terminals` is off (empty) by default;
+//! [`emoji_zwj`] matches it against the running terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -43,6 +47,7 @@ use serde::Deserialize;
 
 use crate::custom_command::CommandTable;
 use crate::external_diff::parse_command;
+use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
 
@@ -106,6 +111,9 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
+    /// The global `[display] emoji_zwj_terminals`: the terminals that draw
+    /// an emoji ZWJ sequence as one two-column picture.
+    pub emoji_zwj_terminals: Vec<String>,
     pub errors: Vec<ConfigError>,
 }
 
@@ -115,6 +123,7 @@ struct GlobalSettings {
     keymap: Keymap,
     watch: WatchConfig,
     diff_pager: Option<String>,
+    emoji_zwj_terminals: Vec<String>,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -129,7 +138,15 @@ struct GlobalFile {
     #[serde(default)]
     diff: DiffTable,
     #[serde(default)]
+    display: DisplayTable,
+    #[serde(default)]
     commands: Vec<CommandTable>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisplayTable {
+    emoji_zwj_terminals: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,9 +163,10 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]` or `[diff]` table, or
-/// `[[commands]]`, here is an unknown field, so a cloned repository can
-/// neither turn on fetching nor name or run a program.
+/// A repository's file: keys only. A `[watch]`, `[diff]` or `[display]`
+/// table, or `[[commands]]`, here is an unknown field, so a cloned
+/// repository can neither turn on fetching nor name or run a program, nor
+/// change how text is drawn.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -163,6 +181,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
         diff_pager: None,
+        emoji_zwj_terminals: Vec::new(),
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
@@ -171,6 +190,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     if let Some(global) = global {
         (loaded.keymap, loaded.watch, loaded.diff_pager) =
             (global.keymap, global.watch, global.diff_pager);
+        loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -267,11 +287,30 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(pager) = &file.diff.pager {
         parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
     }
+    let emoji_zwj_terminals = file.display.emoji_zwj_terminals.unwrap_or_default();
+    // An empty name would match a terminal that sets no name at all.
+    if emoji_zwj_terminals.iter().any(String::is_empty) {
+        return Err("display.emoji_zwj_terminals: a terminal name cannot be empty".into());
+    }
     Ok(GlobalSettings {
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        emoji_zwj_terminals,
     })
+}
+
+/// Whether the running terminal is one of `terminals`, the ones the user
+/// says draw an emoji ZWJ sequence as one picture. It is named by
+/// `TERM_PROGRAM`, else, when that is unset or empty, by `TERM`; the match
+/// is exact. Inside tmux `TERM_PROGRAM` is `tmux`, which is right: tmux
+/// decides the width there. No match, the default, escapes.
+pub fn emoji_zwj(terminals: &[String], term_program: Option<&str>, term: Option<&str>) -> EmojiZwj {
+    let name = term_program.filter(|p| !p.is_empty()).or(term);
+    match name {
+        Some(name) if !name.is_empty() && terminals.iter().any(|t| t == name) => EmojiZwj::Keep,
+        _ => EmojiZwj::Escape,
+    }
 }
 
 /// `keymap` with a repository file's text applied.
@@ -487,6 +526,7 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                emoji_zwj_terminals: vec![],
                 errors: vec![],
             }
         );
@@ -761,5 +801,82 @@ output = "none"
         assert_eq!(loaded.diff_pager, Some("delta".into()));
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+    }
+
+    #[test]
+    fn the_global_file_lists_the_terminals_that_cluster_emoji() {
+        let files = Files::new("display");
+        files.global("[display]\nemoji_zwj_terminals = [\"WezTerm\", \"ghostty\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(loaded.emoji_zwj_terminals, ["WezTerm", "ghostty"]);
+
+        files.global("[keys]\n");
+        assert!(files.load().emoji_zwj_terminals.is_empty());
+        files.global("[display]\n");
+        assert!(files.load().emoji_zwj_terminals.is_empty());
+    }
+
+    #[test]
+    fn an_empty_terminal_name_or_an_unknown_display_key_is_refused() {
+        let terminals = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.emoji_zwj_terminals)
+        };
+        assert_eq!(
+            terminals("[display]\nemoji_zwj_terminals = [\"WezTerm\", \"\"]\n"),
+            Err("display.emoji_zwj_terminals: a terminal name cannot be empty".into())
+        );
+        let typo = terminals("[display]\nemoji_zwj_terminal = [\"WezTerm\"]\n").unwrap_err();
+        assert!(
+            typo.contains("unknown field `emoji_zwj_terminal`"),
+            "{typo}"
+        );
+        let wrong = terminals("[display]\nemoji_zwj_terminals = \"WezTerm\"\n").unwrap_err();
+        assert!(wrong.starts_with("line 2"), "{wrong}");
+    }
+
+    #[test]
+    fn only_the_global_file_lists_emoji_terminals() {
+        let refused = repo("[display]\nemoji_zwj_terminals = [\"x\"]\n").unwrap_err();
+        assert!(refused.contains("unknown field `display`"), "{refused}");
+
+        let files = Files::new("repo-display");
+        files
+            .global("[display]\nemoji_zwj_terminals = [\"WezTerm\"]\n")
+            .repo("[keys]\n\"files.commit\" = [\"C\"]\n[display]\nemoji_zwj_terminals = [\"x\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.emoji_zwj_terminals, ["WezTerm"]);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(loaded.errors[0].message.contains("unknown field `display`"));
+        // Ignored as a whole: its `[keys]` did not apply either.
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+    }
+
+    #[test]
+    fn the_running_terminal_keeps_emoji_joiners_only_when_listed() {
+        let listed = ["WezTerm".to_string(), "xterm-kitty".to_string()];
+        use EmojiZwj::{Escape, Keep};
+        for (program, term, expected) in [
+            // TERM_PROGRAM decides when set.
+            (Some("WezTerm"), None, Keep),
+            (Some("WezTerm"), Some("xterm-256color"), Keep),
+            (Some("tmux"), Some("xterm-kitty"), Escape),
+            // TERM only when TERM_PROGRAM is unset or empty.
+            (None, Some("xterm-kitty"), Keep),
+            (Some(""), Some("xterm-kitty"), Keep),
+            // Exact and case-sensitive.
+            (Some("wezterm"), None, Escape),
+            (Some("WezTerm2"), None, Escape),
+            (None, Some("xterm"), Escape),
+            (None, None, Escape),
+            (Some(""), Some(""), Escape),
+        ] {
+            assert_eq!(
+                emoji_zwj(&listed, program, term),
+                expected,
+                "{program:?} {term:?}"
+            );
+        }
+        assert_eq!(emoji_zwj(&[], Some("WezTerm"), Some("xterm-kitty")), Escape);
     }
 }

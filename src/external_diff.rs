@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::StyledRow;
 use crate::git::diff::{
-    DiffRequest, diff_command, run_diff, sanitize, sanitize_body, terminal_safe,
+    DiffRequest, EmojiZwj, diff_command, run_diff, sanitize, sanitize_body, terminal_safe,
 };
 use crate::git::patch::FilePatch;
 use crate::git::runner::{GitCommand, GitRunner};
@@ -315,7 +315,7 @@ pub fn map_rows(patch: &FilePatch, rows: &[StyledRow]) -> Vec<Option<(usize, usi
             let text = line.text.strip_suffix(b"\n").unwrap_or(&line.text);
             let text = text.strip_suffix(b"\r").unwrap_or(text);
             // The same sanitiser `ansi` used on the rows, or the texts differ.
-            let content = squeeze(&sanitize_body(text));
+            let content = squeeze(&sanitize_body(text, EmojiZwj::Escape));
             let found = if content.is_empty() {
                 // Only the next row, and only if nothing but a gutter is on it.
                 plain
