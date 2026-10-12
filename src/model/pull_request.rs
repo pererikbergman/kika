@@ -27,6 +27,9 @@ const NOT_GITHUB: &str = "Pull requests can only be created on GitHub";
 const NO_UPSTREAM: &str = "Push the branch first";
 const RATE_LIMITED: &str = "GitHub is rate limited; fetch after the limit resets";
 const CREATING: &str = "A pull request is being created";
+const NO_HOSTS: &str = "Name GitHub hosts under [forge] in the global config";
+const REFRESHING: &str = "Pull requests are already being refreshed";
+const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
 
 /// A pull request being put together. Its parts are taken when each step
 /// is answered, so a reload meanwhile cannot change what is created.
@@ -142,6 +145,27 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
         return Some(RATE_LIMITED.into());
     }
     state.pr_create.is_some().then_some(CREATING.into())
+}
+
+/// Why the badges cannot be asked for again now: no host opted in, the
+/// remote on none of them, a call already running, or the host rate
+/// limited until a second still to come. Fixed text only, never the
+/// forge's.
+pub(crate) fn refresh_disabled(state: &AppState) -> Option<Reason> {
+    let forge = &state.forge;
+    if !forge.enabled() {
+        return Some(NO_HOSTS.into());
+    }
+    let Some(repo) = &forge.repo else {
+        return Some(NO_FORGE.into());
+    };
+    if forge.in_flight {
+        return Some(REFRESHING.into());
+    }
+    let limited = forge.limited.get(&repo.host.to_ascii_lowercase());
+    limited
+        .is_some_and(|until| *until > state.now)
+        .then_some(REFRESH_LIMITED.into())
 }
 
 /// The most of a title the question shows, in characters.
