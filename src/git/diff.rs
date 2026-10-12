@@ -339,7 +339,7 @@ fn push_safe(text: &mut String, c: char) {
 /// Unicode's Default_Ignorable_Code_Point set plus the interlinear annotation
 /// characters. U+FE0E and U+FE0F are left alone because emoji such as "❤️"
 /// need them; a name differing only by one of those is a narrow, accepted gap.
-fn is_invisible_or_bidi(c: char) -> bool {
+pub(crate) fn is_invisible_or_bidi(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'

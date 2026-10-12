@@ -28,6 +28,12 @@ impl RepoPath {
         &self.raw
     }
 
+    /// The exact name as bytes, for content that holds names, such as a
+    /// `.gitignore` line. Never decoded.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.raw.as_encoded_bytes()
+    }
+
     /// For drawing only: invalid UTF-8 and control characters are replaced, and
     /// bidi or zero-width characters are shown as `<U+XXXX>` escapes.
     pub fn display(&self) -> &str {
