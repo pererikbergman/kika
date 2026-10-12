@@ -3,11 +3,10 @@
 //! terminal probe, the message back from the external editor, and leaving
 //! the popup when git is done.
 
-use crate::commit_editor::CommitEditor;
+use super::CommitEditor;
 use crate::effect::{Effect, Tag};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
-use crate::keymap;
 use crate::model::{AppState, CommitFlow, Context};
 use crate::op::GitOp;
 use crate::popup::ErrorPopup;
@@ -20,7 +19,7 @@ impl AppState {
         if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
             return;
         }
-        if let Some(reason) = keymap::commit_disabled(self) {
+        if let Some(reason) = super::keys::commit_disabled(self) {
             self.notice = Some(reason);
             return;
         }
@@ -38,7 +37,7 @@ impl AppState {
         if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
             return vec![];
         }
-        if let Some(reason) = keymap::amend_disabled(self) {
+        if let Some(reason) = super::keys::amend_disabled(self) {
             self.notice = Some(reason);
             return vec![];
         }
@@ -245,7 +244,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit_editor::Field;
+    use crate::features::commit::editor::Field;
     use crate::git::FileEntry;
     use crate::git::status::{BranchStatus, EntryKind, Head};
     use crate::keymap::KeyScope;
