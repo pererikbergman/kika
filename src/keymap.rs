@@ -790,6 +790,16 @@ fn whitespace_hidden(state: &AppState) -> Option<&'static str> {
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN)
 }
 
+/// A diff tool draws the files, not the patch, so nothing in its view can
+/// be staged, discarded or edited.
+pub const DISPLAY_ONLY: &str = "The diff tool view is display-only: press R for the built-in diff";
+
+/// The Diff pane shows a tool's rows, which hunk and line keys cannot act on.
+fn display_only(state: &AppState) -> Option<&'static str> {
+    let in_diff = matches!(state.focus, Focus::Diff(_));
+    (in_diff && state.display_only()).then_some(DISPLAY_ONLY)
+}
+
 /// The diff keys of the Workspace scope reach the blame through its
 /// parent, but the diff they would change is hidden behind it.
 const BLAME_OPEN: &str = "Close the blame first";
@@ -821,6 +831,24 @@ fn least_context(state: &AppState) -> Option<&'static str> {
 /// Enter has no commit to open before the log has rows.
 fn no_commit(state: &AppState) -> Option<&'static str> {
     state.commits.rows.is_empty().then_some("No commits")
+}
+
+/// Why nothing can be copied from the Commits panel.
+pub(crate) fn no_commit_selected(state: &AppState) -> Option<&'static str> {
+    let row = state.commits.rows.get(state.commits.selected);
+    row.is_none().then_some("No commit selected")
+}
+
+/// Why `i` cannot add the selected file to `.gitignore`. A tracked file
+/// stays tracked whatever `.gitignore` says, and Kika never untracks one.
+pub(crate) fn ignore_disabled(state: &AppState) -> Option<&'static str> {
+    if state.files.is_empty() {
+        return Some("No files");
+    }
+    match state.selected.and_then(|i| state.files.get(i)) {
+        Some(file) if file.kind == EntryKind::Untracked => None,
+        _ => Some("Only untracked files can be ignored"),
+    }
 }
 
 /// With no renderer configured there is nothing to cycle.
@@ -898,7 +926,7 @@ pub(crate) fn hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.loading() {
@@ -977,7 +1005,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<&'static str> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING);
     }
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     match &state.focus {
@@ -1003,7 +1031,7 @@ fn edit_hunk_disabled(state: &AppState) -> Option<&'static str> {
     let Focus::Diff(view) = &state.focus else {
         return Some(NO_CHANGES);
     };
-    if let Some(reason) = whitespace_hidden(state) {
+    if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
     if view.lines.is_some() {
@@ -1905,6 +1933,17 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "commits.copy_menu",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::Commits,
+        intent: AppIntent::OpenMenu(MenuId::Copy),
+        description: "Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on)",
+        label: "clipboard",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "reflog.next",
         keys: &[
             KeyPattern::exact(KeyCode::Char('j'), NONE),
@@ -2120,6 +2159,17 @@ static REGISTRY: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: mergetool_disabled,
+    },
+    Binding {
+        id: "files.ignore",
+        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenIgnore,
+        description: "Add to .gitignore",
+        label: "ignore",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: ignore_disabled,
     },
     Binding {
         id: "diff.next",
@@ -6067,6 +6117,69 @@ mod tests {
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
     }
 
+    #[test]
+    fn a_diff_tool_view_disables_the_patch_keys_in_the_diff_only() {
+        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::git::patch::parse;
+        use crate::hunk_view::{HunkView, LineCursor};
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = vec![crate::git::FileEntry {
+            path: "a.rs".into(),
+            orig_path: None,
+            index: '.',
+            worktree: 'M',
+            kind: EntryKind::Changed,
+        }];
+        state.selected = Some(0);
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        state.renderer = Some(0);
+        let reason = |state: &AppState, scope, c| match resolve(
+            registry(),
+            &Keymap::default(),
+            scope,
+            state,
+            plain(c),
+        ) {
+            Resolution::Disabled(reason) => Some(reason),
+            Resolution::Run(_) => None,
+            Resolution::Unbound | Resolution::Command(_) => panic!("{c} is unbound in {scope:?}"),
+        };
+        // Whole-file keys are unaffected.
+        assert_eq!(reason(&state, KeyScope::Files, ' '), None);
+        assert_eq!(reason(&state, KeyScope::Files, 'd'), None);
+
+        let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        view.patch =
+            Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
+        state.focus = Focus::Diff(view.clone());
+        for c in [' ', 'v', 'd', 'e'] {
+            assert_eq!(
+                reason(&state, KeyScope::Diff, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        view.lines = Some(LineCursor {
+            anchor: 0,
+            cursor: 0,
+        });
+        state.focus = Focus::Diff(view);
+        for c in [' ', 'd'] {
+            assert_eq!(
+                reason(&state, KeyScope::Lines, c),
+                Some(DISPLAY_ONLY),
+                "{c:?}"
+            );
+        }
+        state.renderer = None;
+        assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
+    }
+
     /// The `<scope>` part of a binding id.
     fn scope_name(scope: KeyScope) -> &'static str {
         match scope {
@@ -6696,6 +6809,84 @@ mod tests {
                 };
                 assert_eq!((item.disabled)(state), expected, "{}", item.label);
             }
+        }
+    }
+
+    #[test]
+    fn the_clipboard_and_ignore_keys_clash_with_nothing_reachable_from_their_scopes() {
+        for id in ["commits.copy_menu", "files.ignore"] {
+            let new = binding(id);
+            for other in registry() {
+                let reachable = new.scope.chain().any(|s| s == other.scope)
+                    || other.scope.chain().any(|s| s == new.scope);
+                if other.id == id || !reachable {
+                    continue;
+                }
+                for key in new.keys {
+                    assert!(
+                        !other.keys.iter().any(|k| k.overlaps(key)),
+                        "{id} clashes with {}",
+                        other.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn y_and_i_do_nothing_in_the_command_log_and_never_shadow_its_key() {
+        // The log is a popup with no parent scope, so Commits' `y` and
+        // Files' `i` cannot reach into it, and `@` opens it from both.
+        assert_eq!(KeyScope::CommandLog.parent(), None);
+        for c in ['y', 'i'] {
+            assert_eq!(from(KeyScope::CommandLog, plain(c)), None, "{c}");
+        }
+        let at = binding("workspace.command_log");
+        for id in ["commits.copy_menu", "files.ignore"] {
+            let new = binding(id);
+            assert!(new.scope.chain().any(|s| s == at.scope), "{id}");
+            for key in new.keys {
+                assert!(!at.keys.iter().any(|k| k.overlaps(key)), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn y_opens_the_copy_menu_and_i_ignores_only_an_untracked_file() {
+        assert_eq!(
+            from(KeyScope::Commits, plain('y')),
+            Some(AppIntent::OpenMenu(MenuId::Copy))
+        );
+        let mut state = AppState::new(Context::Workspace);
+        let resolve_i = |state: &AppState| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Files,
+            state,
+            plain('i'),
+        ) {
+            Resolution::Run(binding) => Ok(binding.intent.clone()),
+            Resolution::Disabled(reason) => Err(reason),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(resolve_i(&state), Err("No files"));
+        let file = |kind, index, worktree| crate::git::FileEntry {
+            path: "a.log".into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind,
+        };
+        state.files = vec![file(EntryKind::Changed, '.', 'M')];
+        state.selected = Some(0);
+        assert_eq!(
+            resolve_i(&state),
+            Err("Only untracked files can be ignored")
+        );
+        state.files = vec![file(EntryKind::Untracked, '?', '?')];
+        assert_eq!(resolve_i(&state), Ok(AppIntent::OpenIgnore));
+        for id in ["commits.copy_menu", "files.ignore"] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
         }
     }
 }

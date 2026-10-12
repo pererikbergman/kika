@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
+use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
@@ -14,7 +15,7 @@ use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::CommitFile;
+use crate::git::commit_files::{CommitFile, CommitId};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
@@ -32,6 +33,7 @@ use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::git::tags::TagRef;
 use crate::git::worktrees::Worktree;
+use crate::gitignore::IgnoreAdded;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -542,6 +544,28 @@ pub enum AppIntent {
     ClearCopied,
     /// Cherry-pick the copied commits onto the current branch.
     PasteCommits,
+    /// Put the selected commit's hash, subject or message on the system
+    /// clipboard.
+    CopyCommitText(CopyWhat),
+    /// A commit's full message was read to copy it; `tag` says which read.
+    CommitMessageLoaded {
+        tag: Tag,
+        oid: CommitId,
+        result: Result<String, String>,
+    },
+    /// The text could not be sent to the clipboard, and why.
+    CopyFailed(String),
+    /// Ask which pattern to add to `.gitignore` for the selected
+    /// untracked file, offering the one that matches exactly it.
+    OpenIgnore,
+    /// The pattern the `.gitignore` prompt was accepted with.
+    IgnorePatternAnswered(String),
+    /// The pattern was added to `.gitignore`, or was there already, or
+    /// why not. The text is the pattern as shown.
+    IgnoreWritten {
+        tag: Tag,
+        result: Result<IgnoreAdded, String>,
+    },
     /// Reset the current branch to the selected commit. A hard reset asks
     /// first.
     ResetTo(ResetMode),

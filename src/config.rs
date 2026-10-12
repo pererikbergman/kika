@@ -18,6 +18,7 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! tool = "difft --color=always"    # a display-only tool, run on OLD NEW
 //! [forge]
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! ```
@@ -111,6 +112,8 @@ pub struct Loaded {
     pub diff_pager: Option<String>,
     /// The global `[forge] github` hosts; empty keeps the forge off.
     pub forge_hosts: Vec<ForgeHost>,
+    /// The global `[diff] tool` command, checked by `parse_command`.
+    pub diff_tool: Option<String>,
     pub errors: Vec<ConfigError>,
 }
 
@@ -121,6 +124,7 @@ struct GlobalSettings {
     watch: WatchConfig,
     diff_pager: Option<String>,
     forge_hosts: Vec<ForgeHost>,
+    diff_tool: Option<String>,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -154,6 +158,7 @@ struct ForgeTable {
 #[serde(deny_unknown_fields)]
 struct DiffTable {
     pager: Option<String>,
+    tool: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -183,14 +188,24 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         watch: DEFAULT_WATCH,
         diff_pager: None,
         forge_hosts: Vec::new(),
+        diff_tool: None,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
     if let Some(global) = global {
-        (loaded.keymap, loaded.watch, loaded.diff_pager) =
-            (global.keymap, global.watch, global.diff_pager);
+        (
+            loaded.keymap,
+            loaded.watch,
+            loaded.diff_pager,
+            loaded.diff_tool,
+        ) = (
+            global.keymap,
+            global.watch,
+            global.diff_pager,
+            global.diff_tool,
+        );
         loaded.forge_hosts = global.forge_hosts;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
@@ -270,7 +285,8 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
         .map_err(|_| "not UTF-8 text".to_string())
 }
 
-/// `keymap` and `watch` with the global file's text applied, and its pager.
+/// `keymap` and `watch` with the global file's text applied, and its
+/// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
     let keymap = Keymap::build(keymap, &file.keys, Trust::Global)?.with_commands(&file.commands)?;
@@ -288,6 +304,9 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
     if let Some(pager) = &file.diff.pager {
         parse_command(pager).map_err(|e| format!("diff.pager: {e}"))?;
     }
+    if let Some(tool) = &file.diff.tool {
+        parse_command(tool).map_err(|e| format!("diff.tool: {e}"))?;
+    }
     let forge_hosts = file
         .forge
         .github
@@ -298,6 +317,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        diff_tool: file.diff.tool,
         forge_hosts,
     })
 }
@@ -515,6 +535,7 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                diff_tool: None,
                 forge_hosts: vec![],
                 errors: vec![],
             }
@@ -850,5 +871,44 @@ output = "none"
         assert_eq!(loaded.diff_pager, Some("delta".into()));
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+    }
+
+    #[test]
+    fn the_global_file_names_a_diff_tool_and_a_bad_one_is_refused() {
+        let tool =
+            |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.diff_tool);
+        assert_eq!(
+            tool("[diff]\ntool = \"difft --color=always\"\n"),
+            Ok(Some("difft --color=always".into()))
+        );
+        assert_eq!(tool(""), Ok(None));
+        assert_eq!(
+            tool("[diff]\ntool = \"difft | less\"\n"),
+            Err("diff.tool: The command needs a shell, which is never used".into())
+        );
+        let files = Files::new("tool");
+        files.global("[diff]\ntool = \"difft --color=always\"\n");
+        assert_eq!(files.load().diff_tool, Some("difft --color=always".into()));
+        files.global("[diff]\ntool = \"difft | less\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
+    }
+
+    #[test]
+    fn only_the_global_file_names_a_diff_tool() {
+        let files = Files::new("repo-tool");
+        files
+            .global("[diff]\ntool = \"difft\"\n")
+            .repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, Some("difft".into()));
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+
+        files.global("").repo("[diff]\ntool = \"x\"\n");
+        let loaded = files.load();
+        assert_eq!(loaded.diff_tool, None);
+        assert_eq!(loaded.errors.len(), 1);
     }
 }

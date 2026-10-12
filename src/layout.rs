@@ -121,6 +121,19 @@ pub fn screen_layout(area: Rect) -> [Rect; 2] {
 const COLLAPSED: u16 = 3;
 /// Rows the expanded panel keeps before the collapsed ones get theirs.
 const EXPANDED_MIN: u16 = 5;
+/// Rows the expanded panel keeps before the collapsed ones get a border:
+/// about 12 entries inside its own border, so a border on the others never
+/// costs the panel being read most of its list.
+const EXPANDED_ROOMY: u16 = 14;
+
+/// Rows the expanded panel must keep for collapsed panels of `rows` rows.
+fn expanded_floor(rows: u16) -> u16 {
+    if rows == COLLAPSED {
+        EXPANDED_ROOMY
+    } else {
+        EXPANDED_MIN
+    }
+}
 
 /// A left column beside the diff. `focused` decides the split in Half and
 /// Full; `expanded` is the side panel that fills the column. In Normal and
@@ -169,9 +182,10 @@ pub fn workspace_layout(
 
 /// Rows for each side panel in a column `height` rows tall; 0 is hidden.
 /// The expanded panel takes what the others leave. They collapse to 3 rows
-/// (border and a line), then 2 (title and a line), then 1 (the title on the
-/// top border), then the ones farthest from the expanded panel go. The
-/// expanded one never goes.
+/// (border and a line) only while the expanded panel still keeps about 12
+/// content rows, then 2 (title and a line), then 1 (the title on the top
+/// border), then the ones farthest from the expanded panel go. The expanded
+/// one never goes.
 pub fn left_heights(height: u16, expanded: SidePanel) -> [u16; 5] {
     let others = SidePanel::ALL.len() as u16 - 1;
     let mut heights = [0; 5];
@@ -179,7 +193,7 @@ pub fn left_heights(height: u16, expanded: SidePanel) -> [u16; 5] {
     // has three useful sizes: border and line, title and line, title.
     let collapsed = (1..=COLLAPSED)
         .rev()
-        .find(|&rows| height >= others * rows + EXPANDED_MIN)
+        .find(|&rows| height >= others * rows + expanded_floor(rows))
         .unwrap_or(1);
     // Nearest first; on a tie the one above stays, so Status outlasts the
     // panels below Files.
@@ -227,8 +241,49 @@ mod tests {
 
     #[test]
     fn a_tall_column_collapses_the_others_to_three_rows() {
-        assert_eq!(left_heights(23, SidePanel::Files), [3, 11, 3, 3, 3]);
-        assert_eq!(left_heights(17, SidePanel::Stash), [3, 3, 3, 3, 5]);
+        assert_eq!(left_heights(26, SidePanel::Files), [3, 14, 3, 3, 3]);
+        assert_eq!(left_heights(40, SidePanel::Files), [3, 28, 3, 3, 3]);
+    }
+
+    #[test]
+    fn an_80x24_column_keeps_twelve_rows_for_the_expanded_panel() {
+        // 23 rows: the 3-row form would leave the expanded panel 9 lines.
+        assert_eq!(left_heights(23, SidePanel::Files), [2, 15, 2, 2, 2]);
+        assert_eq!(left_heights(25, SidePanel::Files), [2, 17, 2, 2, 2]);
+        assert_eq!(left_heights(17, SidePanel::Stash), [2, 2, 2, 2, 9]);
+    }
+
+    #[test]
+    fn the_three_row_form_only_comes_with_fourteen_expanded_rows() {
+        for height in 0..60 {
+            for expanded in SidePanel::ALL {
+                let heights = left_heights(height, expanded);
+                let has_three = SidePanel::ALL
+                    .iter()
+                    .any(|&p| p != expanded && heights[p.index()] == COLLAPSED);
+                if has_three {
+                    assert!(heights[expanded.index()] >= 14, "{height} {expanded:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_collapsed_size_never_grows_as_the_column_shrinks() {
+        for expanded in SidePanel::ALL {
+            let size = |height| {
+                let heights = left_heights(height, expanded);
+                SidePanel::ALL
+                    .iter()
+                    .filter(|&&p| p != expanded)
+                    .map(|p| heights[p.index()])
+                    .max()
+                    .unwrap_or(0)
+            };
+            for height in 1..60 {
+                assert!(size(height - 1) <= size(height), "{height} {expanded:?}");
+            }
+        }
     }
 
     #[test]
@@ -314,10 +369,10 @@ mod tests {
             ScreenMode::Normal,
         );
         let rect = |side| layout.rect(Panel::Side(side)).unwrap();
-        assert_eq!(rect(SidePanel::Status), Rect::new(0, 0, 30, 3));
-        assert_eq!(rect(SidePanel::Files), Rect::new(0, 3, 30, 11));
-        assert_eq!(rect(SidePanel::Branches), Rect::new(0, 14, 30, 3));
-        assert_eq!(rect(SidePanel::Stash), Rect::new(0, 20, 30, 3));
+        assert_eq!(rect(SidePanel::Status), Rect::new(0, 0, 30, 2));
+        assert_eq!(rect(SidePanel::Files), Rect::new(0, 2, 30, 15));
+        assert_eq!(rect(SidePanel::Branches), Rect::new(0, 17, 30, 2));
+        assert_eq!(rect(SidePanel::Stash), Rect::new(0, 21, 30, 2));
     }
 
     #[test]
