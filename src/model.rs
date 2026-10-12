@@ -12508,7 +12508,9 @@ mod tests {
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
-        let keymap = Keymap::default().with_commands(tables).unwrap();
+        let (keymap, _) = Keymap::default()
+            .with_commands(tables, &Default::default())
+            .unwrap();
         let repo = state.repo.clone();
         state.update(AppIntent::ConfigLoaded {
             repo,

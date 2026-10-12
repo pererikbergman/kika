@@ -730,6 +730,16 @@ impl Keymap {
         layer: &KeysTable,
         trust: Trust,
     ) -> Result<(Keymap, Vec<String>), String> {
+        Self::build_layer(base, layer, trust).map(|(keymap, dropped, _)| (keymap, dropped))
+    }
+
+    /// [`Keymap::build`], with the ids whose change `layer` made and kept
+    /// after the drops: the global file's commands give way to those.
+    pub fn build_layer(
+        base: &Keymap,
+        layer: &KeysTable,
+        trust: Trust,
+    ) -> Result<(Keymap, Vec<String>, BTreeSet<&'static str>), String> {
         let mut keymap = base.clone();
         let mut layer_ids = BTreeSet::new();
         for (id, texts) in layer {
@@ -757,7 +767,7 @@ impl Keymap {
         if quit.is_some_and(|b| keymap.keys(b).is_empty()) {
             return Err("\"global.quit\" needs at least one key".to_string());
         }
-        Ok((keymap, dropped))
+        Ok((keymap, dropped, layer_ids))
     }
 
     /// Undo the overrides in `layer_ids`, the ones the layer being built
@@ -799,21 +809,121 @@ impl Keymap {
     }
 
     /// `self` with the global file's `[[commands]]`, in place of any it
-    /// had. Fails on a table that does not parse, a command key that
-    /// clashes with another key of its scope, or one that would hide a
-    /// locked binding in an enclosing scope, such as `q` hiding quit.
-    pub fn with_commands(self, tables: &[CommandTable]) -> Result<Keymap, String> {
+    /// had, and one message per command dropped. A command on a key that
+    /// a binding in `kept`, the ones the same file's `[keys]` moved, holds
+    /// in the command's scope is dropped alone: the user's newer intent is
+    /// usually the binding, and one stale command should not cost the rest
+    /// of the file. Fails on a table that does not parse, a command that
+    /// would hide a locked binding in an enclosing scope, such as `q`
+    /// hiding quit, or any other clash in a command's scope. Messages
+    /// number commands by their place in the file, dropped ones included.
+    pub fn with_commands(
+        self,
+        tables: &[CommandTable],
+        kept: &BTreeSet<&'static str>,
+    ) -> Result<(Keymap, Vec<String>), String> {
         let commands = tables
             .iter()
             .enumerate()
             .map(|(i, table)| CustomCommand::parse(table, i + 1))
             .collect::<Result<Vec<_>, _>>()?;
         let keymap = Keymap { commands, ..self };
-        keymap.check_scopes()?;
-        for (i, command) in keymap.commands.iter().enumerate() {
+        // Before any drop, so a drop can never hide this refusal.
+        keymap.check_locked_commands()?;
+        let dropping = keymap.commands_on_kept_keys(kept)?;
+        let mut messages = Vec::new();
+        let mut numbers = Vec::new();
+        let mut commands = Vec::new();
+        for (i, (command, drop)) in keymap.commands.into_iter().zip(dropping).enumerate() {
+            match drop {
+                Some(clash) => messages.push(format!(
+                    "{clash} (\"{}\"); command {} was dropped",
+                    command.description,
+                    i + 1
+                )),
+                None => {
+                    numbers.push(i);
+                    commands.push(command);
+                }
+            }
+        }
+        let keymap = Keymap {
+            commands,
+            overrides: keymap.overrides,
+        };
+        if let Some(clash) = keymap.clashes().first() {
+            // Named by their place in the file, not in what is left.
+            let renumber = |owner| match owner {
+                Owner::Command(i) => Owner::Command(numbers[i]),
+                binding => binding,
+            };
+            let clash = Clash {
+                a: renumber(clash.a),
+                b: renumber(clash.b),
+                ..*clash
+            };
+            return Err(clash.to_string());
+        }
+        Ok((keymap, messages))
+    }
+
+    /// For each command, the clash that drops it: one of its keys is held
+    /// in its scope by a binding in `kept`. A command that also clashes with
+    /// a binding the layer did not move fails the file instead, so the drop
+    /// cannot hide that clash. Bindings are indexed by scope and key code,
+    /// so the work stays linear in the number of keys.
+    fn commands_on_kept_keys(
+        &self,
+        kept: &BTreeSet<&'static str>,
+    ) -> Result<Vec<Option<Clash<'static>>>, String> {
+        let mut held: HashMap<(KeyScope, KeyCode), Vec<(&KeyPattern, &'static Binding)>> =
+            HashMap::new();
+        for binding in REGISTRY {
+            for key in self.keys(binding) {
+                held.entry((binding.scope, key.code))
+                    .or_default()
+                    .push((key, binding));
+            }
+        }
+        let mut dropping = Vec::with_capacity(self.commands.len());
+        for (i, command) in self.commands.iter().enumerate() {
+            let mut on_kept = None;
+            let mut on_other = None;
+            for key in &command.keys {
+                let holders = held.get(&(command.scope, key.code)).into_iter().flatten();
+                for &(_, binding) in holders.filter(|(k, _)| k.overlaps(key)) {
+                    let clash = Clash {
+                        a: Owner::Binding(binding),
+                        b: Owner::Command(i),
+                        key: *key,
+                        // Only shown, never ordered against another clash.
+                        at: (0, 0),
+                    };
+                    let slot = if kept.contains(binding.id) {
+                        &mut on_kept
+                    } else {
+                        &mut on_other
+                    };
+                    slot.get_or_insert(clash);
+                }
+                if on_kept.is_some() && on_other.is_some() {
+                    break;
+                }
+            }
+            if let (Some(_), Some(clash)) = (on_kept, on_other) {
+                return Err(clash.to_string());
+            }
+            dropping.push(on_kept);
+        }
+        Ok(dropping)
+    }
+
+    /// No command key may hide a locked binding of an enclosing scope.
+    fn check_locked_commands(&self) -> Result<(), String> {
+        for (i, command) in self.commands.iter().enumerate() {
             let locked = REGISTRY.iter().filter(|b| REPO_LOCKED.contains(&b.id));
             for binding in locked.filter(|b| command.scope.chain().any(|s| s == b.scope)) {
-                let hidden = keymap
+                let hidden = self
                     .keys(binding)
                     .iter()
                     .find(|k| command.keys.iter().any(|key| key.overlaps(k)));
@@ -827,7 +937,7 @@ impl Keymap {
                 }
             }
         }
-        Ok(keymap)
+        Ok(())
     }
 
     /// Every key in force with its owner and scope: the registry's, then
@@ -10773,11 +10883,115 @@ mod tests {
     }
 
     fn commands(tables: &[CommandTable]) -> Result<Keymap, String> {
-        Keymap::default().with_commands(tables)
+        let (keymap, dropped) = Keymap::default().with_commands(tables, &BTreeSet::new())?;
+        assert_eq!(dropped, Vec::<String>::new(), "no layer ids, no drops");
+        Ok(keymap)
     }
 
     fn files_command(keys: &[&str]) -> CommandTable {
         test_table(Panel::Files, keys, &["true"], &[], OutputMode::None)
+    }
+
+    /// A global layer's `[keys]` and `[[commands]]`, loaded as the global
+    /// file is.
+    fn global_with_commands(
+        entries: &[(&str, &[&str])],
+        tables: &[CommandTable],
+    ) -> Result<(Keymap, Vec<String>), String> {
+        let (keymap, dropped, kept) =
+            Keymap::build_layer(&Keymap::default(), &layer(entries), Trust::Global)?;
+        assert_eq!(dropped, Vec::<String>::new(), "a layer without clashes");
+        keymap.with_commands(tables, &kept)
+    }
+
+    #[test]
+    fn a_command_on_a_key_the_layer_gave_a_binding_is_dropped_alone() {
+        let (keymap, dropped) = global_with_commands(
+            &[("files.stage", &["ctrl-t"])],
+            &[
+                files_command(&["ctrl-t"]),
+                files_command(&["ctrl-y"]),
+                files_command(&["ctrl-t"]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            dropped,
+            [
+                r#"key "ctrl-t" is bound to both "files.stage" and command 1 ("Run true"); command 1 was dropped"#,
+                r#"key "ctrl-t" is bound to both "files.stage" and command 3 ("Run true"); command 3 was dropped"#,
+            ]
+        );
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            [parse_key("ctrl-t").unwrap()]
+        );
+        let [command] = keymap.commands.as_slice() else {
+            panic!("expected one command: {:?}", keymap.commands);
+        };
+        assert_eq!(command.keys, [parse_key("ctrl-y").unwrap()]);
+    }
+
+    #[test]
+    fn a_command_clash_the_layer_did_not_make_still_fails_with_the_file_numbers() {
+        let moved = &[("files.stage", &["ctrl-t"][..])];
+        // Command 1 is dropped; command 3 is on a default key.
+        let e = global_with_commands(
+            moved,
+            &[
+                files_command(&["ctrl-t"]),
+                files_command(&["ctrl-y"]),
+                files_command(&["c"]),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(
+            e,
+            r#"key "c" is bound to both "files.commit" and command 3"#
+        );
+        // Two commands on a key no `[keys]` entry holds.
+        let e = global_with_commands(
+            moved,
+            &[
+                files_command(&["ctrl-t"]),
+                files_command(&["X"]),
+                files_command(&["X"]),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(e, r#"key "X" is bound to both command 2 and command 3"#);
+        // On the moved key and on a default key: the drop cannot hide that.
+        let e = global_with_commands(moved, &[files_command(&["ctrl-t", "c"])]).unwrap_err();
+        assert_eq!(
+            e,
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        // On the moved key and hiding quit: the locked check runs first.
+        let e = global_with_commands(moved, &[files_command(&["ctrl-t", "q"])]).unwrap_err();
+        assert_eq!(e, r#"command 1: key "q" would hide "global.quit""#);
+    }
+
+    /// A global file may hold 64 KiB of commands, every one on the key a
+    /// `[keys]` entry holds. Each is dropped once, without comparing every
+    /// pair of them.
+    #[test]
+    fn hundreds_of_commands_on_a_moved_key_are_dropped_quickly_with_bounded_work() {
+        let one = "[[commands]]\ncontext = \"files\"\nkeys = [\"ctrl-t\"]\ndescription = \"d\"\ncommand = [\"true\"]\n";
+        let count = 64 * 1024 / one.len();
+        assert!(count > 500, "{count}");
+        let tables = vec![files_command(&["ctrl-t"]); count];
+        let started = std::time::Instant::now();
+        let (keymap, dropped) =
+            global_with_commands(&[("files.stage", &["ctrl-t"])], &tables).unwrap();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert_eq!(dropped.len(), count);
+        assert!(dropped[count - 1].ends_with(&format!("command {count} was dropped")));
+        assert!(keymap.commands.is_empty());
+        assert_eq!(
+            keymap.keys(binding("files.stage")),
+            [parse_key("ctrl-t").unwrap()]
+        );
     }
 
     #[test]
@@ -10795,7 +11009,11 @@ mod tests {
         assert!(commands(&[files_command(&["X"]), diff]).is_ok());
         // A key the global file moved away is free for a command.
         let moved = remap(&[("files.commit", &["C"])]);
-        assert!(moved.with_commands(&[files_command(&["c"])]).is_ok());
+        assert!(
+            moved
+                .with_commands(&[files_command(&["c"])], &BTreeSet::new())
+                .is_ok()
+        );
     }
 
     #[test]

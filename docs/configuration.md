@@ -68,7 +68,9 @@ Settings are applied in three layers, each on top of the one before:
 3. the repository's `.kika.toml`.
 
 A `[keys]` entry that binds a key already taken in the same scope is dropped
-on its own (see [`[keys]`](#keys)); the rest of the file applies. A file with
+on its own (see [`[keys]`](#keys)), and so is a global `[[commands]]` entry
+on a key the global file's own `[keys]` gives a binding (see
+[Keys](#keys-1) under Commands); the rest of the file applies. A file with
 any other error is ignored as a whole, and the layer below it applies. Kika
 shows the error so you can fix it. Unknown fields and unknown binding ids
 count as errors, so a typo is reported instead of silently doing nothing.
@@ -97,11 +99,11 @@ and lists the keys it should answer to:
   dropped. A key the layer below holds, such as a default binding, a global
   binding or a global command when the clash is in `.kika.toml`, always stays
   where it is. Kika shows one error per dropped entry, naming the key and both
-  bindings. Every other problem, such as an unknown id, a key that does not
-  parse, `global.quit = []`, a `.kika.toml` that touches a locked binding,
-  or a key the global file gives both a binding and one of its own
-  `[[commands]]`, still ignores the whole file, even when the same file has a
-  droppable clash.
+  bindings. In the global file, a key it gives both a binding and one of its
+  own `[[commands]]` stays with the binding: the command is dropped instead.
+  Every other problem, such as an unknown id, a key that does not parse,
+  `global.quit = []` or a `.kika.toml` that touches a locked binding, still
+  ignores the whole file, even when the same file has a droppable clash.
 
 Key names:
 
@@ -704,9 +706,17 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   and is an error.
 - A repository's `.kika.toml` cannot move a binding onto a command's key:
   that entry is dropped, and the command keeps the key.
-- In the global file, a command key that clashes with a binding (a default
-  one, or one the same file's `[keys]` moved there) or with another command
-  ignores the whole global file. Nothing is dropped on its own in that case.
+- In the global file, a command on a key that the same file's `[keys]` gives
+  a binding in the command's scope is dropped on its own: the binding keeps
+  the key, and the other commands and the rest of the file apply. Kika shows
+  one error per dropped command, naming the key, the binding and the command
+  by its place in the file and its description, for example `key "ctrl-t" is
+  bound to both "files.stage" and command 1 ("Copy the file to…"); command 1
+  was dropped`. If several commands share that key, all of them are dropped.
+- A global command key that clashes with a default binding the file did not
+  move, or with another command, still ignores the whole global file, and so
+  does one that would hide a locked binding, even when the same command or
+  file also has a droppable clash.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
 - A `"popup"` or `"none"` command that is still running can be stopped with

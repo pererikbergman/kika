@@ -744,6 +744,48 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_command_is_named_with_its_description_made_safe() {
+        use crate::config::ConfigError;
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::intent::AppIntent;
+        use crate::keymap::{Keymap, KeysTable, Trust};
+        let keys: KeysTable = [("files.stage".to_string(), vec!["ctrl-t".to_string()])].into();
+        let (keymap, _, kept) =
+            Keymap::build_layer(&Keymap::default(), &keys, Trust::Global).unwrap();
+        let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::None);
+        table.description = "wipe\u{1b}[2J".into();
+        let (keymap, dropped) = keymap.with_commands(&[table], &kept).unwrap();
+        assert!(keymap.commands.is_empty());
+        let [message] = dropped.as_slice() else {
+            panic!("expected one drop: {dropped:?}");
+        };
+        assert!(message.contains('\u{1b}'), "the message keeps the raw text");
+
+        let mut state = workspace(&["a.rs"]);
+        state.update(AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![ConfigError {
+                path: "/home/me/.config/kika/config.toml".into(),
+                message: message.clone(),
+                dropped_binding: true,
+            }],
+        });
+        let (buffer, rows) = draw(&state, 120, 24);
+        assert!(contains(&rows, " Config error "), "{rows:#?}");
+        assert!(contains(&rows, r#""files.stage""#), "{rows:#?}");
+        assert!(contains(&rows, "command 1"), "{rows:#?}");
+        assert!(contains(&rows, "wipe"), "{rows:#?}");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\u{1b}')),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn the_confirm_asks_and_the_bar_offers_yes_and_no() {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Confirm(ConfirmKind::Quit)];
