@@ -208,6 +208,7 @@ mod tests {
                 mode: crate::git::ops::StashMode::All,
                 message: None,
                 paths: vec![],
+                restore: vec![],
             },
             GitOp::StashApply(stash()),
             GitOp::StashPop(stash()),

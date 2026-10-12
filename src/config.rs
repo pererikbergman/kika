@@ -25,16 +25,18 @@
 //! github = ["github.com"]   # absent or empty = off. The opt-in to asking GitHub.
 //! gitlab = ["gitlab.com"]   # only to build URLs; never contacted
 //! browser = ["open"]        # argv that opens a URL, given as its last argument
+//! [forge.allow]
+//! "github.com" = ["acme", "me/kika"]  # absent = every repository on the host
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
 //! [clipboard]
 //! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
 //! ```
 //!
-//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[clipboard]`
-//! are read from the global file only, at startup. `[display] emoji_zwj_terminals` is off
-//! (empty) by default; [`emoji_zwj`] matches it against the running
-//! terminal once.
+//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and
+//! `[clipboard]` are read from the global file only, at startup.
+//! `[display] emoji_zwj_terminals` is off (empty) by default;
+//! [`emoji_zwj`] matches it against the running terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -43,12 +45,17 @@
 //! file, not a symlink. Either file must be a regular file of at most
 //! 64 KiB. A `[keys]` entry that binds a key twice in one scope is dropped
 //! alone: its binding keeps the keys of the layer below, and the rest of the
-//! file applies. A file with any other error is ignored as a whole, and the
+//! file applies. A global `[[commands]]` entry on a key the same file's
+//! `[keys]` gives a binding of its scope is dropped alone too, whatever its
+//! other keys: the binding keeps the key. The commands left must pass every
+//! other check. A file with any other error, a command left clashing with a
+//! default key or another command included, is ignored as a whole, and the
 //! layer below it applies.
 //!
 //! The user's guide to both files, with every binding id, is
 //! `docs/configuration.md`.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File};
@@ -61,6 +68,7 @@ use serde::Deserialize;
 use crate::custom_command::CommandTable;
 use crate::external_diff::{check_argv, parse_command};
 use crate::forge::ForgeHost;
+use crate::forge::allow::AllowRule;
 use crate::git::diff::EmojiZwj;
 use crate::keymap::{Keymap, KeysTable, Trust};
 use crate::watch::{DEFAULT_WATCH, WatchConfig};
@@ -111,7 +119,7 @@ fn global_path(var: impl Fn(&str) -> Option<std::ffi::OsString>, windows: bool) 
 pub struct ConfigError {
     pub path: String,
     pub message: String,
-    /// Only one key change was dropped and the rest of the file applied;
+    /// Only one key change or command was dropped and the rest of the file applied;
     /// `false` means the whole file was ignored.
     pub dropped_binding: bool,
 }
@@ -196,9 +204,10 @@ struct CommitTable {
     hooks_detached: Option<bool>,
 }
 
-/// The hosts Kika may ask about pull requests, by forge, and the program
-/// that opens a forge page. Only here, in the user's own file: a cloned
-/// repository can never make Kika contact a host or run a program.
+/// The hosts Kika may ask about pull requests, by forge, the repositories
+/// on them it may ask about, and the program that opens a forge page.
+/// Only here, in the user's own file: a cloned repository can never make
+/// Kika contact a host, widen what it asks about, or run a program.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForgeTable {
@@ -208,6 +217,10 @@ struct ForgeTable {
     #[serde(default)]
     gitlab: Vec<String>,
     browser: Option<Vec<String>>,
+    /// Per `github` host, the owners and `owner/repo`s `gh` may be asked
+    /// about; a host without a key allows all of them.
+    #[serde(default)]
+    allow: BTreeMap<String, Vec<String>>,
 }
 
 /// The program that copies text, given it on stdin. Only here, in the
@@ -301,8 +314,8 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
     loaded
 }
 
-/// Record each of `messages`, a `[keys]` entry of the file at `path`
-/// dropped while the rest of the file applied.
+/// Record each of `messages`, a `[keys]` entry or a command of the file
+/// at `path` dropped while the rest of the file applied.
 fn dropped(path: &Option<PathBuf>, messages: Vec<String>, errors: &mut Vec<ConfigError>) {
     let Some(path) = path.as_deref() else {
         return;
@@ -387,8 +400,9 @@ fn read(path: &Path, trust: Trust) -> Result<Option<String>, String> {
 /// pager and tool.
 fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<GlobalSettings, String> {
     let file = parse_global(text)?;
-    let (keymap, dropped) = Keymap::build(keymap, &file.keys, Trust::Global)?;
-    let keymap = keymap.with_commands(&file.commands)?;
+    let (keymap, mut dropped, kept) = Keymap::build_layer(keymap, &file.keys, Trust::Global)?;
+    let (keymap, commands_dropped) = keymap.with_commands(&file.commands, &kept)?;
+    dropped.extend(commands_dropped);
     let seconds = |name: &str, value: Option<u64>| match value {
         // A zero interval would poll without pause.
         Some(0) => Err(format!("watch.{name} must be at least 1 second")),
@@ -412,7 +426,8 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
             .map(|host| ForgeHost::parse(host).map_err(|e| format!("forge.{key}: {e}")))
             .collect::<Result<Vec<_>, _>>()
     };
-    let forge_hosts = hosts(&file.forge.github, "github")?;
+    let forge_hosts = attach_allow(hosts(&file.forge.github, "github")?, &file.forge.allow)
+        .map_err(|e| format!("forge.allow: {e}"))?;
     let forge_gitlab_hosts = hosts(&file.forge.gitlab, "gitlab")?;
     let browser = file
         .forge
@@ -442,6 +457,35 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         emoji_zwj_terminals,
         clipboard_command,
     })
+}
+
+/// `github` with each `[forge.allow]` list attached to its host, and to
+/// every copy of it should the host be listed twice. A key must name one
+/// of `github`: a list for a host that is never asked would look like a
+/// limit while it limits nothing.
+fn attach_allow(
+    github: Vec<ForgeHost>,
+    allow: &BTreeMap<String, Vec<String>>,
+) -> Result<Vec<ForgeHost>, String> {
+    let mut lists = BTreeMap::new();
+    for (key, entries) in allow {
+        let name = ForgeHost::parse(key)?;
+        if !github.iter().any(|h| h.as_str() == name.as_str()) {
+            return Err(format!("{key:?} is not one of the forge.github hosts"));
+        }
+        let rules = entries
+            .iter()
+            .map(|entry| AllowRule::parse(entry))
+            .collect::<Result<Vec<_>, _>>()?;
+        lists.insert(name.as_str().to_string(), rules);
+    }
+    Ok(github
+        .into_iter()
+        .map(|host| match lists.get(host.as_str()) {
+            Some(rules) => host.with_allow(rules.clone()),
+            None => host,
+        })
+        .collect())
 }
 
 /// Whether the running terminal is one of `terminals`, the ones the user
@@ -491,6 +535,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+    use crate::forge::ForgeRepo;
+    use crate::forge::allow::AllowRule;
     use crate::keymap::{KeyPattern, parse_key, registry};
 
     fn keys_of<'a>(keymap: &'a Keymap, id: &str) -> &'a [KeyPattern] {
@@ -942,22 +988,171 @@ output = "none"
         assert!(typo.contains("unknown field `shell`"), "{typo}");
     }
 
+    /// The global `[keys]` lines that move `files.stage` onto `ctrl-t`,
+    /// `COPY_COMMAND`'s key.
+    const STAGE_ON_CTRL_T: &str =
+        "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n";
+
+    /// `STAGE_ON_CTRL_T` without moving `files.commit` off `c`.
+    const ONLY_STAGE_ON_CTRL_T: &str = "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n";
+
+    const COPY_DROPPED: &str = r#"key "ctrl-t" is bound to both "files.stage" and command 1 ("Copy the file to…"); command 1 was dropped"#;
+
     #[test]
-    fn a_global_binding_moved_onto_its_own_command_key_ignores_the_file() {
+    fn a_global_command_on_a_key_its_own_file_moved_a_binding_onto_is_dropped_alone() {
         let files = Files::new("global-onto-command");
         files.global(&format!(
-            "[keys]\n\"files.stage\" = [\"ctrl-t\"]\n\"files.commit\" = [\"C\"]\n{COPY_COMMAND}"
+            "{STAGE_ON_CTRL_T}[watch]\nfetch = 300\n{COPY_COMMAND}"
         ));
         let loaded = files.load();
         assert_eq!(
             loaded.errors,
             [ConfigError {
                 path: files.dir.join("config.toml").display().to_string(),
-                message: r#"key "ctrl-t" is bound to both "files.stage" and command 1"#.into(),
+                message: COPY_DROPPED.into(),
+                dropped_binding: true,
+            }]
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("C")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        assert_eq!(loaded.keymap.commands, []);
+    }
+
+    #[test]
+    fn a_global_command_on_a_free_key_survives_its_neighbours_drop() {
+        let files = Files::new("global-onto-command-free");
+        files.global(&format!(
+            "{STAGE_ON_CTRL_T}{COPY_COMMAND}{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, [COPY_DROPPED]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+        // It still runs, and the help menu lists it.
+        use crate::keymap::{KeyPress, KeyScope, Resolution, available_commands, resolve};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let state = crate::model::AppState::new(crate::model::Context::Workspace);
+        let ctrl_y = KeyPress::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            resolve(registry(), &loaded.keymap, KeyScope::Files, &state, ctrl_y),
+            Resolution::Command(0)
+        ));
+        let listed = available_commands(&loaded.keymap, KeyScope::Files);
+        assert_eq!(listed, [&loaded.keymap.commands[0]]);
+    }
+
+    #[test]
+    fn a_repository_file_applies_over_a_global_file_with_a_dropped_command() {
+        let files = Files::new("global-onto-command-repo");
+        files
+            .global(&format!(
+                "{STAGE_ON_CTRL_T}{COPY_COMMAND}{}",
+                COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+            ))
+            .repo("[keys]\n\"files.commit\" = [\"K\"]\n");
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, [COPY_DROPPED]);
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("K")]);
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+    }
+
+    #[test]
+    fn every_global_command_on_a_moved_key_is_dropped_with_its_own_message() {
+        let files = Files::new("global-onto-commands");
+        files.global(&format!("{STAGE_ON_CTRL_T}{COPY_COMMAND}{COPY_COMMAND}"));
+        let loaded = files.load();
+        let messages: Vec<&str> = loaded.errors.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                COPY_DROPPED,
+                &COPY_DROPPED.replace("command 1", "command 2"),
+            ]
+        );
+        assert!(loaded.errors.iter().all(|e| e.dropped_binding));
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(loaded.keymap.commands, []);
+    }
+
+    #[test]
+    fn a_later_clash_after_a_drop_names_the_command_by_its_place_in_the_file() {
+        let files = Files::new("global-onto-command-numbers");
+        files.global(&format!(
+            "{ONLY_STAGE_ON_CTRL_T}{COPY_COMMAND}{}{}",
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y"),
+            COPY_COMMAND.replace("ctrl-t", "c")
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: r#"key "c" is bound to both "files.commit" and command 3"#.into(),
                 dropped_binding: false,
             }]
         );
         assert_eq!(loaded.keymap, Keymap::default());
+    }
+
+    #[test]
+    fn a_command_on_a_moved_key_and_a_default_key_is_dropped_and_the_file_loads() {
+        let files = Files::new("global-onto-command-and-default");
+        files.global(&format!(
+            "{ONLY_STAGE_ON_CTRL_T}[watch]\nfetch = 300\n{}{}",
+            COPY_COMMAND.replace(r#"["ctrl-t"]"#, r#"["ctrl-t", "c"]"#),
+            COPY_COMMAND.replace("ctrl-t", "ctrl-y")
+        ));
+        let loaded = files.load();
+        assert_eq!(
+            loaded.errors,
+            [ConfigError {
+                path: files.dir.join("config.toml").display().to_string(),
+                message: concat!(
+                    r#"key "ctrl-t" is bound to both "files.stage" and command 1, "#,
+                    r#"and key "c" is bound to both "files.commit" and command 1 "#,
+                    r#"("Copy the file to…"); command 1 was dropped"#
+                )
+                .into(),
+                dropped_binding: true,
+            }]
+        );
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("ctrl-t")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
+        assert_eq!(loaded.watch.fetch, Some(Duration::from_secs(300)));
+        assert_eq!(loaded.keymap.commands.len(), 1);
+        assert_eq!(loaded.keymap.commands[0].keys, [key("ctrl-y")]);
+    }
+
+    #[test]
+    fn a_droppable_command_does_not_save_a_file_with_another_error() {
+        let err = |extra_keys: &str, extra: &str| {
+            global(&format!(
+                "{ONLY_STAGE_ON_CTRL_T}{extra_keys}{extra}{COPY_COMMAND}"
+            ))
+            .unwrap_err()
+        };
+        assert_eq!(
+            err("", &COPY_COMMAND.replace("ctrl-t", "c")),
+            r#"key "c" is bound to both "files.commit" and command 1"#
+        );
+        assert_eq!(
+            err("", &COPY_COMMAND.replace("ctrl-t", "q")),
+            r#"command 1: key "q" would hide "global.quit""#
+        );
+        assert_eq!(
+            err("\"global.quit\" = []\n", ""),
+            r#""global.quit" needs at least one key"#
+        );
+        assert_eq!(
+            err("\"files.nope\" = [\"x\"]\n", ""),
+            r#"unknown binding "files.nope""#
+        );
     }
 
     #[test]
@@ -1216,6 +1411,122 @@ output = "none"
                 ForgeHost::parse("github.example.com").unwrap()
             ]
         );
+    }
+
+    #[test]
+    fn the_global_file_narrows_a_github_host_to_listed_owners() {
+        let hosts = |text: &str| {
+            apply_global(text, &Keymap::default(), DEFAULT_WATCH).map(|g| g.forge_hosts)
+        };
+        let github = || ForgeHost::parse("github.com").unwrap();
+        let rule = |text: &str| AllowRule::parse(text).unwrap();
+        // Unset: today's per-host behaviour.
+        let [unset] = hosts("[forge]\ngithub = [\"github.com\"]\n")
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(unset, github());
+        assert!(unset.allows(&ForgeRepo {
+            host: "github.com".into(),
+            owner: "anyone".into(),
+            name: "anything".into(),
+        }));
+        // A host listed twice is narrowed in both places.
+        let twice = hosts(
+            "[forge]\ngithub = [\"github.com\", \"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme\"]\n",
+        )
+        .unwrap();
+        assert_eq!(twice, vec![github().with_allow(vec![rule("acme")]); 2]);
+        assert_eq!(
+            hosts(
+                "[forge]\ngithub = [\"github.com\", \"github.example.com\"]\n\
+                 [forge.allow]\n\"github.com\" = [\"acme\", \"pererikbergman/kika\"]\n\
+                 \"github.example.com\" = []\n"
+            ),
+            Ok(vec![
+                github().with_allow(vec![rule("acme"), rule("pererikbergman/kika")]),
+                ForgeHost::parse("github.example.com")
+                    .unwrap()
+                    .with_allow(vec![]),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_bad_allow_entry_or_host_drops_the_global_file() {
+        let err = |allow: &str| {
+            apply_global(
+                &format!(
+                    "[forge]\ngithub = [\"github.com\"]\ngitlab = [\"gitlab.com\"]\n\
+                     [forge.allow]\n{allow}\n"
+                ),
+                &Keymap::default(),
+                DEFAULT_WATCH,
+            )
+            .map(|_| ())
+            .unwrap_err()
+        };
+        for entry in [
+            "*",
+            "acme/*",
+            "a/b/c",
+            "",
+            "acme/",
+            "/kika",
+            "acme/kika.git",
+        ] {
+            let message = err(&format!("\"github.com\" = [\"{entry}\"]"));
+            assert!(message.starts_with("forge.allow: "), "{entry:?}: {message}");
+        }
+        for key in ["github.example.com", "gitlab.com", "GitHub.com"] {
+            let message = err(&format!("\"{key}\" = [\"acme\"]"));
+            assert!(message.starts_with("forge.allow: "), "{key:?}: {message}");
+            assert!(message.contains(&format!("{key:?}")), "{message}");
+        }
+        // Control bytes in user text are escaped in the message.
+        let message = err("\"github.com\" = [\"a\\u001bb\"]");
+        assert!(message.contains("\\u{1b}"), "{message}");
+
+        let files = Files::new("forge-allow-bad");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme/*\"]\n",
+        );
+        let loaded = files.load();
+        assert_eq!(loaded.forge_hosts, []);
+        assert_eq!(loaded.keymap, Keymap::default());
+        let [error] = loaded.errors.try_into().unwrap();
+        assert!(error.message.starts_with("forge.allow: "), "{error}");
+        assert!(!error.dropped_binding);
+    }
+
+    #[test]
+    fn only_the_global_file_holds_an_allow_list() {
+        let files = Files::new("forge-allow-repo");
+        files.global(
+            "[keys]\n\"files.stage\" = [\"x\"]\n[forge]\ngithub = [\"github.com\"]\n\
+             [forge.allow]\n\"github.com\" = [\"acme\"]\n",
+        );
+        let want = vec![
+            ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![AllowRule::parse("acme").unwrap()]),
+        ];
+        for text in [
+            "[forge.allow]\n\"github.com\" = [\"evil\"]\n",
+            "[keys]\n\"files.stage\" = [\"y\"]\n[forge.allow]\n\"github.com\" = []\n",
+        ] {
+            let refused = repo(text).unwrap_err();
+            assert!(refused.contains("unknown field `forge`"), "{refused}");
+            files.repo(text);
+            let loaded = files.load();
+            assert_eq!(loaded.forge_hosts, want);
+            // Its keys do not apply either: the file is ignored whole.
+            assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
+            let [error] = loaded.errors.try_into().unwrap();
+            assert!(!error.dropped_binding);
+        }
     }
 
     #[test]

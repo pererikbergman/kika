@@ -6,6 +6,7 @@
 //! own, so the user's login, proxy and TLS settings apply and Kika never
 //! holds a token.
 
+pub mod allow;
 pub mod cache;
 pub mod github;
 pub mod head;
@@ -19,11 +20,18 @@ use std::collections::HashMap;
 
 use crate::effect::{Effect, Tag};
 use crate::git::branches::BranchName;
+use allow::AllowRule;
 
 /// A host the user lets Kika contact, checked when the config is read:
-/// lower-case ASCII DNS labels joined by dots, nothing else.
+/// lower-case ASCII DNS labels joined by dots, nothing else. It carries
+/// its `[forge.allow]` list, so every path that may call `gh` for a
+/// repository on it can ask [`ForgeHost::allows`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ForgeHost(String);
+pub struct ForgeHost {
+    name: String,
+    /// `None` allows every repository on the host; an empty list none.
+    allow: Option<Vec<AllowRule>>,
+}
 
 impl ForgeHost {
     /// `text` as a host, or why it is not one. No scheme, port, userinfo,
@@ -51,11 +59,30 @@ impl ForgeHost {
         if !text.split('.').all(label_ok) {
             return bad("only letters, digits, - and dots between labels");
         }
-        Ok(Self(text.to_string()))
+        Ok(Self {
+            name: text.to_string(),
+            allow: None,
+        })
+    }
+
+    /// The host limited to the repositories `rules` allow.
+    pub fn with_allow(self, rules: Vec<AllowRule>) -> Self {
+        Self {
+            allow: Some(rules),
+            ..self
+        }
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.name
+    }
+
+    /// Whether `gh` may be asked about `repo` on this host: always without
+    /// an allow-list, else only when one of its rules names `repo`.
+    pub fn allows(&self, repo: &ForgeRepo) -> bool {
+        self.allow
+            .as_ref()
+            .is_none_or(|rules| rules.iter().any(|rule| rule.allows(repo)))
     }
 }
 

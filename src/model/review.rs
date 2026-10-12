@@ -18,7 +18,8 @@ use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{MergePrConfirm, Popup};
 use ratatui::text::Line;
 
-pub const NO_FORGE: &str = "The remote is on no forge host in the global config";
+pub const NO_FORGE: &str =
+    "The remote is on no forge host in the global config, or not in [forge.allow]";
 const NO_BROWSER: &str = "Set forge.browser in the global config";
 const NO_FAILING_CHECK: &str = "No failing check has a details page";
 const NO_PR_OPEN: &str = "No pull request is open";
@@ -287,7 +288,8 @@ impl AppState {
 
     /// Where a load may go: the configured hosts and, when known, the
     /// repository. Refused when the remote is known to be on none of the
-    /// hosts, or its host is rate limited past now.
+    /// hosts or left out by its allow-list, or its host is rate limited
+    /// past now.
     fn review_target(&self) -> Result<(Vec<ForgeHost>, Option<ForgeRepo>), ReviewProblem> {
         let hosts = &self.forge.hosts;
         if hosts.is_empty() || self.forge.unmatched {
@@ -295,7 +297,9 @@ impl AppState {
         }
         let repo = self.forge.repo.clone().or_else(|| self.review.repo.clone());
         if let Some(repo) = &repo {
-            let host = matches(repo, hosts).ok_or(ReviewProblem::NoForgeHost)?;
+            let host = matches(repo, hosts)
+                .filter(|host| host.allows(repo))
+                .ok_or(ReviewProblem::NoForgeHost)?;
             if let Some(&until) = self.forge.limited.get(host.as_str())
                 && until > self.now
             {
@@ -847,6 +851,17 @@ pub(crate) mod tests {
         assert_eq!(state.update(AppIntent::Start), []);
         assert_eq!(
             state.review.detail_fetch.error,
+            Some(ReviewProblem::NoForgeHost)
+        );
+
+        // The known repository is one `[forge.allow]` leaves out.
+        let mut state = workspace();
+        let rule = crate::forge::allow::AllowRule::parse("someone-else").unwrap();
+        state.forge.hosts = vec![state.forge.hosts[0].clone().with_allow(vec![rule])];
+        assert!(state.forge.repo.is_some());
+        assert_eq!(state.update(AppIntent::EnterReview), []);
+        assert_eq!(
+            state.review.queues_fetch.error,
             Some(ReviewProblem::NoForgeHost)
         );
     }

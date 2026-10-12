@@ -41,8 +41,8 @@ pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
 
 impl AppState {
     /// The host and repository a merge goes to, or why it may not: the
-    /// repository the detail came from, on a configured host that is not
-    /// rate limited now.
+    /// repository the detail came from, on a configured host whose
+    /// `[forge.allow]` names it and that is not rate limited now.
     fn merge_target(&self) -> Result<(ForgeHost, ForgeRepo), Reason> {
         let repo = self
             .forge
@@ -50,7 +50,11 @@ impl AppState {
             .clone()
             .or_else(|| self.review.repo.clone())
             .ok_or(NO_FORGE)?;
-        let host = matches(&repo, &self.forge.hosts).ok_or(NO_FORGE)?.clone();
+        // A repository `[forge.allow]` leaves out is never asked about.
+        let host = matches(&repo, &self.forge.hosts)
+            .filter(|host| host.allows(&repo))
+            .ok_or(NO_FORGE)?
+            .clone();
         self.merge_allowed(&host)?;
         Ok((host, repo))
     }
@@ -146,7 +150,8 @@ impl AppState {
             self.notice = Some(MERGING.into());
             return vec![];
         }
-        if matches(&confirm.repo, &self.forge.hosts) != Some(&confirm.host) {
+        let host = matches(&confirm.repo, &self.forge.hosts);
+        if host != Some(&confirm.host) || !confirm.host.allows(&confirm.repo) {
             self.notice = Some(NO_FORGE.into());
             return vec![];
         }
@@ -478,6 +483,40 @@ mod tests {
         state.forge.limited.insert("github.com".into(), NOW - 1);
         shift_m(&mut state);
         confirmed(&mut state);
+    }
+
+    #[test]
+    fn a_repository_the_allow_list_leaves_out_is_never_merged() {
+        use crate::forge::allow::AllowRule;
+        let other = || vec![AllowRule::parse("other").unwrap()];
+        // Left out by the time `M` is pressed: no question.
+        let mut state = on_detail(squash_only);
+        state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap().with_allow(other())];
+        assert!(shift_m(&mut state).is_empty());
+        assert!(state.popups.is_empty());
+        assert_eq!(state.notice.as_deref(), Some(NO_FORGE));
+        assert!(NO_FORGE.contains("[forge.allow]"));
+        // Left out between the question and `y`: no merge.
+        let mut state = on_detail(squash_only);
+        shift_m(&mut state);
+        assert!(matches!(
+            state.popups.last(),
+            Some(Popup::MergePullRequest(_))
+        ));
+        state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap().with_allow(other())];
+        assert!(press(&mut state, KeyCode::Char('y')).is_empty());
+        assert!(state.pr_merge.is_none());
+        assert_eq!(state.notice.as_deref(), Some(NO_FORGE));
+        // An allow-list that names it lets it through.
+        let mut state = on_detail(squash_only);
+        state.forge.hosts = vec![
+            ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![AllowRule::parse("acme/widgets").unwrap()]),
+        ];
+        shift_m(&mut state);
+        let effects = press(&mut state, KeyCode::Char('y'));
+        assert_eq!(merges(&effects).len(), 1);
     }
 
     #[test]

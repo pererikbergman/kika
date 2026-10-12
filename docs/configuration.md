@@ -44,6 +44,9 @@ github = ["github.com"]   # leave out to keep pull requests off
 gitlab = ["gitlab.com"]   # only used to build URLs, never contacted
 browser = ["open"]        # opens forge pages; leave out to keep it off
 
+[forge.allow]
+"github.com" = ["acme", "me/kika"]   # leave out to allow every repository on the host
+
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
 
@@ -68,7 +71,9 @@ Settings are applied in three layers, each on top of the one before:
 3. the repository's `.kika.toml`.
 
 A `[keys]` entry that binds a key already taken in the same scope is dropped
-on its own (see [`[keys]`](#keys)); the rest of the file applies. A file with
+on its own (see [`[keys]`](#keys)), and so is a global `[[commands]]` entry
+on a key the global file's own `[keys]` gives a binding (see
+[Keys](#keys-1) under Commands); the rest of the file applies. A file with
 any other error is ignored as a whole, and the layer below it applies. Kika
 shows the error so you can fix it. Unknown fields and unknown binding ids
 count as errors, so a typo is reported instead of silently doing nothing.
@@ -97,11 +102,11 @@ and lists the keys it should answer to:
   dropped. A key the layer below holds, such as a default binding, a global
   binding or a global command when the clash is in `.kika.toml`, always stays
   where it is. Kika shows one error per dropped entry, naming the key and both
-  bindings. Every other problem, such as an unknown id, a key that does not
-  parse, `global.quit = []`, a `.kika.toml` that touches a locked binding,
-  or a key the global file gives both a binding and one of its own
-  `[[commands]]`, still ignores the whole file, even when the same file has a
-  droppable clash.
+  bindings. In the global file, a key it gives both a binding and one of its
+  own `[[commands]]` stays with the binding: the command is dropped instead.
+  Every other problem, such as an unknown id, a key that does not parse,
+  `global.quit = []` or a `.kika.toml` that touches a locked binding, still
+  ignores the whole file, even when the same file has a droppable clash.
 
 Key names:
 
@@ -274,7 +279,8 @@ github = ["github.com", "github.example.com"]
   repository shows nothing. A branch shows the newest pull request
   into that repository whose head branch has the same name.
 - Opening any clone whose origin is on a listed host runs read-only `gh`
-  calls under your account, for that clone's owner/repo and branch names.
+  calls under your account, for that clone's owner/repo and branch names,
+  unless `[forge.allow]` (below) leaves that repository out.
 - Kika asks GitHub through the [GitHub CLI](https://cli.github.com), `gh`,
   which must be installed and logged in for the host (`gh auth login
   --hostname <host>`, or `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN`
@@ -293,7 +299,8 @@ github = ["github.com", "github.example.com"]
 - Pull requests load when the repository opens, and again after a fetch,
   pull or push you start, or when you press `B` in the Branches panel.
   There is no timer. `B` says why when it cannot ask: no host listed, the
-  remote on none of them, a refresh already running, or a rate limit.
+  remote on none of them or not in `[forge.allow]`, a refresh already
+  running, or a rate limit.
 - When the pull requests have not changed, GitHub answers that first
   conditional request for free (it does not count against your rate
   limit), and the cached badges are kept without the GraphQL query. The
@@ -322,6 +329,40 @@ github = ["github.com", "github.example.com"]
   for another repository. It does not retry by itself: the next open,
   fetch, pull, push or `B` after the reset asks again. Until then `B` is
   refused with a notice. The wait is kept only while Kika runs.
+
+### Limiting which repositories are asked about
+
+Listing a host lets every clone on it ask `gh` about its own repository. To
+narrow that, give a host a list of owners and `owner/repo` names in
+`[forge.allow]`:
+
+```toml
+[forge]
+github = ["github.com", "github.example.com"]
+
+[forge.allow]
+"github.com" = ["acme", "pererikbergman/kika"]
+```
+
+- A host with no key in `[forge.allow]` (or no `[forge.allow]` at all)
+  allows every repository on it, as above.
+- A host with a key allows only the repositories its list names: `acme`
+  allows every repository of the owner `acme`, `pererikbergman/kika` only
+  that one. An empty list (`"github.com" = []`) allows none.
+- Names are compared ignoring case, as GitHub does: `acme` also allows
+  `ACME/widgets`. There are no patterns: `*`, a third `/` part, an empty
+  part, a part of dots only or a name ending in `.git` is an error, as is
+  any character other than letters, digits, `.`, `_` and `-`.
+- Each key must be one of the hosts in `github`. A key for a `gitlab` host,
+  or for a host not listed, is an error. Any error ignores the whole file.
+- It gates every `gh` call for a repository: the badges, review mode, and
+  creating a pull request. A clone it leaves out shows no badges, its cache
+  is neither read nor written, and `gh` is never run for it. Only the
+  repository a call is about is checked: you can open a pull request from
+  your own fork, whatever its owner, into a repository the list allows,
+  and only allowed repositories are offered as its target.
+- Opening or copying a forge page does not run `gh`, so it works
+  for any repository on a listed host.
 
 ### Opening, copying and creating pull requests
 
@@ -357,8 +398,10 @@ browser = ["open"]                             # macOS; ["xdg-open"] on Linux
   ignored. It runs in the background with no input or output, and shows in
   the Command log.
 - Creating needs a GitHub branch with no pull request yet, pushed to a
-  remote: the head is its upstream. When more than one remote on the same
-  GitHub host could take it, Kika asks which (Target remote), then which of
+  remote: the head is its upstream. Only remotes on the same GitHub host
+  whose repository `[forge.allow]` allows can take it; with none, Kika says
+  so and asks nothing. When more than one could, Kika asks which (Target
+  remote), then which of
   its branches to merge into (Base branch, starting on `main`, else
   `master`). It then asks for the title, starting from the branch name, and
   shows the repository, `head → base` and the title. Only `y` creates it;
@@ -732,9 +775,20 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
   and is an error.
 - A repository's `.kika.toml` cannot move a binding onto a command's key:
   that entry is dropped, and the command keeps the key.
-- In the global file, a command key that clashes with a binding (a default
-  one, or one the same file's `[keys]` moved there) or with another command
-  ignores the whole global file. Nothing is dropped on its own in that case.
+- In the global file, a command on a key that the same file's `[keys]` gives
+  a binding in the command's scope is dropped on its own: the binding keeps
+  the key, and the other commands and the rest of the file apply. The whole
+  command is dropped, even if its other keys are free or clash with a default
+  binding. Kika shows one error per dropped command, naming every key of it
+  that a binding holds, those bindings, and the command by its place in the
+  file and its description, for example `key "ctrl-t" is bound to both
+  "files.stage" and command 1 ("Copy the file to…"); command 1 was dropped`.
+  If several commands share that key, all of them are dropped. A dropped
+  command binds nothing, so it never takes a key from any binding.
+- The commands that are left must still follow every rule: one that clashes
+  with a default binding the file did not move, with another command that is
+  left, or that would hide a locked binding still ignores the whole global
+  file.
 - Commands are listed in the help menu (`?`) after the panel's own keys.
   They are not shown in the bottom bar.
 - A `"popup"` or `"none"` command that is still running can be stopped with
@@ -758,8 +812,10 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[[commands]]` is allowed only in the global file**, for the same reason:
   a cloned repository must not be able to run a program.
 - **`[forge]` is allowed only in the global file**, since it lets Kika contact
-  a host and names the browser it runs. A `[forge]` table in `.kika.toml` is
-  an error, and the whole file is ignored.
+  a host and names the browser it runs. This includes `[forge.allow]`: a
+  clone cannot widen or change which of its repositories are asked about. A
+  `[forge]` or `[forge.allow]` table in `.kika.toml` is an error, and the
+  whole file is ignored.
 - **`[clipboard]` is allowed only in the global file**, since it names a
   program for Kika to run. A `[clipboard]` table in `.kika.toml` is an error,
   and the whole file is ignored.

@@ -10,7 +10,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -160,32 +160,6 @@ fn basename(program: &OsStr) -> String {
     sanitize(name.to_string_lossy().as_bytes())
 }
 
-/// Find a bare program name on `PATH` ourselves, so the working directory
-/// is never searched: empty and relative `PATH` entries are skipped.
-fn resolve(program: &OsStr) -> Option<PathBuf> {
-    let path = Path::new(program);
-    if path.is_absolute() {
-        return Some(path.to_path_buf());
-    }
-    let search = std::env::var_os("PATH")?;
-    std::env::split_paths(&search)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(program))
-        .find(|candidate| is_executable(candidate))
-}
-
-#[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    path.metadata()
-        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
-    path.is_file()
-}
-
 /// The plain diff of `request`, the renderer's only input. Refused when
 /// larger than [`MAX_BYTES`].
 pub fn read_diff(
@@ -225,8 +199,9 @@ pub fn run_renderer(
 }
 
 /// The renderer's process, not yet started: its argv, then `extra_args`,
-/// with the program found by [`resolve`] and the pane width in `COLUMNS`
-/// and `DFT_WIDTH` (a tool that ignores `COLUMNS` when piped reads that).
+/// with the program found by [`crate::program::resolve`] and the pane
+/// width in `COLUMNS` and `DFT_WIDTH` (a tool that ignores `COLUMNS` when
+/// piped reads that).
 /// No shell is involved.
 fn command(
     renderer: &ExternalRenderer,
@@ -238,8 +213,7 @@ fn command(
         .argv
         .split_first()
         .ok_or_else(|| format!("{label} has no command"))?;
-    let program = resolve(program).ok_or_else(|| format!("{label} not found"))?;
-    let mut command = Command::new(program);
+    let mut command = crate::program::command(program).map_err(|_| format!("{label} not found"))?;
     command
         .args(args)
         .args(extra_args)
@@ -300,7 +274,7 @@ pub fn run(
             match stdout.try_recv() {
                 Ok(Ok(bytes)) => output = Some(bytes),
                 Ok(Err(Overflow)) => {
-                    kill(&mut child);
+                    kill_group(&mut child);
                     return Err(format!("Output of {label} is too large"));
                 }
                 Err(_) => {}
@@ -328,7 +302,7 @@ pub fn run(
             });
         }
         if Instant::now() >= deadline {
-            kill(&mut child);
+            kill_group(&mut child);
             return Err(format!("{label} timed out"));
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -362,16 +336,17 @@ fn drain(
     rx
 }
 
-/// Stop the renderer and everything it started, then reap it. `child.kill`
-/// alone would leave the renderer's own children holding the pipes.
-fn kill(child: &mut Child) {
+/// Stop a child started in its own process group and everything it
+/// started, then reap it. `child.kill` alone would leave the child's own
+/// children holding the pipes. Renderers and the clipboard program use it.
+pub(crate) fn kill_group(child: &mut Child) {
     // A direct signal, not a `kill` program, so nothing is looked up on
-    // `PATH`. The renderer is unreaped until `wait` below, so its pid, which
+    // `PATH`. The child is unreaped until `wait` below, so its pid, which
     // is also its group id, cannot have been reused by another process.
     #[cfg(unix)]
     if let Ok(pid) = libc::pid_t::try_from(child.id()) {
         // SAFETY: `killpg` only sends a signal; `pid` leads the group the
-        // renderer was started in. ESRCH (group already gone) is ignored.
+        // child was started in. ESRCH (group already gone) is ignored.
         let _ = unsafe { libc::killpg(pid, libc::SIGKILL) };
     }
     let _ = child.kill();
@@ -575,7 +550,10 @@ mod tests {
         let command = command(&tool, &extra, 61).unwrap();
         assert_eq!(
             Some(command.get_program()),
-            resolve(OsStr::new("sh")).as_deref().map(Path::as_os_str)
+            crate::program::resolve(OsStr::new("sh"))
+                .as_deref()
+                .ok()
+                .map(Path::as_os_str)
         );
         let args: Vec<&OsStr> = command.get_args().collect();
         assert_eq!(args, ["--flag", "--", "/tmp/k/old.rs", "/tmp/k/new.rs"]);
@@ -593,17 +571,6 @@ mod tests {
             labels(&discover(&runner, Some("delta".into()), None)),
             ["delta"]
         );
-    }
-
-    #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "sh and /bin/x are Unix names; Windows needs sh.exe and a drive letter"
-    )]
-    fn resolve_never_searches_relative_path_entries() {
-        let found = resolve(OsStr::new("sh")).expect("sh is on PATH");
-        assert!(found.is_absolute());
-        assert_eq!(resolve(OsStr::new("/bin/x")), Some(PathBuf::from("/bin/x")));
     }
 
     #[cfg(unix)]

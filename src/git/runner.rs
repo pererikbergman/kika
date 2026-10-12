@@ -205,8 +205,10 @@ impl CliRunner {
         self
     }
 
-    fn command(&self, cmd: &GitCommand) -> Command {
-        let mut command = Command::new("git");
+    /// The process for `cmd`, or `NotFound` when no absolute `PATH` entry
+    /// holds `git`.
+    fn command(&self, cmd: &GitCommand) -> io::Result<Command> {
+        let mut command = crate::program::command(OsStr::new("git"))?;
         // Each hidden mode's key reaches only the command that sets it.
         for key in HIDDEN_MODE_ENV
             .iter()
@@ -221,7 +223,7 @@ impl CliRunner {
             .args(cmd.args())
             .envs(cmd.envs().iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null());
-        command
+        Ok(command)
     }
 
     /// Wait for `child`, feeding it `input` and draining both outputs on
@@ -329,7 +331,7 @@ impl GitRunner for CliRunner {
     }
 
     fn run(&self, cmd: &GitCommand) -> io::Result<GitOutput> {
-        let mut command = self.command(cmd);
+        let mut command = self.command(cmd)?;
         if cmd.input().is_some() {
             command.stdin(Stdio::piped());
         }
@@ -362,7 +364,7 @@ impl GitRunner for CliRunner {
     /// terminal reaches git and its hooks directly, while the loop keeps
     /// Kika alive through it.
     fn run_attached(&self, cmd: &GitCommand) -> io::Result<AttachedExit> {
-        let mut command = self.command(cmd);
+        let mut command = self.command(cmd)?;
         let stdin = match cmd.input() {
             Some(_) => Stdio::piped(),
             None => Stdio::inherit(),
@@ -398,7 +400,7 @@ impl GitRunner for CliRunner {
 
     fn spawn(&self, cmd: &GitCommand) -> io::Result<GitChild> {
         let mut child = self
-            .command(cmd)
+            .command(cmd)?
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -520,9 +522,13 @@ mod tests {
         use crate::sequence_editor::PLAN_ENV;
 
         let runner = CliRunner::new("/r");
-        let plain = runner.command(&GitCommand::new("status"));
-        let rebase = runner.command(&GitCommand::new("rebase").env(PLAN_ENV, "pick x\n"));
-        let fetch = runner.command(&GitCommand::new("fetch").env(SOCKET_ENV, "/s"));
+        let plain = runner.command(&GitCommand::new("status")).unwrap();
+        let rebase = runner
+            .command(&GitCommand::new("rebase").env(PLAN_ENV, "pick x\n"))
+            .unwrap();
+        let fetch = runner
+            .command(&GitCommand::new("fetch").env(SOCKET_ENV, "/s"))
+            .unwrap();
         for key in [PLAN_ENV, SOCKET_ENV] {
             assert_eq!(env_of(&plain, key), Some(None), "{key}");
         }
@@ -597,7 +603,7 @@ mod tests {
         .chain(ops.iter().map(op_command));
 
         for cmd in commands {
-            let process = runner.command(&cmd);
+            let process = runner.command(&cmd).unwrap();
             assert_eq!(process.get_current_dir(), Some(top), "{cmd:?}");
             let argv: Vec<_> = process.get_args().collect();
             assert_eq!(argv, cmd.args(), "{cmd:?}");
@@ -613,7 +619,9 @@ mod tests {
         crate::git::fake::git(tmp.path(), &["config", "core.editor", "repo-editor"]);
         let runner = CliRunner::isolated(tmp.path());
         assert_eq!(runner.workdir(), tmp.path());
-        let process = runner.command(&GitCommand::new("var").arg("GIT_EDITOR"));
+        let process = runner
+            .command(&GitCommand::new("var").arg("GIT_EDITOR"))
+            .unwrap();
         let envs: Vec<_> = process.get_envs().collect();
         for key in ["GIT_EDITOR", "VISUAL", "EDITOR"] {
             assert!(envs.contains(&(OsStr::new(key), None)), "{key}: {envs:?}");
