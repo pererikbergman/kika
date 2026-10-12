@@ -2395,3 +2395,80 @@ async fn the_log_narrows_to_a_renamed_file_or_an_author_and_two_commits_compare(
     assert_eq!(shown.len(), 2, "{shown:?}");
     app.assert_screen_contains(" vs ");
 }
+
+/// `init`, then `A` changing `a.txt` and `B` adding `b.txt` on `main`,
+/// with a fix to `A`'s line staged, git's editor a no-op and Kika's hidden
+/// mode ready as the sequence editor; the Commits panel on `HEAD`.
+#[cfg(unix)]
+async fn a_fix_for_an_older_commit() -> (TestRepo, Harness) {
+    let repo = on_main()
+        .write("a.txt", "one\ntwo\n")
+        .commit("A")
+        .write("b.txt", "b\n")
+        .commit("B")
+        .write("a.txt", "one\nfixed\n")
+        .stage("a.txt");
+    repo.git(["config", "core.editor", "true"]);
+    let mut app = Harness::start(&repo).await;
+    app.use_test_binary_as_sequence_editor(&repo.path().join(".git"));
+    app.press(KeyCode::Char('4')).await;
+    (repo, app)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_b_finds_the_base_ctrl_f_makes_the_fixup_and_shift_s_folds_it() {
+    let (repo, mut app) = a_fix_for_an_older_commit().await;
+    let a = String::from_utf8(repo.git(["rev-parse", "HEAD~1"])).unwrap();
+
+    app.press_with(KeyCode::Char('b'), KeyModifiers::CONTROL)
+        .await;
+    assert_eq!(app.state().commits.selected, 1);
+    assert_eq!(app.state().commits.rows[1].oid, a.trim());
+    app.press_with(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        .await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "fixup! A\nB\nA\ninit\n");
+    assert!(repo.staged().is_empty());
+
+    app.press_with(KeyCode::Char('S'), KeyModifiers::SHIFT)
+        .await;
+    app.assert_screen_contains("Fold every fixup! commit");
+    // Enter does not answer.
+    app.press(KeyCode::Enter).await;
+    assert_eq!(subjects(&repo), "fixup! A\nB\nA\ninit\n");
+    app.press(KeyCode::Char('y')).await;
+
+    assert_no_failure(&mut app);
+    assert_eq!(subjects(&repo), "B\nA\ninit\n");
+    assert_eq!(repo.git(["show", "HEAD~1:a.txt"]), b"one\nfixed\n");
+    assert_eq!(repo.git(["show", "HEAD:b.txt"]), b"b\n");
+    assert_eq!(current_branch(&repo), "main");
+    assert!(repo.git(["status", "--porcelain"]).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_todo_list_that_differs_from_the_autosquash_plan_aborts_and_changes_nothing() {
+    let (repo, mut app) = a_fix_for_an_older_commit().await;
+    let a = String::from_utf8(repo.git(["rev-parse", "HEAD~1"])).unwrap();
+    repo.git(["commit", "-q", "--fixup", a.trim()]);
+    app.press(KeyCode::Char('r')).await;
+    assert_eq!(app.state().commits.rows[0].subject, "fixup! A");
+
+    app.press_with(KeyCode::Char('S'), KeyModifiers::SHIFT)
+        .await;
+    // History moves on outside Kika while it asks, so git's todo names
+    // a commit the plan does not.
+    repo.git([
+        "commit", "-q", "--amend", "-m", "fixup! A", "-m", "Changed.",
+    ]);
+    let head = repo.head();
+    app.press(KeyCode::Char('y')).await;
+
+    app.assert_screen_contains("Could not rebase");
+    assert_eq!(repo.head(), head);
+    assert_eq!(subjects(&repo), "fixup! A\nB\nA\ninit\n");
+    assert!(!repo.path().join(".git/rebase-merge").exists());
+}

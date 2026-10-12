@@ -715,6 +715,7 @@ mod tests {
             author: "a".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         }];
         assert_eq!(reason(&state, "Forge URL"), None);
         let effects = state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl));

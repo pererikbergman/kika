@@ -90,6 +90,9 @@ pub struct CommitsPanel {
     /// What git narrows the log to. Unlike `filter`, it changes which
     /// commits are loaded, not which loaded rows show.
     pub query: LogQuery,
+    /// The look for the commit the staged lines come from, in flight;
+    /// only its answer is applied.
+    pub fixup_base_seq: Option<u64>,
 }
 
 /// The Commits panel's two lists.
@@ -377,6 +380,7 @@ mod tests {
             author: "Ann".into(),
             time: 0,
             subject: "s".into(),
+            subject_altered: false,
         };
         let mut panel = CommitsPanel::default();
         panel.begin_page(1, 0);

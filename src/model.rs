@@ -1152,6 +1152,11 @@ impl AppState {
             AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
+            AppIntent::CreateFixup => return self.create_fixup(),
+            AppIntent::Autosquash => self.ask_autosquash(),
+            AppIntent::ConfirmAutosquash => return self.autosquash(),
+            AppIntent::FindFixupBase => return self.find_fixup_base(),
+            AppIntent::FixupBaseFound { tag, result } => self.fixup_base_found(tag, result),
             AppIntent::InsertBreak => return self.rewrite(Rewrite::Break),
             AppIntent::BranchTipsLoaded { tag, result } => {
                 if tag.generation == self.generation {
@@ -1301,6 +1306,7 @@ impl AppState {
                 return KeyScope::CreatePullRequest;
             }
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
+            Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -2612,6 +2618,7 @@ impl AppState {
             stage_all: editor.stage_all,
             amend: editor.amend.is_some(),
             no_verify: editor.no_verify,
+            fixup: None,
         };
         // Whether it needs the terminal is read first; see `commit_probed`.
         let effects = self.start_op_as(Ok(Some(op)), |tag, op| Effect::ProbeCommit { tag, op });
@@ -2683,7 +2690,12 @@ impl AppState {
         if Some(tag.seq) == self.op_seq {
             self.op_seq = None;
         }
-        let commit = matches!(op, GitOp::Commit { .. });
+        // A fixup is made from the Commits panel, not the commit popup, so
+        // its failure shows as any other op's.
+        let commit = matches!(op, GitOp::Commit { fixup: None, .. });
+        if matches!(op, GitOp::Commit { fixup: Some(_), .. }) {
+            self.commit_on_terminal = false;
+        }
         if tag.generation != self.generation {
             // The result is for another repository; give the message back.
             if commit {
@@ -5747,6 +5759,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Unstage(_) => "Could not unstage",
         GitOp::StageAll => "Could not stage everything",
         GitOp::UnstageAll => "Could not unstage everything",
+        GitOp::Commit { fixup: Some(_), .. } => "Could not create the fixup",
         GitOp::Commit { amend: true, .. } => "Could not amend",
         GitOp::Commit { .. } => "Could not commit",
         GitOp::ApplyCached { reverse: false, .. } => "Could not stage the change",
@@ -5806,6 +5819,7 @@ fn failure_title(op: &GitOp) -> &'static str {
     }
 }
 
+mod fixup;
 mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
@@ -6858,6 +6872,7 @@ mod tests {
                 stage_all: false,
                 amend: false,
                 no_verify: false,
+                fixup: None,
             }
         );
         assert!(tag.user);
@@ -6895,6 +6910,7 @@ mod tests {
                 stage_all: true,
                 amend: false,
                 no_verify: false,
+                fixup: None,
             }
         );
     }
@@ -7361,6 +7377,7 @@ mod tests {
                 stage_all: false,
                 amend: true,
                 no_verify: false,
+                fixup: None,
             }
         );
         assert!(matches!(state.commit, CommitFlow::Running(_)));
@@ -7378,6 +7395,7 @@ mod tests {
                 stage_all: false,
                 amend: true,
                 no_verify: false,
+                fixup: None,
             }
         );
     }
@@ -7530,6 +7548,7 @@ mod tests {
                 stage_all: false,
                 amend: true,
                 no_verify: true,
+                fixup: None,
             }
         );
         assert_eq!(state.op_seq, Some(tag.seq));
@@ -10414,6 +10433,7 @@ mod tests {
                 author: "Ann".into(),
                 time: 0,
                 subject: format!("commit {i}"),
+                subject_altered: false,
             })
             .collect();
         LogPage { rows, done }
@@ -10605,6 +10625,7 @@ mod tests {
             stage_all: false,
             amend: false,
             no_verify: false,
+            fixup: None,
         }));
         let (_, tip, skip) = commits_load(&effects);
         assert_eq!((tip, skip), (None, 0));
@@ -18214,5 +18235,245 @@ mod tests {
         let state = AppState::new(Context::Workspace).with_git_version(version(38));
         assert!(state.git_has(crate::git::version::UPDATE_REFS));
         assert!(!AppState::new(Context::Workspace).git_has(crate::git::version::BREAK));
+    }
+
+    /// `on_linear_log` with `a` = `fixup! C` on `b` = `B` on `c` = `C`,
+    /// short ids `a1`, `b1`, `c1`, `b` selected and `x.txt` staged.
+    fn with_a_fixup() -> AppState {
+        let mut state = on_linear_log();
+        for (row, (subject, short)) in
+            state
+                .commits
+                .rows
+                .iter_mut()
+                .zip([("fixup! C", "a1"), ("B", "b1"), ("C", "c1")])
+        {
+            row.subject = subject.into();
+            row.short_oid = short.into();
+        }
+        state.files = vec![FileEntry {
+            path: "x.txt".into(),
+            orig_path: None,
+            index: 'M',
+            worktree: '.',
+            kind: EntryKind::Changed,
+        }];
+        state
+    }
+
+    #[test]
+    fn ctrl_f_commits_the_staged_change_as_a_fixup_of_the_selected_commit() {
+        let mut state = with_a_fixup();
+        let effects = state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        let (tag, op) = probe_of(&effects);
+        assert_eq!(
+            op,
+            GitOp::Commit {
+                message: None,
+                stage_all: false,
+                amend: false,
+                no_verify: false,
+                fixup: Some(cid(&"b".repeat(40))),
+            }
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.commit, CommitFlow::Closed);
+
+        // Its failure shows as any op's, not in the commit popup.
+        state.update(AppIntent::OpFinished {
+            tag,
+            op,
+            result: Err("hook said no".into()),
+        });
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not create the fixup");
+                assert!(error.message.contains("hook said no"));
+            }
+            other => panic!("expected the error, got {other:?}"),
+        }
+        assert_eq!(state.op_seq, None);
+        assert!(!state.commit_on_terminal);
+    }
+
+    #[test]
+    fn a_fixup_needs_something_staged() {
+        let mut state = with_a_fixup();
+        state.files.clear();
+        assert_eq!(state.update(AppIntent::CreateFixup), vec![]);
+        assert_eq!(state.notice, Some(keymap::STAGE_THE_FIX.into()));
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn shift_s_asks_and_only_y_folds_every_fixup() {
+        use rebase_plan::{RebasePlan, TodoAction as A};
+        let mut state = with_a_fixup();
+        let ask = |state: &mut AppState| {
+            assert_eq!(press_char(state, 'S'), vec![]);
+            assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
+            assert_eq!(ConfirmKind::Autosquash.title(), "Autosquash");
+            assert!(
+                state
+                    .confirm_question(ConfirmKind::Autosquash)
+                    .starts_with("Fold every fixup! commit into the commit it fixes?")
+            );
+        };
+
+        ask(&mut state);
+        assert_eq!(state.key_focus(), KeyScope::AutosquashConfirm);
+        // Enter is too easy to press by habit: it answers nothing.
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
+        assert_eq!(press_char(&mut state, 'q'), vec![]);
+        assert_eq!(state.op_seq, None);
+        assert_eq!(press_char(&mut state, 'n'), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
+
+        ask(&mut state);
+        let (tag, op) = attached_of(&press_char(&mut state, 'y'));
+        assert_eq!(
+            op,
+            GitOp::InteractiveRebase(RebasePlan {
+                base: cid(&"d".repeat(40)),
+                steps: vec![
+                    rebase_step(A::Pick, 'c'),
+                    rebase_step(A::Fixup, 'a'),
+                    rebase_step(A::Pick, 'b'),
+                ],
+                update_refs: false,
+            })
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn y_plans_again_from_the_log_as_it_is_now() {
+        let mut state = with_a_fixup();
+        press_char(&mut state, 'S');
+        // A reload while asking found the fixup folded already.
+        state.commits.rows[0].subject = "A".into();
+        assert_eq!(press_char(&mut state, 'y'), vec![]);
+        assert_eq!(state.notice, Some(rebase_plan::NO_FIXUPS.into()));
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn autosquash_says_why_not_and_asks_nothing() {
+        let mut state = with_a_fixup();
+        state.commits.rows[0].subject = "A".into();
+        assert_eq!(state.update(AppIntent::Autosquash), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.notice, Some(rebase_plan::NO_FIXUPS.into()));
+    }
+
+    /// Ask for the fixup base, as `ctrl-b` does, and return its tag.
+    fn find_base(state: &mut AppState) -> Tag {
+        let effects = state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+        )));
+        match effects.as_slice() {
+            [Effect::FindFixupBase { tag }] => *tag,
+            other => panic!("expected FindFixupBase, got {other:?}"),
+        }
+    }
+
+    fn base_found(tag: Tag, base: crate::git::fixup_base::FixupBase) -> AppIntent {
+        AppIntent::FixupBaseFound {
+            tag,
+            result: Ok(base),
+        }
+    }
+
+    #[test]
+    fn one_fixup_base_moves_the_cursor_to_it() {
+        use crate::git::fixup_base::FixupBase;
+        let mut state = with_a_fixup();
+        state.commits.range_anchor = Some("b".repeat(40));
+        // From the Files panel a range in the log does not stop it.
+        state.focus = Focus::Files;
+        let before = state.busy;
+        let tag = state.update(AppIntent::FindFixupBase);
+        let tag = match tag.as_slice() {
+            [Effect::FindFixupBase { tag }] => *tag,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(state.busy, before + 1);
+        state.update(base_found(tag, FixupBase::One(cid(&"c".repeat(40)))));
+        assert_eq!(state.commits.selected, 2);
+        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.notice, Some("Fixup base: c1 C".into()));
+        assert_eq!(state.busy, before);
+        state.focus = Focus::Commits;
+
+        let tag = find_base(&mut state);
+        state.update(base_found(tag, FixupBase::One(cid(&"e".repeat(40)))));
+        assert_eq!(state.commits.selected, 2);
+        assert_eq!(
+            state.notice,
+            Some(
+                "Fixup base: eeeeeee (not loaded; move down to load more, then look again)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn several_fixup_bases_are_listed_newest_first_and_the_cursor_stays() {
+        use crate::git::fixup_base::FixupBase;
+        let mut state = with_a_fixup();
+        let tag = find_base(&mut state);
+        let ids = ["e", "c", "a"].map(|d| cid(&d.repeat(40)));
+        state.update(base_found(tag, FixupBase::Many(ids.to_vec())));
+        assert_eq!(state.commits.selected, 1);
+        assert_eq!(
+            state.notice,
+            Some("Staged lines come from 3 commits: a1, c1, eeeeeee".into())
+        );
+
+        let tag = find_base(&mut state);
+        state.update(base_found(tag, FixupBase::None));
+        assert_eq!(
+            state.notice,
+            Some("No commit touched the staged lines".into())
+        );
+
+        let tag = find_base(&mut state);
+        state.update(AppIntent::FixupBaseFound {
+            tag,
+            result: Err("fatal: no".into()),
+        });
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Error(error)] if error.title == "Could not find the fixup base"
+        ));
+    }
+
+    #[test]
+    fn a_stale_fixup_base_changes_nothing() {
+        use crate::git::fixup_base::FixupBase;
+        let mut state = with_a_fixup();
+        let old = find_base(&mut state);
+        let new = find_base(&mut state);
+        let busy = state.busy;
+        state.notice = None;
+        state.update(base_found(old, FixupBase::One(cid(&"c".repeat(40)))));
+        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.notice, None);
+        assert_eq!(state.busy, busy - 1, "the newer look is still on its way");
+        assert_eq!(state.commits.fixup_base_seq, Some(new.seq));
+
+        let other = Tag {
+            generation: new.generation + 1,
+            ..new
+        };
+        state.update(base_found(other, FixupBase::One(cid(&"c".repeat(40)))));
+        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.notice, None);
     }
 }

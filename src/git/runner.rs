@@ -548,6 +548,7 @@ mod tests {
                 stage_all: false,
                 amend: false,
                 no_verify: false,
+                fixup: None,
             },
             GitOp::ApplyEdited {
                 patch: b"patch".to_vec(),

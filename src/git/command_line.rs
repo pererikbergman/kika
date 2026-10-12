@@ -503,6 +503,7 @@ mod tests {
                 stage_all: true,
                 amend: false,
                 no_verify: false,
+                fixup: None,
             },
             GitOp::CreateTag {
                 name: "v1".into(),
