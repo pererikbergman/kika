@@ -1047,6 +1047,14 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             let leading = if clears { vec![ids[0]] } else { vec![] };
             (leading, vec![ids[1], ids[2]])
         }
+        KeyScope::Reflog => {
+            let leading = if state.commits.reflog.filter.is_empty() {
+                vec![]
+            } else {
+                vec!["reflog.escape"]
+            };
+            (leading, vec!["reflog.filter"])
+        }
         KeyScope::Diff if searching(state) => (
             vec!["diff.search_next", "diff.search_prev", "diff.escape"],
             vec!["diff.search"],
@@ -5791,5 +5799,27 @@ mod tests {
             "{:?}",
             rows[19]
         );
+    }
+
+    #[test]
+    fn esc_clear_leads_the_reflog_tabs_bar_while_it_has_a_filter() {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Commits;
+        state.commits.tab = crate::commits::CommitsTab::Reflog;
+        state.commits.reflog.data = Some(crate::git::reflog::Reflog {
+            entries: crate::git::reflog::parse_records(include_bytes!(
+                "git/fixtures/reflog/commit.bin"
+            )),
+            ..Default::default()
+        });
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("V range"), "{:?}", rows[9]);
+        state.commits.reflog.set_filter("first".into());
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
     }
 }

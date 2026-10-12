@@ -20,6 +20,8 @@ pub enum InputTarget {
     BranchesFilter,
     RemotesFilter,
     TagsFilter,
+    /// Narrows the Commits panel's Reflog tab.
+    ReflogFilter,
     DiffSearch,
     /// The path git narrows the log to; read on Enter, not as typed.
     LogPath,
@@ -40,6 +42,7 @@ impl InputTarget {
             | InputTarget::BranchesFilter
             | InputTarget::RemotesFilter
             | InputTarget::TagsFilter
+            | InputTarget::ReflogFilter
             | InputTarget::DiffSearch
             | InputTarget::ReviewFilter
             | InputTarget::WorktreesFilter => "/",
