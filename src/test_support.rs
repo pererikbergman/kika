@@ -12,7 +12,7 @@ use crate::git::GitRunner;
 use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::{DiffLine, DiffRequest, LineKind};
+use crate::git::diff::{DiffChunk, DiffLine, DiffRequest, LineKind};
 use crate::git::log::{CommitRow, LogPage, LogQuery};
 use crate::git::patch::{self, FilePatch};
 use crate::git::path::RepoPath;
@@ -181,6 +181,17 @@ pub(crate) fn line(text: &str) -> DiffLine {
     DiffLine {
         kind: LineKind::Context,
         text: text.into(),
+    }
+}
+
+/// A `DiffLoaded` chunk of `n` lines for `tag`, each naming its seq.
+pub(crate) fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
+    AppIntent::DiffLoaded {
+        tag,
+        result: Ok(DiffChunk {
+            lines: (0..n).map(|i| line(&format!("{}:{i}", tag.seq))).collect(),
+            done,
+        }),
     }
 }
 

@@ -41,7 +41,7 @@ use crate::git::bisect::BisectMark;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{
-    DiffChunk, DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT, sanitize,
+    DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
 use crate::git::log::LogQuery;
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
@@ -2145,12 +2145,6 @@ impl AppState {
         self.select(index)
     }
 
-    fn diff_loaded(&mut self, tag: Tag, result: Result<DiffChunk, String>) {
-        if tag.generation == self.generation {
-            self.diff.apply(tag.seq, result);
-        }
-    }
-
     /// Run the operation a stage key chose. Only one runs at a time, and
     /// only on the local workspace.
     pub(crate) fn start_op(&mut self, op: Result<Option<GitOp>, String>) -> Vec<Effect> {
@@ -3983,7 +3977,7 @@ use crate::features::commits::custom_patch::NO_PATCH;
 mod tests {
     use super::*;
     use crate::diff_pane::DIFF_PREFETCH;
-    use crate::git::diff::DiffSide;
+    use crate::git::diff::{DiffChunk, DiffSide};
     use crate::git::status::{EntryKind, RepoStatus};
     use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
@@ -4215,16 +4209,6 @@ mod tests {
         assert_eq!(state.busy, 1);
     }
 
-    fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
-        AppIntent::DiffLoaded {
-            tag,
-            result: Ok(DiffChunk {
-                lines: (0..n).map(|i| line(&format!("{}:{i}", tag.seq))).collect(),
-                done,
-            }),
-        }
-    }
-
     #[test]
     fn a_status_load_selects_the_first_file_and_requests_its_diff() {
         // Height 24: 21 diff rows.
@@ -4283,15 +4267,6 @@ mod tests {
     }
 
     #[test]
-    fn later_chunks_append() {
-        let (mut state, effects) = with_files(three_files(), 24);
-        let tag = diff_tag(&effects);
-        state.update(chunk(tag, 5, false));
-        state.update(chunk(tag, 4, true));
-        assert_eq!(state.diff.lines.len(), 9);
-    }
-
-    #[test]
     fn selection_stops_at_the_ends_of_the_list() {
         let (mut state, _) = with_files(three_files(), 24);
         assert_eq!(state.update(AppIntent::SelectPrev), vec![]);
@@ -4313,31 +4288,6 @@ mod tests {
         assert_eq!(state.selected, None);
         assert_eq!(state.update(AppIntent::SelectNext), vec![]);
         assert_eq!(state.update(AppIntent::SelectPrev), vec![]);
-    }
-
-    #[test]
-    fn superseded_diff_results_never_appear() {
-        let (mut state, effects) = with_files(three_files(), 24);
-        let first = diff_tag(&effects);
-        let second = diff_tag(&state.update(AppIntent::SelectNext));
-        let before = state.diff.clone();
-
-        state.update(chunk(first, 3, true));
-        state.update(AppIntent::DiffSlow { tag: first });
-        assert_eq!(state.diff, before);
-
-        let current_generation = Tag {
-            generation: second.generation + 1,
-            ..second
-        };
-        state.generation += 1;
-        let after_bump = state.diff.clone();
-        state.update(chunk(second, 3, true));
-        state.update(AppIntent::DiffSlow { tag: second });
-        assert_eq!(state.diff, after_bump);
-        // Sanity: the tag for the new generation would have applied.
-        state.update(chunk(current_generation, 1, true));
-        assert_eq!(state.diff.lines.len(), 1);
     }
 
     #[test]
@@ -4408,23 +4358,6 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(state.selected, Some(0));
         assert_eq!(state.diff.lines.len(), 5);
-    }
-
-    #[test]
-    fn a_diff_error_is_stored_and_ends_the_stream() {
-        let (mut state, effects) = with_files(three_files(), 10);
-        let tag = diff_tag(&effects);
-        state.update(AppIntent::DiffLoaded {
-            tag,
-            result: Err("fatal: oops".into()),
-        });
-        assert_eq!(state.diff.error.as_deref(), Some("fatal: oops"));
-        assert!(state.diff.done);
-        assert!(!state.diff.pending);
-        assert_eq!(
-            state.update(AppIntent::ScrollDiff(Scroll::PageDown)),
-            vec![]
-        );
     }
 
     #[test]
