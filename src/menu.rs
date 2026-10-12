@@ -4,6 +4,7 @@
 use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
+use crate::features::operation::keys::merge_disabled;
 use crate::features::pull_requests::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
@@ -14,9 +15,8 @@ use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    OP_RUNNING, Reason, amend_disabled, commit_disabled, files_stage_disabled, list_guard,
-    merge_disabled, never, no_commit_selected, patch_rewrite_disabled, reset_disabled,
-    stage_all_disabled,
+    OP_RUNNING, Reason, amend_disabled, commit_disabled, files_stage_disabled, list_guard, never,
+    no_commit_selected, patch_rewrite_disabled, reset_disabled, stage_all_disabled,
 };
 use crate::model::AppState;
 use crate::op::{GitOp, MergeStrategy, ResetMode, leading_dirs};

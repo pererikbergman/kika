@@ -1025,6 +1025,7 @@ pub(crate) mod screen {
     use crate::git::blame::BlameLine;
     use crate::git::diff::{DiffLine, LineKind};
     use crate::git::status::{BranchStatus, EntryKind, Head};
+    use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};
 
@@ -1037,6 +1038,41 @@ pub(crate) mod screen {
 
     pub(crate) fn contains(rows: &[String], needle: &str) -> bool {
         rows.iter().any(|row| row.contains(needle))
+    }
+
+    /// `rows` with the focused panel's thick border drawn thin, for tests
+    /// about what a panel shows rather than how it is framed.
+    pub(crate) fn thin(rows: Vec<String>) -> Vec<String> {
+        rows.into_iter()
+            .map(|row| {
+                row.chars()
+                    .map(|c| match c {
+                        '┃' => '│',
+                        '━' => '─',
+                        '┏' => '┌',
+                        '┓' => '┐',
+                        '┗' => '└',
+                        '┛' => '┘',
+                        c => c,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// A loaded workspace with no changes on `branch`.
+    pub(crate) fn on(branch: BranchStatus) -> AppState {
+        let mut state = loaded(vec![]);
+        state.branch = Some(branch);
+        state
+    }
+
+    /// `state` with the Status panel focused, so it is expanded.
+    pub(crate) fn status_focused(state: &AppState) -> AppState {
+        let mut state = state.clone();
+        state.focus = Focus::Status;
+        state.expanded = SidePanel::Status;
+        state
     }
 
     pub(crate) fn file(path: &str) -> FileEntry {
