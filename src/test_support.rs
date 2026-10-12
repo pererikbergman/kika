@@ -28,7 +28,7 @@ use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    Binding, KeyPress, KeyScope, Keymap, KeysTable, Resolution, Trust, registry, resolve,
+    Binding, KeyPress, KeyScope, Keymap, KeysTable, Reason, Resolution, Trust, registry, resolve,
 };
 use crate::layout::{self, SidePanel};
 use crate::model::*;
@@ -1174,6 +1174,16 @@ pub(crate) fn build(
 
 pub(crate) fn binding(id: &str) -> &'static Binding {
     registry().iter().find(|b| b.id == id).expect("known id")
+}
+
+/// Why `c` cannot run in `scope`, or `None` when it runs.
+pub(crate) fn key_reason(state: &AppState, scope: KeyScope, c: char) -> Option<Reason> {
+    let key = KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE);
+    match resolve(registry(), &Keymap::default(), scope, state, key) {
+        Resolution::Disabled(reason) => Some(reason),
+        Resolution::Run(_) => None,
+        other => panic!("{c} in {scope:?}: {other:?}"),
+    }
 }
 
 pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {

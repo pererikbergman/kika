@@ -11,7 +11,6 @@ use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
 use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
-use crate::custom_patch::CustomPatch;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
@@ -24,6 +23,7 @@ use crate::features::branches::tags::PendingTag;
 use crate::features::branches::tags::keys::delete_tag_disabled;
 use crate::features::command_log::CommandLog;
 use crate::features::commits::copy::CopiedCommits;
+use crate::features::commits::custom_patch::CustomPatch;
 use crate::features::commits::reflog;
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
@@ -1565,7 +1565,7 @@ impl AppState {
     /// Map the rendered rows to the focused view's patch, when both are
     /// of the same file and side, then bring the selection into view.
     /// A tool's rows are never mapped: they show the files, not the patch.
-    fn remap(&mut self) {
+    pub(crate) fn remap(&mut self) {
         let display_only = self.display_only();
         let Some(rendered) = &mut self.rendered else {
             return;
@@ -2156,7 +2156,7 @@ impl AppState {
 
     /// Start loading the focused view's patch. A user effect, so the busy
     /// indicator shows and a refused key can say "Loading…".
-    fn load_patch(&mut self) -> Vec<Effect> {
+    pub(crate) fn load_patch(&mut self) -> Vec<Effect> {
         let seq = self.take_seq();
         let Focus::Diff(view) = &mut self.focus else {
             return vec![];
@@ -3041,7 +3041,7 @@ impl AppState {
 
     /// Back to the log, still on the same commit, with the pane showing the
     /// selected working-tree file again.
-    fn close_commit_files(&mut self) -> Vec<Effect> {
+    pub(crate) fn close_commit_files(&mut self) -> Vec<Effect> {
         if self.commits.open.take().is_none() {
             return vec![];
         }
@@ -4447,13 +4447,12 @@ fn failure_title(op: &GitOp) -> &'static str {
 
 mod branch_lists;
 mod confirm_guard;
-mod custom_patch;
 mod fixup;
 mod leave_commits;
 mod log_query;
 mod rewrite_range;
 
-use custom_patch::NO_PATCH;
+use crate::features::commits::custom_patch::NO_PATCH;
 use log_query::MARK_CLEARED;
 
 #[cfg(test)]
@@ -8111,7 +8110,7 @@ mod tests {
         );
         assert_eq!(state.focus, Focus::Commits);
         assert!(matches!(
-            custom_patch_tests::key_reason(&state, KeyScope::CommitFiles, 'l'),
+            key_reason(&state, KeyScope::CommitFiles, 'l'),
             Some(r) if r.contains("comparison")
         ));
     }
@@ -11444,7 +11443,7 @@ mod tests {
         type_text(&mut state, "/zzz\n");
         assert!(open_files(&state).selected_hidden());
         assert_eq!(
-            crate::keymap::patch_file_disabled(&state).as_deref(),
+            crate::features::commits::custom_patch::keys::patch_file_disabled(&state).as_deref(),
             Some(crate::keymap::FILTER_HIDES_ROW)
         );
         assert_eq!(state.update(AppIntent::PatchToggleFile), vec![]);
@@ -12957,488 +12956,5 @@ mod tests {
         state.update(base_found(other, FixupBase::One(cid(&"c".repeat(40)))));
         assert_eq!(state.commits.selected, 1);
         assert_eq!(state.notice, None);
-    }
-
-    /// The custom patch: picking from a commit, and the menu of rewrites.
-    mod custom_patch_tests {
-        use super::*;
-        use crate::custom_patch::{FilePick, PatchAction, PatchChoice};
-        use crate::git::commit_files::{CommitFile, CommitId};
-        use crate::git::log::{CommitRow, LogPage};
-        use crate::git::patch::LineId;
-        use crate::handoff::HandOff;
-        use crate::keymap::{Resolution, registry, resolve};
-
-        /// Why `c` cannot run in `scope`, or `None` when it runs.
-        pub(crate) fn key_reason(state: &AppState, scope: KeyScope, c: char) -> Option<Reason> {
-            let key = KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE);
-            match resolve(registry(), &Keymap::default(), scope, state, key) {
-                Resolution::Disabled(reason) => Some(reason),
-                Resolution::Run(_) => None,
-                other => panic!("{c} in {scope:?}: {other:?}"),
-            }
-        }
-
-        /// Row `i`'s full id.
-        fn oid(i: usize) -> String {
-            format!("{:040x}", i + 1)
-        }
-
-        fn id(i: usize) -> CommitId {
-            CommitId::parse(&oid(i)).unwrap()
-        }
-
-        /// Four commits on `main`, row 0 `HEAD`, none of them a branch's
-        /// other than `main`; an untracked file only; the Commits panel
-        /// focused on row `selected`.
-        fn history(selected: usize) -> AppState {
-            let (mut state, _) = with_files(vec![untracked("u.txt")], 24);
-            let rows = (0..4)
-                .map(|i| CommitRow {
-                    oid: oid(i),
-                    short_oid: oid(i)[..7].to_string(),
-                    parents: vec![oid(i + 1)],
-                    author: "Ann".into(),
-                    time: 0,
-                    subject: format!("commit {i}"),
-                    subject_altered: false,
-                })
-                .collect();
-            state.commits.begin_page(900, 0);
-            state
-                .commits
-                .page_loaded(900, 0, Ok((LogPage { rows, done: true }, 1_000)));
-            state.commits.tips = Some(vec![]);
-            state.focus = Focus::Commits;
-            state.expanded = SidePanel::Commits;
-            state.commits.selected = selected;
-            state
-        }
-
-        /// Open row `row`'s files, listing `a.rs` and `b.rs`.
-        fn open_files(state: &mut AppState, row: usize) {
-            state.commits.selected = row;
-            let effects = press(state, KeyCode::Enter);
-            let tag = match effects.as_slice() {
-                [Effect::LoadCommitFiles { tag, .. }] => *tag,
-                other => panic!("{other:?}"),
-            };
-            let file = |path: &str| CommitFile {
-                status: 'M',
-                path: path.into(),
-                orig_path: None,
-            };
-            state.update(AppIntent::CommitFilesLoaded {
-                tag,
-                result: Ok(vec![file("a.rs"), file("b.rs")]),
-            });
-        }
-
-        /// Row 2's `a.rs` in the Diff pane, its patch `TWO_HUNKS`.
-        fn picking() -> AppState {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            let (tag, request) = patch_load(&press(&mut state, KeyCode::Char('l')));
-            assert_eq!(request.commit.as_ref().map(|r| r.oid.clone()), Some(id(2)));
-            state.update(AppIntent::PatchLoaded {
-                tag,
-                result: Ok(patch_of(TWO_HUNKS)),
-            });
-            state
-        }
-
-        fn lines(ids: &[LineId]) -> Option<FilePick> {
-            Some(FilePick::Lines(ids.iter().copied().collect()))
-        }
-
-        fn picked(state: &AppState, path: &str) -> Option<FilePick> {
-            state.custom_patch.as_ref()?.file_state(&path.into())
-        }
-
-        #[test]
-        fn space_in_a_commits_hunk_picks_its_lines_and_never_stages() {
-            let mut state = picking();
-            assert_eq!(state.key_focus(), KeyScope::Diff);
-
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(
-                picked(&state, "a.rs"),
-                lines(&[LineId::removed(1), LineId::added(1), LineId::added(2)])
-            );
-            assert_eq!(state.custom_patch.as_ref().unwrap().source.oid, id(2));
-            assert_eq!(state.op_seq, None);
-
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn space_in_line_mode_picks_only_the_range() {
-            let mut state = picking();
-            press(&mut state, KeyCode::Char('v'));
-            assert_eq!(state.key_focus(), KeyScope::Lines);
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(picked(&state, "a.rs"), lines(&[LineId::removed(1)]));
-            // The next line joins it; the hunk's other line stays out.
-            press(&mut state, KeyCode::Char('j'));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(
-                picked(&state, "a.rs"),
-                lines(&[LineId::removed(1), LineId::added(1)])
-            );
-            assert_eq!(state.op_seq, None);
-        }
-
-        #[test]
-        fn the_working_tree_keys_say_not_in_a_commits_change() {
-            let mut state = picking();
-            for c in ['t', 'd', 'e'] {
-                assert_eq!(
-                    key_reason(&state, KeyScope::Diff, c).as_deref(),
-                    Some(keymap::NOT_IN_COMMIT),
-                    "{c}"
-                );
-            }
-            assert_eq!(key_reason(&state, KeyScope::Diff, ' '), None);
-            press(&mut state, KeyCode::Char('v'));
-            assert_eq!(
-                key_reason(&state, KeyScope::Lines, 'd').as_deref(),
-                Some(keymap::NOT_IN_COMMIT)
-            );
-            // Sent as intents, they do nothing either.
-            for intent in [
-                AppIntent::ToggleDiffSide,
-                AppIntent::Discard,
-                AppIntent::EditHunk,
-            ] {
-                state.notice = None;
-                assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
-                assert!(state.popups.is_empty(), "{intent:?}");
-                assert_eq!(state.notice.as_deref(), Some(keymap::NOT_IN_COMMIT));
-            }
-        }
-
-        #[test]
-        fn space_in_the_commit_files_picks_the_whole_file_and_drops_it() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            assert_eq!(state.key_focus(), KeyScope::CommitFiles);
-            assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
-            assert_eq!(picked(&state, "a.rs"), Some(FilePick::Whole));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn picking_from_a_second_commit_leaves_the_patch_and_says_reset_it_first() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            let before = state.custom_patch.clone();
-            press(&mut state, KeyCode::Esc);
-            open_files(&mut state, 1);
-
-            press(&mut state, KeyCode::Char(' '));
-
-            assert_eq!(state.custom_patch, before);
-            let short = &oid(2)[..7];
-            assert_eq!(
-                state.notice.as_deref(),
-                Some(
-                    format!("The custom patch holds changes from {short}; reset it first").as_str()
-                )
-            );
-        }
-
-        #[test]
-        fn the_patch_menu_has_five_items_and_reset_drops_the_patch() {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            state.update(AppIntent::Key(KeyPress::new(
-                KeyCode::Char('p'),
-                KeyModifiers::CONTROL,
-            )));
-            assert_eq!(
-                state.popups,
-                [Popup::Menu {
-                    id: MenuId::CustomPatch,
-                    cursor: 0
-                }]
-            );
-            let labels: Vec<_> = menu::items(MenuId::CustomPatch)
-                .iter()
-                .map(|item| item.label)
-                .collect();
-            assert_eq!(
-                labels,
-                [
-                    "Remove from commit",
-                    "Move to selected commit",
-                    "Move to index",
-                    "New commit after source…",
-                    "Reset patch"
-                ]
-            );
-            if let Some(Popup::Menu { cursor, .. }) = state.popups.last_mut() {
-                *cursor = 4;
-            }
-            assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
-            assert_eq!(state.custom_patch, None);
-            assert!(state.popups.is_empty());
-        }
-
-        /// Row 2's `a.rs` picked whole, files closed, the cursor on `row`.
-        fn with_patch(row: usize) -> AppState {
-            let mut state = history(0);
-            open_files(&mut state, 2);
-            press(&mut state, KeyCode::Char(' '));
-            press(&mut state, KeyCode::Esc);
-            state.commits.selected = row;
-            state
-        }
-
-        fn the_op(effects: &[Effect]) -> GitOp {
-            match effects {
-                [Effect::HandOff(HandOff::Attached { op, .. })] => op.clone(),
-                other => panic!("expected one attached op, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn a_rewrite_asks_and_only_y_runs_it() {
-            for (choice, action, row) in [
-                (PatchChoice::Remove, PatchAction::Remove, 0),
-                (PatchChoice::ToIndex, PatchAction::ToIndex, 0),
-                (PatchChoice::MoveToSelected, PatchAction::MoveTo(id(0)), 0),
-                (PatchChoice::MoveToSelected, PatchAction::MoveTo(id(3)), 3),
-            ] {
-                let mut state = with_patch(row);
-                state.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(
-                    state.popups,
-                    [Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))]
-                );
-                assert_eq!(state.key_focus(), KeyScope::PatchConfirm);
-                // Enter answers nothing.
-                assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-                assert_eq!(state.popups.len(), 1);
-
-                let op = the_op(&press(&mut state, KeyCode::Char('y')));
-
-                let GitOp::CustomPatch {
-                    plan,
-                    action: ran,
-                    picks,
-                    orig_head,
-                } = op
-                else {
-                    panic!("{op:?}");
-                };
-                assert_eq!(ran, action);
-                assert_eq!(orig_head, id(0));
-                assert_eq!(Some(picks), state.custom_patch.clone());
-                let edits: Vec<_> = plan
-                    .steps
-                    .iter()
-                    .filter(|s| s.action == crate::git::rebase_plan::TodoAction::Edit)
-                    .map(|s| s.commit.clone())
-                    .collect();
-                let want = match &action {
-                    PatchAction::MoveTo(target) if *target == id(3) => vec![id(3)],
-                    PatchAction::MoveTo(target) => vec![id(2), target.clone()],
-                    PatchAction::ToIndex => vec![id(2), id(0)],
-                    _ => vec![id(2)],
-                };
-                assert_eq!(edits, want, "{action:?}");
-            }
-        }
-
-        #[test]
-        fn during_a_bisect_no_patch_rewrite_asks_or_runs() {
-            for choice in [
-                PatchChoice::Remove,
-                PatchChoice::MoveToSelected,
-                PatchChoice::ToIndex,
-                PatchChoice::NewCommit,
-            ] {
-                let mut idle = with_patch(0);
-                idle.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(idle.popups.len(), 1, "{choice:?} asks without a bisect");
-
-                let mut state = with_patch(0);
-                start_bisecting(&mut state);
-                let effects = state.update(AppIntent::ChoosePatchAction(choice));
-                assert_eq!(effects, vec![], "{choice:?}");
-                assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()), "{choice:?}");
-                assert_eq!(state.popups, [], "{choice:?}");
-                assert_eq!(state.op_seq, None, "{choice:?}");
-            }
-        }
-
-        #[test]
-        fn no_closes_the_question_and_keeps_the_patch() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            assert_eq!(press(&mut state, KeyCode::Char('n')), vec![]);
-            assert!(state.popups.is_empty());
-            assert!(state.custom_patch.is_some());
-        }
-
-        #[test]
-        fn a_new_commit_asks_for_its_message_first_and_refuses_an_empty_one() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::NewCommit));
-            assert!(matches!(
-                state.popups.as_slice(),
-                [Popup::Prompt {
-                    kind: PromptKind::PatchCommitMessage,
-                    ..
-                }]
-            ));
-            press(&mut state, KeyCode::Char(' '));
-            assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-            assert_eq!(
-                state.notice.as_deref(),
-                Some(super::super::custom_patch::MESSAGE_NEEDED)
-            );
-            assert!(matches!(
-                state.popups.as_slice(),
-                [Popup::Prompt {
-                    kind: PromptKind::PatchCommitMessage,
-                    ..
-                }]
-            ));
-
-            for c in "Split".chars() {
-                state.update(AppIntent::Key(KeyPress::new(
-                    KeyCode::Char(c),
-                    KeyModifiers::SHIFT,
-                )));
-            }
-            press(&mut state, KeyCode::Enter);
-            assert_eq!(
-                state.popups,
-                [Popup::Confirm(ConfirmKind::CustomPatch(
-                    PatchAction::NewCommit("Split".into())
-                ))]
-            );
-            let Popup::Confirm(kind) = state.popups[0].clone() else {
-                panic!("{:?}", state.popups);
-            };
-            let question = state.confirm_question(&kind);
-            assert!(question.contains("\"Split\""), "{question}");
-            let op = the_op(&press(&mut state, KeyCode::Char('y')));
-            assert!(matches!(
-                op,
-                GitOp::CustomPatch { action: PatchAction::NewCommit(ref m), .. } if m == "Split"
-            ));
-        }
-
-        #[test]
-        fn a_successful_rewrite_drops_the_patch_and_a_failed_one_keeps_it() {
-            let mut state = with_patch(0);
-            state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            let effects = press(&mut state, KeyCode::Char('y'));
-            let (tag, op) = match effects.as_slice() {
-                [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
-                other => panic!("{other:?}"),
-            };
-            state.update(AppIntent::OpFinished {
-                tag,
-                op: op.clone(),
-                result: Err("conflict".into()),
-            });
-            assert!(state.custom_patch.is_some());
-            assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
-
-            state.popups.clear();
-            let effects = state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
-            assert_eq!(effects, vec![]);
-            let (tag, op) = match press(&mut state, KeyCode::Char('y')).as_slice() {
-                [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
-                other => panic!("{other:?}"),
-            };
-            state.update(AppIntent::OpFinished {
-                tag,
-                op,
-                result: Ok(()),
-            });
-            assert_eq!(state.custom_patch, None);
-        }
-
-        #[test]
-        fn a_rewrite_says_why_not_in_order() {
-            use crate::git::repo_state::Operation;
-            let why = |state: &AppState, choice| {
-                keymap::patch_rewrite_disabled(state, choice).map(|r| r.into_owned())
-            };
-            let mut state = with_patch(2);
-            let picks = state.custom_patch.take();
-            state.op_seq = Some(1);
-            state.branch.as_mut().unwrap().in_progress = vec![Operation::Rebase];
-            state.files.push(changed("t.rs", '.', 'M'));
-            state.commits.filter = "x".into();
-            state.commits.rows[2].parents = vec![oid(3), oid(9)];
-
-            let mut reasons = vec![];
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.custom_patch = picks;
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.op_seq = None;
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.branch.as_mut().unwrap().in_progress.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.files.retain(|f| f.kind == EntryKind::Untracked);
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.filter.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.rows[2].parents.clear();
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            state.commits.rows[2].parents = vec![oid(3)];
-            reasons.push(why(&state, PatchChoice::MoveToSelected));
-            reasons.push(why(&state, PatchChoice::Remove));
-
-            let want: Vec<Option<String>> = [
-                Some(keymap::PATCH_EMPTY),
-                Some(keymap::OP_RUNNING),
-                Some("Finish or abort the operation in progress"),
-                Some("Commit or stash your changes first"),
-                Some(keymap::CLEAR_LOG_FILTER),
-                Some("Cannot rewrite a merge commit"),
-                Some("Cannot rewrite the first commit"),
-                Some(keymap::TARGET_IS_SOURCE),
-                None,
-            ]
-            .into_iter()
-            .map(|r| r.map(String::from))
-            .collect();
-            assert_eq!(reasons, want);
-
-            // A log narrowed to a path is refused the same way.
-            state.commits.query.path = Some("a.rs".into());
-            assert_eq!(
-                why(&state, PatchChoice::Remove).as_deref(),
-                Some(keymap::CLEAR_LOG_FILTER)
-            );
-        }
-
-        #[test]
-        fn a_repository_file_cannot_rebind_the_patch_menu() {
-            use crate::keymap::{KeysTable, REPO_LOCKED, Trust};
-            assert!(REPO_LOCKED.contains(&"workspace.patch_menu"));
-            for id in [
-                "workspace.patch_menu",
-                "patch_confirm.yes",
-                "patch_confirm.no",
-            ] {
-                assert!(REPO_LOCKED.contains(&id), "{id}");
-                let table: KeysTable = [(id.to_string(), vec!["enter".to_string()])].into();
-                let repo = Keymap::build(&Keymap::default(), &table, Trust::Repo);
-                assert!(repo.is_err(), "{id}");
-                let global = Keymap::build(&Keymap::default(), &table, Trust::Global);
-                assert!(global.is_ok(), "{id}: {global:?}");
-            }
-        }
     }
 }
