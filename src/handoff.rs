@@ -15,10 +15,10 @@ use crate::git::GitRunner;
 use crate::git::cherry_pick;
 use crate::git::custom_patch;
 use crate::git::diff::terminal_safe;
-use crate::git::ops::{GitOp, MessageSource, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
 use crate::intent::AppIntent;
+use crate::op::{GitOp, MessageSource, commit_command, op_command, run_op};
 use crate::sequence_editor::editor_value;
 
 /// Something to run with the terminal handed over.
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn an_attached_op_runs_its_argv_on_the_terminal_and_reports_back() {
-        use crate::git::ops::MergeStrategy;
+        use crate::op::MergeStrategy;
         let op = GitOp::Merge {
             branch: "feature".into(),
             strategy: MergeStrategy::NoFastForward,

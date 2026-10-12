@@ -6,9 +6,9 @@
 use super::{AppState, Context, SELECTION_CLEARED};
 use crate::branches::BranchesTab;
 use crate::effect::Effect;
-use crate::git::ops::GitOp;
 use crate::keymap::{self, Reason};
 use crate::list_filter::InputTarget;
+use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, Popup, RangeKind};
 use crate::remotes::RemoteRow;
 
@@ -193,13 +193,13 @@ mod tests {
     use super::*;
     use crate::git::branches::{Branch, Track};
     use crate::git::commit_files::CommitId;
-    use crate::git::ops::{op_command, op_steps};
     use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
     use crate::git::tags::TagRef;
     use crate::intent::AppIntent;
     use crate::keymap::{FILTER_HIDES_ROW, KeyPress, KeyScope};
     use crate::layout::{Panel, SidePanel};
     use crate::list_filter::{MAX_INPUT, input_full_notice};
+    use crate::op::{op_command, op_steps};
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         let mods = match code {

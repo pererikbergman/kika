@@ -3,10 +3,10 @@
 //! effects.
 
 use crate::git::commit_files::CommitId;
-use crate::git::ops::StashMode;
 use crate::git::path::RepoPath;
 use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::list_filter;
+use crate::op::StashMode;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StashList {

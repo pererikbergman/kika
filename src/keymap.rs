@@ -1474,7 +1474,7 @@ pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
     } else if state.files.is_empty() {
         Some("No changes to stage".into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some(crate::git::ops::CONFLICTS_REFUSAL.into())
+        Some(crate::op::CONFLICTS_REFUSAL.into())
     } else {
         None
     }
@@ -8576,7 +8576,7 @@ mod tests {
         let ask = |force| {
             Popup::DeleteBranch(DeleteBranchConfirm {
                 name: "t".into(),
-                op: crate::git::ops::GitOp::DeleteBranch {
+                op: crate::op::GitOp::DeleteBranch {
                     name: "t".into(),
                     force,
                 },
@@ -8844,7 +8844,7 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.popups = vec![Popup::DeleteTag(crate::popup::DeleteTagConfirm {
             name: "v1".into(),
-            op: crate::git::ops::GitOp::DeleteTag {
+            op: crate::op::GitOp::DeleteTag {
                 name: "v1".into(),
                 oid: "1".repeat(40),
             },
@@ -8902,7 +8902,7 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.popups = vec![Popup::RemoveRemote(crate::popup::RemoveRemoteConfirm {
             name: "fork".into(),
-            op: crate::git::ops::GitOp::RemoveRemote("fork".into()),
+            op: crate::op::GitOp::RemoveRemote("fork".into()),
         })];
         let resolve_in = |key| {
             resolve(

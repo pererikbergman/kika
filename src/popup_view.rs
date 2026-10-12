@@ -516,10 +516,10 @@ mod tests {
 
     use super::*;
     use crate::git::FileEntry;
-    use crate::git::ops::GitOp;
     use crate::git::status::EntryKind;
     use crate::git::submodule::{Submodule, SubmoduleState};
     use crate::model::Context;
+    use crate::op::GitOp;
     use crate::popup::PromptKind;
     use crate::popup::{ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat};
     use crate::view::{buffer_rows, render};
@@ -1075,7 +1075,7 @@ mod tests {
     #[test]
     fn the_hard_reset_question_names_the_target_and_offers_no_enter() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         use crate::popup::ResetHardConfirm;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::ResetHard(ResetHardConfirm {
@@ -1388,7 +1388,7 @@ mod tests {
     /// The hard-reset form of the leave-commits question, with eight ids.
     fn hard_reset_leaving_eight() -> AppState {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         use crate::popup::LeaveCommitsConfirm;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {

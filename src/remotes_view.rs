@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn the_remove_question_is_shown_whole_at_80_by_24() {
-        use crate::git::ops::GitOp;
+        use crate::op::GitOp;
         use crate::popup::{Popup, RemoveRemoteConfirm};
         let mut state = focused(vec![remote("origin", Some("/srv/r"), &["main"])]);
         state.popups.push(Popup::RemoveRemote(RemoveRemoteConfirm {

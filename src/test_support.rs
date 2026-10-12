@@ -9,7 +9,6 @@ use crate::git::branches::{Branch, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffLine, DiffRequest, LineKind};
 use crate::git::log::{CommitRow, LogPage};
-use crate::git::ops::{GitOp, ResetMode};
 use crate::git::patch::{self, FilePatch};
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan;
@@ -25,6 +24,7 @@ use crate::intent::AppIntent;
 use crate::keymap::{KeyPress, KeyScope};
 use crate::layout::{self, SidePanel};
 use crate::model::*;
+use crate::op::{GitOp, ResetMode};
 use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 

@@ -9,11 +9,11 @@ use crate::custom_patch::{CustomPatch, FilePick, PatchAction, PatchChoice};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
-use crate::git::ops::GitOp;
 use crate::git::patch::{FileKind, LineId, PatchError};
 use crate::hunk_view::HunkView;
 use crate::keymap;
 use crate::layout::SidePanel;
+use crate::op::GitOp;
 use crate::popup::{ConfirmKind, LineInput, Popup, PromptKind};
 use crate::view::elide_right;
 

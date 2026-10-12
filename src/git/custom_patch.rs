@@ -330,7 +330,7 @@ fn fail_closed(runner: &dyn GitRunner, orig: &CommitId, error: String) -> String
 
 /// Run `cmd` detached; its stdout, or git's message made safe to draw.
 fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String> {
-    super::ops::run_checked(runner, cmd).map(|output| output.stdout)
+    super::runner::run_checked(runner, cmd).map(|output| output.stdout)
 }
 
 #[cfg(test)]
@@ -338,10 +338,10 @@ mod tests {
     use super::*;
     use crate::git::commit_files::CommitRange;
     use crate::git::fake::{FakeRunner, TempDir, fail, ok};
-    use crate::git::ops::{GitOp, op_command};
     use crate::git::patch::LineId;
     use crate::git::path::RepoPath;
     use crate::git::rebase_plan::Step;
+    use crate::op::{GitOp, op_command};
 
     fn id(digit: char) -> CommitId {
         CommitId::parse(&digit.to_string().repeat(40)).unwrap()

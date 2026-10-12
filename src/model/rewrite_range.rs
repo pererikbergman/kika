@@ -5,9 +5,9 @@
 use super::{AppState, Context};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
-use crate::git::ops::GitOp;
 use crate::git::rebase_plan::{Edit, RebasePlan, TodoAction};
 use crate::keymap::{self, Reason};
+use crate::op::GitOp;
 use crate::popup::{ConfirmKind, Popup};
 
 /// Why a confirmed drop did not run: the range is not the one asked about.
@@ -102,13 +102,13 @@ mod tests {
 
     use super::*;
     use crate::git::log::CommitRow;
-    use crate::git::ops::op_command;
     use crate::git::rebase_plan::{RANGE_GAP, Step};
     use crate::handoff::HandOff;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope, OP_RUNNING};
     use crate::layout::SidePanel;
     use crate::model::Focus;
+    use crate::op::op_command;
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))
