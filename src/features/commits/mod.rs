@@ -6,6 +6,7 @@
 //! `patch_plan`.
 
 pub(crate) mod bisect;
+pub(crate) mod compare;
 pub(crate) mod copy;
 pub(crate) mod custom_patch;
 pub(crate) mod reflog;

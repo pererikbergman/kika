@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
-use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::branches::{remotes, tags};
 use crate::features::commits::{Crossing, with_stacked_branches};
@@ -1704,7 +1703,7 @@ pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<Rea
 }
 
 /// A range spans log rows; the todo list above the log has none.
-fn commits_range_disabled(state: &AppState) -> Option<Reason> {
+pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
     state
         .commits
         .todo_selected
@@ -2112,13 +2111,6 @@ fn log_filter_disabled(state: &AppState) -> Option<Reason> {
         .then_some(CLEAR_RANGE_FIRST.into())
 }
 
-/// A mark is a log commit, not a row of the todo list above the log.
-fn commits_mark_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false)
-        .or_else(|| commits_range_disabled(state))
-        .or_else(|| no_commit_selected(state))
-}
-
 fn files_log_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| no_file_selected(state))
 }
@@ -2127,22 +2119,6 @@ pub(crate) fn no_branch_selected(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| {
         let selected = state.branches.selected_branch();
         selected.is_none().then_some("No branch selected".into())
-    })
-}
-
-/// A comparison needs a mark, and another branch or commit than it.
-pub(crate) fn branches_diff_disabled(state: &AppState) -> Option<Reason> {
-    no_branch_selected(state).or_else(|| match &state.diff_mark {
-        None => Some("Mark a commit or branch first (M)".into()),
-        Some(DiffMark::Branch(name))
-            if state
-                .branches
-                .selected_branch()
-                .is_some_and(|b| b.name == *name) =>
-        {
-            Some("Pick another branch or commit to diff against".into())
-        }
-        Some(_) => None,
     })
 }
 
@@ -4471,45 +4447,6 @@ static COMMITS_LOG_FILTER: &[Binding] = &[
     },
 ];
 
-// Chunk 74: compare
-#[rustfmt::skip]
-static COMPARE_COMMITS: &[Binding] = &[
-    Binding {
-        id: "commits.mark",
-        keys: &[KeyPattern::any(KeyCode::Char('M'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::ToggleDiffMark,
-        description: "Mark the selected commit to diff against (enter on another); again to clear",
-        label: "mark for diff",
-        bar: false,
-        disabled: commits_mark_disabled,
-    },
-];
-
-// Chunk 76: compare
-static COMPARE_BRANCHES: &[Binding] = &[
-    Binding {
-        id: "branches.mark",
-        keys: &[KeyPattern::any(KeyCode::Char('M'))],
-        scope: KeyScope::Branches,
-        intent: AppIntent::ToggleDiffMark,
-        description: "Mark the selected branch to diff against (enter on another); again to clear",
-        label: "mark for diff",
-        bar: false,
-        disabled: no_branch_selected,
-    },
-    Binding {
-        id: "branches.diff",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::OpenDiff,
-        description: "Show what changed from the diff mark to the selected branch",
-        label: "diff with mark",
-        bar: false,
-        disabled: branches_diff_disabled,
-    },
-];
-
 // Chunk 77: commits
 #[rustfmt::skip]
 static COMMITS_FILES_LOG: &[Binding] = &[
@@ -4618,9 +4555,9 @@ static CHUNKS: &[&[Binding]] = &[
     review::keys::REVIEW_MERGE_CONFIRM,
     CORE_FILTER_SEARCH,
     COMMITS_LOG_FILTER,
-    COMPARE_COMMITS,
+    commits::compare::keys::COMPARE_COMMITS,
     commits::reflog::keys::REFLOG_LOG_FILTER,
-    COMPARE_BRANCHES,
+    commits::compare::keys::COMPARE_BRANCHES,
     COMMITS_FILES_LOG,
     CORE_INPUT_QUIT,
 ];
@@ -4640,6 +4577,7 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::commits::compare::keys::commits_mark_disabled;
     use crate::features::commits::custom_patch::keys::patch_file_disabled;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::git::bisect::BisectMark;

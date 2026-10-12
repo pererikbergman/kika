@@ -14,8 +14,8 @@ use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::branches::{remotes, tags};
-use crate::features::commits::copy;
 use crate::features::commits::reflog;
+use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
     blame, conflicts, custom_commands, pull_requests, repos, review, submodules, sync, worktrees,
@@ -34,7 +34,7 @@ use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_saf
 use crate::git::fixup_base::find_fixup_base;
 use crate::git::head::read_head_message;
 use crate::git::left_behind::read_left_behind;
-use crate::git::log::{LogQuery, branch_commit, log_page, markers};
+use crate::git::log::{LogQuery, log_page, markers};
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
@@ -791,15 +791,6 @@ pub(crate) fn unix_now() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// A comparison's end as a commit: a commit as it is, a branch where it
-/// points now.
-fn resolve_end(runner: &dyn GitRunner, end: DiffEnd) -> Result<CommitId, String> {
-    match end {
-        DiffEnd::Commit(id) => Ok(id),
-        DiffEnd::Branch(name) => branch_commit(runner, &name),
-    }
-}
-
 /// How long a diff may take before "Loading…" is shown.
 pub const DIFF_LOADING_DELAY: Duration = Duration::from_millis(150);
 
@@ -1183,24 +1174,7 @@ impl Runtime {
                 });
             }
             Effect::ResolveDiff { tag, base, target } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        let base = resolve_end(runner.as_ref(), base)?;
-                        let target = resolve_end(runner.as_ref(), target)?;
-                        Ok(CommitRange {
-                            oid: target,
-                            parent: Some(base),
-                        })
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("git rev-parse crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::DiffResolved { tag, result });
-                });
+                compare::effects::resolve(runner, tx, tag, base, target)
             }
             Effect::LoadCommitFiles { tag, range } => {
                 tokio::spawn(async move {
