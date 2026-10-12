@@ -7,7 +7,6 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::commit_editor::{byte_at, char_len};
 use crate::features::command_log::CommandLogView;
 use crate::features::commits::custom_patch::PatchAction;
 use crate::features::repos::RecentList;
@@ -897,6 +896,15 @@ impl LineInput {
             _ => {}
         }
     }
+}
+
+pub(crate) fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// The byte offset of char `col` in `text`, or its end.
+pub(crate) fn byte_at(text: &str, col: usize) -> usize {
+    text.char_indices().nth(col).map_or(text.len(), |(i, _)| i)
 }
 
 /// Something failed: what, git's own words, and what to do now.

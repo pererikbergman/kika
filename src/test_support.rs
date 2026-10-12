@@ -2,9 +2,9 @@
 //! that tests in more than one area use. A helper only one feature's tests
 //! use stays with that feature.
 
-use crate::commit_editor::CommitEditor;
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
+use crate::features::commit::CommitEditor;
 use crate::features::commits::reflog::Reflog;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::forge::ForgeHost;
@@ -1636,5 +1636,17 @@ pub(crate) mod screen {
         view.cursor = cursor;
         state.focus = Focus::Blame(view);
         state
+    }
+
+    /// Draw and return the buffer and where the terminal cursor ended up.
+    pub(crate) fn draw_with_cursor(
+        state: &AppState,
+        width: u16,
+        height: u16,
+    ) -> (ratatui::buffer::Buffer, (u16, u16)) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(state, frame)).unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        (terminal.backend().buffer().clone(), (cursor.x, cursor.y))
     }
 }
