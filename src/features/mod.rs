@@ -35,3 +35,5 @@
 //!    `AppState` method calls. So every slice also runs this check, which must
 //!    print nothing (hits that point at a parent feature are allowed):
 //!    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
+
+pub(crate) mod command_log;

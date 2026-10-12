@@ -22,7 +22,7 @@ use crate::git::submodule::{Submodule, SubmoduleState};
 use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
-use crate::keymap::{KeyPress, KeyScope};
+use crate::keymap::{Binding, KeyPress, KeyScope, Keymap, KeysTable, Trust, registry};
 use crate::layout::{self, SidePanel};
 use crate::model::*;
 use crate::op::{GitOp, ResetMode};
@@ -912,4 +912,30 @@ pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
     state.expanded = SidePanel::Branches;
     state.files_loaded = true;
     state
+}
+
+pub(crate) fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyPress {
+    KeyPress::new(code, modifiers)
+}
+
+pub(crate) fn plain(c: char) -> KeyPress {
+    key(KeyCode::Char(c), KeyModifiers::NONE)
+}
+
+pub(crate) fn layer(entries: &[(&str, &[&str])]) -> KeysTable {
+    entries
+        .iter()
+        .map(|(id, keys)| (id.to_string(), keys.iter().map(|k| k.to_string()).collect()))
+        .collect()
+}
+
+pub(crate) fn build(
+    entries: &[(&str, &[&str])],
+    trust: Trust,
+) -> Result<(Keymap, Vec<String>), String> {
+    Keymap::build(&Keymap::default(), &layer(entries), trust)
+}
+
+pub(crate) fn binding(id: &str) -> &'static Binding {
+    registry().iter().find(|b| b.id == id).expect("known id")
 }
