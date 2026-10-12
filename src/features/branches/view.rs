@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::branches::{BranchesPanel, BranchesTab};
+use super::{BranchesPanel, BranchesTab};
 use crate::features::branches::{remotes, tags};
 use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
@@ -27,7 +27,7 @@ const LOG_AUTHOR: usize = 16;
 // The panel's state, the forge's and the clock are separate parts of
 // `AppState`; bundling them only for this call would hide which it reads.
 #[allow(clippy::too_many_arguments)]
-pub fn render_panel(
+pub(crate) fn render_panel(
     panel: &BranchesPanel,
     forge: &ForgeState,
     now: i64,
@@ -157,7 +157,7 @@ fn tab_title(panel: &BranchesPanel, look: &PanelLook) -> String {
 
 /// What marks a branch row besides its own state.
 #[derive(Clone, Copy, Default)]
-pub struct RowMarks<'a> {
+pub(crate) struct RowMarks<'a> {
     /// The branch a fetch, pull or push runs on, and the spinner's frame.
     pub spinner: Option<(&'a BranchName, &'a str)>,
     /// The branch marked for diffing.
@@ -330,7 +330,7 @@ fn forge_line(forge: &ForgeState, now: i64, width: usize) -> Option<String> {
 
 /// The selected branch's newest commits, one per row, scrolled by the
 /// log's own scroll.
-pub fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, area: Rect) {
+pub(crate) fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Frame, area: Rect) {
     let log = &panel.log;
     // Where in the log the pane is, as the Diff pane says it.
     let position = if log.rows.is_empty() || log.error.is_some() {

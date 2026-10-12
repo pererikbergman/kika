@@ -1,10 +1,10 @@
-use crate::branches::BranchesTab;
-use crate::branches_view;
 use crate::commits_view;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::features::blame;
+use crate::features::branches;
+use crate::features::branches::BranchesTab;
 use crate::features::branches::remotes;
 use crate::features::commit;
 use crate::features::commits::custom_patch::{self, CustomPatch};
@@ -79,8 +79,8 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                     Some(DiffMark::Branch(name)) => Some(name),
                     _ => None,
                 };
-                let marks = branches_view::RowMarks { spinner, diff };
-                branches_view::render_panel(
+                let marks = branches::view::RowMarks { spinner, diff };
+                branches::view::render_panel(
                     &state.branches,
                     &state.forge,
                     state.now,
@@ -125,7 +125,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         {
             remotes::view::render_remote(&state.branches.remotes, &look, frame, area)
         }
-        (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
+        (Focus::Branches, ..) => branches::view::render_log(&state.branches, &look, frame, area),
         // A commit's file, streamed like a working-tree diff; never rendered.
         (Focus::Commits, ..) if state.commits.open.is_some() => {
             render_diff_pane(&state.diff, options, &look, frame, area)

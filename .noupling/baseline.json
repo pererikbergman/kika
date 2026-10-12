@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791847494",
-  "issue_count": 26,
+  "timestamp": "1791848321",
+  "issue_count": 24,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/features",
     "coupling_violation:src/e2e -> src/forge",
@@ -16,7 +16,6 @@
     "zone_flag:src/forge",
     "zone_flag:src/git",
     "low_cohesion:src/features",
-    "low_cohesion:src/features/branches",
     "low_cohesion:src/features/branches/remotes",
     "low_cohesion:src/features/branches/tags",
     "low_cohesion:src/features/commit",
@@ -27,7 +26,6 @@
     "low_cohesion:src/features/commits/rewrite",
     "low_cohesion:src/features/diff",
     "low_cohesion:src/features/operation",
-    "low_cohesion:src/features/repos",
-    "low_cohesion:src/model"
+    "low_cohesion:src/features/repos"
   ]
 }

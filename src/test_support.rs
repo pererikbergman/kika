@@ -3,6 +3,7 @@
 //! use stays with that feature.
 
 use crate::effect::{Effect, Tag};
+use crate::features::branches::BranchesTab;
 use crate::features::commit::CommitEditor;
 use crate::features::commits::reflog::Reflog;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
@@ -672,6 +673,12 @@ pub(crate) fn with_branches() -> AppState {
 
 pub(crate) fn selected_name(state: &AppState) -> String {
     state.branches.selected_branch().unwrap().name.display()
+}
+
+/// Show the Branches panel's Remotes tab, for a feature that must not
+/// name the tab type itself.
+pub(crate) fn on_remotes_tab(state: &mut AppState) {
+    state.branches.tab = BranchesTab::Remotes;
 }
 
 pub(crate) fn git_remote(name: &str, configured: bool, branches: &[&str]) -> Remote {
