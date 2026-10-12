@@ -72,8 +72,9 @@ pub struct CredentialPrompt {
 
 impl CredentialPrompt {
     /// Only git's username question and ssh's new-host-key question are
-    /// shown as typed, matched on their exact words, so a prompt a server
-    /// chose cannot ask for a secret with the text in sight. Ssh puts
+    /// shown as typed, matched on their exact words (the start of git's,
+    /// the whole closing sentence of ssh's), so a prompt a server chose
+    /// cannot ask for a secret with the text in sight. Ssh puts
     /// `(user@host) ` before a server's own prompts, so one starting with
     /// `(` stays masked however it ends. A bare `Username:` is not git's
     /// question and stays masked on purpose.
@@ -89,12 +90,16 @@ impl CredentialPrompt {
     }
 }
 
-/// Ssh's new-host-key question: it ends with the choice, after which
-/// nothing more can be asked, and is not a server prompt.
+/// Ssh's new-host-key question: it ends with ssh's whole closing sentence,
+/// after which nothing more can be asked, and is not a server prompt.
 fn is_host_key_question(prompt: &str) -> bool {
+    const ENDINGS: [&str; 2] = [
+        "want to continue connecting (yes/no/[fingerprint])?",
+        // Older ssh asks without the fingerprint choice.
+        "want to continue connecting (yes/no)?",
+    ];
     let prompt = prompt.trim_end();
-    !prompt.starts_with('(')
-        && (prompt.ends_with("(yes/no)?") || prompt.ends_with("(yes/no/[fingerprint])?"))
+    !prompt.starts_with('(') && ENDINGS.iter().any(|ending| prompt.ends_with(ending))
 }
 
 /// A [`LineInput`] that may hold a password, so its `Debug` hides the text.
@@ -1074,6 +1079,10 @@ mod tests {
         assert!(masked(
             "want to continue connecting (yes/no/[fingerprint])? token:"
         ));
+        // Only the choice, without ssh's sentence before it.
+        assert!(masked("Token (yes/no)?"));
+        assert!(masked("Password:\n(yes/no)?"));
+        assert!(masked("Token (yes/no/[fingerprint])?"));
         // Not git's username question, so masked on purpose.
         assert!(masked("Username:"));
     }

@@ -90,6 +90,11 @@ mod bridge {
         deadline: Duration,
     }
 
+    const LIMITS: Limits = Limits {
+        read_timeout: READ_TIMEOUT,
+        deadline: TOTAL_READ_DEADLINE,
+    };
+
     /// The listening end. Questions are answered one at a time, in the
     /// order they arrive, by the `ask` given to [`AskpassServer::start`].
     /// Dropping it removes the socket and its directory and hangs up on a
@@ -110,11 +115,7 @@ mod bridge {
         pub fn start(
             ask: impl Fn(Question) -> Option<Secret> + Send + 'static,
         ) -> io::Result<Self> {
-            let limits = Limits {
-                read_timeout: READ_TIMEOUT,
-                deadline: TOTAL_READ_DEADLINE,
-            };
-            Self::start_with_limits(ask, limits)
+            Self::start_with_limits(ask, LIMITS)
         }
 
         fn start_with_limits(
@@ -341,11 +342,11 @@ mod bridge {
         type Asked = mpsc::Receiver<(Question, mpsc::Sender<Option<Secret>>)>;
 
         fn server() -> (AskpassServer, Asked) {
-            server_with(None)
+            server_with(LIMITS)
         }
 
-        /// As [`server`], with the production limits unless `limits` is given.
-        fn server_with(limits: Option<Limits>) -> (AskpassServer, Asked) {
+        /// As [`server`], with its own read limits.
+        fn server_with(limits: Limits) -> (AskpassServer, Asked) {
             let (asked_tx, asked) = mpsc::channel();
             let asked_tx = Mutex::new(asked_tx);
             let ask = move |question| {
@@ -353,11 +354,7 @@ mod bridge {
                 lock(&asked_tx).send((question, answer_tx)).ok()?;
                 answer_rx.recv().ok().flatten()
             };
-            let server = match limits {
-                Some(limits) => AskpassServer::start_with_limits(ask, limits),
-                None => AskpassServer::start(ask),
-            }
-            .unwrap();
+            let server = AskpassServer::start_with_limits(ask, limits).unwrap();
             (server, asked)
         }
 
@@ -486,7 +483,7 @@ mod bridge {
                 read_timeout: Duration::from_millis(200),
                 deadline: Duration::from_millis(600),
             };
-            let (server, asked) = server_with(Some(limits));
+            let (server, asked) = server_with(limits);
             let started = Instant::now();
             // One byte every 100 ms, so no single read ever times out.
             let mut trickle = UnixStream::connect(server.socket()).unwrap();

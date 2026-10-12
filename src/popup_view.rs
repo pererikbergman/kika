@@ -1650,6 +1650,27 @@ mod tests {
         for c in typed.chars() {
             assert!(!contains(&rows, &c.to_string()), "{c} shown: {rows:#?}");
         }
+        assert!(contains(&rows, "•"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_ssh_host_key_question_shows_every_line_and_the_typed_answer() {
+        let state = asked(
+            "The authenticity of host 'h' can't be established.\n\
+             ED25519 key fingerprint is SHA256:abc.\n\
+             Are you sure you want to continue connecting (yes/no/[fingerprint])? ",
+            "yes",
+        );
+        let (_, rows) = draw(&state, 80, 24);
+        for line in [
+            "The authenticity of host 'h' can't be established.",
+            "ED25519 key fingerprint is SHA256:abc.",
+            "connecting (yes/no/[fingerprint])?",
+            " yes ",
+        ] {
+            assert!(contains(&rows, line), "{line:?} missing: {rows:#?}");
+        }
+        assert!(!contains(&rows, "•"), "{rows:#?}");
     }
 
     #[test]
