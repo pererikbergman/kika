@@ -295,9 +295,11 @@ mod tests {
         /// [`no_spawn_site_runs_a_decoy_from_the_working_directory`].
         #[tokio::test]
         async fn decoy_child_public_sites() {
-            use crate::external_diff::{ExternalRenderer, LIMITS, RendererKind};
             use crate::features::custom_commands::CommandFailure;
             use crate::features::custom_commands::run_captured;
+            use crate::features::diff::renderers::external_diff::{
+                ExternalRenderer, LIMITS, RendererKind,
+            };
             use crate::forge::github::{CliGh, GhCall, GhCommand, GhRunner};
             use crate::git::runner::{CliRunner, GitCommand, GitRunner};
 
@@ -335,7 +337,14 @@ mod tests {
                 argv: vec!["kika-decoy".into()],
                 kind: RendererKind::Pager,
             };
-            let rendered = crate::external_diff::run(&renderer, &here, &[], b"", 80, LIMITS);
+            let rendered = crate::features::diff::renderers::external_diff::run(
+                &renderer,
+                &here,
+                &[],
+                b"",
+                80,
+                LIMITS,
+            );
             assert_eq!(rendered, Err("kika-decoy not found".into()));
         }
 
