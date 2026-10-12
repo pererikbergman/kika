@@ -15,7 +15,7 @@ use crate::custom_patch::{CustomPatch, FilePick};
 use crate::diff_mark::DiffMark;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
+use crate::git::diff::{sanitize, terminal_safe};
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
 use crate::reflog_view::reflog_lines;
@@ -74,12 +74,14 @@ pub(crate) fn render_commits_panel(
     };
     let mut base = "Commits".to_string();
     if expanded && !reflog && panel.query.is_active() {
-        // With a filter as well, the query leaves room for it, up to half.
+        // With a filter as well, the query leaves room for it, up to half:
+        // measured as `filter_title` draws it, made safe and with the
+        // title's padding, one column either side, so it is not cut.
         let reserve = if panel.filter.is_empty() {
             width_of(&selected)
         } else {
-            let filter = format!(" · /{} {}", panel.filter, counts());
-            width_of(&filter).min(look.title_room() / 2)
+            let filter = format!(" · /{} {}", sanitize(panel.filter.as_bytes()), counts());
+            (width_of(&filter) + 2).min(look.title_room() / 2)
         };
         let query = &panel.query;
         base = query_title(
@@ -1734,6 +1736,25 @@ mod tests {
         assert!(width_of(title) <= 80, "{title}");
         assert!(title.contains("name.rs · author: ann"), "{title}");
         assert!(title.contains("/work"), "{title}");
+    }
+
+    #[test]
+    fn a_query_leaves_the_fuzzy_filter_room_for_its_text_as_drawn() {
+        let path = format!("{}name.rs", "dir/".repeat(30));
+        let mut state = queried(Some(&path), None);
+        // Drawn as `w`, U+FFFD and the 8-column `<U+202E>`: 10 columns, not 1.
+        state.commits.filter = "w\x07\u{202E}".into();
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        let title = &rows[0];
+        assert!(
+            title.contains(" · /w\u{FFFD}<U+202E> 0 of 4 loaded"),
+            "{title}"
+        );
+        assert!(title.contains("path: …"), "the path gave way: {title}");
+        for row in &rows {
+            assert!(width_of(row) <= 80, "{row}");
+            assert!(!row.contains(['\x07', '\u{202E}']), "{row}");
+        }
     }
 
     #[test]
