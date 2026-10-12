@@ -3,14 +3,15 @@
 //! the branches or tags, or removing the remotes, a range covers. Every
 //! name an op carries comes from the loaded list, never from the filter.
 
-use super::{AppState, Context, SELECTION_CLEARED, delete_tag_disabled};
+use super::{
+    AppState, Context, RemoteRow, SELECTION_CLEARED, change_remote_disabled, delete_tag_disabled,
+};
 use crate::branches::BranchesTab;
 use crate::effect::Effect;
 use crate::keymap::{self, Reason};
 use crate::list_filter::InputTarget;
 use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, Popup, RangeKind};
-use crate::remotes::RemoteRow;
 
 impl AppState {
     /// Narrow the Branches panel's tab `target` filters. The log follows a
@@ -58,7 +59,7 @@ impl AppState {
         let disabled: fn(&AppState) -> Option<Reason> = match kind {
             RangeKind::Branches => keymap::delete_branch_disabled,
             RangeKind::Tags => delete_tag_disabled,
-            RangeKind::Remotes => keymap::change_remote_disabled,
+            RangeKind::Remotes => change_remote_disabled,
             RangeKind::Stashes => keymap::drop_stash_disabled,
         };
         if let Some(reason) = disabled(self) {

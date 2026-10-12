@@ -7,10 +7,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::branches::{BranchesPanel, BranchesTab};
-use crate::features::branches::tags;
+use crate::features::branches::{remotes, tags};
 use crate::forge::{CiState, ForgeState, ForgeStatus, ForgeView, PrBadge, PrState};
 use crate::git::branches::{Branch, BranchName, LogRow, Track};
-use crate::remotes_view;
 use crate::rows::{DIFF_MARK, clock, diff_mark_style};
 use crate::view::{
     PanelLook, clip, elide_right, fit, list_title, no_matches, pad, range_row, scrolled, width_of,
@@ -81,7 +80,7 @@ pub fn render_panel(
         block = block.title_bottom(Line::from(line));
     }
     let body = if expanded && panel.tab == BranchesTab::Remotes {
-        remotes_view::list_body(&panel.remotes, usize::from(inner.height), width)
+        remotes::view::list_body(&panel.remotes, usize::from(inner.height), width)
     } else if expanded && panel.tab == BranchesTab::Tags {
         tags::view::list_body(&panel.tags, usize::from(inner.height), width)
     } else if let Some(error) = &panel.error {
