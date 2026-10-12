@@ -330,12 +330,12 @@ pub fn sanitize(raw: &[u8]) -> String {
 /// terminal without grapheme clustering draws each part, wider than the two
 /// columns the layout reserves, which pushes the row past its pane. With
 /// `Keep`, a ZWJ is drawn when it joins two emoji elements and the whole
-/// sequence measures two columns. An element is a pictographic character,
-/// optionally followed by U+FE0F or a skin-tone modifier, that measures two
-/// columns on its own, so a text-presentation symbol such as `©`, `™`,
-/// `↔` or a `❤` without U+FE0F is never one. A sequence that is not fully
-/// qualified measures wider, so all of its joiners stay escaped, as does a
-/// joiner next to anything else.
+/// sequence, of at most four elements, measures two columns. An element is
+/// a pictographic character, optionally followed by U+FE0F or a skin-tone
+/// modifier, that measures two columns on its own, so a text-presentation
+/// symbol such as `©`, `™`, `↔` or a `❤` without U+FE0F is never one.
+/// Every joiner of a longer sequence stays escaped, as does a joiner next
+/// to anything else.
 pub fn sanitize_body(raw: &[u8], emoji: EmojiZwj) -> String {
     let decoded = String::from_utf8_lossy(raw);
     let chars: Vec<char> = decoded.chars().collect();
@@ -361,8 +361,15 @@ pub fn sanitize_body(raw: &[u8], emoji: EmojiZwj) -> String {
     text
 }
 
+/// The most emoji a kept sequence joins: the longest standard ones, a
+/// family of four or a kiss with two skin tones, have four. A longer chain
+/// still measures two columns, but a terminal may draw only part of it, so
+/// all of its joiners stay escaped.
+const MAX_EMOJI_ELEMENTS: usize = 4;
+
 /// The indexes, in order, of every ZWJ inside a maximal emoji ZWJ
-/// sequence, `element (ZWJ element)+`, that measures two columns.
+/// sequence, `element (ZWJ element)+` of at most `MAX_EMOJI_ELEMENTS`
+/// elements, that measures two columns.
 fn emoji_joiners(chars: &[char]) -> Vec<usize> {
     let width = |part: &[char]| Span::raw(part.iter().collect::<String>()).width();
     // The end of the emoji element starting at `i`, if one does. It must
@@ -394,7 +401,7 @@ fn emoji_joiners(chars: &[char]) -> Vec<usize> {
             joiners.push(end);
             end = next;
         }
-        if !joiners.is_empty() && width(&chars[i..end]) == 2 {
+        if (1..MAX_EMOJI_ELEMENTS).contains(&joiners.len()) && width(&chars[i..end]) == 2 {
             kept.extend(joiners);
         }
         i = end;
@@ -1374,6 +1381,13 @@ mod tests {
             let escaped = raw.replace('\u{200D}', "<U+200D>");
             assert_eq!(sanitize_body(raw.as_bytes(), EmojiZwj::Escape), escaped);
         }
+        // Four emoji, the longest standard sequences, are kept.
+        for raw in [
+            "👨\u{200D}👩\u{200D}👧\u{200D}👦",
+            "👩\u{1F3FB}\u{200D}❤\u{FE0F}\u{200D}💋\u{200D}👨\u{1F3FC}",
+        ] {
+            assert_eq!(sanitize_body(raw.as_bytes(), EmojiZwj::Keep), raw);
+        }
         // Inside a longer line, between words and next to another sequence.
         let line = "a 👨\u{200D}👩\u{200D}👧 b ❤\u{FE0F}\u{200D}🔥👩\u{1F3FD}\u{200D}💻";
         assert_eq!(sanitize_body(line.as_bytes(), EmojiZwj::Keep), line);
@@ -1418,6 +1432,15 @@ mod tests {
             ("©\u{200D}2024", "©<U+200D>2024"),
             ("🀀\u{200D}🀀", "🀀<U+200D>🀀"),
             ("\u{1FC00}\u{200D}\u{1FC00}", "\u{1FC00}<U+200D>\u{1FC00}"),
+            // More than four emoji: every joiner stays escaped.
+            (
+                "👨\u{200D}👩\u{200D}👧\u{200D}👦\u{200D}👶",
+                "👨<U+200D>👩<U+200D>👧<U+200D>👦<U+200D>👶",
+            ),
+            (
+                "🔥\u{200D}🔥\u{200D}🔥\u{200D}🔥\u{200D}🔥\u{200D}🔥",
+                "🔥<U+200D>🔥<U+200D>🔥<U+200D>🔥<U+200D>🔥<U+200D>🔥",
+            ),
             // A narrow element next to a wide one.
             ("👨\u{200D}©", "👨<U+200D>©"),
             ("↔\u{200D}👨", "↔<U+200D>👨"),

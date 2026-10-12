@@ -657,7 +657,31 @@ struct Glyph {
     start: usize,
     width: usize,
     text: String,
-    emoji: bool,
+}
+
+/// For each char of `line`, whether it continues the glyph before it
+/// instead of starting one: a zero-width char, or an emoji that a ZWJ or a
+/// skin tone joins to a glyph starting with an emoji. `clip` lays glyphs out
+/// by it and the search marks snap to it, so a mark never cuts a glyph the
+/// terminal draws as one. A zero-width char with no glyph before it
+/// continues nothing.
+fn continues_glyph(line: &str) -> Vec<bool> {
+    let mut glyph_is_emoji = None;
+    let mut before = None;
+    line.chars()
+        .map(|c| {
+            let joins = glyph_is_emoji == Some(true)
+                && (emoji::is_pictographic(c) && before == Some('\u{200D}')
+                    || emoji::is_modifier(c) && before.is_some_and(emoji::is_pictographic));
+            let zero = width_of(c.encode_utf8(&mut [0; 4])) == 0;
+            let continues = glyph_is_emoji.is_some() && (joins || zero);
+            if !continues && !zero {
+                glyph_is_emoji = Some(emoji::is_pictographic(c));
+            }
+            before = Some(c);
+            continues
+        })
+        .collect()
 }
 
 impl Glyph {
@@ -699,14 +723,9 @@ pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
     let mut cells = vec![Cell::Blank; width];
     let mut col: usize = 0;
     let mut last: Option<Glyph> = None;
-    let mut before: Option<char> = None;
-    for c in line.chars() {
-        let joins = last.as_ref().is_some_and(|glyph| glyph.emoji)
-            && (emoji::is_pictographic(c) && before == Some('\u{200D}')
-                || emoji::is_modifier(c) && before.is_some_and(emoji::is_pictographic));
-        before = Some(c);
+    for (c, continues) in line.chars().zip(continues_glyph(line)) {
         let w = width_of(c.encode_utf8(&mut [0; 4]));
-        if let Some(glyph) = last.as_mut().filter(|_| joins || w == 0) {
+        if let Some(glyph) = last.as_mut().filter(|_| continues) {
             // A combining mark or a joined emoji stays with the glyph before it.
             // It is redrawn at its new width: `🏳️‍⚧` measures 3 until the
             // last U+FE0F brings it back to 2.
@@ -724,7 +743,6 @@ pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
             start: col,
             width: w,
             text: c.to_string(),
-            emoji: emoji::is_pictographic(c),
         };
         glyph.place(&mut cells, from);
         last = Some(glyph);
@@ -1478,20 +1496,43 @@ pub(crate) const CURRENT_MATCH: Style = Style::new()
 
 /// `text` in `style`, split so each char range in `marks` (in order, not
 /// overlapping) takes its own style on top. Ranges past the end of a
-/// clipped text are cut to it.
+/// clipped text are cut to it. Each range widens to whole glyphs: the
+/// buffer measures each span on its own, so a span that ended inside an
+/// emoji sequence or before a combining mark would split what `clip` laid
+/// out as one glyph, and shift the rest of the row.
 fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
     if marks.is_empty() {
         return vec![Span::styled(text, style)];
     }
+    let continues = continues_glyph(&text);
     let chars: Vec<char> = text.chars().collect();
+    let inside = |i: usize| continues.get(i).copied().unwrap_or(false);
     let piece = |from: usize, to: usize| {
         chars[from.min(chars.len())..to.min(chars.len())]
             .iter()
             .collect::<String>()
     };
-    let mut spans = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
     let mut at = 0;
     for &(start, end, mark) in marks {
+        let mut start = start.min(chars.len()).max(at);
+        while start > at && inside(start) {
+            start -= 1;
+        }
+        let mut end = end.min(chars.len());
+        while inside(end) {
+            end += 1;
+        }
+        // A match in the glyph the last one widened to: that span already
+        // holds it, and takes this match's style on top.
+        if end <= start {
+            if at > 0
+                && let Some(last) = spans.last_mut()
+            {
+                last.style = last.style.patch(mark);
+            }
+            continue;
+        }
         spans.push(Span::styled(piece(at, start), style));
         spans.push(Span::styled(piece(start, end), style.patch(mark)));
         at = end;
@@ -3575,6 +3616,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn with_keep_a_search_match_never_splits_an_emoji_sequence() {
+        let family = "👨\u{200D}👩";
+        let tail: String = ('a'..='z').collect();
+        let diff = format!(
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n\
+             +Q{family}X{family}{tail}\n"
+        );
+        for query in ["👨", "👩", "\u{200D}", family, "Q👨", "👩X", "X👨"] {
+            for width in [100, 24, 20] {
+                let mut state = joined_keep(&diff);
+                if let Focus::Diff(view) = &mut state.focus {
+                    view.set_search(query, EmojiZwj::Keep);
+                }
+                let buffer = draw_buffer(&state, width, 12);
+                let at = format!("{query:?} at {width}");
+                let (x, y) = added_row(&buffer, 'Q');
+                // `+Q`, the sequence in one 2-column cell, then `X`.
+                assert_eq!(buffer[(x + 2, y)].symbol(), family, "{at}");
+                assert_eq!(buffer[(x + 4, y)].symbol(), "X", "{at}");
+                assert_eq!(buffer[(x + 5, y)].symbol(), family, "{at}");
+                // The match is marked on the whole sequence.
+                let marked = |x: u16| buffer[(x, y)].style().bg.is_some();
+                if query != "X👨" {
+                    assert!(marked(x + 2), "{at}: not marked");
+                }
+                if width == 100 {
+                    assert_eq!(buffer[(x + 7, y)].symbol(), "a", "{at}");
+                } else {
+                    assert_cut_row(&buffer, width, y, &at);
+                }
+                assert_eq!(buffer[(width - 1, y)].symbol(), "┃", "{at}");
+                for cell in buffer.content() {
+                    let symbol = cell.symbol();
+                    assert!(
+                        !symbol.ends_with('\u{200D}') && !symbol.starts_with('\u{200D}'),
+                        "{at}: a cell {symbol:?}"
+                    );
+                    if symbol.contains('👨') || symbol.contains('👩') {
+                        assert_eq!(symbol, family, "{at}: a split sequence");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn marks_widen_to_whole_glyphs_and_a_second_mark_in_one_glyph_restyles_it() {
+        let family = "👨\u{200D}👩";
+        let text = format!("Q{family}X");
+        let spans = |marks: &[(usize, usize, Style)]| -> Vec<(String, Style)> {
+            marked_spans(text.clone(), Style::new(), marks)
+                .into_iter()
+                .map(|span| (span.content.into_owned(), span.style))
+                .collect()
+        };
+        let plain = Style::new();
+        // `👩` (chars 3..4) and the ZWJ (2..3) both widen to the sequence.
+        for range in [(3, 4), (2, 3), (1, 2), (1, 4)] {
+            assert_eq!(
+                spans(&[(range.0, range.1, MATCH)]),
+                [
+                    ("Q".to_string(), plain),
+                    (family.to_string(), MATCH),
+                    ("X".to_string(), plain),
+                ],
+                "{range:?}"
+            );
+        }
+        // Two matches in the one sequence: the current one wins.
+        assert_eq!(
+            spans(&[(1, 2, MATCH), (3, 4, CURRENT_MATCH)]),
+            [
+                ("Q".to_string(), plain),
+                (family.to_string(), MATCH.patch(CURRENT_MATCH)),
+                ("X".to_string(), plain),
+            ]
+        );
+        // A combining mark stays with its letter too.
+        let accented = marked_spans("e\u{301}x".into(), plain, &[(0, 1, MATCH)]);
+        assert_eq!(accented[0].content, "e\u{301}");
     }
 
     #[test]
