@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use crate::custom_patch::{CustomPatch, PatchAction};
-use crate::features::branches::tags;
+use crate::features::branches::{remotes, tags};
 use crate::features::commits::bisect::git::run_bisect_start;
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::git::bisect::BisectMark;
@@ -666,14 +666,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             GitCommand::new("branch").arg("-d").arg("--"),
             |cmd, name| cmd.arg(name.as_os_string()),
         ),
-        // The start point as a full ref, as for `CreateBranch`.
-        GitOp::CheckoutTracking { name, from } => GitCommand::new("checkout")
-            .arg("-q")
-            .arg("--track")
-            .arg("-b")
-            .arg(name)
-            .arg(from.full_ref())
-            .arg("--"),
+        GitOp::CheckoutTracking { name, from } => remotes::git::track_command(name, from),
         GitOp::SetUpstream { branch, upstream } => {
             let mut flag = OsString::from("--set-upstream-to=");
             flag.push(upstream.full_ref());
@@ -686,23 +679,9 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg("--unset-upstream")
             .arg("--")
             .arg(branch.as_os_string()),
-        // Never `-f`: adding a remote must not reach the network.
-        GitOp::AddRemote { name, url } => GitCommand::new("remote")
-            .arg("add")
-            .arg("--")
-            .arg(name)
-            .arg(url),
-        // In git 2.15 `remote rename` and `remote remove` parse no options,
-        // so `--` would be a usage error. The new name passed
-        // `validate_remote_name`, and no key acts on an old name that
-        // starts with `-`, so neither is read as an option.
-        GitOp::RenameRemote { from, to } => GitCommand::new("remote")
-            .arg("rename")
-            .arg(from.as_os_string())
-            .arg(to),
-        GitOp::RemoveRemote(name) => GitCommand::new("remote")
-            .arg("remove")
-            .arg(name.as_os_string()),
+        GitOp::AddRemote { name, url } => remotes::git::add_command(name, url),
+        GitOp::RenameRemote { from, to } => remotes::git::rename_command(from, to),
+        GitOp::RemoveRemote(name) => remotes::git::remove_command(name),
         // The first of the steps `run_op` takes, one per remote, tag or stash;
         // `refusal` keeps an empty list from running.
         GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) | GitOp::StashDrops(_) => {
@@ -1348,9 +1327,9 @@ fn has_unstaged(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::fake::{FakeRunner, config, fail, ok};
     use crate::git::runner::GitOutput;
-    use crate::test_support::{argv, rev_parse, two_commit_repo};
+    use crate::test_support::{argv, cloned_repo, rev_parse, two_commit_repo};
 
     fn entry(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
         FileEntry {
@@ -2067,92 +2046,6 @@ mod tests {
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
             runner.assert_done();
         }
-    }
-
-    #[test]
-    fn a_failed_remote_op_says_why_without_credentials() {
-        let runner = FakeRunner::new().expect(
-            &["remote", "add", "--", "o", "https://u:tok@h/r"],
-            fail("error: remote o already exists at 'https://u:tok@h/r'\n"),
-        );
-        let op = GitOp::AddRemote {
-            name: "o".into(),
-            url: "https://u:tok@h/r".into(),
-        };
-        assert_eq!(
-            run_op(&runner, &op),
-            Err("error: remote o already exists at 'https://h/r'".into())
-        );
-    }
-
-    /// A repository on `main` with one commit, and `origin`: a local bare
-    /// repository holding `main` and `feature`, fetched once.
-    fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {
-        use crate::git::fake::{TempDir, git};
-        let bare = TempDir::new("remote-bare");
-        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
-        let tmp = TempDir::new("remote-ops");
-        let dir = tmp.path();
-        git(dir, &["init", "-q", "-b", "main"]);
-        git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
-        let url = bare.path().to_str().unwrap();
-        git(dir, &["remote", "add", "origin", url]);
-        git(dir, &["push", "-q", "origin", "main", "main:feature"]);
-        git(dir, &["fetch", "-q", "origin"]);
-        (tmp, bare)
-    }
-
-    fn config(dir: &std::path::Path, key: &str) -> Option<String> {
-        let mut cmd = std::process::Command::new("git");
-        let out = cmd
-            .current_dir(dir)
-            .envs(crate::git::runner::isolation_env())
-            .args(["config", "--get", key])
-            .output()
-            .unwrap();
-        out.status
-            .success()
-            .then(|| String::from_utf8(out.stdout).unwrap().trim().to_string())
-    }
-
-    fn remote_refs(dir: &std::path::Path) -> String {
-        String::from_utf8(crate::git::fake::git(
-            dir,
-            &["for-each-ref", "--format=%(refname)", "refs/remotes"],
-        ))
-        .unwrap()
-    }
-
-    #[test]
-    fn remotes_are_added_renamed_and_removed_without_a_fetch_in_real_git() {
-        let (tmp, bare) = cloned_repo();
-        let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
-        let url = bare.path().to_str().unwrap().to_string();
-
-        let add = GitOp::AddRemote {
-            name: "fork".into(),
-            url: url.clone(),
-        };
-        run_op(&runner, &add).unwrap();
-        assert_eq!(config(dir, "remote.fork.url"), Some(url));
-        assert!(!remote_refs(dir).contains("refs/remotes/fork/"), "fetched");
-
-        // Its refs move with it once there are some.
-        crate::git::fake::git(dir, &["fetch", "-q", "fork"]);
-        let rename = GitOp::RenameRemote {
-            from: "fork".into(),
-            to: "mine".into(),
-        };
-        run_op(&runner, &rename).unwrap();
-        assert_eq!(config(dir, "remote.fork.url"), None);
-        let refs = remote_refs(dir);
-        assert!(refs.contains("refs/remotes/mine/feature"), "{refs}");
-        assert!(!refs.contains("refs/remotes/fork/"), "{refs}");
-
-        run_op(&runner, &GitOp::RemoveRemote("mine".into())).unwrap();
-        assert_eq!(config(dir, "remote.mine.url"), None);
-        assert!(!remote_refs(dir).contains("refs/remotes/mine/"));
     }
 
     #[test]

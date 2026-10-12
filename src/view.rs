@@ -7,6 +7,7 @@ use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::features::blame;
+use crate::features::branches::remotes;
 use crate::features::conflicts;
 use crate::features::operation;
 use crate::git::FileEntry;
@@ -22,7 +23,6 @@ use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use crate::remote_run::RemoteRun;
-use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
 use crate::stash_view;
 use ratatui::Frame;
@@ -123,7 +123,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             if state.branches.tab == BranchesTab::Remotes
                 && state.branches.remotes.selected_branch().is_none() =>
         {
-            remotes_view::render_remote(&state.branches.remotes, &look, frame, area)
+            remotes::view::render_remote(&state.branches.remotes, &look, frame, area)
         }
         (Focus::Branches, ..) => branches_view::render_log(&state.branches, &look, frame, area),
         // A commit's file, streamed like a working-tree diff; never rendered.

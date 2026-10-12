@@ -13,7 +13,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
-use crate::features::branches::tags;
+use crate::features::branches::{remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::custom_commands::OutputMode;
 use crate::features::{
@@ -39,7 +39,7 @@ use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
-use crate::git::remotes::{RemoteName, list_remotes};
+use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
@@ -1007,19 +1007,7 @@ impl Runtime {
                     });
                 });
             }
-            Effect::LoadRemotes { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || list_remotes(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
-                                format!("git for-each-ref crashed: {e}").as_bytes(),
-                            ))
-                        });
-                    let _ = tx.send(AppIntent::RemotesLoaded { tag, result });
-                });
-            }
+            Effect::LoadRemotes { tag } => remotes::effects::load(runner, tx, tag),
             Effect::LoadTags { tag } => tags::effects::load(runner, tx, tag),
             // Synchronous, so no later effect runs in the old repository.
             // A diff still streaming belongs to the old one.
@@ -2564,47 +2552,6 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::TagsLoaded { result: Err(_), .. })
         ));
-    }
-
-    #[tokio::test]
-    async fn a_remotes_load_reports_back_with_the_same_tag() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &["config", "-z", "--get-regexp", r"^remote\..*\.url$"],
-                    ok(b"remote.origin.url\n/srv/r\0"),
-                )
-                .expect(
-                    &[
-                        "for-each-ref",
-                        "--format=%(refname)%00%(symref)",
-                        "refs/remotes",
-                    ],
-                    ok(b"refs/remotes/origin/main\0\n"),
-                ),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 5,
-            user: false,
-        };
-
-        runtime.spawn(Effect::LoadRemotes { tag });
-
-        match rx.recv().await {
-            Some(AppIntent::RemotesLoaded {
-                tag: got,
-                result: Ok(remotes),
-            }) => {
-                assert_eq!(got, tag);
-                assert_eq!(remotes.len(), 1);
-                assert_eq!(remotes[0].branches[0].display(), "origin/main");
-            }
-            other => panic!("expected RemotesLoaded, got {other:?}"),
-        }
-        runner.assert_done();
     }
 
     #[tokio::test]
