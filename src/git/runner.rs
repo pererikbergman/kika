@@ -732,10 +732,24 @@ mod tests {
         runner.interrupt();
     }
 
+    /// With a terminal, the read stops git's background group with SIGTTIN;
+    /// without one the hook stops the group itself. It refuses to if it
+    /// shares the test's group, or if it does not know that group because
+    /// `OUTER_GROUP` is unset or empty.
+    #[cfg(unix)]
+    const STOPPING_HOOK: &str = "#!/bin/sh\n\
+         group=$(ps -o pgid= -p $$ | tr -d ' ')\n\
+         [ -n \"$OUTER_GROUP\" ] && [ -n \"$group\" ] && [ \"$group\" != \"$OUTER_GROUP\" ] || exit 1\n\
+         echo \"$$ $PPID $group\" > started.tmp && mv started.tmp started\n\
+         if (exec 3</dev/tty) 2>/dev/null; then read x </dev/tty; fi\n\
+         kill -STOP 0\n\
+         sleep 30\n";
+
     /// SIGKILLs what is left of a stopped group if the test fails before the
     /// interrupt ends it. Each pid is signalled only while it is still in
     /// git's group, and never if that group is ours, so a reused pid or an
-    /// unrelated process is never touched.
+    /// unrelated process is never touched. It never panics: a panic inside
+    /// `drop` while the test unwinds would abort the whole test binary.
     #[cfg(unix)]
     struct StoppedGroup {
         pids: Vec<String>,
@@ -751,7 +765,7 @@ mod tests {
                 return;
             }
             for pid in &self.pids {
-                if pgid_of(pid) == self.group
+                if pgid_of(pid).as_deref() == Some(self.group.as_str())
                     && let Ok(pid) = pid.parse::<libc::pid_t>()
                     && pid > 1
                 {
@@ -761,6 +775,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Waits up to 10 s for `child` to exit. On timeout it SIGKILLs the
+    /// child and fails, so a stuck child never outlives the test.
+    #[cfg(unix)]
+    fn exit_within_10s(child: &mut std::process::Child) -> std::process::ExitStatus {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the child did not exit within 10 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The hook must stop nothing unless it knows the test's group. It runs
+    /// in a group of its own, so a regressed guard stops only that child.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_hook_refuses_without_outer_group() {
+        use crate::git::fake::TempDir;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let tmp = TempDir::new("stopping-hook-guard");
+        let dir = tmp.path();
+        std::fs::write(dir.join("hook"), STOPPING_HOOK).unwrap();
+        for outer in [None, Some("")] {
+            let mut cmd = Command::new("sh");
+            cmd.arg("hook")
+                .current_dir(dir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            match outer {
+                None => cmd.env_remove("OUTER_GROUP"),
+                Some(value) => cmd.env("OUTER_GROUP", value),
+            };
+            CommandExt::process_group(&mut cmd, 0);
+            let mut child = cmd.spawn().unwrap();
+
+            let status = exit_within_10s(&mut child);
+
+            assert_eq!(status.code(), Some(1), "OUTER_GROUP={outer:?}");
+            assert!(!dir.join("started").exists(), "OUTER_GROUP={outer:?}");
+            assert!(!dir.join("started.tmp").exists(), "OUTER_GROUP={outer:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_stopped_group_kills_its_stopped_members() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        CommandExt::process_group(&mut cmd, 0);
+        let mut child = cmd.spawn().unwrap();
+        let pid = child.id();
+        // SAFETY: only sends a signal, to the child just spawned as the
+        // leader of its own group.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
+
+        drop(StoppedGroup {
+            pids: vec![pid.to_string()],
+            group: pid.to_string(),
+        });
+
+        assert_eq!(exit_within_10s(&mut child).signal(), Some(libc::SIGKILL));
+
+        // A pid `ps` knows nothing about is skipped without a panic.
+        let mut gone = Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id().to_string();
+        gone.wait().unwrap();
+        drop(StoppedGroup {
+            pids: vec![gone_pid.clone()],
+            group: gone_pid,
+        });
     }
 
     /// Regression: a background read of `/dev/tty` stops git's whole group
@@ -779,20 +878,7 @@ mod tests {
         git(dir, &["config", "core.hooksPath", ".git/hooks"]);
         std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
         let hook = dir.join(".git/hooks/pre-commit");
-        // With a terminal, the read stops git's background group with
-        // SIGTTIN; without one the hook stops the group itself. It refuses
-        // to if it shares the test's group.
-        std::fs::write(
-            &hook,
-            "#!/bin/sh\n\
-             group=$(ps -o pgid= -p $$ | tr -d ' ')\n\
-             [ -n \"$group\" ] && [ \"$group\" != \"$OUTER_GROUP\" ] || exit 1\n\
-             echo \"$$ $PPID $group\" > started.tmp && mv started.tmp started\n\
-             if (exec 3</dev/tty) 2>/dev/null; then read x </dev/tty; fi\n\
-             kill -STOP 0\n\
-             sleep 30\n",
-        )
-        .unwrap();
+        std::fs::write(&hook, STOPPING_HOOK).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(dir.join("a"), "a\n").unwrap();
         git(dir, &["add", "a"]);
@@ -816,6 +902,12 @@ mod tests {
                 let _ = tx.send(runner.run(&cmd));
             });
         }
+        // Built before anything can panic on `started`, so a failure past
+        // this point still cleans up whatever was recorded.
+        let mut stopped = StoppedGroup {
+            pids: Vec::new(),
+            group: String::new(),
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
         while !dir.join("started").exists() {
             assert!(Instant::now() < deadline, "the hook never started");
@@ -823,10 +915,11 @@ mod tests {
         }
         let started = std::fs::read_to_string(dir.join("started")).unwrap();
         let mut ids: Vec<String> = started.split_whitespace().map(String::from).collect();
-        let group = ids.pop().unwrap();
+        let group = ids.pop().expect("started names the hook's group");
         // The hook, its git, and the group's leader.
         ids.push(group.clone());
-        let stopped = StoppedGroup { pids: ids, group };
+        stopped.pids = ids;
+        stopped.group = group;
         loop {
             let stat = Command::new("ps")
                 .args(["-o", "stat=", "-p", &stopped.pids[0]])
@@ -865,14 +958,20 @@ mod tests {
         assert!(!own_child_group(ours, ours, ours), "our own group");
     }
 
-    /// The pgid of process `pid`, as `ps` prints it.
+    /// The pgid of process `pid`, as `ps` prints it, or `None` if `ps`
+    /// fails or knows no such process. `None` rather than a panic, because
+    /// `StoppedGroup::drop` calls it.
     #[cfg(unix)]
-    fn pgid_of(pid: &str) -> String {
+    fn pgid_of(pid: &str) -> Option<String> {
         let out = Command::new("ps")
             .args(["-o", "pgid=", "-p", pid])
             .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let pgid = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!pgid.is_empty()).then_some(pgid)
     }
 
     #[cfg(unix)]
@@ -919,7 +1018,7 @@ mod tests {
         let hook_pgid = std::fs::read_to_string(dir.join(".git/pgid")).unwrap();
         assert_eq!(
             hook_pgid.trim(),
-            pgid_of(&std::process::id().to_string()),
+            pgid_of(&std::process::id().to_string()).expect("ps failed"),
             "git started a new process group"
         );
         assert!(lock(&runner.running).is_empty());
@@ -951,7 +1050,10 @@ mod tests {
         assert_eq!(lines.next(), Some("none"));
         // Git's group is not Kika's, so `interrupt` can stop it as a whole.
         let group = lines.next().unwrap().trim().to_string();
-        assert_ne!(group, pgid_of(&std::process::id().to_string()));
+        assert_ne!(
+            group,
+            pgid_of(&std::process::id().to_string()).expect("ps failed")
+        );
     }
 
     #[test]
