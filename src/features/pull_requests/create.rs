@@ -4,8 +4,8 @@
 //! a create reaches the network, and only after a `y`.
 
 use std::borrow::Cow;
+use std::ffi::OsString;
 
-use super::{AppState, Context};
 use crate::clipboard::CopyWhat;
 use crate::effect::Effect;
 use crate::forge::remote::matches;
@@ -16,6 +16,7 @@ use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::remotes::RemoteName;
 use crate::keymap::{Reason, no_commit_selected};
+use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ConfirmKind, ErrorPopup, LineInput, Popup, PromptKind};
 
@@ -32,7 +33,7 @@ const NOT_ASKED: &str =
     "The remote is on no forge host in the global config, or not in [forge.allow]";
 const NO_HOSTS: &str = "Name GitHub hosts under [forge] in the global config";
 const REFRESHING: &str = "Pull requests are already being refreshed";
-pub(super) const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
+pub(crate) const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
 
 /// A pull request being put together. Its parts are taken when each step
 /// is answered, so a reload meanwhile cannot change what is created.
@@ -74,7 +75,7 @@ fn forge_link(state: &AppState) -> Option<(ForgeKind, ForgeRepo)> {
 }
 
 /// GitHub compares owners and names without regard to case.
-pub(super) fn same_repo(a: &ForgeRepo, b: &ForgeRepo) -> bool {
+pub(crate) fn same_repo(a: &ForgeRepo, b: &ForgeRepo) -> bool {
     a.host.eq_ignore_ascii_case(&b.host)
         && a.owner.eq_ignore_ascii_case(&b.owner)
         && a.name.eq_ignore_ascii_case(&b.name)
@@ -206,8 +207,17 @@ fn head_ref(draft: &PrDraft, target: &ForgeRepo) -> String {
 }
 
 impl AppState {
+    /// The global config's GitLab hosts and browser, for forge links.
+    pub fn with_forge_links(self, gitlab: Vec<ForgeHost>, browser: Option<Vec<OsString>>) -> Self {
+        Self {
+            forge_gitlab_hosts: gitlab,
+            browser,
+            ..self
+        }
+    }
+
     /// Hand the selected branch's page to the configured browser.
-    pub(super) fn open_forge_url(&mut self) -> Vec<Effect> {
+    pub(crate) fn open_forge_url(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -225,7 +235,7 @@ impl AppState {
     }
 
     /// Put the selected branch's page on the clipboard.
-    pub(super) fn copy_forge_url(&mut self) -> Vec<Effect> {
+    pub(crate) fn copy_forge_url(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -240,7 +250,7 @@ impl AppState {
 
     /// Start a pull request for the selected branch: from the remote its
     /// upstream is on, to a remote on the same GitHub host.
-    pub(super) fn create_pr_start(&mut self) {
+    pub(crate) fn create_pr_start(&mut self) {
         if self.context != Context::Workspace {
             return;
         }
@@ -315,14 +325,14 @@ impl AppState {
         })
     }
 
-    pub(super) fn move_pick_cursor(&mut self, delta: isize) {
+    pub(crate) fn move_pick_cursor(&mut self, delta: isize) {
         if let Some(Popup::PickList(list)) = self.popups.last_mut() {
             list.move_cursor(delta);
         }
     }
 
     /// Take the picked row and go on to the next step.
-    pub(super) fn pick_select(&mut self) -> Vec<Effect> {
+    pub(crate) fn pick_select(&mut self) -> Vec<Effect> {
         let Some(Popup::PickList(list)) = self.popups.last() else {
             return vec![];
         };
@@ -398,7 +408,7 @@ impl AppState {
     }
 
     /// Keep the title and ask before creating; an empty one is asked again.
-    pub(super) fn pull_request_titled(&mut self, text: &str) {
+    pub(crate) fn pull_request_titled(&mut self, text: &str) {
         let Some(draft) = self.pr_draft.as_mut() else {
             return;
         };
@@ -417,7 +427,7 @@ impl AppState {
     }
 
     /// Ask GitHub to create the pull request the question described.
-    pub(super) fn confirm_create_pull_request(&mut self) -> Vec<Effect> {
+    pub(crate) fn confirm_create_pull_request(&mut self) -> Vec<Effect> {
         if self.popups.last() != Some(&Popup::Confirm(ConfirmKind::CreatePullRequest)) {
             return vec![];
         }
@@ -470,7 +480,7 @@ impl AppState {
     /// GitHub refuses calls to `host` until `until`: no create, merge or
     /// load asks it before then, and the status line says so when it is
     /// the badges' host.
-    pub(super) fn record_rate_limit(&mut self, host: &ForgeHost, until: i64) {
+    pub(crate) fn record_rate_limit(&mut self, host: &ForgeHost, until: i64) {
         let host = host.as_str();
         self.forge.limited.insert(host.to_string(), until);
         let here = self.forge.repo.as_ref();
@@ -483,7 +493,7 @@ impl AppState {
     /// GitHub answered the create. A new pull request on the repository
     /// the badges come from shows its badge at once, and the badges are
     /// asked for again; one on another repository is only said.
-    pub(super) fn pull_request_created(
+    pub(crate) fn pull_request_created(
         &mut self,
         tag: crate::effect::Tag,
         result: Result<(u64, String), CreateError>,

@@ -15,10 +15,12 @@ use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::branches::tags;
 use crate::features::custom_commands::OutputMode;
-use crate::features::{blame, conflicts, custom_commands, repos, submodules, sync, worktrees};
+use crate::features::{
+    blame, conflicts, custom_commands, pull_requests, repos, submodules, sync, worktrees,
+};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
-use crate::forge::task::{ForgeContext, Load, run_load};
+use crate::forge::task::ForgeContext;
 use crate::forge::{CreateError, ForgeStatus};
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
@@ -499,7 +501,10 @@ fn write_rebase_todo(
 
 /// Log `argv` as started in the Command log, and return what logs it as
 /// finished, with its outcome and how long it ran.
-fn log_program(argv: &[OsString], sink: CommandSink) -> impl FnOnce(CommandOutcome) + Send + use<> {
+pub(crate) fn log_program(
+    argv: &[OsString],
+    sink: CommandSink,
+) -> impl FnOnce(CommandOutcome) + Send + use<> {
     let line = argv
         .iter()
         .map(|arg| terminal_safe(arg.as_encoded_bytes()))
@@ -518,46 +523,6 @@ fn log_program(argv: &[OsString], sink: CommandSink) -> impl FnOnce(CommandOutco
             outcome,
             elapsed: start.elapsed(),
         })
-    }
-}
-
-/// Start `argv` (the browser and the URL last) with no shell and nothing
-/// to read or write, logged in the Command log. It is waited for on a
-/// thread of its own, so a browser that stays open holds nothing up;
-/// only a failure to start is reported, as `OpenUrlFailed`.
-fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppIntent>) {
-    let finished = log_program(&argv, sink);
-    let Some((program, args)) = argv.split_first() else {
-        finished(CommandOutcome::NotStarted);
-        let _ = tx.send(AppIntent::OpenUrlFailed("No browser is configured".into()));
-        return;
-    };
-    let spawned = crate::program::command(program).and_then(|mut command| {
-        command
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-    });
-    match spawned {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let outcome = match child.wait() {
-                    Ok(status) if status.success() => CommandOutcome::Ok,
-                    Ok(status) => CommandOutcome::Failed(Some(status.to_string())),
-                    Err(_) => CommandOutcome::NotStarted,
-                };
-                finished(outcome);
-            });
-        }
-        Err(e) => {
-            finished(CommandOutcome::NotStarted);
-            let program = terminal_safe(program.as_encoded_bytes());
-            let _ = tx.send(AppIntent::OpenUrlFailed(format!(
-                "Could not start {program}: {e}"
-            )));
-        }
     }
 }
 
@@ -813,7 +778,7 @@ impl StdinWriter {
 
 /// Where a create or merge runs `gh`: as for loads, the cache directory,
 /// never the repository, so `gh` reads no repository's git config.
-fn gh_cwd(forge: &ForgeContext) -> PathBuf {
+pub(crate) fn gh_cwd(forge: &ForgeContext) -> PathBuf {
     forge
         .cache_dir
         .clone()
@@ -1459,7 +1424,9 @@ impl Runtime {
             // The loop takes these out and copies itself, between draws.
             // Without a loop there is no terminal to copy through.
             Effect::Clipboard(_) => {}
-            Effect::OpenUrl { argv } => open_url(argv, self.sink.clone(), tx),
+            Effect::OpenUrl { argv } => {
+                pull_requests::effects::open_url(argv, self.sink.clone(), tx)
+            }
             Effect::CreatePullRequest {
                 tag,
                 host,
@@ -1467,35 +1434,16 @@ impl Runtime {
                 head,
                 base,
                 title,
-            } => {
-                // No forge client, or a repository `[forge.allow]` leaves
-                // out (the model never asks for one): nothing may reach
-                // the network.
-                let Some(forge) = self.forge.clone().filter(|_| host.allows(&repo)) else {
-                    let _ = tx.send(AppIntent::PullRequestCreated {
-                        tag,
-                        result: Err(CreateError::Status(ForgeStatus::Failed)),
-                    });
-                    return;
-                };
-                tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let cwd = gh_cwd(&forge);
-                        let gh = crate::forge::github::Gh {
-                            runner: forge.gh.as_ref(),
-                            sink: &forge.sink,
-                            host: &host,
-                            cwd,
-                            now: unix_now(),
-                        };
-                        gh.create_pull(&repo, &head, &base, &title)
-                    })
-                    .await
-                    // A panic still answers, or the create would stay in flight.
-                    .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
-                    let _ = tx.send(AppIntent::PullRequestCreated { tag, result });
-                });
-            }
+            } => pull_requests::effects::create(
+                self.forge.clone(),
+                tx,
+                tag,
+                host,
+                repo,
+                head,
+                base,
+                title,
+            ),
             Effect::MergePullRequest {
                 tag,
                 host,
@@ -1679,41 +1627,17 @@ impl Runtime {
                 refresh,
                 known,
                 limited,
-            } => match self.forge.clone().filter(|_| !hosts.is_empty()) {
-                // Off: nothing is read, run or written.
-                None => {
-                    let _ = tx.send(AppIntent::ForgeRepoNone { tag });
-                }
-                Some(forge) => {
-                    tokio::spawn(async move {
-                        let send = tx.clone();
-                        let done = tokio::task::spawn_blocking(move || {
-                            let load = Load {
-                                tag,
-                                hosts: &hosts,
-                                branches: &branches,
-                                refresh,
-                                known: known.as_ref(),
-                                limited: &limited,
-                                top: std::fs::canonicalize(runner.workdir()).ok(),
-                                now: unix_now(),
-                            };
-                            run_load(runner.as_ref(), &forge, &load, &|intent| {
-                                let _ = send.send(intent);
-                            });
-                        })
-                        .await;
-                        // A panic still ends the call, or no refresh would run again.
-                        if done.is_err() && refresh {
-                            let _ = tx.send(AppIntent::PullRequestsFetched {
-                                tag,
-                                result: Err(ForgeStatus::Failed),
-                                limited_until: None,
-                            });
-                        }
-                    });
-                }
-            },
+            } => pull_requests::effects::load(
+                self.forge.clone(),
+                runner,
+                tx,
+                tag,
+                hosts,
+                branches,
+                refresh,
+                known,
+                limited,
+            ),
         }
     }
 }
@@ -1820,55 +1744,7 @@ mod tests {
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::git::remote::RemoteFailure;
-
-    fn forge_tag() -> Tag {
-        Tag {
-            generation: 0,
-            seq: 11,
-            user: false,
-        }
-    }
-
-    #[tokio::test]
-    async fn a_pull_request_load_with_no_hosts_runs_nothing_and_writes_nothing() {
-        use crate::forge::github::FakeGh;
-        use crate::git::recording::CommandSink;
-
-        let tmp = crate::git::fake::TempDir::new("forge-effect-off");
-        let cache_dir = tmp.path().join("forge");
-        let git = Arc::new(FakeRunner::new());
-        let gh = Arc::new(FakeGh::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
-            gh: gh.clone(),
-            sink: CommandSink::new(),
-            cache_dir: Some(cache_dir.clone()),
-        }));
-        let load = |hosts| Effect::LoadPullRequests {
-            tag: forge_tag(),
-            hosts,
-            branches: vec!["main".into()],
-            refresh: true,
-            known: None,
-            limited: vec![],
-        };
-        runtime.spawn(load(vec![]));
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
-        );
-        // Without a forge client, even named hosts reach nobody.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let bare = Runtime::new(git.clone(), tx);
-        bare.spawn(load(vec![ForgeHost::parse("github.com").unwrap()]));
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
-        );
-        git.assert_done();
-        assert_eq!(gh.calls(), []);
-        assert!(!cache_dir.exists());
-    }
+    use crate::test_support::forge_tag;
 
     #[tokio::test]
     async fn review_loads_answer_once_and_reach_nobody_without_a_forge_client() {
@@ -1928,58 +1804,6 @@ mod tests {
         }
         git.assert_done();
         assert_eq!(gh.calls().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_create_runs_gh_in_the_cache_dir_and_answers_once() {
-        use crate::forge::github::fixtures::CREATE_201;
-        use crate::forge::github::{FakeGh, GhCall, answer};
-
-        let tmp = crate::git::fake::TempDir::new("forge-effect-create");
-        let cache_dir = tmp.path().join("forge");
-        let git = Arc::new(FakeRunner::new());
-        let gh = Arc::new(FakeGh::new().reply(answer(CREATE_201)));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
-            gh: gh.clone(),
-            sink: CommandSink::new(),
-            cache_dir: Some(cache_dir.clone()),
-        }));
-        let create = Effect::CreatePullRequest {
-            tag: forge_tag(),
-            host: ForgeHost::parse("github.com").unwrap(),
-            repo: ForgeRepo {
-                host: "github.com".into(),
-                owner: "acme".into(),
-                name: "widgets".into(),
-            },
-            head: "me:topic".into(),
-            base: "main".into(),
-            title: "Add login".into(),
-        };
-        runtime.spawn(create.clone());
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
-                tag: forge_tag(),
-                result: Ok((42, "https://github.com/acme/widgets/pull/42".into())),
-            })
-        );
-        git.assert_done();
-        let [call] = gh.calls().try_into().unwrap();
-        assert_eq!(call.cwd, cache_dir);
-        assert!(matches!(call.kind, GhCall::Create { .. }));
-
-        // Without a forge client, nothing is asked.
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        Runtime::new(git, tx).spawn(create);
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
-                tag: forge_tag(),
-                result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
-        );
     }
 
     #[tokio::test]
@@ -2078,96 +1902,6 @@ mod tests {
         );
         git.assert_done();
         assert_eq!(gh.calls(), []);
-    }
-
-    #[tokio::test]
-    async fn a_create_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
-        use crate::forge::allow::AllowRule;
-        use crate::forge::github::FakeGh;
-
-        let git = Arc::new(FakeRunner::new());
-        let gh = Arc::new(FakeGh::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
-            gh: gh.clone(),
-            sink: CommandSink::new(),
-            cache_dir: None,
-        }));
-        let other = AllowRule::parse("other").unwrap();
-        runtime.spawn(Effect::CreatePullRequest {
-            tag: forge_tag(),
-            host: ForgeHost::parse("github.com")
-                .unwrap()
-                .with_allow(vec![other]),
-            repo: ForgeRepo {
-                host: "github.com".into(),
-                owner: "acme".into(),
-                name: "widgets".into(),
-            },
-            head: "me:topic".into(),
-            base: "main".into(),
-            title: "Add login".into(),
-        });
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
-                tag: forge_tag(),
-                result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
-        );
-        git.assert_done();
-        assert_eq!(gh.calls(), []);
-    }
-
-    #[tokio::test]
-    async fn a_browser_that_cannot_start_says_why_and_is_logged() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let sink = CommandSink::new();
-        let keep = Arc::clone(&events);
-        sink.connect(move |ev| keep.lock().unwrap().push(ev));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_command_sink(sink.clone());
-        let url = "https://github.com/acme/widgets/pull/7";
-        runtime.spawn(Effect::OpenUrl {
-            argv: vec!["/nonexistent/kika-browser".into(), url.into()],
-        });
-        match rx.recv().await {
-            Some(AppIntent::OpenUrlFailed(message)) => {
-                assert!(
-                    message.starts_with("Could not start /nonexistent/kika-browser: "),
-                    "{message}"
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-        let events = events.lock().unwrap();
-        match events.as_slice() {
-            [
-                CommandEvent::Started { id: a, line, .. },
-                CommandEvent::Finished {
-                    id: b,
-                    outcome: CommandOutcome::NotStarted,
-                    ..
-                },
-            ] => {
-                assert_eq!(a, b);
-                assert_eq!(line, &format!("/nonexistent/kika-browser {url}"));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_browser_that_starts_reports_nothing_back() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx);
-        // `true` stands in for a browser: it takes the URL and exits.
-        runtime.spawn(Effect::OpenUrl {
-            argv: vec!["true".into(), "https://github.com/o/r/pull/1".into()],
-        });
-        let waited = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
-        assert!(waited.is_err(), "{waited:?}");
     }
 
     #[tokio::test]
@@ -4572,7 +4306,7 @@ mod tests {
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let url = vec!["kika-decoy".into(), "https://example.com".into()];
-        open_url(url, CommandSink::new(), tx.clone());
+        pull_requests::effects::open_url(url, CommandSink::new(), tx.clone());
         let copy = vec!["kika-decoy".into()];
         run_clipboard_command(
             copy,

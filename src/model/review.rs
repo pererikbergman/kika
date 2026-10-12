@@ -613,7 +613,7 @@ impl AppState {
     }
 
     /// The check picked from the "Check details" list.
-    pub(super) fn pick_check(&mut self, row: usize) -> Vec<Effect> {
+    pub(crate) fn pick_check(&mut self, row: usize) -> Vec<Effect> {
         let urls = std::mem::take(&mut self.review.check_urls);
         match urls.get(row) {
             Some(url) => self.open_check_url(url.clone()),

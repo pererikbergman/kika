@@ -14,7 +14,8 @@ use crate::external_diff::NO_RENDERER;
 use crate::features::branches::tags;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::{
-    blame, command_log, conflicts, custom_commands, operation, repos, submodules, sync, worktrees,
+    blame, command_log, conflicts, custom_commands, operation, pull_requests, repos, submodules,
+    sync, worktrees,
 };
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
@@ -30,7 +31,6 @@ use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
-use crate::model::pull_request::refresh_disabled;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
 use crate::rebase_todo::Rewrite;
@@ -2443,7 +2443,7 @@ fn files_log_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| no_file_selected(state))
 }
 
-fn no_branch_selected(state: &AppState) -> Option<Reason> {
+pub(crate) fn no_branch_selected(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| {
         let selected = state.branches.selected_branch();
         selected.is_none().then_some("No branch selected".into())
@@ -4421,30 +4421,6 @@ static BRANCHES_KEYS: &[Binding] = &[
     },
 ];
 
-// Chunk 47: pull_requests
-static PULL_REQUESTS_BRANCHES: &[Binding] = &[
-    Binding {
-        id: "branches.pull_request",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::OpenMenu(MenuId::PullRequest),
-        description: "Open, copy or create the selected branch's pull request",
-        label: "pull request",
-        bar: false,
-        disabled: no_branch_selected,
-    },
-    Binding {
-        id: "branches.refresh_pull_requests",
-        keys: &[KeyPattern::any(KeyCode::Char('B'))],
-        scope: KeyScope::Branches,
-        intent: AppIntent::RefreshPullRequests,
-        description: "Ask GitHub again for the branches' pull requests",
-        label: "refresh PRs",
-        bar: false,
-        disabled: refresh_disabled,
-    },
-];
-
 // Chunk 48: branches
 static BRANCHES_UPSTREAM_TABS: &[Binding] = &[
     Binding {
@@ -5009,103 +4985,6 @@ static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
         id: "travel.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Travel,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 71: pull_requests
-static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
-    Binding {
-        id: "pick_list.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::PickList,
-        intent: AppIntent::PickNext,
-        description: "Select the next row",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "pick_list.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::PickList,
-        intent: AppIntent::PickPrev,
-        description: "Select the previous row",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "pick_list.pick",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::PickList,
-        intent: AppIntent::PickSelect,
-        description: "Take the selected row",
-        label: "pick",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "pick_list.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
-        scope: KeyScope::PickList,
-        intent: AppIntent::PopPopup,
-        description: "Close the list and stop",
-        label: "close",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "pick_list.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::PickList,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-    // Creating a pull request reaches GitHub, so Enter is left unbound.
-    Binding {
-        id: "create_pull_request.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::CreatePullRequest,
-        intent: AppIntent::ConfirmCreatePullRequest,
-        description: "Yes, create the pull request on GitHub",
-        label: "create",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "create_pull_request.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::CreatePullRequest,
-        intent: AppIntent::ConfirmNo,
-        description: "No, create nothing",
-        label: "cancel",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "create_pull_request.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::CreatePullRequest,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -5736,7 +5615,7 @@ static CHUNKS: &[&[Binding]] = &[
     FILES_DISCARD_CONFIRM,
     BRANCHES_KEYS,
     operation::keys::OPERATION_BRANCHES,
-    PULL_REQUESTS_BRANCHES,
+    pull_requests::keys::PULL_REQUESTS_BRANCHES,
     BRANCHES_UPSTREAM_TABS,
     REMOTES_KEYS,
     tags::keys::TAGS_KEYS,
@@ -5760,7 +5639,7 @@ static CHUNKS: &[&[Binding]] = &[
     command_log::keys::COMMAND_LOG_KEYS,
     worktrees::keys::WORKTREES_REMOVE_CONFIRM,
     repos::keys::REPOS_RECENT,
-    PULL_REQUESTS_PICK_CREATE,
+    pull_requests::keys::PULL_REQUESTS_PICK_CREATE,
     REVIEW_MERGE_CONFIRM,
     CORE_FILTER_SEARCH,
     COMMITS_LOG_FILTER,
