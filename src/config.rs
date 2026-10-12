@@ -27,10 +27,12 @@
 //! browser = ["open"]        # argv that opens a URL, given as its last argument
 //! [display]
 //! emoji_zwj_terminals = ["WezTerm"]  # terminals that draw an emoji sequence as one picture
+//! [clipboard]
+//! command = ["pbcopy"]      # absent = off: copies use OSC 52. Gets the text on stdin.
 //! ```
 //!
-//! `[watch]`, `[diff]`, `[commit]`, `[forge]` and `[display]` are read from
-//! the global file only, at startup. `[display] emoji_zwj_terminals` is off
+//! `[watch]`, `[diff]`, `[commit]`, `[forge]`, `[display]` and `[clipboard]`
+//! are read from the global file only, at startup. `[display] emoji_zwj_terminals` is off
 //! (empty) by default; [`emoji_zwj`] matches it against the running
 //! terminal once.
 //! `[[commands]]` is read from the global file only. A repository file
@@ -136,6 +138,9 @@ pub struct Loaded {
     /// The global `[display] emoji_zwj_terminals`: the terminals that draw
     /// an emoji ZWJ sequence as one two-column picture.
     pub emoji_zwj_terminals: Vec<String>,
+    /// The global `[clipboard] command` argv, checked by `check_argv`;
+    /// `None` keeps copying on OSC 52.
+    pub clipboard_command: Option<Vec<OsString>>,
     pub errors: Vec<ConfigError>,
 }
 
@@ -151,6 +156,7 @@ struct GlobalSettings {
     diff_tool: Option<String>,
     commit_hooks_detached: bool,
     emoji_zwj_terminals: Vec<String>,
+    clipboard_command: Option<Vec<OsString>>,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -172,6 +178,8 @@ struct GlobalFile {
     commit: CommitTable,
     #[serde(default)]
     forge: ForgeTable,
+    #[serde(default)]
+    clipboard: ClipboardTable,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -192,6 +200,14 @@ struct ForgeTable {
     #[serde(default)]
     gitlab: Vec<String>,
     browser: Option<Vec<String>>,
+}
+
+/// The program that copies text, given it on stdin. Only here, in the
+/// user's own file: a cloned repository can never name a program to run.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardTable {
+    command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -216,9 +232,9 @@ struct WatchTable {
 }
 
 /// A repository's file: keys only. A `[watch]`, `[diff]`, `[commit]`,
-/// `[forge]` or `[display]` table, or `[[commands]]`, here is an unknown
-/// field, so a cloned repository can neither turn on fetching, name or run
-/// a program, take the terminal away from its own hooks, make Kika contact
+/// `[forge]`, `[display]` or `[clipboard]` table, or `[[commands]]`, here
+/// is an unknown field, so a cloned repository can neither turn on
+/// fetching, name or run a program, take the terminal away from its own hooks, make Kika contact
 /// a forge, nor change how text is drawn.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -240,6 +256,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         diff_tool: None,
         commit_hooks_detached: false,
         emoji_zwj_terminals: Vec::new(),
+        clipboard_command: None,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
@@ -263,6 +280,7 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         loaded.forge_gitlab_hosts = global.forge_gitlab_hosts;
         loaded.browser = global.browser;
         loaded.emoji_zwj_terminals = global.emoji_zwj_terminals;
+        loaded.clipboard_command = global.clipboard_command;
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -376,6 +394,11 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         .browser
         .map(|argv| check_argv(argv).map_err(|e| format!("forge.browser: {e}")))
         .transpose()?;
+    let clipboard_command = file
+        .clipboard
+        .command
+        .map(|argv| check_argv(argv).map_err(|e| format!("clipboard.command: {e}")))
+        .transpose()?;
     let emoji_zwj_terminals = file.display.emoji_zwj_terminals.unwrap_or_default();
     // An empty name would match a terminal that sets no name at all.
     if emoji_zwj_terminals.iter().any(String::is_empty) {
@@ -391,6 +414,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         browser,
         commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
         emoji_zwj_terminals,
+        clipboard_command,
     })
 }
 
@@ -667,6 +691,7 @@ mod tests {
                 browser: None,
                 commit_hooks_detached: false,
                 emoji_zwj_terminals: vec![],
+                clipboard_command: None,
                 errors: vec![],
             }
         );
@@ -1227,5 +1252,82 @@ output = "none"
             );
         }
         assert_eq!(emoji_zwj(&[], Some("WezTerm"), Some("xterm-kitty")), Escape);
+    }
+
+    #[test]
+    fn the_global_file_names_a_clipboard_command() {
+        let global = |text: &str| apply_global(text, &Keymap::default(), DEFAULT_WATCH);
+        assert_eq!(global("").unwrap().clipboard_command, None);
+        let settings = global("[clipboard]\ncommand = [\"/usr/bin/pbcopy\"]\n").unwrap();
+        assert_eq!(
+            settings.clipboard_command,
+            Some(vec![OsString::from("/usr/bin/pbcopy")])
+        );
+        let xclip =
+            global("[clipboard]\ncommand = [\"xclip\", \"-selection\", \"clipboard\"]\n").unwrap();
+        assert_eq!(
+            xclip.clipboard_command,
+            Some(vec![
+                OsString::from("xclip"),
+                "-selection".into(),
+                "clipboard".into()
+            ])
+        );
+
+        let err = |text: &str| global(text).unwrap_err();
+        assert_eq!(
+            err("[clipboard]\ncommand = []\n"),
+            "clipboard.command: The command is empty"
+        );
+        assert_eq!(
+            err("[clipboard]\ncommand = [\"bin/x\"]\n"),
+            "clipboard.command: The program must be a bare name or an absolute path"
+        );
+        assert_eq!(
+            err("[clipboard]\ncommand = [\"x\", \"a\\u001bb\"]\n"),
+            "clipboard.command: The command contains a control character"
+        );
+        assert!(err("[clipboard]\ncommand = \"pbcopy\"\n").contains("invalid type"));
+        let typo = err("[clipboard]\ncomand = [\"pbcopy\"]\n");
+        assert!(typo.contains("unknown field `comand`"), "{typo}");
+
+        // A bad command drops the whole file, as any error does.
+        let files = Files::new("clipboard-bad");
+        files.global("[keys]\n\"files.stage\" = [\"x\"]\n[clipboard]\ncommand = [\"x/copy\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.clipboard_command, None);
+        assert_eq!(loaded.keymap, Keymap::default());
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].message.starts_with("clipboard.command: "));
+
+        files.global("[clipboard]\ncommand = [\"/usr/bin/pbcopy\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert_eq!(
+            loaded.clipboard_command,
+            Some(vec![OsString::from("/usr/bin/pbcopy")])
+        );
+    }
+
+    #[test]
+    fn only_the_global_file_names_a_clipboard_command() {
+        let refused = repo("[clipboard]\ncommand = [\"x\"]\n").unwrap_err();
+        assert!(refused.contains("unknown field `clipboard`"), "{refused}");
+
+        let files = Files::new("repo-clipboard");
+        files
+            .global("[keys]\n\"files.stage\" = [\"x\"]\n")
+            .repo("[keys]\n\"files.commit\" = [\"C\"]\n[clipboard]\ncommand = [\"x\"]\n");
+        let loaded = files.load();
+        assert_eq!(loaded.clipboard_command, None);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert!(
+            loaded.errors[0]
+                .message
+                .contains("unknown field `clipboard`")
+        );
+        // The global keys still apply; the repository file's do not.
+        assert_eq!(keys_of(&loaded.keymap, "files.stage"), [key("x")]);
+        assert_eq!(keys_of(&loaded.keymap, "files.commit"), [key("c")]);
     }
 }

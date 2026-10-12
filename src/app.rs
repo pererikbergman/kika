@@ -56,6 +56,7 @@ pub async fn run(
         .with_global_config(global_config)
         .with_diff_pager(config.diff_pager.clone())
         .with_diff_tool(config.diff_tool.clone())
+        .with_clipboard_command(config.clipboard_command.clone())
         .with_forge(forge)
         .with_command_sink(sink.clone())
         // Resolved by `main` for this terminal; the view reads the same value.

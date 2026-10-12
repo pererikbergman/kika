@@ -18738,6 +18738,18 @@ mod tests {
         assert!(
             matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == clipboard::TOO_LONG)
         );
+
+        // A clipboard program's failure arrives after "Copied …" is shown.
+        let mut state = copy_ready();
+        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        assert!(state.notice_text.is_some());
+        let late = "false failed: exit status: 1. Check clipboard.command in the global config.";
+        state.update(AppIntent::CopyFailed(late.into()));
+        assert_eq!(state.notice_text, None);
+        assert!(matches!(
+            state.popups.last(),
+            Some(Popup::Error(e)) if e.title == "Could not copy" && e.message == late
+        ));
     }
 
     /// The text and kind of the prompt on top.
