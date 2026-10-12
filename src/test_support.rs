@@ -279,6 +279,11 @@ pub(crate) const TWO_HUNKS: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ 
     @@ -1,2 +1,3 @@\n-a\n+b\n+c\n d\n\
     @@ -9 +10 @@\n-e\n+f\n";
 
+pub(crate) const ONE_HUNK: &[u8] = b"diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+    @@ -9 +9 @@\n-e\n+f\n";
+pub(crate) const BINARY: &[u8] = b"diff --git a/a.rs b/a.rs\nindex 1..2 100644\n\
+    Binary files a/a.rs and b/a.rs differ\n";
+
 pub(crate) fn patch_of(bytes: &[u8]) -> FilePatch {
     patch::parse(bytes).unwrap()
 }
