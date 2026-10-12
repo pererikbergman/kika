@@ -300,10 +300,17 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
   whole file is ignored with an error.
 - Inside tmux, `$TERM_PROGRAM` is `tmux`, and tmux decides the width there.
   List `tmux` only if your tmux draws these sequences as one picture.
-- Only a complete, well-formed sequence that measures two columns is drawn
-  as a picture. A joiner next to a letter, at the start or end of a line, in
-  a run of joiners, next to a hidden or direction-changing character, or in
-  a sequence missing a U+FE0F stays escaped.
+- Only a well-formed sequence that measures two columns is drawn as a
+  picture, and each emoji in it must be two columns wide on its own. A
+  symbol drawn as text, one column wide, such as `©`, `™`, `→` or a `❤`
+  without U+FE0F, never counts as an emoji here, so a joiner next to one
+  stays escaped. So does a joiner next to a letter, at the start or end of a
+  line, in a run of joiners, or next to a hidden or direction-changing
+  character.
+- If joiners still show as `<U+200D>`, check the name with the commands
+  above, capitals included. If rows run past the pane's edge instead, the
+  terminal does not draw these sequences as one picture: take it off the
+  list.
 - File names, authors, commit headers, hunk headers, the conflict view and a
   `[diff]` program's output always escape emoji joiners.
 

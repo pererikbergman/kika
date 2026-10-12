@@ -688,6 +688,32 @@ mod tests {
     }
 
     #[test]
+    fn search_reads_the_rows_with_the_emoji_policy_they_are_drawn_with() {
+        let family = "👨\u{200D}👩";
+        let diff = format!("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+{family}\n");
+        let mut view = HunkView::new("x".into(), DiffSide::Worktree);
+        view.loaded(parse(diff.as_bytes()).unwrap(), 20);
+        view.set_search(family, EmojiZwj::Keep);
+        assert!(
+            view.search
+                .as_ref()
+                .is_some_and(|s| s.current_match().is_some())
+        );
+        view.set_search(family, EmojiZwj::Escape);
+        assert!(
+            view.search
+                .as_ref()
+                .is_some_and(|s| s.current_match().is_none())
+        );
+        view.set_search("👨<U+200D>👩", EmojiZwj::Escape);
+        assert!(
+            view.search
+                .as_ref()
+                .is_some_and(|s| s.current_match().is_some())
+        );
+    }
+
+    #[test]
     fn a_search_jumps_to_its_hunk_and_follows_reloads() {
         let mut view = view();
         view.set_search("+g", EmojiZwj::Escape);

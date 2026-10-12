@@ -122,6 +122,33 @@ mod tests {
             assert!(!is_pictographic(c), "{c:?}");
         }
         assert!(is_modifier('\u{1F3FB}') && is_modifier('\u{1F3FF}'));
+        assert!(!is_modifier('\u{1F3FA}') && !is_modifier('\u{1F400}'));
         assert!(!is_modifier('👨') && !is_modifier('\u{FE0F}'));
+    }
+
+    #[test]
+    fn the_table_edges_match_emoji_data() {
+        // Each pair: the first and last code point of a range, then the
+        // code points just outside it.
+        for (inside, outside) in [
+            (['\u{1F249}', '\u{1F3FA}'], ['\u{1F248}', '\u{1F3FB}']),
+            (['\u{1F400}', '\u{1F53D}'], ['\u{1F3FF}', '\u{1F53E}']),
+            (['\u{1F546}', '\u{1F64F}'], ['\u{1F545}', '\u{1F650}']),
+            (['\u{1F680}', '\u{1F6FF}'], ['\u{1F67F}', '\u{1F700}']),
+            (['\u{1F8AE}', '\u{1F8AF}'], ['\u{1F8AD}', '\u{1F8B0}']),
+            (['\u{1F8BC}', '\u{1F8BF}'], ['\u{1F8BB}', '\u{1F8C0}']),
+            (['\u{1F8C2}', '\u{1F8FF}'], ['\u{1F8C1}', '\u{1F900}']),
+            (['\u{1F947}', '\u{1FAFF}'], ['\u{1F946}', '\u{1FB00}']),
+            (['\u{1FC00}', '\u{1FFFD}'], ['\u{1FBFF}', '\u{1FFFE}']),
+            (['\u{2614}', '\u{2685}'], ['\u{2613}', '\u{2686}']),
+            (['\u{2690}', '\u{2705}'], ['\u{268F}', '\u{2706}']),
+        ] {
+            for c in inside {
+                assert!(is_pictographic(c), "{c:?}");
+            }
+            for c in outside {
+                assert!(!is_pictographic(c), "{c:?}");
+            }
+        }
     }
 }

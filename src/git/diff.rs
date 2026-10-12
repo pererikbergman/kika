@@ -329,9 +329,11 @@ pub fn sanitize(raw: &[u8]) -> String {
 /// Emoji ZWJ sequences follow `emoji`. With `Escape` they stay escaped: a
 /// terminal without grapheme clustering draws each part, wider than the two
 /// columns the layout reserves, which pushes the row past its pane. With
-/// `Keep`, a ZWJ is drawn when it joins two emoji elements (a pictographic
-/// character, optionally followed by U+FE0F or a skin-tone modifier) and
-/// the whole sequence measures two columns. A sequence that is not fully
+/// `Keep`, a ZWJ is drawn when it joins two emoji elements and the whole
+/// sequence measures two columns. An element is a pictographic character,
+/// optionally followed by U+FE0F or a skin-tone modifier, that measures two
+/// columns on its own, so a text-presentation symbol such as `©`, `™`,
+/// `↔` or a `❤` without U+FE0F is never one. A sequence that is not fully
 /// qualified measures wider, so all of its joiners stay escaped, as does a
 /// joiner next to anything else.
 pub fn sanitize_body(raw: &[u8], emoji: EmojiZwj) -> String {
@@ -362,7 +364,11 @@ pub fn sanitize_body(raw: &[u8], emoji: EmojiZwj) -> String {
 /// The indexes, in order, of every ZWJ inside a maximal emoji ZWJ
 /// sequence, `element (ZWJ element)+`, that measures two columns.
 fn emoji_joiners(chars: &[char]) -> Vec<usize> {
-    // The end of the emoji element starting at `i`, if one does.
+    let width = |part: &[char]| Span::raw(part.iter().collect::<String>()).width();
+    // The end of the emoji element starting at `i`, if one does. It must
+    // be two columns on its own: a text-presentation symbol such as `©`,
+    // `↔` or a bare `❤` is one, so a ZWJ between two of them would draw
+    // nothing yet still add up to two columns.
     let element = |i: usize| {
         let c = *chars.get(i)?;
         if !emoji::is_pictographic(c) {
@@ -371,7 +377,8 @@ fn emoji_joiners(chars: &[char]) -> Vec<usize> {
         let attached = chars
             .get(i + 1)
             .is_some_and(|&n| n == '\u{FE0F}' || emoji::is_modifier(n));
-        Some(i + 1 + usize::from(attached))
+        let end = i + 1 + usize::from(attached);
+        (width(&chars[i..end]) == 2).then_some(end)
     };
     let mut kept = Vec::new();
     let mut i = 0;
@@ -387,8 +394,7 @@ fn emoji_joiners(chars: &[char]) -> Vec<usize> {
             joiners.push(end);
             end = next;
         }
-        let sequence: String = chars[i..end].iter().collect();
-        if !joiners.is_empty() && Span::raw(sequence).width() == 2 {
+        if !joiners.is_empty() && width(&chars[i..end]) == 2 {
             kept.extend(joiners);
         }
         i = end;
@@ -1394,10 +1400,27 @@ mod tests {
             // of the sequence stays escaped.
             ("❤\u{200D}🔥", "❤<U+200D>🔥"),
             ("🏳\u{FE0F}\u{200D}⚧", "🏳\u{FE0F}<U+200D>⚧"),
+            // A bare `❤` is one column, so it is no element: the sequence
+            // ends before it, and only the joiners it would need escape.
             (
                 "👨\u{200D}👩\u{200D}❤\u{200D}🔥",
-                "👨<U+200D>👩<U+200D>❤<U+200D>🔥",
+                "👨\u{200D}👩<U+200D>❤<U+200D>🔥",
             ),
+            // Text-presentation symbols are one column each, so a ZWJ
+            // between two of them adds up to two columns but draws nothing.
+            ("©\u{200D}®", "©<U+200D>®"),
+            ("™\u{200D}™", "™<U+200D>™"),
+            ("↔\u{200D}↔", "↔<U+200D>↔"),
+            ("→\u{200D}→", "→<U+200D>→"),
+            ("☀\u{200D}☀", "☀<U+200D>☀"),
+            ("★\u{200D}★", "★<U+200D>★"),
+            ("❤\u{200D}©", "❤<U+200D>©"),
+            ("©\u{200D}2024", "©<U+200D>2024"),
+            ("🀀\u{200D}🀀", "🀀<U+200D>🀀"),
+            ("\u{1FC00}\u{200D}\u{1FC00}", "\u{1FC00}<U+200D>\u{1FC00}"),
+            // A narrow element next to a wide one.
+            ("👨\u{200D}©", "👨<U+200D>©"),
+            ("↔\u{200D}👨", "↔<U+200D>👨"),
         ];
         for (raw, expected) in cases {
             assert_eq!(
