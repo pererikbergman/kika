@@ -22,8 +22,8 @@
 //! Kept cross-feature reads and calls:
 //! - `bisect_refuses` on `AppState` and `bisect::head_move_disabled`
 //!   (bisect, in core), so no tracking checkout moves `HEAD` mid-bisect;
-//! - `branches.*` and `load_branch_log` (the parent, still in core): the
-//!   tab, its remotes and the selected branch's log;
+//! - `branches.*` and `load_branch_log` (the parent, `features/branches`):
+//!   the tab, its remotes and the selected branch's log;
 //! - `start_op` and `op_seq` (core), git one operation at a time.
 //!
 //! What stays in core: the tag push and selection guards `push_tag_disabled`,
@@ -34,8 +34,8 @@
 //! range remove arm, `key_focus`, `open_filter`, `toggle_range`, the
 //! `TrackBranch`, `RemoteName`, `RemoteUrl` and `RenameRemote` prompt
 //! submits and titles, `Popup::RemoveRemote`, `RemoveRemoteConfirm`, the
-//! refresh-all load, `BranchesPanel`, `branches_view.rs` and
-//! `branch_lists.rs`.
+//! refresh-all load and `range_delete.rs`. The parent owns `BranchesPanel`,
+//! the panel's `view.rs` and the range question's builder (`lists.rs`).
 
 pub(crate) mod effects;
 pub(crate) mod git;

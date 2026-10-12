@@ -66,7 +66,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
-    use crate::branches::BranchesTab;
+    use crate::features::branches::BranchesTab;
     use crate::git::commit_files::CommitId;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};

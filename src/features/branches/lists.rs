@@ -1,23 +1,20 @@
 //! The Branches panel's filters and range deletes: narrowing the Local,
-//! Remotes and Tags tabs as the user types, and asking before deleting
-//! the branches or tags, or removing the remotes, a range covers. Every
+//! Remotes and Tags tabs as the user types, and building the question
+//! asked before deleting the branches or tags, or removing the remotes, a
+//! range covers. Core `range_delete.rs` asks it and runs the answer. Every
 //! name an op carries comes from the loaded list, never from the filter.
 
-use super::{
-    AppState, Context, RemoteRow, SELECTION_CLEARED, change_remote_disabled, delete_tag_disabled,
-    drop_stash_disabled,
-};
-use crate::branches::BranchesTab;
+use super::remotes::RemoteRow;
 use crate::effect::Effect;
-use crate::keymap::{self, Reason};
 use crate::list_filter::InputTarget;
+use crate::model::{AppState, SELECTION_CLEARED};
 use crate::op::GitOp;
-use crate::popup::{DeleteRangeConfirm, Popup, RangeKind};
+use crate::popup::{DeleteRangeConfirm, RangeKind};
 
 impl AppState {
     /// Narrow the Branches panel's tab `target` filters. The log follows a
     /// selection the filter moved.
-    pub(super) fn apply_branches_filter(
+    pub(crate) fn apply_branches_filter(
         &mut self,
         target: InputTarget,
         text: String,
@@ -50,48 +47,10 @@ impl AppState {
         }
     }
 
-    /// Ask before deleting what the range of `kind`'s tab covers, naming
-    /// what goes and counting what stays; with nothing to delete, say so
-    /// and ask nothing.
-    pub(super) fn ask_delete_range(&mut self, kind: RangeKind) {
-        if self.context != Context::Workspace {
-            return;
-        }
-        let disabled: fn(&AppState) -> Option<Reason> = match kind {
-            RangeKind::Branches => keymap::delete_branch_disabled,
-            RangeKind::Tags => delete_tag_disabled,
-            RangeKind::Remotes => change_remote_disabled,
-            RangeKind::Stashes => drop_stash_disabled,
-        };
-        if let Some(reason) = disabled(self) {
-            self.notice = Some(reason);
-            return;
-        }
-        let confirm = match kind {
-            RangeKind::Branches => self.branches_range_confirm(),
-            RangeKind::Tags => self.tags_range_confirm(),
-            RangeKind::Remotes => self.remotes_range_confirm(),
-            RangeKind::Stashes => self.stashes_range_confirm(),
-        };
-        if confirm.names.is_empty() {
-            self.notice = Some(
-                match kind {
-                    RangeKind::Branches => "No branch in the selection can be deleted with y",
-                    RangeKind::Tags => "No tag in the selection",
-                    RangeKind::Remotes => "No remote in the selection can be removed",
-                    RangeKind::Stashes => "No stash in the selection",
-                }
-                .into(),
-            );
-            return;
-        }
-        self.popups.push(Popup::DeleteRange(confirm));
-    }
-
     /// The range's branches `git branch -d` may take: never the current
     /// one, and never one whose commits are not merged, since only `y`
     /// answers and a range is never forced.
-    fn branches_range_confirm(&self) -> DeleteRangeConfirm {
+    pub(crate) fn branches_range_confirm(&self) -> DeleteRangeConfirm {
         let (mut unmerged, mut current) = (0, 0);
         let mut names = Vec::new();
         for i in self.branches.range() {
@@ -116,7 +75,7 @@ impl AppState {
     }
 
     /// Every tag in the range, each with the object it held when listed.
-    fn tags_range_confirm(&self) -> DeleteRangeConfirm {
+    pub(crate) fn tags_range_confirm(&self) -> DeleteRangeConfirm {
         let tags: Vec<_> = self
             .branches
             .tags
@@ -140,7 +99,7 @@ impl AppState {
     /// rows stay: deleting a remote's branch would need the network. A
     /// group no configured remote owns, or a name like an option, is
     /// never passed to `remote remove`.
-    fn remotes_range_confirm(&self) -> DeleteRangeConfirm {
+    pub(crate) fn remotes_range_confirm(&self) -> DeleteRangeConfirm {
         let list = &self.branches.remotes;
         let rows = list.rows();
         let (mut unconfigured, mut option_like) = (0, 0);
@@ -168,24 +127,6 @@ impl AppState {
             op: GitOp::RemoveRemotes(names),
         }
     }
-
-    /// Run the open range question's op, and only if one is open. The
-    /// range it was asked over is done with.
-    pub(super) fn confirm_delete_range(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::DeleteRange(_))) {
-            return vec![];
-        }
-        let Some(Popup::DeleteRange(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        match confirm.kind {
-            RangeKind::Branches => self.branches.clear_range(BranchesTab::Local),
-            RangeKind::Tags => self.branches.clear_range(BranchesTab::Tags),
-            RangeKind::Remotes => self.branches.clear_range(BranchesTab::Remotes),
-            RangeKind::Stashes => self.stash.range_anchor = None,
-        }
-        self.start_op(Ok(Some(confirm.op)))
-    }
 }
 
 #[cfg(test)]
@@ -193,6 +134,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+    use crate::features::branches::BranchesTab;
     use crate::git::branches::{Branch, Track};
     use crate::git::commit_files::CommitId;
     use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
@@ -201,7 +143,9 @@ mod tests {
     use crate::keymap::{FILTER_HIDES_ROW, KeyPress, KeyScope};
     use crate::layout::{Panel, SidePanel};
     use crate::list_filter::{MAX_INPUT, input_full_notice};
+    use crate::model::Context;
     use crate::op::{op_command, op_steps};
+    use crate::popup::Popup;
 
     fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         let mods = match code {

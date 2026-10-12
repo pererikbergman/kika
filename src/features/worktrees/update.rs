@@ -258,7 +258,6 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::branches::BranchesTab;
     use crate::features::worktrees::git::parse_list;
     use crate::git::branches::BranchName;
     use crate::git::path::RepoPath;
@@ -664,7 +663,7 @@ mod tests {
             state.notice,
             Some("Branch is already checked out in a worktree".into())
         );
-        state.branches.tab = BranchesTab::Remotes;
+        on_remotes_tab(&mut state);
         state.branches.selected = Some(2);
         press_char(&mut state, 'a');
         assert_eq!(
