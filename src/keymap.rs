@@ -585,6 +585,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "worktrees.add",
     "worktrees.remove",
     "worktrees.quit",
+    "worktrees.escape",
     "remove_worktree.yes",
     "remove_worktree.no",
     "remove_worktree.quit",
@@ -4966,11 +4967,28 @@ static REGISTRY: &[Binding] = &[
         disabled: remove_worktree_disabled,
     },
     Binding {
+        id: "worktrees.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Worktrees,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the worktrees by branch or path",
+        label: "filter",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "worktrees.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Worktrees,
+        intent: AppIntent::ListEscape,
+        description: "Clear the filter, else close the list",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "worktrees.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char('q'), NONE)],
         scope: KeyScope::Worktrees,
         intent: AppIntent::PopPopup,
         description: "Close the list",
@@ -6524,8 +6542,9 @@ mod tests {
         assert_eq!(run(key(KeyCode::Up, none)), Some(WorktreePrev));
         assert_eq!(run(key(KeyCode::Enter, none)), Some(OpenWorktree));
         assert_eq!(run(plain('d')), Some(RemoveWorktree));
-        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));
+        assert_eq!(run(plain('/')), Some(OpenFilter));
         assert_eq!(
             run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(Quit)
@@ -6533,6 +6552,55 @@ mod tests {
         for k in [plain('?'), plain('r'), plain('W')] {
             assert_eq!(run(k), None, "{k:?}");
         }
+    }
+
+    #[test]
+    fn a_filter_hiding_every_worktree_disables_switch_and_remove_but_not_add() {
+        use crate::git::worktrees::parse_list;
+        use crate::popup::Popup;
+        use crate::worktree_list::WorktreeList;
+        let mut state = AppState::new(Context::Workspace);
+        state.repo = Some("/r/a".into());
+        let mut list = WorktreeList::loading(0);
+        list.loaded(Ok(parse_list(
+            b"worktree /r/a\0branch refs/heads/main\0\0\
+              worktree /r/b\0branch refs/heads/topic\0\0",
+            0,
+        )));
+        list.move_cursor(1);
+        list.filter = "zzz".into();
+        state.popups = vec![Popup::Worktrees(list)];
+        let found = |k| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Worktrees,
+                &state,
+                k,
+            )
+        };
+        for k in [key(KeyCode::Enter, KeyModifiers::NONE), plain('d')] {
+            assert!(
+                matches!(found(k), Resolution::Disabled(ref why) if why == FILTER_HIDES_ROW),
+                "{k:?}"
+            );
+        }
+        // Adding is for the Branches panel's branch, not a listed row.
+        assert!(
+            !matches!(found(plain('a')), Resolution::Disabled(ref why) if why == FILTER_HIDES_ROW)
+        );
+        assert_eq!(
+            crate::worktree_list::add_worktree_disabled(&state),
+            Some("Select a local branch in the Branches panel".into())
+        );
+    }
+
+    #[test]
+    fn the_worktrees_escape_is_locked_and_its_filter_is_not() {
+        assert!(REPO_LOCKED.contains(&"worktrees.escape"));
+        assert!(build(&[("worktrees.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"worktrees.filter"));
+        assert!(build(&[("worktrees.filter", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
