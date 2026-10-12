@@ -38,7 +38,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             }
             Popup::Confirm(kind) => render_question(
                 &format!(" {} ", kind.title()),
-                &state.confirm_question(*kind),
+                &state.confirm_question(kind),
                 frame,
                 area,
             ),
@@ -69,6 +69,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::DeleteTag(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
+            Popup::DeleteRange(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
                 frame,
@@ -690,7 +696,7 @@ mod tests {
 
         let mut state = workspace(&["a.rs"]);
         let kind = ConfirmKind::Abort(Operation::Rebase);
-        state.popups = vec![Popup::Confirm(kind)];
+        state.popups = vec![Popup::Confirm(kind.clone())];
         let (_, rows) = draw(&state, 40, 12);
         for needle in [" Abort rebase ", "Abort the rebase", "(y/n)"] {
             assert!(contains(&rows, needle), "{needle}: {rows:#?}");
@@ -749,7 +755,7 @@ mod tests {
     fn the_autosquash_question_shows_whole_and_only_y_folds() {
         let mut state = workspace(&["a.rs"]);
         let kind = ConfirmKind::Autosquash;
-        state.popups = vec![Popup::Confirm(kind)];
+        state.popups = vec![Popup::Confirm(kind.clone())];
         for (width, height) in [(80, 24), (40, 12)] {
             let (_, rows) = draw(&state, width, height);
             assert_eq!(
@@ -764,6 +770,101 @@ mod tests {
         // Too small for the box: drawing still works.
         let (_, rows) = draw(&state, 16, 5);
         assert_eq!(rows.len(), 5);
+    }
+
+    /// `workspace` with a custom patch of one file from `bbbbbbb`.
+    fn with_patch() -> AppState {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::commit_files::{CommitId, CommitRange};
+        let mut state = workspace(&["a.rs"]);
+        state.files.clear();
+        let range = CommitRange {
+            oid: CommitId::parse(&"b".repeat(40)).unwrap(),
+            parent: CommitId::parse(&"a".repeat(40)),
+        };
+        let mut patch = CustomPatch::new(range, "bbbbbbb".into());
+        patch.toggle_file(&"a.rs".into());
+        state.custom_patch = Some(patch);
+        state
+    }
+
+    #[test]
+    fn the_custom_patch_question_keeps_y_n_in_sight_at_every_size() {
+        use crate::custom_patch::PatchAction;
+        use crate::git::commit_files::CommitId;
+        let long = "A rather long message with wide 漢字漢字 and 👩\u{200D}💻 in it, past any box";
+        let actions = [
+            PatchAction::Remove,
+            PatchAction::MoveTo(CommitId::parse(&"c".repeat(40)).unwrap()),
+            PatchAction::ToIndex,
+            PatchAction::NewCommit("Split".into()),
+            PatchAction::NewCommit(long.into()),
+        ];
+        for action in actions {
+            let mut state = with_patch();
+            state.popups = vec![Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))];
+            for (width, height) in [(80, 24), (40, 12)] {
+                let (_, rows) = draw(&state, width, height);
+                let text = box_text(&rows, " Custom patch ");
+                assert!(
+                    text.contains("(y/n)"),
+                    "{action:?} {width}x{height}: {rows:#?}"
+                );
+                assert!(text.contains("bbbbbbb"), "{rows:#?}");
+                assert!(text.contains("put back"), "{rows:#?}");
+                let bar = &rows[usize::from(height) - 1];
+                assert!(bar.starts_with(" y rewrite  n keep"), "{rows:#?}");
+                assert!(!bar.contains("enter"), "{rows:#?}");
+            }
+            // The answer keys come with the first line.
+            let (_, rows) = draw(&state, 30, 8);
+            assert!(contains(&rows, "(y/n)"), "{action:?}: {rows:#?}");
+            // Too small for the box: drawing still works.
+            let (_, rows) = draw(&state, 12, 4);
+            assert_eq!(rows.len(), 4);
+        }
+        // A long message is cut, not shown whole.
+        let mut state = with_patch();
+        state.popups = vec![Popup::Confirm(ConfirmKind::CustomPatch(
+            PatchAction::NewCommit(long.into()),
+        ))];
+        let (_, rows) = draw(&state, 80, 24);
+        let text = box_text(&rows, " Custom patch ");
+        assert!(text.contains("…\"?"), "{rows:#?}");
+        assert!(!text.contains("past any box"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_custom_patch_menu_lists_its_five_items_with_reasons_in_words() {
+        let mut state = with_patch();
+        state.popups = vec![Popup::Menu {
+            id: MenuId::CustomPatch,
+            cursor: 0,
+        }];
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " Custom patch "), "{rows:#?}");
+        for label in [
+            "Remove from commit",
+            "Move to selected commit",
+            "Move to index",
+            "New commit after source…",
+            "Reset patch",
+        ] {
+            assert!(contains(&rows, label), "{label}: {rows:#?}");
+        }
+        // The patch's commit is not loaded: each rewrite says so in words.
+        assert!(
+            contains(&rows, "Remove from commit  The patch's commit is not"),
+            "{rows:#?}"
+        );
+        let reset = rows.iter().find(|r| r.contains("Reset patch")).unwrap();
+        assert!(!reset.contains("No custom patch"), "{rows:#?}");
+        for (width, height) in [(40, 12), (16, 6)] {
+            let (_, rows) = draw(&state, width, height);
+            assert_eq!(rows.len(), usize::from(height));
+        }
+        let (_, rows) = draw(&state, 40, 12);
+        assert!(contains(&rows, "Custom patch"), "{rows:#?}");
     }
 
     #[test]

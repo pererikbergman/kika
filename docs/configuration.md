@@ -727,10 +727,11 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.focus_branches` | `3` | Focus the Branches panel | |
 | `workspace.focus_commits` | `4` | Focus the Commits panel | |
 | `workspace.focus_stash` | `5` | Focus the Stash panel | |
-| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks | |
+| `workspace.focus_diff` | `0`, `l`, `right` | Focus the diff, to work on the selected file's hunks, or pick lines of a commit's file | |
 | `workspace.next_panel` | `tab` | Focus the next panel | |
 | `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
 | `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
+| `workspace.patch_menu` | `ctrl-p` | Show what can be done with the custom patch: remove, move or split it off | locked |
 | `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
 | `workspace.undo` | `ctrl-z` | Undo the last commit, checkout, reset or rebase, saying first what moves | locked |
 | `workspace.redo` | `ctrl-r` | Redo what the last undo reversed, saying first what moves | locked |
@@ -819,6 +820,9 @@ this way.
 | `branches.prev_tab` | `[` | Show the tags | |
 | `branches.mark` | `M` | Mark the selected branch to diff against (enter on another); again to clear | |
 | `branches.diff` | `enter` | Show what changed from the diff mark to the selected branch | |
+| `branches.filter` | `/` | Filter the local branches by typed text | |
+| `branches.range` | `V` | Select a range from here, for delete; again to clear it | |
+| `branches.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -832,6 +836,13 @@ command line.
 `u` asks for the upstream as `remote/branch`, starting from the current one,
 or else the same name on `origin` (or the first remote). It must name a
 remote branch Kika has listed; fetch first if it is new.
+
+`/` narrows the tab shown as you type, as in the Files panel, and each tab
+keeps its own filter. `V` starts a range; `d` over it asks once about every
+branch in it. `y` deletes only the merged ones: the current branch and any
+branch with unmerged commits are kept and counted in the question, and `D`
+still deletes one unmerged branch at a time. Every other row key waits until
+`esc` clears the range. Switching tabs clears the range, not the filter.
 
 ### Remotes
 
@@ -853,6 +864,9 @@ branches below it.
 | `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
 | `remotes.switch_tab` | `]` | Show the tags | |
 | `remotes.prev_tab` | `[` | Show the local branches | |
+| `remotes.filter` | `/` | Filter the remotes and their branches by typed text | |
+| `remotes.range` | `V` | Select a range from here, for remove; again to clear it | |
+| `remotes.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 None of these reaches the network. A remote you add shows no branches until
 you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
@@ -860,6 +874,11 @@ transport (`ext::…`, `ext://…`, `fd::…`, `fd://…`), since those run a co
 or use a file descriptor on every fetch; add such a remote with git directly. A remote named like an option
 (starting with `-`), or refs left under a name no remote has, cannot be
 renamed or removed from Kika.
+
+The filter matches a branch row as `remote/branch`, and a remote's row shows
+whenever its name matches or one of its branches shows. `d` over a range
+removes the configured remotes whose own rows are in it; branch rows in the
+range are left alone, since deleting a branch on a remote needs the network.
 
 ### Tags
 
@@ -875,6 +894,9 @@ diff pane shows the selected tag's commits.
 | `tags.push` | `P` | Push the selected tag to the upstream's remote, or the only remote | locked |
 | `tags.switch_tab` | `]` | Show the local branches | |
 | `tags.prev_tab` | `[` | Show the remotes and their branches | |
+| `tags.filter` | `/` | Filter the tags by typed text | |
+| `tags.range` | `V` | Select a range from here, for delete; again to clear it | |
+| `tags.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
 
 `d` deletes only the local tag, and only if it still points where it did when
 it was listed. `P` pushes the one tag, never forced, to the current branch's
@@ -1072,13 +1094,18 @@ to another repository. The commits a paste makes can be undone with `ctrl-z`.
 
 Each row is one place `HEAD` has been, newest first: its commit, what moved
 it, and git's message. The list is read-only; `ctrl-z` and `ctrl-r` undo and
-redo from it.
+redo from it, whatever the filter hides. `/` narrows the rows as you type,
+matching each row's short id and message as drawn; `enter` keeps the filter
+and `esc` clears it, then quits as everywhere else. The filter only narrows
+what is shown and never reaches git.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `reflog.next` | `j`, `down` | Select the next reflog entry | |
 | `reflog.prev` | `k`, `up` | Select the previous reflog entry | |
 | `reflog.switch_tab` | `[`, `]` | Show the log | |
+| `reflog.filter` | `/` | Filter the reflog by typed text | |
+| `reflog.escape` | `esc` | Clear the filter, else quit Kika | locked |
 | `reflog.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |
 | `reflog.filter_author` | `A` | Show only the commits by a typed author | |
 
@@ -1093,7 +1120,47 @@ goes back to the log.
 |---|---|---|---|
 | `commit_files.next` | `j`, `down` | Select the next file and show its change | |
 | `commit_files.prev` | `k`, `up` | Select the previous file and show its change | |
+| `commit_files.patch` | `space` | Pick the selected file's whole change for the custom patch, or drop it | |
 | `commit_files.back` | `esc`, `h`, `left` | Back to the log, at the same commit | |
+
+#### Custom patches
+
+A custom patch is a set of changes picked from one commit, to take out of
+it. In a commit's files, `space` picks the selected file's whole change, or
+drops it. `l` (or `0`, `right`) focuses the diff on the file's change in the
+commit, where `space` picks the selected hunk's changed lines, or in line
+mode (`v`) the selected lines; picking the same lines again drops them.
+Nothing is staged and git does not run. Picked files show `●` (whole) or `◐`
+(some lines), picked lines a `●` beside them, and the Commits panel's title
+names the patch's commit and counts its files. `t`, `d` and `e` do nothing in
+a commit's change. A first commit, a merge commit and a comparison cannot be
+picked from, nor renamed or copied files; a binary or submodule file is
+refused when the rewrite starts, before anything changes. A patch holds
+one commit's changes: picking from another commit is refused until the
+patch is reset. It lives only while Kika runs.
+
+`ctrl-p` shows what can be done with it:
+
+- **Remove from commit** takes it out of its commit.
+- **Move to selected commit** takes it out and puts it into the commit under
+  the Commits panel's cursor, newer or older.
+- **Move to index** takes it out and leaves it staged.
+- **New commit after source…** asks for a message, takes it out, and commits
+  it right after its commit.
+- **Reset patch** forgets the picks; nothing in the repository changes.
+
+Each rewrite asks first, and only `y` answers it. Kika rebases with a stop at
+each commit the patch changes and applies it there with `git apply --index`,
+amending with `--no-verify` as the rebase's own picks do; signing follows
+your config. Moving to an older commit stops only there: when git picks the
+patch's commit again, the change is already in place and drops out of it.
+If the patch's lines sit right next to other changes of their commit, that
+pick conflicts. A rewrite needs a clean worktree (untracked files may stay),
+no operation in progress, the whole log in view and the patch's commit
+loaded. If any step fails, including a conflict, the rebase is aborted (or,
+once it has finished, the branch is reset with `--keep`), so `HEAD`, the
+index and the worktree end as they were and the patch is kept. On success
+the patch is dropped.
 
 ### Stash
 
@@ -1133,7 +1200,7 @@ another panel goes back to the list.
 |---|---|---|---|
 | `diff.next` | `j`, `down` | Select the next hunk | |
 | `diff.prev` | `k`, `up` | Select the previous hunk | |
-| `diff.stage` | `space` | Stage the selected hunk, or unstage it in the staged view | |
+| `diff.stage` | `space` | Stage the selected hunk, or unstage it in the staged view; in a commit's change, pick it for the custom patch or drop it | |
 | `diff.lines` | `v` | Pick changed lines inside the selected hunk | |
 | `diff.side` | `t` | Switch between the unstaged and the staged changes | |
 | `diff.discard` | `d` | Discard the selected hunk from the working tree | locked |
@@ -1154,7 +1221,7 @@ another panel goes back to the list.
 | `lines.prev` | `k`, `up` | Move to the previous changed line | |
 | `lines.extend_down` | `J`, `down` | Grow the selection down a changed line | |
 | `lines.extend_up` | `K`, `up` | Grow the selection up a changed line | |
-| `lines.stage` | `space` | Stage the selected lines, or unstage them in the staged view | |
+| `lines.stage` | `space` | Stage the selected lines, or unstage them in the staged view; in a commit's change, pick them for the custom patch or drop them | |
 | `lines.back` | `esc`, `v` | Back to whole hunks | |
 | `lines.discard` | `d` | Discard the selected lines from the working tree | locked |
 | `lines.open` | `o` | Open the file in your editor at the selected line | locked |
@@ -1330,6 +1397,17 @@ not answer it.
 | `delete_tag.no` | `n`, `esc` | No, keep the tag | locked |
 | `delete_tag.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Delete the selection?
+
+`d` over a range in the Branches panel asks once, naming how many go and the
+first few names. Only `y` answers it; `enter` does not.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `delete_range.yes` | `y` | Yes, delete what the question names | locked |
+| `delete_range.no` | `n`, `esc` | No, keep them all | locked |
+| `delete_range.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Reset hard?
 
 A hard reset throws away every uncommitted change, staged and unstaged, so
@@ -1384,6 +1462,17 @@ answer it.
 | `autosquash_confirm.yes` | `y` | Yes, fold every fixup! commit into its target | locked |
 | `autosquash_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
 | `autosquash_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Rewrite with the custom patch?
+
+A custom patch rewrites commits you may not be looking at, so `enter` does
+not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `patch_confirm.yes` | `y` | Yes, rewrite the history with the custom patch | locked |
+| `patch_confirm.no` | `n`, `esc` | No, leave the history as it is | locked |
+| `patch_confirm.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Undo or redo?
 
@@ -1470,7 +1559,9 @@ diff, `esc` goes back to the pull request.
 | `worktrees.open` | `enter` | Switch to the selected worktree | locked |
 | `worktrees.add` | `a` | Add a worktree for the local branch selected in the Branches panel | locked |
 | `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
-| `worktrees.close` | `esc`, `q` | Close the list | |
+| `worktrees.filter` | `/` | Filter the worktrees by branch or path | |
+| `worktrees.escape` | `esc` | Clear the filter, else close the list | locked |
+| `worktrees.close` | `q` | Close the list | |
 | `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Command log

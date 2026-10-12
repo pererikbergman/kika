@@ -19,6 +19,7 @@ use super::status::{EntryKind, FileEntry};
 use super::tags::{TagName, validate_tag_name};
 use super::undo::{Direction, Expected, Step};
 use super::version::{GitVersion, parse_version, version_command};
+use crate::custom_patch::{CustomPatch, PatchAction};
 use crate::sequence_editor::PLAN_ENV;
 
 /// One repository-changing Git operation. Path payloads are repo file names,
@@ -106,6 +107,17 @@ pub enum GitOp {
     /// `crate::sequence_editor`). Uncommitted changes are stashed and put
     /// back.
     InteractiveRebase(RebasePlan),
+    /// Rewrite history with the custom patch `picks`, as `action` says:
+    /// the interactive rebase of `plan`, stopping at each commit the patch
+    /// changes (see `super::custom_patch`). Refused unless `HEAD` is still
+    /// `orig_head`; any failure puts `HEAD`, the index and the worktree
+    /// back as they were.
+    CustomPatch {
+        plan: RebasePlan,
+        action: PatchAction,
+        picks: CustomPatch,
+        orig_head: CommitId,
+    },
     /// Go on with the operation git stopped, once its conflicts are
     /// resolved and staged.
     Continue(Operation),
@@ -146,6 +158,9 @@ pub enum GitOp {
         name: BranchName,
         force: bool,
     },
+    /// Delete these local branches in one `git branch -d`. Never forced:
+    /// git refuses any whose commits are not merged and deletes the rest.
+    DeleteBranches(Vec<BranchName>),
     /// Resolve this conflicted file in the user's merge tool, on the
     /// terminal. The tool may ask which one to use or wait for Enter.
     MergeTool(RepoPath),
@@ -196,6 +211,9 @@ pub enum GitOp {
     /// Remove a remote, its remote-tracking branches and the upstreams
     /// that name it.
     RemoveRemote(RemoteName),
+    /// Remove these remotes one at a time, as [`GitOp::RemoveRemote`]
+    /// does, stopping at the first failure.
+    RemoveRemotes(Vec<RemoteName>),
     /// Undo or redo the last action, as the undo planner chose (see
     /// `git::undo`). Git writes `direction`'s marker into the reflog, which
     /// is how the next plan knows this step happened. It runs only while
@@ -218,6 +236,10 @@ pub enum GitOp {
         name: TagName,
         oid: String,
     },
+    /// Delete these tags, each with the object it held when listed, one at
+    /// a time as [`GitOp::DeleteTag`] does, stopping at the first failure.
+    /// Local only.
+    DeleteTags(Vec<(TagName, String)>),
     /// Mark `commit` good, bad or skipped in the bisect; with `start`, a
     /// plain `bisect start` runs first. Once there is a good and a bad
     /// mark, git checks out the next commit to test.
@@ -551,6 +573,10 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             .arg(if *force { "-D" } else { "-d" })
             .arg("--")
             .arg(name.as_os_string()),
+        GitOp::DeleteBranches(names) => names.iter().fold(
+            GitCommand::new("branch").arg("-d").arg("--"),
+            |cmd, name| cmd.arg(name.as_os_string()),
+        ),
         // The start point as a full ref, as for `CreateBranch`.
         GitOp::CheckoutTracking { name, from } => GitCommand::new("checkout")
             .arg("-q")
@@ -588,6 +614,13 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::RemoveRemote(name) => GitCommand::new("remote")
             .arg("remove")
             .arg(name.as_os_string()),
+        // The first of the steps `run_op` takes, one per remote or tag;
+        // `refusal` keeps an empty list from running.
+        GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) => {
+            return op_steps(op)
+                .first()
+                .map_or_else(|| GitCommand::new("remote"), op_command);
+        }
         // The name passed `validate_tag_name` (see `refusal`), so it does
         // not start with `-`; the message is `-m`'s own argument, read as
         // its value whatever it starts with; the full id is hex digits.
@@ -663,6 +696,10 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 .arg("--keep-empty")
                 .arg(plan.base.as_str())
                 .env(PLAN_ENV, encode(&plan.steps));
+        }
+        // Its first step; the rest run from `super::custom_patch::run`.
+        GitOp::CustomPatch { plan, .. } => {
+            return op_command(&GitOp::InteractiveRebase(plan.clone()));
         }
         GitOp::Continue(operation) => {
             return GitCommand::new(operation.subcommand()).arg("--continue");
@@ -791,6 +828,22 @@ pub fn commit_command(amend: bool, no_verify: bool, source: MessageSource) -> Gi
     }
 }
 
+/// The single ops a many-step op runs, in order; any other op is its own
+/// one step.
+pub fn op_steps(op: &GitOp) -> Vec<GitOp> {
+    match op {
+        GitOp::RemoveRemotes(names) => names.iter().cloned().map(GitOp::RemoveRemote).collect(),
+        GitOp::DeleteTags(tags) => tags
+            .iter()
+            .map(|(name, oid)| GitOp::DeleteTag {
+                name: name.clone(),
+                oid: oid.clone(),
+            })
+            .collect(),
+        other => vec![other.clone()],
+    }
+}
+
 /// Run `op`. Failures carry git's message, made safe to draw since it can
 /// quote repo-controlled paths. A commit's, a merge's, a revert's or a
 /// stash apply's failure also carries stdout: hooks print to stderr, but
@@ -841,6 +894,11 @@ fn run_op_with(
     if let Some(reason) = refusal(op) {
         return Err(reason.into());
     }
+    if let GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) = op {
+        return op_steps(op)
+            .iter()
+            .try_for_each(|step| run_op_with(runner, step, env_set));
+    }
     if let GitOp::Travel { expect, .. } = op {
         let now = super::reflog::read_head(runner);
         if now.oid.as_ref() != Some(&expect.oid) || now.head_ref != expect.head_ref {
@@ -871,7 +929,8 @@ fn run_op_with(
         | GitOp::UnsetUpstream(_)
         | GitOp::AddRemote { .. }
         | GitOp::RenameRemote { .. }
-        | GitOp::RemoveRemote(_) => redact_userinfo(&terminal_safe(&output.stderr)),
+        | GitOp::RemoveRemote(_)
+        | GitOp::RemoveRemotes(_) => redact_userinfo(&terminal_safe(&output.stderr)),
         _ => terminal_safe(&output.stderr),
     };
     if message.is_empty() {
@@ -882,7 +941,7 @@ fn run_op_with(
 }
 
 /// Run `cmd`, with git's message, made safe to draw, as the error.
-fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
+pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
     let output = runner.run(cmd).map_err(|e| e.to_string())?;
     if output.success {
         return Ok(output);
@@ -1010,12 +1069,22 @@ fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
 pub fn refusal(op: &GitOp) -> Option<&'static str> {
     match op {
         GitOp::CreateTag { name, .. } => validate_tag_name(name).err(),
+        GitOp::DeleteBranches(names) if names.is_empty() => Some("No branch to delete"),
+        GitOp::DeleteTags(tags) if tags.is_empty() => Some("No tag to delete"),
+        GitOp::RemoveRemotes(names) if names.is_empty() => Some("No remote to remove"),
+        // `remote remove` takes no `--` in older git; see `RemoveRemote`.
+        GitOp::RemoveRemotes(names) if names.iter().any(|n| n.0.starts_with(b"-")) => {
+            Some("Change a remote named like an option with git directly")
+        }
         // Only a full id is surely a commit, never a ref of that name.
         GitOp::CherryPick(picks)
             if picks.is_empty() || !picks.iter().all(super::cherry_pick::is_full_id) =>
         {
             Some("Only full commit ids can be cherry-picked")
         }
+        // Only its first step is one command; run alone it would leave
+        // the rebase stopped.
+        GitOp::CustomPatch { .. } => Some("A custom patch only runs on the terminal"),
         _ => None,
     }
 }
@@ -1696,6 +1765,69 @@ mod tests {
             assert_eq!(argv(&op_command(&op)), expected, "{op:?}");
             let runner = FakeRunner::new().expect(expected, ok(b""));
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_range_of_branches_is_deleted_by_one_unforced_branch_d() {
+        let op = GitOp::DeleteBranches(vec!["a".into(), "-D".into(), "b\x1b".into()]);
+        let expected = ["branch", "-d", "--", "a", "-D", "b\x1b"];
+        assert_eq!(argv(&op_command(&op)), expected);
+        let runner = FakeRunner::new().expect(&expected, ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_range_of_tags_or_remotes_runs_one_command_each_and_stops_at_the_first_failure() {
+        let tags = GitOp::DeleteTags(vec![
+            ("v1".into(), OID.into()),
+            ("v2".into(), OID.into()),
+            ("v3".into(), OID.into()),
+        ]);
+        let runner = FakeRunner::new()
+            .expect(
+                &["update-ref", "--no-deref", "-d", "refs/tags/v1", OID],
+                ok(b""),
+            )
+            .expect(
+                &["update-ref", "--no-deref", "-d", "refs/tags/v2", OID],
+                fail("fatal: cannot lock ref"),
+            );
+        assert_eq!(run_op(&runner, &tags), Err("fatal: cannot lock ref".into()));
+        runner.assert_done();
+
+        let remotes = GitOp::RemoveRemotes(vec!["a".into(), "b".into(), "c".into()]);
+        assert_eq!(argv(&op_command(&remotes)), ["remote", "remove", "a"]);
+        // A call past the failure would find nothing expected and panic.
+        let runner = FakeRunner::new()
+            .expect(&["remote", "remove", "a"], ok(b""))
+            .expect(&["remote", "remove", "b"], fail("error: no such remote"));
+        assert_eq!(
+            run_op(&runner, &remotes),
+            Err("error: no such remote".into())
+        );
+        runner.assert_done();
+
+        let runner = FakeRunner::new()
+            .expect(&["remote", "remove", "a"], ok(b""))
+            .expect(&["remote", "remove", "b"], ok(b""))
+            .expect(&["remote", "remove", "c"], ok(b""));
+        assert_eq!(run_op(&runner, &remotes), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn an_empty_or_option_like_range_runs_no_git() {
+        for op in [
+            GitOp::DeleteBranches(vec![]),
+            GitOp::DeleteTags(vec![]),
+            GitOp::RemoveRemotes(vec![]),
+            GitOp::RemoveRemotes(vec!["ok".into(), "-f".into()]),
+        ] {
+            let runner = FakeRunner::new();
+            assert!(run_op(&runner, &op).is_err(), "{op:?}");
             runner.assert_done();
         }
     }

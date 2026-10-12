@@ -4,6 +4,7 @@ use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
 use crate::conflict_view;
+use crate::custom_patch::CustomPatch;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
@@ -144,9 +145,15 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
             // Short, so it fits the pane's title at 80 columns.
             let suffix = format!("{label} (unmapped)");
+            let view = HunkPane { view, picks: None };
             render_hunk_view(view, options, state.emoji_zwj, &suffix, &look, frame, area)
         }
         (Focus::Diff(view), ..) => {
+            let picks = state
+                .custom_patch
+                .as_ref()
+                .filter(|p| view.commit.as_ref().is_some_and(|c| p.is_from(c)));
+            let view = HunkPane { view, picks };
             render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
         }
         (Focus::Conflict(view), ..) => {
@@ -1022,6 +1029,33 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             };
             (leading, vec!["commits.filter", "commits.range"])
         }
+        KeyScope::Branches | KeyScope::Remotes | KeyScope::Tags => {
+            let panel = &state.branches;
+            let (clears, ids) = match focus {
+                KeyScope::Branches => (
+                    panel.range_anchor.is_some() || !panel.filter.is_empty(),
+                    ["branches.escape", "branches.filter", "branches.range"],
+                ),
+                KeyScope::Remotes => (
+                    panel.remotes.range_anchor.is_some() || !panel.remotes.filter.is_empty(),
+                    ["remotes.escape", "remotes.filter", "remotes.range"],
+                ),
+                _ => (
+                    panel.tags.range_anchor.is_some() || !panel.tags.filter.is_empty(),
+                    ["tags.escape", "tags.filter", "tags.range"],
+                ),
+            };
+            let leading = if clears { vec![ids[0]] } else { vec![] };
+            (leading, vec![ids[1], ids[2]])
+        }
+        KeyScope::Reflog => {
+            let leading = if state.commits.reflog.filter.is_empty() {
+                vec![]
+            } else {
+                vec!["reflog.escape"]
+            };
+            (leading, vec!["reflog.filter"])
+        }
         KeyScope::Diff if searching(state) => (
             vec!["diff.search_next", "diff.search_prev", "diff.escape"],
             vec!["diff.search"],
@@ -1250,7 +1284,7 @@ fn render_files_panel(
     } else if state.files.is_empty() {
         Paragraph::new("No changes")
     } else if shown.is_empty() {
-        Paragraph::new(Line::styled("No matches", Style::new().fg(Color::DarkGray)))
+        Paragraph::new(no_matches())
     } else if !expanded {
         Paragraph::new(count)
     } else {
@@ -1311,6 +1345,42 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
     ));
     let room = look.title_width.saturating_sub(fixed).max(1);
     format!("{name} · /{} {counts}", elide_right(&query, room))
+}
+
+/// What a list says when its filter hides every row.
+pub(crate) fn no_matches() -> Line<'static> {
+    Line::styled("No matches", Style::new().fg(Color::DarkGray))
+}
+
+/// A list's title text: `base` alone, or with ` · N selected` while a
+/// range is set, or as [`filter_title`] with the shown count while a
+/// filter is.
+pub(crate) fn list_title(
+    look: &PanelLook,
+    base: &str,
+    filter: &str,
+    shown: usize,
+    total: usize,
+    range: Option<usize>,
+) -> String {
+    let selected = range.map_or_else(String::new, |n| format!(" · {n} selected"));
+    if !filter.is_empty() {
+        let counts = format!("{shown} of {total}{selected}");
+        filter_title(look, base, filter, &counts)
+    } else {
+        format!("{base}{selected}")
+    }
+}
+
+/// The part of `shown` that fits in `rows`, scrolled just enough to keep
+/// `selected` in view.
+pub(crate) fn scrolled(shown: &[usize], selected: Option<usize>, rows: usize) -> &[usize] {
+    let at = selected
+        .and_then(|s| shown.iter().position(|&i| i == s))
+        .unwrap_or(0);
+    let first = at.saturating_sub(rows.saturating_sub(1));
+    let end = shown.len().min(first + rows);
+    &shown[first.min(end)..end]
 }
 
 /// `<name> · path: <path> · author: <author>`, naming the parts set, each
@@ -1508,7 +1578,7 @@ pub(crate) fn diff_pane_body(
 /// In line mode the picked lines are marked that way instead.
 /// `suffix`, when set, follows the title after a `·`.
 fn render_hunk_view(
-    view: &HunkView,
+    pane: HunkPane,
     options: DiffOptions,
     emoji: EmojiZwj,
     suffix: &str,
@@ -1516,9 +1586,13 @@ fn render_hunk_view(
     frame: &mut Frame,
     area: Rect,
 ) {
+    let view = pane.view;
     let block = look.block(hunk_title(view, options, suffix, look));
     let inner = block.inner(area);
     let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    // A commit's change gives a second column to what the patch holds.
+    let picked_ids = pane.picks.map(|patch| picked_rows(view, patch));
+    let gutters = if picked_ids.is_some() { 2 } else { 1 };
     let pane = match &view.patch {
         None if view.loading() => Paragraph::new("Loading…"),
         None => Paragraph::new("Could not read the diff"),
@@ -1554,13 +1628,14 @@ fn render_hunk_view(
                         RowKind::Context => Style::new(),
                         RowKind::NoNewline => Style::new().fg(Color::DarkGray),
                     };
-                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(1));
+                    let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(gutters));
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
-                    spans.extend(marked_spans(
-                        text,
-                        style,
-                        &search_marks(view.search.as_ref(), at),
-                    ));
+                    if let Some(ids) = &picked_ids {
+                        let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
+                        let mark = if held { "●" } else { " " };
+                        spans.push(Span::styled(mark, commits_view::PATCH_MARK));
+                    }
+                    spans.extend(marked_spans(text, style, &search_marks(view.search.as_ref(), at)));
                     let line = Line::from(spans);
                     let mark = match view.lines {
                         Some(_) => row.line.is_some(),
@@ -1577,6 +1652,33 @@ fn render_hunk_view(
         }
     };
     frame.render_widget(pane.block(block), area);
+}
+
+/// The focused hunk view, with the custom patch when the view is of the
+/// commit it holds changes from.
+#[derive(Clone, Copy)]
+struct HunkPane<'a> {
+    view: &'a HunkView,
+    picks: Option<&'a CustomPatch>,
+}
+
+/// `(hunk, line)` of each row whose changed line the patch holds.
+fn picked_rows(view: &HunkView, patch: &CustomPatch) -> std::collections::HashSet<(usize, usize)> {
+    let Some(file) = &view.patch else {
+        return Default::default();
+    };
+    file.hunks
+        .iter()
+        .enumerate()
+        .flat_map(|(h, hunk)| {
+            hunk.line_ids()
+                .into_iter()
+                .enumerate()
+                .filter_map(move |(l, id)| Some(((h, l), id?)))
+        })
+        .filter(|(_, id)| patch.contains_line(&view.path, *id))
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// The focused pane's title: the side, the path, the mode, the options
@@ -1663,6 +1765,7 @@ fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> 
 
 fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelLook) -> String {
     let side = match view.side {
+        _ if view.commit.is_some() => "Commit",
         DiffSide::Index => "Staged",
         DiffSide::Worktree | DiffSide::Untracked => "Unstaged",
     };
@@ -3870,6 +3973,80 @@ mod tests {
     }
 
     #[test]
+    fn in_a_commits_change_the_lines_the_patch_holds_carry_a_mark() {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::commit_files::{CommitId, CommitRange};
+        use crate::git::patch::LineId;
+        let range = CommitRange {
+            oid: CommitId::parse("b0b").unwrap(),
+            parent: CommitId::parse("a0a"),
+        };
+        let mut state = loaded(vec![file("a.rs")]);
+        let mut view = HunkView::for_commit("a.rs".into(), range.clone());
+        view.loaded(crate::git::patch::parse(TWO_HUNKS).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        let mut patch = CustomPatch::new(range, "b0b".into());
+        patch.toggle_lines(&"a.rs".into(), &[LineId::added(9)].into());
+        state.custom_patch = Some(patch);
+
+        let rows = draw(&state, 100, 20);
+
+        assert!(contains(&rows, " Commit a.rs "), "{rows:#?}");
+        assert!(contains(&rows, " ●+new nine"), "{rows:#?}");
+        assert!(contains(&rows, "  -old nine"), "{rows:#?}");
+        // The selected hunk keeps its own gutter.
+        assert!(contains(&rows, "▌ +new one"), "{rows:#?}");
+
+        // Another commit's view shows no marks.
+        if let Focus::Diff(view) = &mut state.focus {
+            view.commit.as_mut().unwrap().oid = CommitId::parse("c0c").unwrap();
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(!contains(&rows, "●"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_patch_mark_keeps_wide_lines_aligned_at_any_width() {
+        use crate::custom_patch::CustomPatch;
+        use crate::git::commit_files::{CommitId, CommitRange};
+        use crate::git::patch::LineId;
+        let range = CommitRange {
+            oid: CommitId::parse("b0b").unwrap(),
+            parent: CommitId::parse("a0a"),
+        };
+        let wide = "漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字漢字 👩\u{200D}💻 end";
+        let diff =
+            format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+{wide}\n");
+        let mut state = loaded(vec![file("a.rs")]);
+        let mut view = HunkView::for_commit("a.rs".into(), range.clone());
+        view.loaded(crate::git::patch::parse(diff.as_bytes()).unwrap(), 20);
+        state.focus = Focus::Diff(view);
+        let mut patch = CustomPatch::new(range, "b0b".into());
+        patch.toggle_lines(&"a.rs".into(), &[LineId::added(1)].into());
+        state.custom_patch = Some(patch);
+
+        for width in [100, 50, 30, 16] {
+            let buffer = draw_buffer(&state, width, 12);
+            let rows = buffer_rows(&buffer);
+            let y = rows
+                .iter()
+                .position(|r| r.contains("●+"))
+                .unwrap_or_else(|| {
+                    panic!("{width}: {rows:#?}");
+                });
+            // Clipped to the pane, the right border stays where it is.
+            assert_eq!(
+                buffer[(width - 1, y as u16)].symbol(),
+                "┃",
+                "{width}: {rows:#?}"
+            );
+            assert!(contains(&rows, " -x"), "{width}: {rows:#?}");
+        }
+        let rows = draw(&state, 8, 4);
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
     fn in_line_mode_the_picked_lines_are_reversed_and_the_header_is_not() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
         if let Focus::Diff(view) = &mut state.focus {
@@ -5651,5 +5828,27 @@ mod tests {
             "{:?}",
             rows[19]
         );
+    }
+
+    #[test]
+    fn esc_clear_leads_the_reflog_tabs_bar_while_it_has_a_filter() {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Commits;
+        state.commits.tab = crate::commits::CommitsTab::Reflog;
+        state.commits.reflog.data = Some(crate::git::reflog::Reflog {
+            entries: crate::git::reflog::parse_records(include_bytes!(
+                "git/fixtures/reflog/commit.bin"
+            )),
+            ..Default::default()
+        });
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("V range"), "{:?}", rows[9]);
+        state.commits.reflog.set_filter("first".into());
+        let rows = draw(&state, 120, 10);
+        assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
     }
 }

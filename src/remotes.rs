@@ -3,6 +3,7 @@
 //! the model loads the list and moves the selection.
 
 use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
+use crate::list_filter;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemotesList {
@@ -17,6 +18,11 @@ pub struct RemotesList {
     /// What an open prompt acts on, taken when it opened, so a reload
     /// while the user types cannot change it.
     pub pending: Option<RemotePending>,
+    /// What the tab is narrowed to, kept for the session.
+    pub filter: String,
+    /// The row a range selection started on, so a reload keeps the range
+    /// on the same rows.
+    pub range_anchor: Option<RowKey>,
 }
 
 /// One row of the tab: a remote's header, or one of its branches.
@@ -41,8 +47,8 @@ pub enum RemotePending {
 
 /// What a row is, so a reload can find it again: a remote's name or a
 /// branch's ref.
-#[derive(PartialEq, Eq)]
-enum RowKey {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RowKey {
     Remote(Vec<u8>),
     Branch(Vec<u8>),
 }
@@ -83,26 +89,136 @@ impl RemotesList {
                 .or_else(|| self.selected.map(|i| i.min(rows.len() - 1)))
                 .or(Some(0))
         };
+        self.reconcile();
     }
 
-    fn key(&self, row: RemoteRow) -> RowKey {
+    /// What `row` is, to find it again after a reload.
+    pub(crate) fn key(&self, row: RemoteRow) -> RowKey {
         match row {
             RemoteRow::Remote(i) => RowKey::Remote(self.remotes[i].name.0.clone()),
             RemoteRow::Branch(i, j) => RowKey::Branch(self.remotes[i].branches[j].refname.clone()),
         }
     }
 
-    /// Move the selection by `delta`, stopping at either end. Says whether
-    /// it moved.
+    /// Move the selection by `delta` over the rows the filter shows,
+    /// stopping at either end. Says whether it moved.
     pub fn move_by(&mut self, delta: isize) -> bool {
         let Some(current) = self.selected else {
             return false;
         };
-        let next = current
-            .saturating_add_signed(delta)
-            .min(self.rows().len().saturating_sub(1));
+        let Some(next) = list_filter::step(&self.visible(), current, delta) else {
+            return false;
+        };
         self.selected = Some(next);
         next != current
+    }
+
+    /// The indexes into [`RemotesList::rows`] the filter shows. A branch
+    /// row matches as `remote/branch`; a header shows when its remote's
+    /// name matches or any of its branches shows, so a shown branch is
+    /// never without its remote.
+    pub fn visible(&self) -> Vec<usize> {
+        let rows = self.rows();
+        if self.filter.is_empty() {
+            return (0..rows.len()).collect();
+        }
+        let mut shown = vec![false; rows.len()];
+        // Walked backwards, so each header knows whether a branch below
+        // it shows.
+        let mut branch_shown = false;
+        for (at, &row) in rows.iter().enumerate().rev() {
+            shown[at] = match row {
+                RemoteRow::Branch(..) => {
+                    let matched = self.row_matches(row);
+                    branch_shown |= matched;
+                    matched
+                }
+                RemoteRow::Remote(_) => {
+                    let matched = branch_shown || self.row_matches(row);
+                    branch_shown = false;
+                    matched
+                }
+            };
+        }
+        (0..rows.len()).filter(|&at| shown[at]).collect()
+    }
+
+    /// Whether the filter matches what `row` is, on its own.
+    fn row_matches(&self, row: RemoteRow) -> bool {
+        let text = match row {
+            RemoteRow::Remote(i) => self.remotes[i].name.display(),
+            RemoteRow::Branch(i, j) => self.remotes[i].branches[j].display(),
+        };
+        list_filter::matches(&self.filter, &text)
+    }
+
+    /// The filter hides the selected row, which happens only when it
+    /// hides every row.
+    pub fn selected_hidden(&self) -> bool {
+        if self.filter.is_empty() {
+            return false;
+        }
+        match self.selected_row() {
+            None => false,
+            Some(row @ RemoteRow::Branch(..)) => !self.row_matches(row),
+            Some(row @ RemoteRow::Remote(i)) => {
+                let branches = 0..self.remotes[i].branches.len();
+                !self.row_matches(row)
+                    && !branches
+                        .into_iter()
+                        .any(|j| self.row_matches(RemoteRow::Branch(i, j)))
+            }
+        }
+    }
+
+    /// The rows the range covers, as indexes into
+    /// [`RemotesList::rows`]; empty without one.
+    pub fn range(&self) -> Vec<usize> {
+        let Some(anchor) = &self.range_anchor else {
+            return Vec::new();
+        };
+        let rows = self.rows();
+        let at = rows.iter().position(|&row| &self.key(row) == anchor);
+        match (at, self.selected) {
+            (Some(at), Some(cursor)) => list_filter::range(&self.visible(), at, cursor),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Narrow the list to `text`. A changed filter drops the range, which
+    /// was made over the rows shown before; says whether it did.
+    pub fn set_filter(&mut self, text: String) -> bool {
+        let mut cleared = false;
+        if text != self.filter {
+            self.filter = text;
+            cleared = self.range_anchor.take().is_some();
+        }
+        self.reconcile();
+        cleared
+    }
+
+    /// Start a range at the selected row, or clear the one there is. A
+    /// row the filter hides starts none.
+    pub fn toggle_range(&mut self) {
+        if self.range_anchor.take().is_none() && !self.selected_hidden() {
+            self.range_anchor = self.selected_row().map(|row| self.key(row));
+        }
+    }
+
+    /// After the filter or the list changed: a range whose first row is
+    /// gone is cleared, and a hidden selection moves to the first row
+    /// shown.
+    pub fn reconcile(&mut self) {
+        if let Some(anchor) = &self.range_anchor
+            && !self.rows().iter().any(|&row| &self.key(row) == anchor)
+        {
+            self.range_anchor = None;
+        }
+        if self.selected_hidden()
+            && let Some(&first) = self.visible().first()
+        {
+            self.selected = Some(first);
+        }
     }
 
     pub fn selected_row(&self) -> Option<RemoteRow> {
@@ -214,6 +330,59 @@ mod tests {
         assert_eq!(list.selected, Some(0));
         list.loaded(Ok(vec![]));
         assert_eq!(list.selected, None);
+    }
+
+    #[test]
+    fn a_matching_branch_shows_with_its_header_and_a_matching_remote_shows_its_header() {
+        let mut list = list(vec![
+            remote("origin", &["main", "topic"]),
+            remote("fork", &["x"]),
+            remote("up", &[]),
+        ]);
+        list.filter = "topic".into();
+        assert_eq!(list.visible(), [0, 2], "origin's header, then origin/topic");
+        list.filter = "fork".into();
+        // The branch matches as `fork/x`, so it shows too.
+        assert_eq!(list.visible(), [3, 4]);
+        list.filter = "up".into();
+        assert_eq!(list.visible(), [5], "a remote with no branches");
+        list.filter = "zzz".into();
+        assert!(list.visible().is_empty());
+    }
+
+    #[test]
+    fn moving_skips_hidden_rows_and_a_filter_moves_a_hidden_selection() {
+        let mut list = list(vec![remote("a", &["x", "y"]), remote("b", &["y"])]);
+        list.filter = "y".into();
+        assert_eq!(list.visible(), [0, 2, 3, 4]);
+        list.reconcile();
+        assert_eq!(list.selected, Some(0));
+        assert!(list.move_by(1));
+        assert_eq!(list.selected_branch().unwrap().display(), "a/y");
+        list.filter = "b/".into();
+        assert!(list.selected_hidden());
+        list.reconcile();
+        assert_eq!(list.selected_row(), Some(RemoteRow::Remote(1)));
+        // A reload under a filter lands on a shown row.
+        list.selected = Some(0);
+        list.loaded(Ok(vec![remote("a", &["x", "y"]), remote("b", &["y"])]));
+        assert_eq!(list.selected_row(), Some(RemoteRow::Remote(1)));
+    }
+
+    #[test]
+    fn a_range_follows_its_rows_and_a_reload_without_its_anchor_clears_it() {
+        let mut list = list(vec![remote("a", &["x"]), remote("b", &[])]);
+        list.range_anchor = Some(list.key(RemoteRow::Branch(0, 0)));
+        list.move_by(5);
+        assert_eq!(list.range(), [1, 2]);
+        list.loaded(Ok(vec![
+            remote("0", &[]),
+            remote("a", &["x"]),
+            remote("b", &[]),
+        ]));
+        assert_eq!(list.range(), [2, 3]);
+        list.loaded(Ok(vec![remote("a", &[]), remote("b", &[])]));
+        assert_eq!(list.range_anchor, None);
     }
 
     #[test]

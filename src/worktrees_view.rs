@@ -10,15 +10,13 @@ use crate::git::diff::sanitize;
 use crate::git::worktrees::Worktree;
 use crate::model::AppState;
 use crate::view::{centered, clip, elide_left, elide_right, width_of, wrap};
-use crate::worktree_list::{WorktreeList, is_current};
+use crate::worktree_list::{WorktreeList, is_current, label};
 
-/// Hex digits of a detached commit, enough to tell commits apart.
-const SHORT_OID: usize = 7;
-
-/// One row per worktree: `*` for the one Kika is in, the branch (or what
-/// stands for one), the path and its tags. A long path loses its start to
-/// `…`. The cursor row is reversed while the list is on top. Until a load
-/// lands, and when it fails, that is said instead.
+/// One row per worktree the filter shows: `*` for the one Kika is in, the
+/// branch (or what stands for one), the path and its tags. A long path
+/// loses its start to `…`. The cursor row is reversed while the list is on
+/// top. Until a load lands, and when it fails, that is said instead. A
+/// filter is named in the title, sanitised, with how many rows it shows.
 pub fn render_worktrees(
     state: &AppState,
     list: &WorktreeList,
@@ -26,8 +24,8 @@ pub fn render_worktrees(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let title = " Worktrees ";
     let room = usize::from(area.width.saturating_sub(2));
+    let visible = list.visible();
     let rows: Vec<String> = match (&list.items, &list.error) {
         (_, Some(error)) => {
             let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
@@ -38,16 +36,25 @@ pub fn render_worktrees(
         }
         (None, None) => vec![" Loading… ".into()],
         (Some(items), None) if items.is_empty() => vec![" No worktrees ".into()],
-        (Some(items), None) => items
+        (Some(_), None) if visible.is_empty() => vec![" No matches ".into()],
+        (Some(items), None) => visible
             .iter()
-            .map(|w| row(w, is_current(state, w), room))
+            .map(|&i| row(&items[i], is_current(state, &items[i]), room))
             .collect(),
     };
-    let cursor = (top && list.selected().is_some()).then_some(list.cursor);
+    // The cursor's place among the rows drawn.
+    let cursor = (top && list.selected().is_some())
+        .then(|| visible.iter().position(|&i| i == list.cursor))
+        .flatten();
+    // As `centered` will cut it: the screen may be shorter than the list.
+    let height = (rows.len() + 2).min(usize::from(area.height));
+    let shown = height.saturating_sub(2).max(1);
+    let total = list.items.as_ref().map_or(0, Vec::len);
+    let title = title(&list.filter, visible.len(), total, cursor, shown, room);
     let width = rows
         .iter()
         .map(|row| width_of(row))
-        .chain([width_of(title)])
+        .chain([width_of(&title)])
         .max()
         .unwrap_or(0)
         .min(room);
@@ -67,18 +74,10 @@ pub fn render_worktrees(
     let popup = centered(
         area,
         u16::try_from(width + 2).unwrap_or(u16::MAX),
-        u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
+        u16::try_from(height).unwrap_or(u16::MAX),
     );
     frame.render_widget(Clear, popup);
-    let shown = usize::from(popup.height.saturating_sub(2)).max(1);
     let first = cursor.map_or(0, |cursor| cursor.saturating_sub(shown - 1));
-    // A list cut by a short screen says where the cursor is in it.
-    let title = match cursor {
-        Some(cursor) if shown < lines.len() => {
-            format!(" Worktrees {}/{} ", cursor + 1, lines.len())
-        }
-        _ => title.to_string(),
-    };
     let first = u16::try_from(first).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(lines)
@@ -86,6 +85,36 @@ pub fn render_worktrees(
             .block(Block::bordered().title(title)),
         popup,
     );
+}
+
+/// ` Worktrees `, or with a filter ` Worktrees · /<filter> <n> of <total> `.
+/// A list cut by a short screen adds where the cursor is in it. The filter
+/// is drawn sanitised and loses its end so the title fits `room` columns.
+fn title(
+    filter: &str,
+    matched: usize,
+    total: usize,
+    cursor: Option<usize>,
+    shown: usize,
+    room: usize,
+) -> String {
+    let place = match cursor {
+        Some(cursor) if shown < matched => Some(format!("{}/{matched}", cursor + 1)),
+        _ => None,
+    };
+    if filter.is_empty() {
+        return match place {
+            Some(place) => format!(" Worktrees {place} "),
+            None => " Worktrees ".to_string(),
+        };
+    }
+    let place = place.map(|p| format!(" · {p}")).unwrap_or_default();
+    let fixed = format!(" Worktrees · / {matched} of {total}{place} ");
+    let query = elide_right(
+        &sanitize(filter.as_bytes()),
+        room.saturating_sub(width_of(&fixed)),
+    );
+    format!(" Worktrees · /{query} {matched} of {total}{place} ")
 }
 
 /// Columns of path kept, when room is short, before the branch is cut.
@@ -97,15 +126,7 @@ const MIN_PATH: usize = 10;
 /// [`MIN_PATH`] columns; then the branch loses its end. Both cuts show `…`.
 fn row(worktree: &Worktree, current: bool, room: usize) -> String {
     let marker = if current { '*' } else { ' ' };
-    let label = if worktree.bare {
-        "(bare)".to_string()
-    } else if let Some(branch) = &worktree.branch {
-        branch.display()
-    } else {
-        let oid = worktree.head.as_ref().map_or("", |id| id.as_str());
-        let short: String = oid.chars().take(SHORT_OID).collect();
-        format!("(detached) {short}").trim_end().to_string()
-    };
+    let label = label(worktree);
     let tags: Vec<&str> = [
         (worktree.main, "main"),
         (worktree.locked, "locked"),
@@ -149,8 +170,9 @@ mod tests {
 
     use super::*;
     use crate::git::worktrees::parse_list;
+    use crate::list_filter::{InputTarget, ListInput};
     use crate::model::Context;
-    use crate::popup::Popup;
+    use crate::popup::{LineInput, Popup};
     use crate::view::{buffer_rows, render};
 
     const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
@@ -340,6 +362,96 @@ mod tests {
         }
         let (buffer, rows) = draw_sized(&state, 20, 5);
         assert!(reversed_row(&buffer, &rows).is_some(), "{rows:#?}");
+    }
+
+    /// [`many`] with `filter` set on the list and typed into the open
+    /// input, as `/` then the keys leave it.
+    fn filtered(n: usize, filter: &str) -> AppState {
+        let mut state = many(n);
+        if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
+            list.filter = filter.into();
+            list.reconcile();
+        }
+        state.input = Some(ListInput {
+            target: InputTarget::WorktreesFilter,
+            line: LineInput::with_text(filter),
+        });
+        state
+    }
+
+    #[test]
+    fn a_filter_draws_only_its_rows_and_says_so_safely_in_the_title() {
+        // A control char never matches a row, so the bar holds the hostile
+        // text while the list is narrowed by the part that can match.
+        let mut state = filtered(5, "wt-\x1b[2J\x07");
+        if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
+            list.filter = "wt-2".into();
+            list.reconcile();
+        }
+        let (buffer, rows) = draw(&state);
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\x1b') && !row.contains('\x07')),
+            "{rows:#?}"
+        );
+        let bar = rows.last().unwrap();
+        assert!(bar.contains(" /wt-"), "the bar draws the input: {bar}");
+        assert!(bar.contains("[2J"), "sanitised: {bar}");
+        line_with(&rows, "┌ Worktrees · /wt-2 1 of 6 ┐");
+        line_with(&rows, "b2  /r/wt-2");
+        for gone in ["/r/main", "/r/wt-1", "/r/wt-5"] {
+            assert!(!rows.iter().any(|r| r.contains(gone)), "{gone} drawn");
+        }
+        let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
+        assert!(cursor.contains("/r/wt-2"), "{cursor}");
+
+        // A hostile filter is drawn, never run, in the title.
+        if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
+            list.filter = "x\x1b[31m\x07".into();
+            list.reconcile();
+        }
+        let (buffer, rows) = draw(&state);
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('\x1b') && !row.contains('\x07')),
+            "{rows:#?}"
+        );
+        let (_, title) = line_with(&rows, " Worktrees · /x");
+        assert!(title.contains("[31m"), "{title}");
+        assert!(title.contains(" 0 of 6 "), "{title}");
+        line_with(&rows, " No matches ");
+        assert_eq!(reversed_row(&buffer, &rows), None);
+    }
+
+    #[test]
+    fn without_a_filter_the_title_is_unchanged() {
+        let mut state = many(3);
+        state.input = None;
+        let (_, rows) = draw(&state);
+        line_with(&rows, "┌ Worktrees ─");
+        assert!(!rows.iter().any(|r| r.contains(" of ")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_long_filter_on_a_small_screen_fits_the_title_inside_the_border() {
+        let long = "w".repeat(200);
+        let state = filtered(11, &long);
+        let (_, rows) = draw_sized(&state, 40, 8);
+        let (_, title) = line_with(&rows, " Worktrees · /");
+        assert!(title.contains('…'), "{title}");
+        assert!(title.contains(" 0 of 12 "), "{title}");
+        let title = title.trim_end();
+        assert!(title.ends_with('┐'), "the right corner stays: {title}");
+
+        // A filter matching more rows than fit counts the cursor's place.
+        // Every term must match, so many short ones make it long.
+        let state = filtered(11, &format!("wt{}", " w".repeat(100)));
+        let (buffer, rows) = draw_sized(&state, 40, 8);
+        let (_, title) = line_with(&rows, " Worktrees · /");
+        assert!(title.contains(" 11 of 12 · 11/11 "), "{title}");
+        assert!(title.trim_end().ends_with('┐'), "{title}");
+        let cursor = reversed_row(&buffer, &rows).expect("the cursor row is in view");
+        assert!(cursor.contains("/r/wt-11"), "{cursor}");
     }
 
     #[test]

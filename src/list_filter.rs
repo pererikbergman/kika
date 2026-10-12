@@ -17,6 +17,11 @@ pub const INPUT_FULL: &str = "The filter is full (256 characters)";
 pub enum InputTarget {
     FilesFilter,
     CommitsFilter,
+    BranchesFilter,
+    RemotesFilter,
+    TagsFilter,
+    /// Narrows the Commits panel's Reflog tab.
+    ReflogFilter,
     DiffSearch,
     /// The path git narrows the log to; read on Enter, not as typed.
     LogPath,
@@ -24,6 +29,8 @@ pub enum InputTarget {
     LogAuthor,
     /// Narrows the shown review queue.
     ReviewFilter,
+    /// Narrows the Worktrees popup's list.
+    WorktreesFilter,
 }
 
 impl InputTarget {
@@ -32,8 +39,13 @@ impl InputTarget {
         match self {
             InputTarget::FilesFilter
             | InputTarget::CommitsFilter
+            | InputTarget::BranchesFilter
+            | InputTarget::RemotesFilter
+            | InputTarget::TagsFilter
+            | InputTarget::ReflogFilter
             | InputTarget::DiffSearch
-            | InputTarget::ReviewFilter => "/",
+            | InputTarget::ReviewFilter
+            | InputTarget::WorktreesFilter => "/",
             InputTarget::LogPath => "path: ",
             InputTarget::LogAuthor => "author: ",
         }

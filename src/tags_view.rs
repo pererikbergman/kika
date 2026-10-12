@@ -6,7 +6,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::git::tags::TagRef;
 use crate::tags::TagsList;
-use crate::view::{elide_right, reversed};
+use crate::view::{elide_right, no_matches, range_row, scrolled};
 
 /// What the tab shows when there are no tags.
 const NO_TAGS: &str = "No tags";
@@ -15,8 +15,8 @@ const NO_TAGS: &str = "No tags";
 const ANNOTATED: &str = "◆ ";
 
 /// The tab's body in `rows` by `width`: why the load failed, a
-/// placeholder, or one row per tag, the selection reversed and scrolled
-/// into view.
+/// placeholder, or one row per tag the filter shows, the selection and
+/// the range reversed and scrolled into view.
 pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'static> {
     if let Some(error) = &list.error {
         let mut lines: Vec<Line> = error.lines().map(|l| Line::from(l.to_string())).collect();
@@ -29,22 +29,16 @@ pub fn list_body(list: &TagsList, rows: usize, width: usize) -> Paragraph<'stati
     if list.tags.is_empty() {
         return Paragraph::new(NO_TAGS);
     }
-    let selected = list.selected.unwrap_or(0);
-    // Scrolled just enough to keep the selection in view.
-    let first = selected.saturating_sub(rows.saturating_sub(1));
-    let lines = list
-        .tags
+    let shown = list.visible();
+    if shown.is_empty() {
+        return Paragraph::new(no_matches());
+    }
+    let range = list.range();
+    let lines = scrolled(&shown, list.selected, rows)
         .iter()
-        .enumerate()
-        .skip(first)
-        .take(rows)
-        .map(|(i, tag)| {
-            let line = Line::from(tag_row(tag, width));
-            if Some(i) == list.selected {
-                reversed(line, width)
-            } else {
-                line
-            }
+        .map(|&i| {
+            let line = Line::from(tag_row(&list.tags[i], width));
+            range_row(line, i, list.selected, &range, width)
         })
         .collect::<Vec<_>>();
     Paragraph::new(lines)
@@ -153,6 +147,39 @@ mod tests {
         for cell in buffer.content() {
             assert!(!cell.symbol().contains('\x1b'), "{rows:#?}");
         }
+    }
+
+    #[test]
+    fn a_filter_draws_safe_with_its_count_and_a_range_reversed() {
+        let mut state = focused(Ok(vec![
+            tag(b"v3", false, 'a', "s"),
+            tag(b"x", false, 'a', "s"),
+            tag(b"v2", false, 'a', "s"),
+            tag(b"v1", false, 'a', "s"),
+        ]));
+        state.screen_mode = crate::layout::ScreenMode::Full;
+        state.branches.tags.set_filter("v\x1b[31m".into());
+        let buffer = draw(&state, 100, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|c| !c.symbol().contains('\x1b'))
+        );
+        assert!(contains(&rows, "0 of 4"), "{rows:#?}");
+
+        state.branches.tags.set_filter("v".into());
+        state.branches.tags.toggle_range();
+        state.branches.tags.move_by(1);
+        let buffer = draw(&state, 100, 24);
+        let rows = buffer_rows(&buffer);
+        assert!(contains(&rows, "/v 3 of 4 · 2 selected"), "{rows:#?}");
+        assert!(!contains(&rows, "  x  "), "{rows:#?}");
+        let reversed = crate::branches_view::tests::reversed_at;
+        assert!(reversed(&buffer, "v3  "));
+        assert!(reversed(&buffer, "v2  "));
+        assert!(!reversed(&buffer, "v1  "));
     }
 
     #[test]

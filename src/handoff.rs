@@ -13,6 +13,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::cherry_pick;
+use crate::git::custom_patch;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::{GitOp, MessageSource, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
@@ -109,12 +110,26 @@ pub fn execute_as(
                 },
                 op => op,
             };
-            AppIntent::OpFinished {
-                result: attached_command(&op, exe)
-                    .and_then(|cmd| run_on_terminal(cmd, runner, pause)),
-                tag,
-                op,
-            }
+            let result = attached_command(&op, exe).and_then(|cmd| match &op {
+                GitOp::CustomPatch {
+                    plan,
+                    action,
+                    picks,
+                    orig_head,
+                } => {
+                    let rewrite = custom_patch::Rewrite {
+                        plan,
+                        action,
+                        picks,
+                        orig_head,
+                    };
+                    custom_patch::run(runner, &rewrite, cmd, &|step| {
+                        run_on_terminal(step, runner, pause)
+                    })
+                }
+                _ => run_on_terminal(cmd, runner, pause),
+            });
+            AppIntent::OpFinished { result, tag, op }
         }
         HandOff::OpenFile { path, line } => {
             let file = workdir.join(path.as_os_str());
@@ -135,7 +150,8 @@ pub fn execute_as(
     }
 }
 
-/// The command for an attached `op`. An interactive rebase also names
+/// The command for an attached `op`. An interactive rebase, a custom
+/// patch's first step among them, also names
 /// Kika, at `exe`, as git's sequence editor, which rewrites the todo list
 /// to the plan; without that path nothing may run.
 fn attached_command(
@@ -143,7 +159,7 @@ fn attached_command(
     exe: impl FnOnce() -> io::Result<PathBuf>,
 ) -> Result<GitCommand, String> {
     let cmd = op_command(op);
-    if !matches!(op, GitOp::InteractiveRebase(_)) {
+    if !matches!(op, GitOp::InteractiveRebase(_) | GitOp::CustomPatch { .. }) {
         return Ok(cmd);
     }
     let exe = exe().map_err(|e| io_error("Could not find Kika's own program", &e))?;
