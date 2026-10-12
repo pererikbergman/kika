@@ -2,12 +2,12 @@ use crate::branches::BranchesTab;
 use crate::branches_view;
 use crate::commit_editor::{CommitEditor, Field};
 use crate::commits_view;
-use crate::conflict_view;
 use crate::custom_patch::CustomPatch;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::features::blame;
+use crate::features::conflicts;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
 use crate::git::diff::{DiffLine, DiffOptions, DiffSide, EmojiZwj, LineKind, sanitize};
@@ -158,7 +158,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
         }
         (Focus::Conflict(view), ..) => {
-            conflict_view::render(view, &state.keymap, &look, frame, area)
+            conflicts::view::render(view, &state.keymap, &look, frame, area)
         }
         (Focus::Blame(view), ..) => match &view.commit {
             Some(commit) => blame::view::render_commit_view(commit, &look, frame, area),

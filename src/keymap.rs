@@ -8,12 +8,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::bisect;
 use crate::commit_files::CommitFilesList;
-use crate::conflict::Choice;
 use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
-use crate::features::{blame, command_log, custom_commands, repos, submodules, worktrees};
+use crate::features::{
+    blame, command_log, conflicts, custom_commands, repos, submodules, worktrees,
+};
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -1283,33 +1284,6 @@ fn renderer_disabled(state: &AppState) -> Option<Reason> {
     state.renderers.is_empty().then_some(NO_RENDERER.into())
 }
 
-/// Why the conflict view cannot pick a side now: one write at a time, and
-/// only in a file whose blocks were read.
-pub(crate) fn pick_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    match &state.focus {
-        Focus::Conflict(view) if view.loaded.is_some() => None,
-        _ => Some("Nothing to pick".into()),
-    }
-}
-
-/// Why the merge tool cannot start now: in the conflict view it is for
-/// that file; from Files, only for a conflicted one.
-pub(crate) fn mergetool_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    if matches!(state.focus, Focus::Conflict(_)) {
-        return None;
-    }
-    match state.selected.and_then(|i| state.files.get(i)) {
-        Some(file) if file.kind == EntryKind::Conflicted => None,
-        _ => Some("Not a conflicted file".into()),
-    }
-}
-
 pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
@@ -2389,10 +2363,6 @@ fn files_open_disabled(state: &AppState) -> Option<Reason> {
 
 fn files_hunks_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| no_file_selected(state))
-}
-
-fn files_mergetool_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| mergetool_disabled(state))
 }
 
 fn commits_open_disabled(state: &AppState) -> Option<Reason> {
@@ -3816,22 +3786,6 @@ static DIFF_FILES: &[Binding] = &[
     },
 ];
 
-// Chunk 30: conflicts
-#[rustfmt::skip]
-static CONFLICTS_FILES: &[Binding] = &[
-    Binding {
-        id: "files.mergetool",
-        keys: &[KeyPattern::any(KeyCode::Char('M'))],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenMergeTool,
-        description: "Resolve the selected conflicted file in your merge tool",
-        label: "merge tool",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: files_mergetool_disabled,
-    },
-];
-
 // Chunk 31: files
 #[rustfmt::skip]
 static FILES_IGNORE: &[Binding] = &[
@@ -4068,86 +4022,6 @@ static DIFF_LINES: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: open_disabled,
-    },
-];
-
-// Chunk 36: conflicts
-static CONFLICTS_KEYS: &[Binding] = &[
-    Binding {
-        id: "conflict.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::ConflictNext,
-        description: "Move to the next conflict",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "conflict.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::ConflictPrev,
-        description: "Move to the previous conflict",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "conflict.ours",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Ours),
-        description: "Keep our side of this conflict and write the file",
-        label: "ours",
-        bar: true,
-        disabled: pick_disabled,
-    },
-    Binding {
-        id: "conflict.theirs",
-        keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Theirs),
-        description: "Keep their side of this conflict and write the file",
-        label: "theirs",
-        bar: true,
-        disabled: pick_disabled,
-    },
-    Binding {
-        id: "conflict.both",
-        keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Both),
-        description: "Keep both sides of this conflict, ours first, and write the file",
-        label: "both",
-        bar: true,
-        disabled: pick_disabled,
-    },
-    Binding {
-        id: "conflict.mergetool",
-        keys: &[KeyPattern::any(KeyCode::Char('M'))],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::OpenMergeTool,
-        description: "Resolve this file in your merge tool instead",
-        label: "merge tool",
-        bar: true,
-        disabled: mergetool_disabled,
-    },
-    Binding {
-        id: "conflict.back",
-        keys: &[KeyPattern::any(KeyCode::Esc)],
-        scope: KeyScope::Conflict,
-        intent: AppIntent::FocusLeft,
-        description: "Back to the file list; picks already written stay",
-        label: "back",
-        bar: true,
-        disabled: never,
     },
 ];
 
@@ -6192,13 +6066,13 @@ static CHUNKS: &[&[Binding]] = &[
     REVIEW_KEYS,
     blame::keys::BLAME_FILES,
     DIFF_FILES,
-    CONFLICTS_FILES,
+    conflicts::keys::CONFLICTS_FILES,
     FILES_IGNORE,
     DIFF_KEYS,
     RENDERERS_DIFF,
     DIFF_LINES,
     blame::keys::BLAME_KEYS,
-    CONFLICTS_KEYS,
+    conflicts::keys::CONFLICTS_KEYS,
     blame::keys::BLAME_COMMIT,
     FILES_MENU,
     STASH_FROM_FILES,

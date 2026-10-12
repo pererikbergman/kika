@@ -13,8 +13,6 @@ mod commits_view;
 mod config;
 #[cfg(test)]
 mod config_docs;
-mod conflict;
-mod conflict_view;
 mod copied;
 mod custom_patch;
 mod diff_mark;
