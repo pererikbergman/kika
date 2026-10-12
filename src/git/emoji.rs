@@ -97,6 +97,11 @@ pub(crate) fn is_modifier(c: char) -> bool {
     matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
 }
 
+/// The 26 regional-indicator letters: two in a row draw as one flag.
+pub(crate) fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +129,14 @@ mod tests {
         assert!(is_modifier('\u{1F3FB}') && is_modifier('\u{1F3FF}'));
         assert!(!is_modifier('\u{1F3FA}') && !is_modifier('\u{1F400}'));
         assert!(!is_modifier('👨') && !is_modifier('\u{FE0F}'));
+    }
+
+    #[test]
+    fn regional_indicators_are_the_26_letters_from_u1f1e6() {
+        assert!(is_regional_indicator('\u{1F1E6}') && is_regional_indicator('\u{1F1FF}'));
+        for c in ['\u{1F1E5}', '\u{1F200}', 'A'] {
+            assert!(!is_regional_indicator(c), "{c:?}");
+        }
     }
 
     #[test]

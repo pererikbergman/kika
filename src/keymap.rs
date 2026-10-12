@@ -27,6 +27,7 @@ use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
+use crate::model::pull_request::refresh_disabled;
 use crate::model::{AppState, CommitFlow, Focus};
 use crate::popup::{DeleteBranchConfirm, Popup};
 use crate::rebase_todo::Rewrite;
@@ -618,6 +619,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "travel.no",
     "travel.quit",
     "branches.pull_request",
+    "branches.refresh_pull_requests",
     "pick_list.quit",
     "pick_list.pick",
     "workspace.review",
@@ -3793,7 +3795,8 @@ static REGISTRY: &[Binding] = &[
         description: "Select the next hunk",
         label: "",
         bar: false,
-        disabled: never,
+        // The tool's rows show no hunk, so moving the selection is unseen.
+        disabled: display_only,
     },
     Binding {
         id: "diff.prev",
@@ -3806,7 +3809,7 @@ static REGISTRY: &[Binding] = &[
         description: "Select the previous hunk",
         label: "",
         bar: false,
-        disabled: never,
+        disabled: display_only,
     },
     Binding {
         id: "diff.stage",
@@ -4709,6 +4712,16 @@ static REGISTRY: &[Binding] = &[
         label: "pull request",
         bar: false,
         disabled: no_branch_selected,
+    },
+    Binding {
+        id: "branches.refresh_pull_requests",
+        keys: &[KeyPattern::any(KeyCode::Char('B'))],
+        scope: KeyScope::Branches,
+        intent: AppIntent::RefreshPullRequests,
+        description: "Ask GitHub again for the branches' pull requests",
+        label: "refresh PRs",
+        bar: false,
+        disabled: refresh_disabled,
     },
     Binding {
         id: "branches.set_upstream",
@@ -8817,6 +8830,80 @@ mod tests {
     }
 
     #[test]
+    fn shift_b_refreshes_pull_requests_in_branches_and_says_why_when_it_cannot() {
+        let shift_b = KeyPattern::any(KeyCode::Char('B'));
+        let holders: Vec<&str> = registry()
+            .iter()
+            .filter(|b| KeyScope::Branches.chain().any(|scope| scope == b.scope))
+            .filter(|b| b.keys.iter().any(|k| k.overlaps(&shift_b)))
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(holders, ["branches.refresh_pull_requests"]);
+
+        let press = |state: &AppState| {
+            resolve(
+                registry(),
+                &Keymap::default(),
+                KeyScope::Branches,
+                state,
+                KeyPress::new(KeyCode::Char('B'), KeyModifiers::SHIFT),
+            )
+        };
+        let mut state = AppState::new(Context::Workspace);
+        match press(&state) {
+            Resolution::Disabled(reason) => assert_eq!(
+                reason,
+                "Name GitHub hosts under [forge] in the global config"
+            ),
+            other => panic!("{other:?}"),
+        }
+        state.forge = crate::forge::ForgeState::new(vec![
+            crate::forge::ForgeHost::parse("github.com").unwrap(),
+        ]);
+        state.forge.repo = Some(crate::forge::ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        });
+        match press(&state) {
+            Resolution::Run(binding) => {
+                assert_eq!(binding.intent, AppIntent::RefreshPullRequests)
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Help lists it with what it does, greyed out with why when off.
+        let listed = |state: &AppState| {
+            available(registry(), &Keymap::default(), KeyScope::Branches, state)
+                .into_iter()
+                .find(|(b, _)| b.id == "branches.refresh_pull_requests")
+                .map(|(b, disabled)| (b.description, disabled))
+        };
+        assert_eq!(
+            listed(&state),
+            Some(("Ask GitHub again for the branches' pull requests", None))
+        );
+        state.forge.in_flight = true;
+        assert_eq!(
+            listed(&state),
+            Some((
+                "Ask GitHub again for the branches' pull requests",
+                Some("Pull requests are already being refreshed".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_move_or_empty_the_pull_request_refresh() {
+        let id = "branches.refresh_pull_requests";
+        assert!(REPO_LOCKED.contains(&id));
+        let expected = format!("{id:?} can only be changed in the global config file");
+        assert_eq!(build(&[(id, &["r"])], Trust::Repo).unwrap_err(), expected);
+        assert_eq!(build(&[(id, &[])], Trust::Repo).unwrap_err(), expected);
+        assert!(build(&[(id, &["ctrl-b"])], Trust::Global).is_ok());
+    }
+
+    #[test]
     fn the_create_question_has_no_enter_and_the_pick_list_closes_on_esc() {
         let state = AppState::new(Context::Workspace);
         let resolve_in =
@@ -9981,6 +10068,51 @@ mod tests {
         assert_eq!(reason(&state, KeyScope::Lines, ' '), None);
     }
 
+    #[test]
+    fn a_diff_tool_view_disables_the_hunk_keys_with_its_notice() {
+        use crate::external_diff::{ExternalRenderer, RendererKind};
+        use crate::hunk_view::HunkView;
+
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Diff(HunkView::new("a.rs".into(), DiffSide::Worktree));
+        state.renderers = vec![ExternalRenderer {
+            label: "difft".into(),
+            argv: vec!["difft".into()],
+            kind: RendererKind::Tool,
+        }];
+        let keys = [
+            (plain('j'), AppIntent::NextHunk),
+            (key(KeyCode::Down, KeyModifiers::NONE), AppIntent::NextHunk),
+            (plain('k'), AppIntent::PrevHunk),
+            (key(KeyCode::Up, KeyModifiers::NONE), AppIntent::PrevHunk),
+        ];
+        let resolved = |state: &AppState, key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::Diff,
+            state,
+            key,
+        ) {
+            Resolution::Run(binding) => Ok(binding.intent.clone()),
+            Resolution::Disabled(reason) => Err(reason),
+            other => panic!("{key:?} resolved to {other:?}"),
+        };
+
+        state.renderer = Some(0);
+        for (key, _) in &keys {
+            assert_eq!(resolved(&state, *key), Err(DISPLAY_ONLY.into()), "{key:?}");
+        }
+        // A pager's rows map to the patch, and the built-in view is the patch.
+        state.renderers[0].kind = RendererKind::Pager;
+        for (key, intent) in &keys {
+            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
+        }
+        state.renderer = None;
+        for (key, intent) in &keys {
+            assert_eq!(resolved(&state, *key), Ok(intent.clone()), "{key:?}");
+        }
+    }
+
     /// The `<scope>` part of a binding id.
     fn scope_name(scope: KeyScope) -> &'static str {
         match scope {
@@ -10521,6 +10653,8 @@ mod tests {
                     | ListEscape
                     | OpenMenu(MenuId::PullRequest)
                     | ConfirmCreatePullRequest
+                    // It asks GitHub for the badges again.
+                    | RefreshPullRequests
                     | OpenPatchMenu
                     // Review mode reaches GitHub or starts the browser, and
                     // a pick may open a check's page.

@@ -896,6 +896,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: todo.to_vec(),
             done: Some(b"pick 0000000 done\n".to_vec()),
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
@@ -907,6 +908,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: b"pick 1111111 one\nexec make test-everything --verbose\n".to_vec(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
@@ -918,15 +920,31 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: todo.into_bytes(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
     /// The bottom bar's text at `width` columns, after an edit key on the
     /// read-only todo.
     fn read_only_notice(width: u16) -> String {
+        read_only_notice_with(
+            width,
+            Ok(b"#"),
+            b"pick 1111111 one\nexec make test-everything --verbose\n",
+        )
+    }
+
+    /// [`read_only_notice`] for `todo` read with comment prefix `comment`.
+    fn read_only_notice_with(width: u16, comment: Result<&[u8], &str>, todo: &[u8]) -> String {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut state = showing(merge_rows());
-        read_only_rebase(&mut state);
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: todo.to_vec(),
+            done: None,
+            comment: comment.map(<[u8]>::to_vec).map_err(str::to_string),
+        })));
         state.commits.todo_selected = Some(0);
         state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
             KeyCode::Char('d'),
@@ -945,6 +963,33 @@ mod tests {
         let narrow = read_only_notice(40);
         assert!(narrow.ends_with('…'), "{narrow:?}");
         assert!(narrow.starts_with(" Read-only"), "{narrow:?}");
+        // A `#` line under a `;` prefix names both and keeps the fix hint.
+        let todo = b"pick 1111111 one\n# Rebase 1111111..2222222 onto 1111111 (2 commands)\n";
+        let wide = read_only_notice_with(80, Ok(b";"), todo);
+        assert!(wide.contains("--edit-todo"), "{wide:?}");
+        assert!(wide.contains("line 2, comment not using ;"), "{wide:?}");
+        let narrow = read_only_notice_with(40, Ok(b";"), todo);
+        assert!(narrow.ends_with('…'), "{narrow:?}");
+    }
+
+    #[test]
+    fn a_comment_prefix_reason_fits_in_80_columns_and_is_cut_at_40() {
+        let todo = b"pick 1111111 one\n";
+        let error = "fatal: bad config line 1 in file .git/config\nmore";
+        for (comment, cause) in [
+            (Ok(&b"b"[..]), "prefix b hides commands"),
+            (Err(error), "fatal: bad config line 1 in file .git/c…"),
+        ] {
+            let wide = read_only_notice_with(80, comment, todo);
+            assert_eq!(
+                wide,
+                format!(" Read-only, fix core.commentChar: {cause}"),
+                "{wide:?}"
+            );
+            let narrow = read_only_notice_with(40, comment, todo);
+            assert!(narrow.starts_with(" Read-only"), "{narrow:?}");
+            assert!(narrow.ends_with('…'), "{narrow:?}");
+        }
     }
 
     /// Every size the panel might get, from a full screen to one cell.
@@ -1093,6 +1138,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: b"pick 1111111 one\nexec make test\n".to_vec(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
         let rows = buffer_rows(&draw(&state, 100, 30));
         let heading = rows

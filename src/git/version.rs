@@ -44,6 +44,14 @@ pub const UPDATE_REFS: GitVersion = GitVersion {
     patch: 0,
 };
 
+/// 2.45 brought `core.commentString`, a comment prefix longer than one
+/// character; an older git ignores the key.
+pub const COMMENT_STRING: GitVersion = GitVersion {
+    major: 2,
+    minor: 45,
+    patch: 0,
+};
+
 /// `git --version`, in the C locale so the words around the number are
 /// always English.
 pub fn version_command() -> GitCommand {

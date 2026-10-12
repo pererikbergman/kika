@@ -2317,6 +2317,81 @@ async fn stashing_from_the_files_menu_then_applying_and_dropping_from_the_stash_
     app.assert_screen_contains("No stashes");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stashing_a_range_of_files_takes_those_two_and_leaves_the_others() {
+    let repo = on_main()
+        .write("b.txt", "two\n")
+        .commit("b")
+        .write("a.txt", "changed a\n")
+        .write("b.txt", "changed b\n")
+        .write("c.txt", "new c\n")
+        .write("d.txt", "new d\n");
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let paths: Vec<String> = app
+        .state()
+        .files
+        .iter()
+        .map(|f| f.path.display().to_string())
+        .collect();
+    assert_eq!(paths, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+
+    // Mark b.txt (tracked) through c.txt (untracked).
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.assert_screen_contains("2 selected");
+    app.press(KeyCode::Char('s')).await;
+    app.assert_screen_contains("Stash selected files");
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Stash message (optional)");
+    app.type_text("two of them").await;
+    app.press(KeyCode::Enter).await;
+
+    assert_eq!(stash_count(&repo), 1);
+    assert_eq!(repo.read("b.txt"), "two\n");
+    assert!(!repo.exists("c.txt"));
+    assert_eq!(repo.read("a.txt"), "changed a\n");
+    assert_eq!(repo.read("d.txt"), "new d\n");
+    let status = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(status, " M a.txt\n?? d.txt\n");
+    assert_eq!(app.state().files_anchor, None, "the range is done with");
+
+    // The stash holds exactly the two: b.txt's change and c.txt untracked.
+    let tracked =
+        String::from_utf8(repo.git(["stash", "show", "--name-only", "stash@{0}"])).unwrap();
+    assert_eq!(tracked, "b.txt\n");
+    let untracked = String::from_utf8(repo.git(["ls-tree", "--name-only", "stash@{0}^3"])).unwrap();
+    assert_eq!(untracked, "c.txt\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_with_a_staged_deletion_and_an_untracked_file_stashes_nothing() {
+    let repo = on_main().write("u.txt", "new\n");
+    repo.git(["rm", "-q", "--", "a.txt"]);
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(before, "D  a.txt\n?? u.txt\n");
+
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('s')).await;
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+    assert_eq!(
+        app.state().notice.as_deref(),
+        Some(crate::menu::STASH_APART)
+    );
+
+    assert_eq!(stash_count(&repo), 0);
+    let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(after, before);
+}
+
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
     let rows = &app.state().commits.rows;
@@ -2555,6 +2630,48 @@ async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() 
     app.assert_screen_contains("+two");
     assert_eq!(app.state().review.fetched_heads.len(), 1);
     assert_eq!(gh.calls().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shift_b_in_branches_asks_github_once_and_only_for_an_opted_in_host() {
+    use std::sync::Arc;
+
+    use crate::forge::ForgeView;
+    use crate::forge::github::fixtures::{PROBE_200, STATES};
+    use crate::forge::github::{FakeGh, answer};
+
+    let repo = on_main();
+    repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);
+
+    // No host opted in: the key says why and nothing reaches gh.
+    let gh = Arc::new(FakeGh::new());
+    let mut app = Harness::start_with_forge_hosts(&repo, Arc::clone(&gh), vec![]).await;
+    app.press(KeyCode::Char('3')).await;
+    app.type_text("B").await;
+    assert_eq!(gh.calls(), []);
+    assert_eq!(
+        app.state().notice.as_deref(),
+        Some("Name GitHub hosts under [forge] in the global config")
+    );
+
+    // github.com opted in: a reload matches the remote, then `B` runs
+    // exactly one more refresh, a probe and the query.
+    let gh = Arc::new(
+        FakeGh::new()
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES))
+            .reply(answer(PROBE_200))
+            .reply(answer(STATES)),
+    );
+    let mut app = Harness::start_with_forge(&repo, Arc::clone(&gh)).await;
+    app.press(KeyCode::Char('3')).await;
+    app.press(KeyCode::Char('r')).await;
+    assert_eq!(gh.calls().len(), 2);
+    assert_eq!(app.state().forge.status, ForgeView::Fresh);
+    app.type_text("B").await;
+    assert_eq!(gh.calls().len(), 4);
+    assert_eq!(app.state().forge.status, ForgeView::Fresh);
+    assert_eq!(app.state().notice, None);
 }
 
 /// Twenty numbered lines, with `changes` (line number, new text) made.

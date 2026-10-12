@@ -599,6 +599,32 @@ mod tests {
     }
 
     #[test]
+    fn the_stash_menus_refusal_of_a_mixed_range_shows_whole_at_80_columns() {
+        let mut state = workspace(&["gone.rs", "u.txt"]);
+        state.files[0].index = 'D';
+        state.files[0].worktree = '.';
+        state.files[1].index = '?';
+        state.files[1].worktree = '?';
+        state.files[1].kind = EntryKind::Untracked;
+        state.focus = crate::model::Focus::Files;
+        state.files_anchor = Some("gone.rs".into());
+        state.selected = Some(1);
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Stash,
+            cursor: 0,
+        }];
+        let (_, rows) = draw(&state, 80, 24);
+        let row = format!(" Stash selected files…  {} ", crate::menu::STASH_APART);
+        let (x, y) = find(&rows, &row);
+        // The row ends inside the box, with its right border after it.
+        let after: String = rows[y as usize]
+            .chars()
+            .skip(x as usize + row.chars().count())
+            .collect();
+        assert!(after.starts_with('│'), "{rows:#?}");
+    }
+
+    #[test]
     fn a_submenu_draws_over_its_parent() {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![
