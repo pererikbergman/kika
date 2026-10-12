@@ -372,10 +372,13 @@ fn step_of(plan: &mut RebasePlan, index: usize) -> &mut Step {
     &mut plan.steps[n - 1 - index]
 }
 
-/// A full object id: 40 hex digits for SHA-1, 64 for SHA-256.
+/// A full object id: 40 lowercase hex digits for SHA-1, 64 for SHA-256.
+/// Git reads a full-length id as an object, never as a ref name, and
+/// writes it lowercase, as the todo's abbreviations it is matched against.
 fn full_id(text: &str) -> Result<CommitId, &'static str> {
+    let lower_hex = text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     CommitId::parse(text)
-        .filter(|_| matches!(text.len(), 40 | 64))
+        .filter(|_| lower_hex && matches!(text.len(), 40 | 64))
         .ok_or("Not a commit id")
 }
 
@@ -583,9 +586,25 @@ pub fn crossing(oid: &str, branch: &[u8]) -> String {
 /// their order, so no branch ends up holding other commits. Each segment
 /// is written as its steps in plan order, then its `update-ref` lines.
 pub fn apply(steps: &[Step], todo: &[TodoEntry]) -> Result<Vec<u8>, String> {
+    full_ids(steps)?;
     let segments = collect_todo(todo)?;
     let matched = match_steps(steps, &segments)?;
     Ok(emit(steps, &matched, &segments))
+}
+
+/// Refuse the whole plan unless every step names its commit by a
+/// [`full_id`] of one length: a short id could match the wrong todo
+/// commit, and one repo has one hash.
+fn full_ids(steps: &[Step]) -> Result<(), String> {
+    let mut len = None;
+    for step in steps {
+        let oid = step.commit.as_str();
+        full_id(oid).map_err(|e| format!("{e}: {oid:?}"))?;
+        if *len.get_or_insert(oid.len()) != oid.len() {
+            return Err(format!("The plan mixes id lengths: {oid:?}"));
+        }
+    }
+    Ok(())
 }
 
 /// A todo commit as [`apply`] keeps it: its id as git wrote it, what
@@ -676,6 +695,8 @@ fn match_steps(steps: &[Step], segments: &Segments) -> Result<Vec<usize>, String
 
 /// The todo list to write: each segment's steps in plan order, a `break`
 /// after each that stops, then that segment's `update-ref` lines.
+/// Commits are named by the step's full id, never git's abbreviation,
+/// since a short id can resolve to a branch or tag of the same name.
 fn emit(steps: &[Step], matched: &[usize], segments: &Segments) -> Vec<u8> {
     let mut out = Vec::new();
     for (segment, names) in segments.refs.iter().enumerate() {
@@ -829,9 +850,14 @@ mod tests {
     }
 
     fn step(action: TodoAction, digit: char) -> Step {
+        step_for(action, &id(digit))
+    }
+
+    /// A step for `oid`, taken as it is.
+    fn step_for(action: TodoAction, oid: &str) -> Step {
         Step {
             action,
-            commit: CommitId::parse(&id(digit)).unwrap(),
+            commit: CommitId::parse(oid).unwrap(),
             break_after: false,
         }
     }
@@ -1217,6 +1243,8 @@ mod tests {
             format!("Pick {a}\n"),
             format!("pick {}\n", &a[..39]),
             format!("pick {}\n", "g".repeat(40)),
+            format!("pick {}\n", "A".repeat(40)),
+            format!("pick {}\n", &a[..7]),
             format!("pick {a} subject\n"),
             format!("pick  {a}\n"),
             format!("pick {a}\r\n"),
@@ -1581,6 +1609,65 @@ mod tests {
         assert!(apply(&twice, &[line(a, ""), line(b, "")]).is_err());
         // The order of the todo does not matter, only which commits.
         assert!(apply(&steps, &[line(a, ""), line(b, "")]).is_ok());
+    }
+
+    #[test]
+    fn apply_names_every_action_s_commit_by_its_full_id() {
+        let digits = ['a', 'b', 'c', 'd', 'e', 'f'];
+        for len in [40, 64] {
+            let full = digits.map(|d| d.to_string().repeat(len));
+            let steps: Vec<Step> = TodoAction::ALL
+                .into_iter()
+                .zip(&full)
+                .map(|(action, oid)| step_for(action, oid))
+                .collect();
+            // Git abbreviates to as few as 4 digits.
+            let todo: Vec<TodoEntry> = full
+                .iter()
+                .zip([4, 5, 6, 7, 4, 7])
+                .map(|(oid, short)| line(&oid[..short], "subject"))
+                .collect();
+            let out = String::from_utf8(apply(&steps, &todo).unwrap()).unwrap();
+            let lines: Vec<&str> = out.lines().collect();
+            assert_eq!(lines.len(), steps.len(), "{out}");
+            for (text, step) in lines.iter().zip(&steps) {
+                let mut fields = text.split(' ');
+                assert_eq!(fields.next(), Some(step.action.word()), "{text}");
+                let oid = fields.next().unwrap();
+                assert_eq!(oid.len(), len, "{text}");
+                assert!(
+                    oid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+                    "{text}"
+                );
+                assert_eq!(oid, step.commit.as_str(), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn apply_refuses_a_plan_with_any_id_that_is_not_full() {
+        let a = id('a');
+        let b = id('b');
+        let todo = [line(&a[..7], "a"), line(&b[..7], "b")];
+        assert!(apply(&[step_for(TodoAction::Pick, &a), pick('b')], &todo).is_ok());
+        let upper_todo = [line("AAAAAAA", "a"), line(&b[..7], "b")];
+        for (steps, todo) in [
+            // A short id, though it matches the todo's abbreviation.
+            (vec![step_for(TodoAction::Pick, &a[..7]), pick('b')], &todo),
+            (vec![pick('a'), step_for(TodoAction::Drop, &b[..39])], &todo),
+            // Uppercase hex, even against a todo spelled the same way.
+            (
+                vec![step_for(TodoAction::Pick, &"A".repeat(40)), pick('b')],
+                &upper_todo,
+            ),
+            // SHA-1 and SHA-256 ids in one plan.
+            (
+                vec![pick('a'), step_for(TodoAction::Pick, &"b".repeat(64))],
+                &todo,
+            ),
+        ] {
+            assert!(apply(&steps, todo).is_err(), "{steps:?}");
+        }
     }
 
     #[test]
