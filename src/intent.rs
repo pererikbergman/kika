@@ -18,6 +18,7 @@ use crate::git::branch_tips::Tip;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffChunk, DiffLine};
+use crate::git::fixup_base::FixupBase;
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
@@ -622,6 +623,19 @@ pub enum AppIntent {
     RewriteCommit(Edit),
     /// Move the selected commit or todo row up (newer) or down (older).
     MoveCommit(Direction),
+    /// Commit the staged change as a `fixup!` of the selected commit.
+    CreateFixup,
+    /// Ask, then fold every `fixup!` commit into the commit it fixes.
+    Autosquash,
+    /// Autosquash, as the question asked.
+    ConfirmAutosquash,
+    /// Find which commit last touched the staged lines.
+    FindFixupBase,
+    /// The commits the staged lines come from, or why they are not known.
+    FixupBaseFound {
+        tag: Tag,
+        result: Result<FixupBase, String>,
+    },
     /// Stop the rebase after the selected commit, or toggle the stop
     /// after the selected todo row.
     InsertBreak,

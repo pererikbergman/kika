@@ -181,6 +181,82 @@ pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'s
     Ok(plan)
 }
 
+/// Why there is nothing to autosquash.
+pub const NO_FIXUPS: &str = "No fixup! commits to fold";
+
+/// Why a `fixup!` commit cannot be folded: no commit below it in the
+/// loaded log has the subject it names.
+pub const NO_TARGET: &str = "No target loaded for a fixup!; move down to load more";
+
+/// Why a `fixup!` commit cannot be folded: its target is below a merge.
+pub const ACROSS_MERGE: &str = "Cannot rewrite across a merge";
+
+/// What git writes in front of the subject of a fixup commit.
+const FIXUP_PREFIX: &str = "fixup! ";
+
+/// Each `fixup!` commit on the first-parent chain from `HEAD`, with the
+/// commit it fixes, as log row indexes `(fixup, target)`, newest fixup
+/// first. The chain ends at the first merge or the last loaded row. A
+/// fixup's target is the nearest older commit in the chain whose subject
+/// is the fixup's, every leading `fixup! ` stripped, and that is not a
+/// fixup itself.
+pub fn fixup_targets(rows: &[CommitRow]) -> Result<Vec<(usize, usize)>, &'static str> {
+    let merge = rows.iter().position(|row| row.parents.len() > 1);
+    let chain = &rows[..merge.unwrap_or(rows.len())];
+    let mut pairs = Vec::new();
+    for (i, row) in chain.iter().enumerate() {
+        let Some(mut subject) = row.subject.strip_prefix(FIXUP_PREFIX) else {
+            continue;
+        };
+        while let Some(rest) = subject.strip_prefix(FIXUP_PREFIX) {
+            subject = rest;
+        }
+        let target = chain[i + 1..]
+            .iter()
+            .position(|older| older.subject == subject && !older.subject.starts_with(FIXUP_PREFIX))
+            .map(|at| i + 1 + at);
+        match target {
+            Some(target) => pairs.push((i, target)),
+            None if merge.is_some() => return Err(ACROSS_MERGE),
+            None => return Err(NO_TARGET),
+        }
+    }
+    if pairs.is_empty() {
+        return Err(NO_FIXUPS);
+    }
+    Ok(pairs)
+}
+
+/// The plan that folds every `fixup!` commit into the commit it fixes
+/// (see [`fixup_targets`]). Each fixup moves to right after its target,
+/// after any older fixup of the same target, and becomes a `fixup`; every
+/// other commit is picked in its order. Kika orders the todo itself, so
+/// git's own `--autosquash` and `rebase.autoSquash` play no part.
+pub fn plan_autosquash(rows: &[CommitRow]) -> Result<RebasePlan, &'static str> {
+    let pairs = fixup_targets(rows)?;
+    let deepest = pairs.iter().map(|&(_, target)| target).max().unwrap_or(0);
+    if rows[deepest].parents.is_empty() {
+        return Err("Cannot rewrite the first commit");
+    }
+    let picked = picks(linear_range(rows, deepest)?)?;
+    let n = picked.steps.len();
+    // `picked.steps[n - 1 - i]` is row `i`.
+    let mut steps = Vec::with_capacity(n);
+    for row in (0..=deepest).rev() {
+        if pairs.iter().any(|&(fixup, _)| fixup == row) {
+            continue;
+        }
+        steps.push(picked.steps[n - 1 - row].clone());
+        // Older fixups first: the higher row index is the older commit.
+        for &(fixup, _) in pairs.iter().rev().filter(|&&(_, target)| target == row) {
+            let mut step = picked.steps[n - 1 - fixup].clone();
+            step.action = TodoAction::Fixup;
+            steps.push(step);
+        }
+    }
+    Ok(RebasePlan { steps, ..picked })
+}
+
 /// `rows[..=last]`, once they are one first-parent chain with a loaded
 /// parent below each and a parent below the last, at most [`MAX_STEPS`].
 fn linear_range(rows: &[CommitRow], last: usize) -> Result<&[CommitRow], &'static str> {
@@ -1358,6 +1434,146 @@ mod tests {
             );
             assert_eq!(validate_edit(&before, &after, false), Ok(()));
         }
+    }
+
+    /// A first-parent chain from `HEAD`, newest first: each `(digit,
+    /// subject)` is a commit on the next, the last on `9…`, not loaded.
+    fn titled(commits: &[(char, &str)]) -> Vec<CommitRow> {
+        commits
+            .iter()
+            .enumerate()
+            .map(|(i, &(digit, subject))| {
+                let parent = commits.get(i + 1).map_or('9', |&(d, _)| d);
+                CommitRow {
+                    subject: subject.into(),
+                    ..row(&id(digit), &[&id(parent)])
+                }
+            })
+            .collect()
+    }
+
+    fn fixup(digit: char) -> Step {
+        step(TodoAction::Fixup, digit)
+    }
+
+    #[test]
+    fn autosquash_moves_a_fixup_after_its_target_and_picks_the_rest() {
+        let rows = titled(&[
+            ('f', "fixup! A"),
+            ('c', "C"),
+            ('b', "B"),
+            ('a', "A"),
+            ('0', "base"),
+        ]);
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of(
+                '0',
+                vec![pick('a'), fixup('f'), pick('b'), pick('c')]
+            ))
+        );
+    }
+
+    #[test]
+    fn autosquash_keeps_two_fixups_of_one_commit_in_their_order() {
+        let rows = titled(&[('e', "fixup! A"), ('b', "B"), ('d', "fixup! A"), ('a', "A")]);
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of(
+                '9',
+                vec![pick('a'), fixup('d'), fixup('e'), pick('b')]
+            ))
+        );
+    }
+
+    #[test]
+    fn autosquash_strips_every_fixup_prefix_to_find_the_target() {
+        let rows = titled(&[('d', "fixup! fixup! A"), ('b', "B"), ('a', "A")]);
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of('9', vec![pick('a'), fixup('d'), pick('b')]))
+        );
+    }
+
+    #[test]
+    fn autosquash_folds_fixups_of_several_commits_from_the_deepest_target() {
+        let rows = titled(&[
+            ('e', "fixup! B"),
+            ('d', "fixup! A"),
+            ('b', "B"),
+            ('a', "A"),
+            ('0', "base"),
+        ]);
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of(
+                '0',
+                vec![pick('a'), fixup('d'), pick('b'), fixup('e')]
+            ))
+        );
+        assert_eq!(fixup_targets(&rows), Ok(vec![(0, 2), (1, 3)]));
+    }
+
+    #[test]
+    fn autosquash_picks_the_nearest_older_commit_with_the_subject() {
+        let rows = titled(&[('d', "fixup! A"), ('b', "A"), ('a', "A")]);
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of('a', vec![pick('b'), fixup('d')]))
+        );
+    }
+
+    #[test]
+    fn autosquash_needs_a_fixup_and_its_target_loaded() {
+        let none = titled(&[('b', "B"), ('a', "A")]);
+        assert_eq!(plan_autosquash(&none), Err(NO_FIXUPS));
+        let lost = titled(&[('d', "fixup! Z"), ('b', "B"), ('a', "A")]);
+        assert_eq!(plan_autosquash(&lost), Err(NO_TARGET));
+        // A fixup is never another fixup's target.
+        let only_fixups = titled(&[('d', "fixup! A"), ('b', "A x"), ('a', "fixup! A")]);
+        assert_eq!(plan_autosquash(&only_fixups), Err(NO_TARGET));
+        assert_eq!(plan_autosquash(&[]), Err(NO_FIXUPS));
+    }
+
+    #[test]
+    fn autosquash_refuses_a_merge_before_the_target_and_a_root_target() {
+        let mut merged = titled(&[('d', "fixup! A"), ('b', "B"), ('a', "A")]);
+        merged[1].parents.push(id('7'));
+        assert_eq!(plan_autosquash(&merged), Err(ACROSS_MERGE));
+        let mut root = titled(&[('d', "fixup! A"), ('b', "B"), ('a', "A")]);
+        root[2].parents.clear();
+        assert_eq!(
+            plan_autosquash(&root),
+            Err("Cannot rewrite the first commit")
+        );
+    }
+
+    #[test]
+    fn autosquash_ignores_fixups_below_a_merge() {
+        // The chain from HEAD ends at the merge; what is below is not
+        // this branch's own line.
+        let mut rows = titled(&[('d', "fixup! B"), ('b', "B"), ('c', "M"), ('e', "fixup! A")]);
+        rows[2].parents.push(id('7'));
+        assert_eq!(
+            plan_autosquash(&rows),
+            Ok(plan_of('c', vec![pick('b'), fixup('d')]))
+        );
+    }
+
+    #[test]
+    fn autosquash_refuses_more_than_max_steps() {
+        let mut rows: Vec<CommitRow> = (0..=MAX_STEPS)
+            .map(|i| {
+                let oid = format!("{:040x}", i + 1);
+                let parent = format!("{:040x}", i + 2);
+                CommitRow {
+                    subject: format!("s{i}"),
+                    ..row(&oid, &[&parent])
+                }
+            })
+            .collect();
+        rows[0].subject = format!("fixup! s{MAX_STEPS}");
+        assert_eq!(plan_autosquash(&rows), Err("Too many commits above it"));
     }
 
     #[test]

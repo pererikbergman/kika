@@ -29,6 +29,7 @@ use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
+use crate::git::fixup_base::find_fixup_base;
 use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::log::{LogQuery, branch_commit, log_page, markers};
 use crate::git::ops::{GitOp, run_op};
@@ -181,6 +182,11 @@ pub enum Effect {
     LoadBlame {
         tag: Tag,
         path: RepoPath,
+    },
+    /// Find the commits the staged lines come from; always answered by
+    /// one `FixupBaseFound`.
+    FindFixupBase {
+        tag: Tag,
     },
     /// Read conflicted `path` from the worktree and its marker size;
     /// always answered by one `ConflictLoaded` for the same `path`.
@@ -696,6 +702,20 @@ impl Runtime {
                         Err(terminal_safe(format!("git blame crashed: {e}").as_bytes()))
                     });
                     let _ = tx.send(AppIntent::BlameLoaded { tag, result });
+                });
+            }
+            Effect::FindFixupBase { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || find_fixup_base(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("Finding the fixup base crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::FixupBaseFound { tag, result });
                 });
             }
             Effect::LoadConflict { tag, path } => {
@@ -1682,6 +1702,7 @@ mod tests {
             stage_all: false,
             amend: false,
             no_verify: false,
+            fixup: None,
         }
     }
 

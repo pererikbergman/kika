@@ -369,6 +369,9 @@ pub enum ConfirmKind {
     /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
     /// is lost and Enter may answer.
     DetachedCheckout,
+    /// Fold every `fixup!` commit into its target. It rewrites commits
+    /// the user may not be looking at, so only `y` answers.
+    Autosquash,
 }
 
 impl ConfirmKind {
@@ -383,6 +386,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
+            ConfirmKind::Autosquash => "Autosquash",
         }
     }
 
@@ -427,6 +431,7 @@ impl ConfirmKind {
                  branch; new commits there belong to no branch until you \
                  create one. (y/n)"
             }
+            ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
         }
     }
 
@@ -438,6 +443,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
+            ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
         }
     }
 
@@ -447,7 +453,8 @@ impl ConfirmKind {
             | ConfirmKind::ForcePush
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
-            | ConfirmKind::DetachedCheckout => None,
+            | ConfirmKind::DetachedCheckout
+            | ConfirmKind::Autosquash => None,
         }
     }
 }
