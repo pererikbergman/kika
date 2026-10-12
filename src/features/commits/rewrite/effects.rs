@@ -1,12 +1,14 @@
-//! The I/O behind the todo list's effects: reading the stopped rebase's
-//! todo list, and writing an edited one back, off the event loop, each
-//! reporting back with the load's or the write's tag.
+//! The I/O behind the rewrites' effects: reading the stopped rebase's
+//! todo list, writing an edited one back, and looking for the commits the
+//! staged lines come from, off the event loop, each reporting back with
+//! its tag.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::fixup_base::find_fixup_base;
 use super::todo::{TodoFile, nothing_done, serialize};
 use crate::effect::Tag;
 use crate::git::GitRunner;
@@ -36,6 +38,22 @@ pub(crate) fn load_todo(
                     ))
                 });
         let _ = tx.send(AppIntent::RebaseTodoLoaded { tag, result });
+    });
+}
+
+/// Look for the commits the staged lines come from and report them as
+/// `FixupBaseFound`.
+pub(crate) fn find_base(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
+    tokio::spawn(async move {
+        // A panic still reports back, or the busy counter would stay raised.
+        let result = tokio::task::spawn_blocking(move || find_fixup_base(runner.as_ref()))
+            .await
+            .unwrap_or_else(|e| {
+                Err(terminal_safe(
+                    format!("Finding the fixup base crashed: {e}").as_bytes(),
+                ))
+            });
+        let _ = tx.send(AppIntent::FixupBaseFound { tag, result });
     });
 }
 

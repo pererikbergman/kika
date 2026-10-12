@@ -2,11 +2,11 @@
 //! lines it changes, by `git blame` of `HEAD`. Read only; the parsing and
 //! the choice are pure.
 
-use super::blame::parse_blame;
-use super::commit_files::CommitId;
-use super::diff::{EmojiZwj, terminal_safe};
-use super::path::RepoPath;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::blame::parse_blame;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::{EmojiZwj, terminal_safe};
+use crate::git::path::RepoPath;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// The commits the staged lines come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
