@@ -681,6 +681,43 @@ mod tests {
     }
 
     #[test]
+    fn dropped_key_changes_show_the_last_one_and_the_hint_at_any_size() {
+        use crate::config::ConfigError;
+        use crate::intent::AppIntent;
+        use crate::keymap::Keymap;
+        let errors: Vec<ConfigError> = [
+            ("s", "files.stash", "files.stage"),
+            ("c", "files.commit", "files.blame"),
+            ("space", "files.stage", "files.hunks"),
+        ]
+        .iter()
+        .map(|(key, a, b)| ConfigError {
+            path: "/home/me/.config/kika/config.toml".into(),
+            message: format!(
+                r#"key "{key}" is bound to both "{a}" and "{b}"; the change to "{b}" was dropped"#
+            ),
+            dropped_binding: true,
+        })
+        .collect();
+        for (width, height) in [(80, 24), (40, 12)] {
+            let mut state = workspace(&["a.rs"]);
+            state.update(AppIntent::ConfigLoaded {
+                repo: state.repo.clone(),
+                keymap: Keymap::default(),
+                errors: errors.clone(),
+            });
+            let (_, rows) = draw(&state, width, height);
+            assert!(contains(&rows, " Config error "), "{rows:#?}");
+            assert!(contains(&rows, r#""files.hunks""#), "{rows:#?}");
+            assert!(contains(&rows, "Esc: close"), "{rows:#?}");
+            if width == 80 {
+                assert!(contains(&rows, r#""files.stash""#), "{rows:#?}");
+                assert!(contains(&rows, "used the rest of"), "{rows:#?}");
+            }
+        }
+    }
+
+    #[test]
     fn the_confirm_asks_and_the_bar_offers_yes_and_no() {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Confirm(ConfirmKind::Quit)];

@@ -1,7 +1,7 @@
 //! Every key Kika understands, declared once. The same records drive
 //! dispatch, the help menu and the bottom bar, so they cannot drift apart.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -214,7 +214,7 @@ fn char_pattern(c: char) -> KeyPattern {
 
 /// Where a binding applies. Keys are looked up in the focused scope, then
 /// each parent, so a panel can override a global key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum KeyScope {
     Global,
     Workspace,
@@ -663,11 +663,49 @@ enum Owner<'a> {
     Command(usize),
 }
 
+impl Owner<'_> {
+    /// Tells owners apart: a binding by its id, a command by its place.
+    fn id(self) -> (usize, &'static str) {
+        match self {
+            Owner::Binding(b) => (0, b.id),
+            Owner::Command(i) => (i + 1, ""),
+        }
+    }
+}
+
 impl std::fmt::Display for Owner<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Owner::Binding(b) => write!(f, "\"{}\"", b.id),
             Owner::Command(i) => write!(f, "command {}", i + 1),
+        }
+    }
+}
+
+/// A key press that two owners of one scope answer to, or one owner
+/// through two of its keys.
+#[derive(Clone, Copy)]
+struct Clash<'a> {
+    a: Owner<'a>,
+    b: Owner<'a>,
+    /// `b`'s key.
+    key: KeyPattern,
+    /// Where `a`'s and `b`'s keys stand in [`Keymap::owned_keys`], so the
+    /// first clash reported is always the same one.
+    at: (usize, usize),
+}
+
+impl std::fmt::Display for Clash<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let key = self.key.label();
+        if self.a.id() == self.b.id() {
+            write!(f, "key \"{key}\" is bound twice to {}", self.a)
+        } else {
+            write!(
+                f,
+                "key \"{key}\" is bound to both {} and {}",
+                self.a, self.b
+            )
         }
     }
 }
@@ -734,13 +772,12 @@ impl Keymap {
         let mut messages = Vec::new();
         loop {
             let mut dropping = BTreeSet::new();
-            for (a, b, key) in self.clashes() {
-                for side in [a, b] {
+            for clash in self.clashes() {
+                for side in [clash.a, clash.b] {
                     let Owner::Binding(binding) = side else {
                         continue;
                     };
                     if layer_ids.contains(binding.id) && dropping.insert(binding.id) {
-                        let clash = clash_message(a, b, key);
                         messages.push(format!("{clash}; the change to {side} was dropped"));
                     }
                 }
@@ -810,23 +847,51 @@ impl Keymap {
     /// No key press may match two bindings or commands of one scope.
     fn check_scopes(&self) -> Result<(), String> {
         match self.clashes().first() {
-            Some(&(a, b, key)) => Err(clash_message(a, b, key)),
+            Some(clash) => Err(clash.to_string()),
             None => Ok(()),
         }
     }
 
-    /// Every pair of owners whose keys overlap in one scope, with the
-    /// later owner's key.
-    fn clashes(&self) -> Vec<(Owner<'_>, Owner<'_>, KeyPattern)> {
-        let patterns = self.owned_keys();
-        let mut clashes = Vec::new();
-        for (i, (a, scope_a, ka)) in patterns.iter().enumerate() {
-            for (b, scope_b, kb) in &patterns[i + 1..] {
-                if scope_a == scope_b && ka.overlaps(kb) {
-                    clashes.push((*a, *b, **kb));
+    /// The first clash of every owner that has one, in order. Each owner
+    /// appears in at least one and there is at most one per owner, so the
+    /// work and the result stay small however many keys a file lists:
+    /// keys are compared only within their scope and key code, and a key
+    /// an owner already has is not stored again.
+    fn clashes(&self) -> Vec<Clash<'_>> {
+        type Seen<'a> = Vec<(usize, Owner<'a>, KeyPattern)>;
+        let mut groups: HashMap<(KeyScope, KeyCode), Seen<'_>> = HashMap::new();
+        let mut first: BTreeMap<(usize, &str), Clash<'_>> = BTreeMap::new();
+        for (j, (owner, scope, key)) in self.owned_keys().into_iter().enumerate() {
+            let seen = groups.entry((scope, key.code)).or_default();
+            let mut repeated = false;
+            for &(i, other, k) in seen.iter() {
+                if k.overlaps(key) {
+                    let clash = Clash {
+                        a: other,
+                        b: owner,
+                        key: *key,
+                        at: (i, j),
+                    };
+                    for side in [other, owner] {
+                        first
+                            .entry(side.id())
+                            .and_modify(|c| {
+                                if clash.at < c.at {
+                                    *c = clash;
+                                }
+                            })
+                            .or_insert(clash);
+                    }
                 }
+                repeated |= other.id() == owner.id() && k == *key;
+            }
+            if !repeated {
+                seen.push((j, owner, *key));
             }
         }
+        let mut clashes: Vec<Clash<'_>> = first.into_values().collect();
+        clashes.sort_by_key(|c| c.at);
+        clashes.dedup_by_key(|c| c.at);
         clashes
     }
 
@@ -856,11 +921,6 @@ impl Keymap {
         }
         Ok(())
     }
-}
-
-/// What a clash is called in the error popup.
-fn clash_message(a: Owner<'_>, b: Owner<'_>, key: KeyPattern) -> String {
-    format!("key \"{}\" is bound to both {a} and {b}", key.label())
 }
 
 /// A keymap from one global `[keys]` table, for tests elsewhere.
@@ -10171,9 +10231,7 @@ mod tests {
         let (keymap, dropped) = build(&[("files.stage", &["x", "x"])], Trust::Global).unwrap();
         assert_eq!(
             dropped,
-            [
-                r#"key "x" is bound to both "files.stage" and "files.stage"; the change to "files.stage" was dropped"#
-            ]
+            [r#"key "x" is bound twice to "files.stage"; the change to "files.stage" was dropped"#]
         );
         assert_eq!(keymap, Keymap::default());
     }
@@ -10283,6 +10341,41 @@ mod tests {
             keymap.keys(binding("global.quit")),
             binding("global.quit").keys
         );
+    }
+
+    /// A repository file may hold 64 KiB of keys. Repeating one key, in one
+    /// entry or across many, must neither store every pair of clashing keys
+    /// nor take long: the scan keeps one clash per owner.
+    #[test]
+    fn thousands_of_copies_of_one_key_are_dropped_quickly_with_bounded_work() {
+        let copies = vec!["x"; 16_000];
+        let files: Vec<&str> = registry()
+            .iter()
+            .filter(|b| b.scope == KeyScope::Files && !REPO_LOCKED.contains(&b.id))
+            .map(|b| b.id)
+            .collect();
+        assert!(files.len() > 10, "{files:?}");
+        let few = vec!["x"; 500];
+        let mut entries: Vec<(&str, &[&str])> = vec![(files[0], &copies)];
+        entries.extend(files[1..].iter().map(|id| (*id, few.as_slice())));
+
+        // Every key the layer set, stored as given, before any drop.
+        let mut flooded = Keymap::default();
+        for (id, keys) in &entries {
+            let keys = keys.iter().map(|k| parse_key(k).unwrap()).collect();
+            flooded.overrides.insert(binding(id).id, keys);
+        }
+        let started = std::time::Instant::now();
+        let clashes = flooded.clashes();
+        assert!(clashes.len() <= files.len(), "{}", clashes.len());
+        assert!(flooded.check_scopes().is_err());
+
+        let (keymap, dropped) = build(&entries, Trust::Repo).unwrap();
+        assert_eq!(dropped.len(), files.len(), "{dropped:?}");
+        assert!(dropped[0].contains("is bound"), "{dropped:?}");
+        assert_eq!(keymap, Keymap::default());
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
     }
 
     /// Every unlocked binding moved onto each key a locked binding or a
