@@ -9,13 +9,12 @@ use crate::ansi;
 use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
-use crate::conflict::MAX_CONFLICT_FILE;
 use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
 use crate::features::custom_commands::OutputMode;
-use crate::features::{blame, custom_commands, repos, submodules, worktrees};
+use crate::features::{blame, conflicts, custom_commands, repos, submodules, worktrees};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
@@ -23,7 +22,6 @@ use crate::forge::{CreateError, ForgeStatus};
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
-use crate::git::attr::conflict_marker_size;
 use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
@@ -1119,47 +1117,14 @@ impl Runtime {
             }
             Effect::LoadConflict { tag, path } => {
                 // Where git runs now, inside an entered submodule too.
-                let workdir = self.runner.workdir();
-                tokio::spawn(async move {
-                    let read = path.clone();
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        let size = conflict_marker_size(runner.as_ref(), &read)?;
-                        let bytes = worktree_file::read(&workdir, &read, MAX_CONFLICT_FILE)?;
-                        Ok((bytes, size))
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("Reading the file crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::ConflictLoaded { tag, path, result });
-                });
+                conflicts::effects::load(runner, tx, self.runner.workdir(), tag, path)
             }
             Effect::WriteResolved {
                 tag,
                 path,
                 expected,
                 content,
-            } => {
-                let workdir = self.runner.workdir();
-                tokio::spawn(async move {
-                    let target = path.clone();
-                    // A panic still reports back, or `op_seq` would block every later op.
-                    let result = tokio::task::spawn_blocking(move || {
-                        worktree_file::replace(&workdir, &target, &expected, &content)
-                            .map(|()| content)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("Writing the file crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::ResolvedWritten { tag, path, result });
-                });
-            }
+            } => conflicts::effects::write(tx, self.runner.workdir(), tag, path, expected, content),
             Effect::LoadCommit { tag, oid } => {
                 blame::effects::load_commit(runner, tx, tag, oid, self.emoji_zwj)
             }
