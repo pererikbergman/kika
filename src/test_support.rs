@@ -596,6 +596,31 @@ pub(crate) fn reload_remotes(state: &mut AppState, remotes: Vec<Remote>) -> Vec<
     })
 }
 
+/// `fork` (no branches), `origin` with `main` and `topic`, and `stray`,
+/// refs no configured remote owns.
+pub(crate) fn three_remotes() -> Vec<Remote> {
+    vec![
+        git_remote("fork", true, &[]),
+        git_remote("origin", true, &["main", "topic"]),
+        git_remote("stray", false, &["old"]),
+    ]
+}
+
+/// `with_branches`, with `three_remotes` loaded.
+pub(crate) fn with_remotes() -> AppState {
+    let mut state = with_branches();
+    reload_remotes(&mut state, three_remotes());
+    state
+}
+
+/// `with_remotes` on the Remotes tab, with `row` selected.
+pub(crate) fn on_remote_row(row: usize) -> AppState {
+    let mut state = with_remotes();
+    press_char(&mut state, ']');
+    state.branches.remotes.move_by(row as isize);
+    state
+}
+
 /// The one attached hand-off in `effects`.
 pub(crate) fn attached_of(effects: &[Effect]) -> (Tag, GitOp) {
     match effects {
@@ -1075,6 +1100,23 @@ pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
         .iter()
         .map(|a| a.to_string_lossy().into_owned())
         .collect()
+}
+
+/// A repository on `main` with one commit, and `origin`: a local bare
+/// repository holding `main` and `feature`, fetched once.
+pub(crate) fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {
+    use crate::git::fake::{TempDir, git};
+    let bare = TempDir::new("remote-bare");
+    git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+    let tmp = TempDir::new("remote-ops");
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let url = bare.path().to_str().unwrap();
+    git(dir, &["remote", "add", "origin", url]);
+    git(dir, &["push", "-q", "origin", "main", "main:feature"]);
+    git(dir, &["fetch", "-q", "origin"]);
+    (tmp, bare)
 }
 
 // --- Tags ---

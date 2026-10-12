@@ -7,8 +7,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::{RemoteRow, RemotesList};
 use crate::git::remotes::Remote;
-use crate::remotes::{RemoteRow, RemotesList};
 use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
 
 /// What the tab shows when there are no remotes.
