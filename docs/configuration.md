@@ -1200,6 +1200,17 @@ A dropped stash is gone from the stash list, so `enter` does not answer it.
 | `drop_stash.no` | `n`, `esc` | No, keep the stash | locked |
 | `drop_stash.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Abort the operation in progress?
+
+Aborting a merge, rebase, cherry-pick or revert loses resolved conflicts,
+and resetting a bisect drops its marks, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `abort_confirm.yes` | `y` | Yes, abort the operation | locked |
+| `abort_confirm.no` | `n`, `esc` | No, keep the operation going | locked |
+| `abort_confirm.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Undo or redo?
 
 The question lists what would happen. An undo can move a branch away from
