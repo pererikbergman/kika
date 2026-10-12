@@ -41,6 +41,7 @@ pub mod submodule;
 pub mod tags;
 pub mod undo;
 pub mod version;
+pub mod worktree_trust;
 pub mod worktrees;
 
 pub use runner::{CliRunner, GitRunner};
