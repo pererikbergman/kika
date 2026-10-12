@@ -17506,8 +17506,8 @@ mod tests {
             assert_eq!(
                 state.notice.as_deref(),
                 Some(
-                    "Todo line 2 is not a todo command Kika edits: \"exec make\"; edit it \
-                     with git rebase --edit-todo, or continue or abort from the Status panel"
+                    "Read-only, fix with git rebase --edit-todo: line 2, unknown command \
+                     \"exec make\""
                 ),
                 "{key}"
             );

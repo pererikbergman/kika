@@ -752,6 +752,138 @@ mod tests {
         })));
     }
 
+    /// A stopped rebase whose todo holds `exec`, so Kika shows it
+    /// read-only.
+    fn read_only_rebase(state: &mut AppState) {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: b"pick 1111111 one\nexec make test-everything --verbose\n".to_vec(),
+            done: None,
+        })));
+    }
+
+    /// A stopped rebase with `n` steps left, longer than a small panel.
+    fn long_rebase(state: &mut AppState, n: usize) {
+        use crate::rebase_todo::{RebaseTodo, TodoFile};
+        let todo: String = (0..n).map(|i| format!("pick {i:07x} step {i}\n")).collect();
+        state.commits.set_todo(Some(RebaseTodo::load(TodoFile {
+            path: "/r/.git/rebase-merge/git-rebase-todo".into(),
+            todo: todo.into_bytes(),
+            done: None,
+        })));
+    }
+
+    /// The bottom bar's text at `width` columns, after an edit key on the
+    /// read-only todo.
+    fn read_only_notice(width: u16) -> String {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut state = showing(merge_rows());
+        read_only_rebase(&mut state);
+        state.commits.todo_selected = Some(0);
+        state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        )));
+        assert!(state.notice.is_some());
+        let rows = buffer_rows(&draw(&state, width, 24));
+        rows.last().unwrap().trim_end().to_string()
+    }
+
+    #[test]
+    fn the_read_only_notice_shows_how_to_fix_it_first() {
+        let wide = read_only_notice(80);
+        assert!(wide.contains("--edit-todo"), "{wide:?}");
+        assert!(wide.contains("line 2"), "{wide:?}");
+        let narrow = read_only_notice(40);
+        assert!(narrow.ends_with('…'), "{narrow:?}");
+        assert!(narrow.starts_with(" Read-only"), "{narrow:?}");
+    }
+
+    /// Every size the panel might get, from a full screen to one cell.
+    const SIZES: [(u16, u16); 3] = [(80, 24), (20, 5), (1, 1)];
+
+    #[test]
+    fn todo_rows_with_a_filtered_log_draw_at_any_size() {
+        let mut state = showing(merge_rows());
+        stopped_rebase(&mut state);
+        state.commits.filter = "work".into();
+        state.commits.selected = 2;
+        for (width, height) in SIZES {
+            draw(&state, width, height);
+            state.commits.todo_selected = Some(1);
+            draw(&state, width, height);
+            state.commits.todo_selected = None;
+        }
+    }
+
+    #[test]
+    fn the_log_cursor_lands_on_its_row_below_the_todo_with_a_range_and_a_filter() {
+        let mut state = showing(merge_rows());
+        stopped_rebase(&mut state);
+        state.commits.filter = "work".into();
+        // `Side work` and `Main work` show; the range runs from one to the other.
+        state.commits.range_anchor = Some("s000000aaa".into());
+        state.commits.selected = 2;
+        for (width, height) in SIZES {
+            draw(&state, width, height);
+        }
+        let buffer = draw(&state, 100, 30);
+        let rows = buffer_rows(&buffer);
+        assert!(!rows.iter().any(|r| r.contains("Merge side")), "filtered");
+        let y = rows.iter().position(|r| r.contains("Main work")).unwrap() as u16;
+        let x = column_of(&rows, "b000000") as u16;
+        assert!(
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        let todo = rows.iter().position(|r| r.contains("first step")).unwrap() as u16;
+        let x = column_of(&rows, "1111111") as u16;
+        assert!(
+            !buffer[(x, todo)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn a_long_todo_in_a_short_panel_scrolls_without_a_panic() {
+        let mut state = showing(merge_rows());
+        long_rebase(&mut state, 40);
+        for selected in [None, Some(0), Some(20), Some(39)] {
+            state.commits.todo_selected = selected;
+            for height in 1..=3 {
+                draw(&state, 80, height);
+            }
+            for (width, height) in SIZES {
+                draw(&state, width, height);
+            }
+        }
+        // The cursor's row shows even with the heading scrolled away.
+        state.commits.todo_selected = Some(20);
+        let rows = buffer_rows(&draw(&state, 80, 8));
+        assert!(rows.iter().any(|r| r.contains("step 20")), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains("Rebase todo")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_read_only_todo_draws_at_any_width() {
+        let mut state = showing(merge_rows());
+        read_only_rebase(&mut state);
+        for selected in [None, Some(1)] {
+            state.commits.todo_selected = selected;
+            for width in 0..=10 {
+                draw(&state, width, 24);
+            }
+            for (width, height) in SIZES {
+                draw(&state, width, height);
+            }
+        }
+    }
+
     #[test]
     fn a_stopped_rebase_shows_its_todo_above_the_log_last_to_run_first() {
         let mut state = showing(merge_rows());

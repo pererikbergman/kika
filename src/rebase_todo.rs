@@ -13,35 +13,30 @@ use crate::git::rebase_plan::{
 /// Why a todo list is shown but not edited, when no single line says it.
 pub const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";
 
-/// What to do instead, said after every reason a list is not edited.
-const EDIT_IT_IN_GIT: &str =
-    "edit it with git rebase --edit-todo, or continue or abort from the Status panel";
+/// How every reason a list is not edited starts: what it is and how to
+/// fix it first, so a narrow bar still shows them.
+const READ_ONLY: &str = "Read-only, fix with git rebase --edit-todo:";
 
 /// The most characters of a todo line a reason quotes.
-const QUOTED: usize = 40;
+const QUOTED: usize = 20;
 
 /// Why `todo` is shown but not edited: the line that stops it, by number,
-/// as the user can find it in the file, and what to do instead.
+/// as the user can find it in the file, after how to fix it.
 pub fn not_editable(todo: &[u8]) -> String {
     match unreadable(todo) {
-        Some(Unreadable::Nul) => {
-            format!("The todo list has a NUL byte, after which git reads nothing; {EDIT_IT_IN_GIT}")
-        }
+        Some(Unreadable::Nul) => format!("{READ_ONLY} a NUL byte ends what git reads"),
         Some(Unreadable::Line { number, text }) => {
             // Every command starts with a letter; a line led by another
             // mark is most likely a comment, written with the comment
             // character a user's core.commentChar chose instead of `#`.
             let cause = if text.first().is_some_and(u8::is_ascii_punctuation) {
-                "looks like a comment with a comment character other than #"
+                "comment not using #"
             } else {
-                "is not a todo command Kika edits"
+                "unknown command"
             };
-            format!(
-                "Todo line {number} {cause}: \"{}\"; {EDIT_IT_IN_GIT}",
-                quoted(text)
-            )
+            format!("{READ_ONLY} line {number}, {cause} \"{}\"", quoted(text))
         }
-        None => format!("{NOT_EDITABLE}; {EDIT_IT_IN_GIT}"),
+        None => format!("{READ_ONLY} {NOT_EDITABLE}"),
     }
 }
 
@@ -292,8 +287,8 @@ mod tests {
     #[test]
     fn a_todo_with_commands_kika_does_not_edit_is_shown_read_only() {
         let todo = RebaseTodo::load(file(b"pick 1234 a\nexec make\n# help\n", Some(b"")));
-        let why = "Todo line 2 is not a todo command Kika edits: \"exec make\"; edit it with \
-                   git rebase --edit-todo, or continue or abort from the Status panel";
+        let why =
+            "Read-only, fix with git rebase --edit-todo: line 2, unknown command \"exec make\"";
         assert_eq!(todo.editable, Err(why.to_string()));
         assert_eq!(todo.raw_lines(), [&b"pick 1234 a"[..], b"exec make"]);
         assert_eq!(todo.len(), 2);
@@ -306,9 +301,8 @@ mod tests {
         assert_eq!(
             todo.editable,
             Err(
-                "Todo line 1 looks like a comment with a comment character other than #: \
-                 \"; Rebase 1..2 onto 1\"; edit it with git rebase --edit-todo, or continue \
-                 or abort from the Status panel"
+                "Read-only, fix with git rebase --edit-todo: line 1, comment not using # \
+                 \"; Rebase 1..2 onto 1\""
                     .to_string()
             )
         );
@@ -333,12 +327,7 @@ mod tests {
         assert_eq!(serialize(&todo.entries), b"pick 1111 one\npick 2222 two\n");
 
         let todo = RebaseTodo::load(file(b"pick 1111 one\n\texec touch x\n", Some(b"")));
-        assert!(
-            todo.editable
-                .as_ref()
-                .unwrap_err()
-                .starts_with("Todo line 2 ")
-        );
+        assert!(todo.editable.as_ref().unwrap_err().contains(": line 2, "));
         assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"exec touch x"]);
         assert!(!nothing_done(b"  pick 1111 one\n"));
     }
@@ -352,7 +341,7 @@ mod tests {
         assert!(
             todo.editable
                 .unwrap_err()
-                .starts_with("The todo list has a NUL byte")
+                .ends_with("a NUL byte ends what git reads")
         );
         let todo = RebaseTodo::load(file(b"pick 1111 one\0\n", None));
         assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..]]);
@@ -371,7 +360,7 @@ mod tests {
             bytes.push(b'\n');
             let todo = RebaseTodo::load(file(&bytes, Some(b"")));
             let why = todo.editable.clone().unwrap_err();
-            assert!(why.starts_with("Todo line 2 "), "{why}");
+            assert!(why.contains(": line 2, "), "{why}");
             assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], odd], "{odd:?}");
         }
     }
