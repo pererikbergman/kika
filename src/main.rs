@@ -46,8 +46,6 @@ mod remote_run;
 mod rendered_view;
 mod rows;
 mod sequence_editor;
-mod stash;
-mod stash_view;
 #[cfg(test)]
 mod test_support;
 mod view;

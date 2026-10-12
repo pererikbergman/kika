@@ -2384,7 +2384,7 @@ async fn a_range_with_a_staged_deletion_and_an_untracked_file_stashes_nothing() 
     app.press(KeyCode::Enter).await;
     assert_eq!(
         app.state().notice.as_deref(),
-        Some(crate::menu::STASH_APART)
+        Some(crate::features::stash::keys::STASH_APART)
     );
 
     assert_eq!(stash_count(&repo), 0);
@@ -2446,7 +2446,7 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
     choose_stash_selected(&mut app).await;
     assert_eq!(
         app.state().notice.as_deref(),
-        Some(crate::menu::STASH_RENAME_TAKEN)
+        Some(crate::features::stash::keys::STASH_RENAME_TAKEN)
     );
     assert_eq!(stash_count(&repo), 0);
     let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
@@ -2504,7 +2504,7 @@ async fn a_staged_deletion_with_a_file_back_at_its_path_stashes_nothing() {
         choose_stash_selected(&mut app).await;
         assert_eq!(
             app.state().notice.as_deref(),
-            Some(crate::menu::STASH_DELETED_TAKEN),
+            Some(crate::features::stash::keys::STASH_DELETED_TAKEN),
             "{back}"
         );
         assert_eq!(stash_count(&repo), 0);

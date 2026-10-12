@@ -7,6 +7,7 @@ use crate::effect::{Effect, Tag};
 use crate::features::commits::reflog::Reflog;
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
+use crate::git::GitRunner;
 use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -18,8 +19,8 @@ use crate::git::rebase_plan;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
-use crate::git::runner::GitCommand;
-use crate::git::stash::{StashEntry, StashFile};
+use crate::git::runner::{GitChild, GitCommand, GitOutput};
+use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 use crate::git::submodule::{Submodule, SubmoduleState};
 use crate::git::tags::TagRef;
@@ -37,6 +38,7 @@ use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::io;
 use std::path::Path;
 
 pub(crate) fn untracked(path: &str) -> FileEntry {
@@ -131,6 +133,15 @@ pub(crate) fn with_files(files: Vec<FileEntry>, height: u16) -> (AppState, Vec<E
         result: Ok(repo(files)),
     });
     (state, effects)
+}
+
+/// `files` loaded again, as a refresh would.
+pub(crate) fn reload(state: &mut AppState, files: Vec<FileEntry>) {
+    let tag = refresh_tag(state);
+    state.update(AppIntent::StatusLoaded {
+        tag,
+        result: Ok(repo(files)),
+    });
 }
 
 pub(crate) fn three_files() -> Vec<FileEntry> {
@@ -1122,6 +1133,26 @@ pub(crate) fn stash_opened(state: &mut AppState) -> Vec<Effect> {
         tag,
         result: Ok(tracked_and_untracked()),
     })
+}
+
+pub(crate) fn stash_ref(index: usize, oid: &str) -> StashRef {
+    StashRef {
+        index,
+        oid: cid(oid),
+    }
+}
+
+/// Panics with terminal control bytes, like a panic that quotes a path.
+pub(crate) struct HostilePanic;
+
+impl GitRunner for HostilePanic {
+    fn run(&self, _: &GitCommand) -> io::Result<GitOutput> {
+        panic!("bad \x1b[2J name");
+    }
+
+    fn spawn(&self, _: &GitCommand) -> io::Result<GitChild> {
+        panic!("bad \x1b[2J name");
+    }
 }
 
 /// The Branches panel drawn on its own, focused, for checks that only
