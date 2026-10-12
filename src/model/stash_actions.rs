@@ -21,7 +21,7 @@ impl AppState {
     }
 
     /// Load the stash list again, keeping what it shows until it lands.
-    pub(super) fn reload_stashes(&mut self) -> Vec<Effect> {
+    pub(crate) fn reload_stashes(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
