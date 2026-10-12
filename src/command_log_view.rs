@@ -29,11 +29,12 @@ pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Fr
         None if hidden => 0,
         None => visible.len().saturating_sub(1),
     };
-    let title = title(&view.filter, visible.len(), log.len(), at, shown, room);
+    let place = (!hidden && !visible.is_empty()).then_some(at);
+    let title = title(&view.filter, visible.len(), log.len(), place, shown, room);
     let lines: Vec<Line> = if log.is_empty() {
         vec![Line::raw(" No git commands yet.")]
     } else if visible.is_empty() {
-        vec![Line::raw(" No matches")]
+        vec![Line::raw(" No matches ")]
     } else {
         let first = at.saturating_sub(shown - 1);
         visible
@@ -61,30 +62,35 @@ pub fn render(log: &CommandLog, view: &CommandLogView, top: bool, frame: &mut Fr
     );
 }
 
-/// ` Command log `, with ` <at>/<len> ` when the rows do not fit. With a
-/// filter, ` Command log · /<filter> <shown> of <total> `: the filter is
-/// drawn sanitised and loses its end so the title fits `room` columns.
+/// ` Command log `, or with a filter ` Command log · /<filter> <n> of
+/// <total> `. Rows cut by a short screen add where the cursor (`at`, among
+/// the shown rows) is in them. The filter is drawn sanitised and loses its
+/// end so the title fits `room` columns.
 fn title(
     filter: &str,
     matched: usize,
     total: usize,
-    at: usize,
+    at: Option<usize>,
     shown: usize,
     room: usize,
 ) -> String {
+    let place = match at {
+        Some(at) if shown < matched => Some(format!("{}/{matched}", at + 1)),
+        _ => None,
+    };
     if filter.is_empty() {
-        return if shown < total {
-            format!(" Command log {}/{total} ", at + 1)
-        } else {
-            " Command log ".to_string()
+        return match place {
+            Some(place) => format!(" Command log {place} "),
+            None => " Command log ".to_string(),
         };
     }
-    let fixed = format!(" Command log · / {matched} of {total} ");
+    let place = place.map(|p| format!(" · {p}")).unwrap_or_default();
+    let fixed = format!(" Command log · / {matched} of {total}{place} ");
     let query = elide_right(
         &sanitize(filter.as_bytes()),
         room.saturating_sub(width_of(&fixed)),
     );
-    format!(" Command log · /{query} {matched} of {total} ")
+    format!(" Command log · /{query} {matched} of {total}{place} ")
 }
 
 /// A stopped command was given up on by Kika, which is not a failure.
@@ -394,7 +400,7 @@ mod tests {
             state.update(AppIntent::CommandLogPrev);
         }
         let (buffer, rows) = draw(&state, 60, 8);
-        line_with(&rows, " Command log · /cmd1 11 of 20 ");
+        line_with(&rows, " Command log · /cmd1 11 of 20 · 1/11 ");
         let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
         assert!(cursor.contains("git cmd1 "), "{cursor}");
     }
@@ -404,7 +410,7 @@ mod tests {
         let state = filtered(3, "zzz");
         let (buffer, rows) = draw(&state, 80, 24);
         line_with(&rows, " Command log · /zzz 0 of 3 ");
-        line_with(&rows, " No matches");
+        line_with(&rows, " No matches ");
         assert_eq!(reversed_row(&buffer, &rows), None);
     }
 
@@ -429,6 +435,86 @@ mod tests {
         let (_, title) = line_with(&rows, " Command log · /");
         assert!(title.contains(" 0 of 3 "), "{title}");
         assert_eq!(crate::view::width_of(title), 40, "{title}");
+
+        // Narrower than the fixed part alone: cut, the corners kept.
+        let (buffer, rows) = draw(&state, 12, 8);
+        let top = &rows[0];
+        assert_eq!(crate::view::width_of(top), 12, "{top}");
+        assert!(top.starts_with('┌') && top.ends_with('┐'), "{top}");
+        assert!(top.contains("Comm"), "{top}");
+        assert!(!top.contains("ccc"), "{top}");
+        assert_eq!(buffer[(11, 1)].symbol(), "│");
+    }
+
+    #[test]
+    fn a_filtered_log_past_the_screen_says_where_the_cursor_is() {
+        let state = filtered(20, "cmd1");
+        let (_, rows) = draw(&state, 60, 8);
+        line_with(&rows, " Command log · /cmd1 11 of 20 · 11/11 ");
+        // All rows fit: no place.
+        let (_, rows) = draw(&state, 60, 24);
+        line_with(&rows, " Command log · /cmd1 11 of 20 ─");
+        // Nothing shown: no place either.
+        let state = filtered(40, "zzz");
+        let (_, rows) = draw(&state, 60, 8);
+        line_with(&rows, " Command log · /zzz 0 of 40 ─");
+    }
+
+    #[test]
+    fn a_filtered_log_on_a_tiny_terminal_draws_without_panicking() {
+        let long = "c".repeat(200);
+        for filter in ["cmd1", "zzz", "x\u{202E}\x1b[31m", long.as_str()] {
+            let state = filtered(12, filter);
+            for (width, height) in [(1, 1), (2, 2), (5, 3), (10, 2), (3, 10), (80, 1), (80, 24)] {
+                let (_, rows) = draw(&state, width, height);
+                for row in &rows {
+                    assert_eq!(crate::view::width_of(row), usize::from(width), "{row}");
+                    assert!(!row.contains('\x1b') && !row.contains('\u{202E}'), "{row}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bar_draws_the_filter_as_it_is_typed_and_sanitised() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        use crate::keymap::{KeyPress, KeyScope};
+        use crate::list_filter::{InputTarget, ListInput};
+        use crate::popup::LineInput;
+
+        let mut state = short_log(12);
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        for c in "cmd1".chars() {
+            state.update(AppIntent::Key(KeyPress::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        let (_, rows) = draw(&state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains(" /cmd1"), "the bar draws the input: {bar}");
+        line_with(&rows, " Command log · /cmd1 3 of 12 ");
+
+        // Text put in the input any other way is still drawn safely.
+        state.input = Some(ListInput {
+            target: InputTarget::CommandLogFilter,
+            line: LineInput::with_text("y\x1b[2J\u{202E}\x07"),
+        });
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(
+            rows.iter().all(|row| !row.contains('\x1b')
+                && !row.contains('\x07')
+                && !row.contains('\u{202E}')),
+            "{rows:#?}"
+        );
+        let bar = rows.last().unwrap();
+        assert!(bar.contains(" /y"), "{bar}");
+        assert!(bar.contains("[2J"), "sanitised: {bar}");
     }
 
     #[test]
