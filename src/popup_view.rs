@@ -744,6 +744,48 @@ mod tests {
     }
 
     #[test]
+    fn a_dropped_command_is_named_with_its_description_made_safe() {
+        use crate::config::ConfigError;
+        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::intent::AppIntent;
+        use crate::keymap::{Keymap, KeysTable, Trust};
+        let keys: KeysTable = [("files.stage".to_string(), vec!["ctrl-t".to_string()])].into();
+        let (keymap, _, kept) =
+            Keymap::build_layer(&Keymap::default(), &keys, Trust::Global).unwrap();
+        let mut table = test_table(Panel::Files, &["ctrl-t"], &["true"], &[], OutputMode::None);
+        table.description = "wipe\u{1b}[2J".into();
+        let (keymap, dropped) = keymap.with_commands(&[table], &kept).unwrap();
+        assert!(keymap.commands.is_empty());
+        let [message] = dropped.as_slice() else {
+            panic!("expected one drop: {dropped:?}");
+        };
+        assert!(message.contains('\u{1b}'), "the message keeps the raw text");
+
+        let mut state = workspace(&["a.rs"]);
+        state.update(AppIntent::ConfigLoaded {
+            repo: state.repo.clone(),
+            keymap,
+            errors: vec![ConfigError {
+                path: "/home/me/.config/kika/config.toml".into(),
+                message: message.clone(),
+                dropped_binding: true,
+            }],
+        });
+        let (buffer, rows) = draw(&state, 120, 24);
+        assert!(contains(&rows, " Config error "), "{rows:#?}");
+        assert!(contains(&rows, r#""files.stage""#), "{rows:#?}");
+        assert!(contains(&rows, "command 1"), "{rows:#?}");
+        assert!(contains(&rows, "wipe"), "{rows:#?}");
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| !cell.symbol().contains('\u{1b}')),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn the_confirm_asks_and_the_bar_offers_yes_and_no() {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::Confirm(ConfirmKind::Quit)];
@@ -1036,6 +1078,7 @@ mod tests {
                 to: CommitId::parse("abc1234").unwrap(),
                 mode: ResetMode::Hard,
             },
+            head: None,
         })];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Reset hard "), "{rows:#?}");
@@ -1289,6 +1332,8 @@ mod tests {
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
             op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
+            head: CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
         })];
@@ -1302,6 +1347,42 @@ mod tests {
             rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
             "{rows:#?}"
         );
+    }
+
+    /// The hard-reset form of the leave-commits question, with eight ids.
+    fn hard_reset_leaving_eight() -> AppState {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        use crate::popup::LeaveCommitsConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
+            op: GitOp::Reset {
+                to: CommitId::parse("abc1234").unwrap(),
+                mode: ResetMode::Hard,
+            },
+            head: CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
+            short_oid: "abc1234".into(),
+            left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
+        })];
+        state
+    }
+
+    #[test]
+    fn the_hard_reset_leave_commits_question_fits_a_normal_terminal() {
+        let (_, rows) = draw(&hard_reset_leaving_eight(), 80, 24);
+        assert!(contains(&rows, "thrown away"), "{rows:#?}");
+        assert!(contains(&rows, "and 3 more"), "{rows:#?}");
+        // The keep hint names the old HEAD; wrapping may split the command.
+        assert!(contains(&rows, "git branch <name>"), "{rows:#?}");
+        assert!(contains(&rows, "fedcba9 (y/n)"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_tiny_terminal_still_shows_the_hard_reset_warning() {
+        let (_, rows) = draw(&hard_reset_leaving_eight(), 24, 8);
+        assert!(contains(&rows, "uncommitted"), "{rows:#?}");
+        assert!(contains(&rows, "thrown away"), "{rows:#?}");
     }
 
     #[test]

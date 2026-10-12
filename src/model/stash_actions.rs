@@ -6,7 +6,7 @@ use super::{AppState, Context, Focus};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
-use crate::git::ops::{GitOp, StashMode};
+use crate::git::ops::{GitOp, StashMode, StashSet};
 use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::keymap;
 use crate::menu;
@@ -237,6 +237,8 @@ impl AppState {
             Some(StashDraft {
                 mode,
                 paths: vec![],
+                restore: vec![],
+                unstage: vec![],
                 from_range: false,
             })
         });
@@ -249,10 +251,12 @@ impl AppState {
     pub(super) fn ask_stash_file_message(&mut self) {
         self.ask_stash_draft(menu::stash_file_disabled, |state| {
             let (entries, from_range) = state.files_marked();
-            let (mode, paths) = GitOp::stash_files_for(&entries)?;
+            let set = GitOp::stash_files_for(&entries)?;
             Some(StashDraft {
-                mode,
-                paths,
+                mode: set.mode,
+                paths: set.paths,
+                restore: set.restore,
+                unstage: set.unstage,
                 from_range,
             })
         });
@@ -286,6 +290,8 @@ impl AppState {
         let Some(StashDraft {
             mode,
             paths,
+            restore,
+            unstage,
             from_range,
         }) = self.stash_draft.take()
         else {
@@ -303,7 +309,13 @@ impl AppState {
             let now = still_range
                 .then(|| GitOp::stash_files_for(&entries))
                 .flatten();
-            if now.as_ref() != Some(&(mode, paths.clone())) {
+            let drafted = StashSet {
+                mode,
+                paths: paths.clone(),
+                restore: restore.clone(),
+                unstage: unstage.clone(),
+            };
+            if now.as_ref() != Some(&drafted) {
                 self.notice = Some(super::STASH_SET_CHANGED.into());
                 return vec![];
             }
@@ -316,6 +328,8 @@ impl AppState {
             mode,
             message,
             paths,
+            restore,
+            unstage,
         })))
     }
 }

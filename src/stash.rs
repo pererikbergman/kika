@@ -219,6 +219,10 @@ impl StashFilesList {
 pub struct StashDraft {
     pub mode: StashMode,
     pub paths: Vec<RepoPath>,
+    /// Old sides of staged renames, restored after the push.
+    pub restore: Vec<RepoPath>,
+    /// Staged deletions, reset to `HEAD` in the index before the push.
+    pub unstage: Vec<RepoPath>,
     /// Drafted from the Files range, which the push then uses up.
     pub from_range: bool,
 }

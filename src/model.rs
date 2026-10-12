@@ -230,6 +230,9 @@ pub struct AppState {
     /// Sequence of the Git operation in flight. Operations run one at a
     /// time so two quick presses never race for `index.lock`.
     pub op_seq: Option<u64>,
+    /// The left-behind check in flight; one at a time, so a second press
+    /// cannot stack a second question.
+    pub left_behind_check: Option<leave_commits::LeftBehindCheck>,
     /// The running commit has the terminal, so Ctrl+C goes to git, not Kika.
     pub commit_on_terminal: bool,
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
@@ -381,6 +384,7 @@ impl AppState {
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
             op_seq: None,
+            left_behind_check: None,
             commit_on_terminal: false,
             commit_hooks_detached: false,
             op_error: None,
@@ -1335,7 +1339,7 @@ impl AppState {
             .join("\n");
         if self.config_error.as_deref() != Some(text.as_str()) {
             let hint = if errors.iter().all(|e| e.dropped_binding) {
-                "Kika dropped these key changes and used the rest of the file. \
+                "Kika dropped these entries and used the rest of the file. \
                  Fix it, then come back to Kika to reload it."
             } else {
                 "Kika ignored this file. Fix it, then come back to Kika to reload it."
@@ -2338,6 +2342,11 @@ impl AppState {
                     effects.extend(self.close_stash_files());
                 }
                 self.focus = Focus::side(side);
+                // Another panel has no keys to step or clear the preview
+                // search, so it would stay marked with no way out.
+                if side != self.expanded {
+                    self.diff.search = None;
+                }
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
                 effects.extend(self.render_if_stale());
@@ -4817,7 +4826,8 @@ impl AppState {
         self.commits.set_todo(todo);
     }
 
-    /// Reset hard as the open question asked, and only if one is open.
+    /// Reset hard as the open question asked, and only if one is open, its
+    /// guard still allows it and `HEAD` has not moved since.
     fn confirm_reset_hard(&mut self) -> Vec<Effect> {
         if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
             return vec![];
@@ -4826,6 +4836,9 @@ impl AppState {
             return vec![];
         };
         if self.confirm_refused(&confirm.op) {
+            return vec![];
+        }
+        if !self.head_still(confirm.head.as_ref()) {
             return vec![];
         }
         self.start_op(Ok(Some(confirm.op)))
@@ -11937,7 +11950,7 @@ mod tests {
         };
         let only_dropped = hint(vec![dropped("a"), dropped("b")]);
         assert!(
-            only_dropped.contains("used the rest of the file"),
+            only_dropped.starts_with("Kika dropped these entries and used the rest of the file."),
             "{only_dropped}"
         );
         assert!(!only_dropped.contains("ignored"), "{only_dropped}");
@@ -12510,7 +12523,9 @@ mod tests {
 
     /// `state` with these commands from the global file.
     fn with_commands(state: &mut AppState, tables: &[CommandTable]) {
-        let keymap = Keymap::default().with_commands(tables).unwrap();
+        let (keymap, _) = Keymap::default()
+            .with_commands(tables, &Default::default())
+            .unwrap();
         let repo = state.repo.clone();
         state.update(AppIntent::ConfigLoaded {
             repo,
@@ -14452,6 +14467,7 @@ mod tests {
             [Popup::ResetHard(ResetHardConfirm {
                 short_oid: "c1".into(),
                 op: hard.clone(),
+                head: None,
             })]
         );
         assert_eq!(state.key_focus(), KeyScope::ResetHard);
@@ -14643,6 +14659,7 @@ mod tests {
             [Popup::ResetHard(ResetHardConfirm {
                 short_oid: "c1".into(),
                 op: reset_op(ResetMode::Hard),
+                head: Some(cid("c0")),
             })]
         );
     }
@@ -14658,6 +14675,8 @@ mod tests {
                 state.popups,
                 [Popup::LeaveCommits(LeaveCommitsConfirm {
                     op: planned,
+                    head: cid("c0"),
+                    head_short_oid: "c0".into(),
                     short_oid: "c1".into(),
                     left: vec!["a0".into(), "a1".into(), "a2".into()],
                 })],
@@ -14841,25 +14860,26 @@ mod tests {
 
     #[test]
     fn a_check_for_a_head_that_moved_runs_nothing() {
-        let mut state = detached_on_commit();
-        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
-        state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
         for result in [Ok(vec![]), Ok(ids(2))] {
-            state.notice = None;
+            let mut state = detached_on_commit();
+            let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+            state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
             let effects = state.update(AppIntent::LeftBehindChecked {
                 tag,
-                op: op.clone(),
+                op,
                 head: cid("c0"),
                 result,
             });
             assert_eq!(effects, vec![]);
             assert_eq!(state.popups, []);
             assert_eq!(state.notice, Some("HEAD moved; try again".into()));
+            assert_eq!(state.op_seq, None);
+            assert_eq!(state.commits.pending, None);
         }
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.commits.pending, None);
 
         // Back on a branch is a move too.
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
         state.branch = Some(on_branch("main"));
         state.update(AppIntent::LeftBehindChecked {
             tag,
@@ -14881,7 +14901,151 @@ mod tests {
             };
             assert_eq!(error.title, "Could not check for commits left behind");
             assert!(error.message.contains("fatal: bad"));
+            assert!(error.next.contains("retry"), "{}", error.next);
         }
+    }
+
+    #[test]
+    fn a_second_press_while_a_check_runs_asks_only_once() {
+        for (intent, _) in moves() {
+            let mut state = detached_on_commit();
+            let busy = state.busy;
+            let (tag, op) = check_of(&state.update(intent.clone()));
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.busy, busy + 1, "{intent:?}");
+            assert_eq!(
+                state.notice,
+                Some("Still checking for commits left behind".into()),
+                "{intent:?}"
+            );
+            state.update(AppIntent::LeftBehindChecked {
+                tag,
+                op,
+                head: cid("c0"),
+                result: Ok(ids(2)),
+            });
+            assert!(
+                matches!(state.popups.as_slice(), [Popup::LeaveCommits(_)]),
+                "{intent:?}: {:?}",
+                state.popups
+            );
+            assert_eq!(state.busy, busy, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn once_a_check_is_answered_the_next_press_checks_again() {
+        // After the question, and after the error.
+        for result in [Ok(ids(2)), Err("fatal: bad".to_string())] {
+            let (mut state, _) = checked(AppIntent::CheckoutCommit, result.clone());
+            state.popups.clear();
+            check_of(&state.update(AppIntent::CheckoutCommit));
+        }
+
+        // An answer for an older repository clears it too.
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+        state.generation += 1;
+        state.update(AppIntent::LeftBehindChecked {
+            tag,
+            op: op.clone(),
+            head: cid("c0"),
+            result: Ok(ids(2)),
+        });
+        assert_eq!(state.popups, []);
+        check_of(&state.update(AppIntent::CheckoutCommit));
+
+        // An answer to some other check does not.
+        let stale = Tag {
+            seq: tag.seq + 1000,
+            ..tag
+        };
+        state.update(AppIntent::LeftBehindChecked {
+            tag: stale,
+            op,
+            head: cid("c0"),
+            result: Ok(ids(2)),
+        });
+        assert_eq!(state.popups, []);
+        assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
+    }
+
+    #[test]
+    fn an_answer_after_focus_moved_asks_nothing() {
+        for name in ["error", "filter"] {
+            for (intent, _) in moves() {
+                for result in [Ok(ids(2)), Ok(vec![]), Err("fatal: bad".to_string())] {
+                    let mut state = detached_on_commit();
+                    let (tag, op) = check_of(&state.update(intent.clone()));
+                    if name == "error" {
+                        state.push_error(ErrorPopup::new("Elsewhere", "x", "y"));
+                    } else {
+                        press_char(&mut state, '/');
+                        assert_eq!(state.key_focus(), KeyScope::Input);
+                    }
+                    let popups = state.popups.clone();
+                    let effects = state.update(AppIntent::LeftBehindChecked {
+                        tag,
+                        op,
+                        head: cid("c0"),
+                        result,
+                    });
+                    let case = format!("{name} {intent:?}");
+                    assert_eq!(effects, vec![], "{case}");
+                    assert_eq!(state.popups, popups, "{case}");
+                    assert_eq!(state.commits.pending, None, "{case}");
+                    assert_eq!(state.op_seq, None, "{case}");
+                    assert_eq!(
+                        state.notice,
+                        Some("Not asked: focus moved; try again".into()),
+                        "{case}"
+                    );
+                    assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+                    assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+                    assert_eq!(state.op_seq, None, "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn y_runs_nothing_once_head_has_moved() {
+        for (intent, planned) in moves() {
+            let (mut state, _) = checked(intent.clone(), Ok(ids(2)));
+            let mut moved = state.clone();
+            moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+            assert_eq!(
+                moved.update(AppIntent::ConfirmLeaveCommits),
+                vec![],
+                "{intent:?}"
+            );
+            assert_eq!(moved.popups, [], "{intent:?}");
+            assert_eq!(moved.op_seq, None, "{intent:?}");
+            assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
+
+            let (_, op) = op_of(&state.update(AppIntent::ConfirmLeaveCommits));
+            assert_eq!(op, planned, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn the_hard_reset_question_runs_nothing_once_head_has_moved() {
+        let (mut state, _) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
+        let mut moved = state.clone();
+        moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+        assert_eq!(moved.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(moved.popups, []);
+        assert_eq!(moved.op_seq, None);
+        assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
+
+        // Back on a branch is a move too.
+        let mut on_main = state.clone();
+        on_main.branch = Some(on_branch("main"));
+        assert_eq!(on_main.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(on_main.op_seq, None);
+
+        let (_, op) = op_of(&state.update(AppIntent::ConfirmResetHard));
+        assert_eq!(op, reset_op(ResetMode::Hard));
     }
 
     #[test]
@@ -18361,6 +18525,98 @@ mod tests {
         assert!(state.should_quit, "then Esc quits as before");
     }
 
+    /// Files with a found preview search for "foo".
+    fn files_searching_foo() -> AppState {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        ctrl(&mut state, 'f');
+        type_text(&mut state, "foo\n");
+        assert!(state.diff.search.is_some());
+        assert_eq!(state.focus, Focus::Files);
+        state
+    }
+
+    #[test]
+    fn switching_the_side_panel_clears_the_preview_search() {
+        for (key, side) in [('1', SidePanel::Status), ('4', SidePanel::Commits)] {
+            let mut state = files_searching_foo();
+            press_char(&mut state, key);
+            assert_eq!(state.expanded, side, "{key}");
+            assert_eq!(state.diff.search, None, "{key}");
+        }
+        for back in [false, true] {
+            let mut state = files_searching_foo();
+            state.update(AppIntent::CycleFocus { back });
+            assert_ne!(state.expanded, SidePanel::Files, "back: {back}");
+            assert_eq!(state.diff.search, None, "back: {back}");
+        }
+    }
+
+    #[test]
+    fn the_diff_pane_and_back_to_files_keeps_the_preview_search() {
+        let mut state = files_searching_foo();
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
+        assert!(matches!(state.focus, Focus::Diff(_)), "{:?}", state.focus);
+        state.update(AppIntent::FocusLeft);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+        // Files again by its number: the side panel did not change.
+        press_char(&mut state, '2');
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+    }
+
+    #[test]
+    fn esc_in_the_preview_search_input_clears_it_and_stays_in_files() {
+        let mut state = files_searching_foo();
+        ctrl(&mut state, 'f');
+        assert!(state.input.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn esc_in_the_blame_search_input_clears_it_and_keeps_the_blame() {
+        let mut state = blamed_foo();
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(blame(&state).search, None);
+    }
+
+    #[test]
+    fn esc_in_the_blame_commit_search_input_clears_it_and_keeps_the_commit() {
+        let mut state = blamed_foo();
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, .. }] => *tag,
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        state.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("+foo")]),
+        });
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).commit.as_ref().unwrap().search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameCommitSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        let commit = blame(&state).commit.as_ref().expect("still open");
+        assert_eq!(commit.search, None);
+    }
+
     #[test]
     fn a_preview_search_with_no_match_says_so_on_enter_and_n() {
         let (mut state, effects) = with_files(three_files(), 24);
@@ -19739,6 +19995,8 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("wip".into()),
                 paths: vec!["b.rs".into()],
+                restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.stash_draft, None);
@@ -19760,6 +20018,8 @@ mod tests {
                     mode,
                     message: None,
                     paths: vec![],
+                    restore: vec![],
+                    unstage: vec![],
                 },
                 "{index}"
             );
@@ -19778,6 +20038,8 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["c.txt".into()],
+                restore: vec![],
+                unstage: vec![],
             }
         );
     }
@@ -19819,6 +20081,8 @@ mod tests {
             mode: StashMode::All,
             message: None,
             paths: vec![],
+            restore: vec![],
+            unstage: vec![],
         };
         let cases = [
             (push, "Could not stash", files),
@@ -19859,6 +20123,8 @@ mod tests {
         state.stash_draft = Some(crate::stash::StashDraft {
             mode: StashMode::All,
             paths: vec![],
+            restore: vec![],
+            unstage: vec![],
             from_range: false,
         });
         state.switch_repo();
@@ -19905,18 +20171,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_range_with_a_rename_and_an_untracked_file_is_refused_with_a_reason() {
-        let renamed = FileEntry {
-            orig_path: Some("old.rs".into()),
+    fn renamed(path: &str, old: &str) -> FileEntry {
+        FileEntry {
+            orig_path: Some(old.into()),
             kind: EntryKind::Renamed,
-            ..changed("new.rs", 'R', '.')
-        };
-        let (mut state, _) = with_files(vec![renamed, untracked("u.txt")], 24);
+            ..changed(path, 'R', '.')
+        }
+    }
+
+    #[test]
+    fn a_range_with_a_rename_and_an_untracked_file_stashes_the_rename_whole() {
+        let files = vec![renamed("new.rs", "old.rs"), untracked("u.txt")];
+        let (mut state, _) = with_files(files, 24);
         press_char(&mut state, 'V');
-        assert_eq!(crate::menu::stash_file_disabled(&state), None);
         press_char(&mut state, 'j');
-        let reason = crate::menu::STASH_APART;
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::IncludeUntracked,
+                message: None,
+                paths: vec!["new.rs".into(), "u.txt".into()],
+                restore: vec!["old.rs".into()],
+                unstage: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn a_rename_whose_old_path_is_taken_again_is_refused_with_a_reason() {
+        // The file at the old path is listed but not marked.
+        let files = vec![renamed("new.rs", "old.rs"), untracked("old.rs")];
+        let (mut state, _) = with_files(files, 24);
+        let reason = crate::menu::STASH_RENAME_TAKEN;
+        assert_eq!(
+            crate::menu::stash_file_disabled(&state),
+            Some(reason.into())
+        );
+        // Marked too, it is refused for the same reason.
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
         assert_eq!(
             crate::menu::stash_file_disabled(&state),
             Some(reason.into())
@@ -19925,6 +20221,74 @@ mod tests {
         assert_eq!(state.notice, Some(reason.into()));
         assert_eq!(state.stash_draft, None);
         assert!(state.files_anchor.is_some());
+    }
+
+    #[test]
+    fn a_rename_whose_old_directory_is_now_a_file_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_RENAME_TAKEN.into());
+        for taken in ["d", "d/e"] {
+            let files = vec![renamed("new.rs", "d/e/old.rs"), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A case-insensitive filesystem would fold these onto the old path
+        // or its directory, so they are refused too.
+        for (old, taken) in [("Old.rs", "old.rs"), ("D/old.rs", "d")] {
+            let files = vec![renamed("new.rs", old), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // A file beside the old path, inside its directory, is fine.
+        let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
+        let (state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+    }
+
+    #[test]
+    fn a_staged_deletion_whose_path_is_taken_again_is_refused_with_a_reason() {
+        let reason = Some(crate::menu::STASH_DELETED_TAKEN.into());
+        // An untracked file at the path, or folded onto it or a directory
+        // it needs by a case-insensitive filesystem.
+        for taken in ["gone.rs", "Gone.rs"] {
+            let files = vec![changed("gone.rs", 'D', '.'), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        for taken in ["d", "D"] {
+            let files = vec![changed("d/gone.rs", 'D', '.'), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
+        // Marked as well, it is still refused, with the same reason.
+        let files = vec![changed("gone.rs", 'D', '.'), untracked("gone.rs")];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(crate::menu::stash_file_disabled(&state), reason);
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, reason);
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn a_lone_staged_deletion_is_stashed_with_its_path_unstaged_first() {
+        // Its own entry does not count as taking its path, nor does a file
+        // beside it.
+        let files = vec![changed("d/gone.rs", 'D', '.'), untracked("d/other.rs")];
+        let (mut state, _) = with_files(files, 24);
+        assert_eq!(crate::menu::stash_file_disabled(&state), None);
+        stash_menu_item(&mut state, 3);
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::StashPush {
+                mode: StashMode::All,
+                message: None,
+                paths: vec!["d/gone.rs".into()],
+                restore: vec![],
+                unstage: vec!["d/gone.rs".into()],
+            }
+        );
     }
 
     #[test]
@@ -19944,6 +20308,8 @@ mod tests {
                 mode: StashMode::All,
                 message: Some("pair".into()),
                 paths: vec!["a.rs".into(), "b.rs".into()],
+                restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.files_anchor, None, "the range is done with");
@@ -19971,6 +20337,8 @@ mod tests {
                 mode: StashMode::IncludeUntracked,
                 message: None,
                 paths: vec!["b.rs".into(), "c.txt".into()],
+                restore: vec![],
+                unstage: vec![],
             }
         );
         assert_eq!(state.files_anchor, None);
@@ -20016,6 +20384,8 @@ mod tests {
                 mode: StashMode::All,
                 message: None,
                 paths: vec!["b.rs".into()],
+                restore: vec![],
+                unstage: vec![],
             }
         );
     }
@@ -20067,12 +20437,28 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         stash_menu_item(&mut state, 3);
-        // Same paths, so the range stays, but b.rs is now staged as deleted.
+        // Same paths, so the range stays, but b.rs is now staged as
+        // deleted: the push would now need it unstaged first.
         reload(
             &mut state,
             vec![changed("a.rs", '.', 'M'), changed("b.rs", 'D', '.')],
         );
         assert!(state.files_anchor.is_some());
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
+
+        let (mut state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", 'M', '.')],
+            24,
+        );
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        // b.rs's change moved to the worktree: same set, same push.
+        reload(
+            &mut state,
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", '.', 'M')],
+        );
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
         assert!(matches!(op, GitOp::StashPush { .. }), "same set, same push");
 

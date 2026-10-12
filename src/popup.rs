@@ -302,6 +302,9 @@ pub struct ResetHardConfirm {
     /// The target's short id, as the log shows it.
     pub short_oid: String,
     pub op: GitOp,
+    /// The detached `HEAD` it was asked from, so `y` runs nothing once
+    /// `HEAD` has moved. `None` on a branch.
+    pub head: Option<CommitId>,
 }
 
 impl ResetHardConfirm {
@@ -324,6 +327,12 @@ impl ResetHardConfirm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveCommitsConfirm {
     pub op: GitOp,
+    /// The detached `HEAD` the commits were found from, so `y` runs
+    /// nothing once `HEAD` has moved.
+    pub head: CommitId,
+    /// `head`'s short id, as the log shows it: the question names it so
+    /// the user can branch there before leaving.
+    pub head_short_oid: String,
     /// The target's short id, as the log shows it.
     pub short_oid: String,
     /// The short ids of the commits left behind, newest first.
@@ -340,31 +349,43 @@ impl LeaveCommitsConfirm {
 
     pub fn question(&self) -> String {
         use crate::git::ops::ResetMode;
-        let action = match &self.op {
-            GitOp::CheckoutCommit(_) => format!("Check out {}", self.short_oid),
-            GitOp::Reset {
-                mode: ResetMode::Hard,
-                ..
-            } => format!("Reset hard to {}", self.short_oid),
-            _ => format!("Reset to {}", self.short_oid),
-        };
         let count = self.left.len();
-        let noun = if count == 1 { "commit" } else { "commits" };
+        let (noun, are) = if count == 1 {
+            ("commit", "is")
+        } else {
+            ("commits", "are")
+        };
         let mut ids = self.left[..count.min(Self::LISTED)].join(", ");
         if count > Self::LISTED {
             ids.push_str(&format!(" and {} more", count - Self::LISTED));
         }
-        let hard = match self.op {
+        let keep = format!(
+            "To keep them, press n, then run: git branch <name> {}",
+            self.head_short_oid
+        );
+        let short_oid = &self.short_oid;
+        match &self.op {
+            // The warning comes first, so a small terminal that clips the
+            // end still shows it.
             GitOp::Reset {
                 mode: ResetMode::Hard,
                 ..
-            } => " Every uncommitted change, staged and unstaged, is thrown away too.",
-            _ => "",
-        };
-        format!(
-            "{action} and leave {count} {noun} that no branch or tag reaches behind \
-             ({ids})? Afterwards only the reflog has them.{hard} (y/n)"
-        )
+            } => format!(
+                "Reset hard to {short_oid}: every uncommitted change, staged and unstaged, \
+                 is thrown away, and {count} {noun} that no branch or tag reaches {are} left \
+                 behind ({ids}). Afterwards only the reflog has them. {keep} (y/n)"
+            ),
+            op => {
+                let action = match op {
+                    GitOp::CheckoutCommit(_) => "Check out",
+                    _ => "Reset to",
+                };
+                format!(
+                    "{action} {short_oid} and leave {count} {noun} that no branch or tag \
+                     reaches behind ({ids})? Afterwards only the reflog has them. {keep} (y/n)"
+                )
+            }
+        }
     }
 }
 
@@ -940,6 +961,7 @@ mod tests {
                 to: CommitId::parse("abc1234").unwrap(),
                 mode: ResetMode::Hard,
             },
+            head: None,
         };
         assert_eq!(ask.title(), "Reset hard");
         assert_eq!(
@@ -952,6 +974,8 @@ mod tests {
     fn leave(op: GitOp, count: usize) -> LeaveCommitsConfirm {
         LeaveCommitsConfirm {
             op,
+            head: crate::git::commit_files::CommitId::parse("fedcba9").unwrap(),
+            head_short_oid: "fedcba9".into(),
             short_oid: "abc1234".into(),
             left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
         }
@@ -973,7 +997,8 @@ mod tests {
         assert_eq!(
             ask.question(),
             "Check out abc1234 and leave 3 commits that no branch or tag reaches behind \
-             (000, 111, 222)? Afterwards only the reflog has them. (y/n)"
+             (000, 111, 222)? Afterwards only the reflog has them. To keep them, press n, \
+             then run: git branch <name> fedcba9 (y/n)"
         );
         assert!(
             leave(checkout, 1)
@@ -993,18 +1018,43 @@ mod tests {
     }
 
     #[test]
-    fn the_hard_reset_version_also_says_the_changes_go() {
+    fn the_hard_reset_version_warns_about_the_changes_first() {
         use crate::git::ops::ResetMode;
         let q = leave(reset(ResetMode::Hard), 2).question();
         assert!(
-            q.starts_with("Reset hard to abc1234 and leave 2 commits"),
+            q.starts_with(
+                "Reset hard to abc1234: every uncommitted change, staged and unstaged, \
+                 is thrown away, and 2 commits"
+            ),
             "{q}"
         );
-        assert!(
-            q.contains("Every uncommitted change, staged and unstaged, is thrown away too."),
-            "{q}"
-        );
+        let warning = q.find("thrown away").unwrap();
+        assert!(warning < q.find("000").unwrap(), "{q}");
         assert!(q.ends_with("(y/n)"), "{q}");
+    }
+
+    #[test]
+    fn every_leave_commits_question_says_how_to_keep_them() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::ops::ResetMode;
+        let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
+        for op in [
+            checkout,
+            reset(ResetMode::Soft),
+            reset(ResetMode::Mixed),
+            reset(ResetMode::Hard),
+        ] {
+            let q = leave(op, 2).question();
+            assert!(
+                q.ends_with("To keep them, press n, then run: git branch <name> fedcba9 (y/n)"),
+                "{q}"
+            );
+        }
+        let q = leave(reset(ResetMode::Hard), 1).question();
+        assert!(
+            q.contains("1 commit that no branch or tag reaches is left"),
+            "{q}"
+        );
     }
 
     #[test]
