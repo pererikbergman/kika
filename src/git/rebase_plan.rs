@@ -138,7 +138,7 @@ pub fn plan(rows: &[CommitRow], selected: usize, edit: Edit) -> Result<RebasePla
         return Err("Already a pick");
     }
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let last = if folds { selected + 1 } else { selected };
     let mut plan = picks(linear_range(rows, last)?)?;
@@ -149,6 +149,13 @@ pub fn plan(rows: &[CommitRow], selected: usize, edit: Edit) -> Result<RebasePla
 /// Why a range cannot be planned: it is not one unbroken run of loaded
 /// rows, which only happens when the filter hides commits inside it.
 pub const RANGE_GAP: &str = "The filter hides commits inside the selection; clear it first";
+
+/// Why an edit other than squash, fixup or drop cannot act on a range.
+pub const RANGE_EDIT: &str = "Only squash, fixup and drop act on a selection";
+
+/// Why the root commit cannot be rewritten: there is no parent to rebase
+/// onto.
+pub const FIRST_COMMIT: &str = "Cannot rewrite the first commit";
 
 /// The plan for `edit` on every row of `range`, log row indexes newest
 /// first, in one rebase. Squash and fixup fold the whole range into the
@@ -161,7 +168,7 @@ pub fn plan_range(
     edit: Edit,
 ) -> Result<RebasePlan, &'static str> {
     if !matches!(edit, Edit::Squash | Edit::Fixup | Edit::Drop) {
-        return Err("Only squash, fixup and drop act on a selection");
+        return Err(RANGE_EDIT);
     }
     let (Some(&lo), Some(&hi)) = (range.first(), range.last()) else {
         return Err(RANGE_GAP);
@@ -171,7 +178,7 @@ pub fn plan_range(
     }
     let targets = rows.get(lo..=hi).ok_or("No commits")?;
     if targets.iter().any(|row| row.parents.is_empty()) {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let last = if edit == Edit::Drop { hi } else { hi + 1 };
     let mut plan = picks(linear_range(rows, last)?)?;
@@ -195,7 +202,7 @@ pub fn plan_move(
         Direction::Down => (selected, selected + 1),
     };
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, older)?)?;
     let n = plan.steps.len();
@@ -209,7 +216,7 @@ pub fn plan_move(
 pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'static str> {
     let target = rows.get(selected).ok_or("No commits")?;
     if target.parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, selected)?)?;
     step_of(&mut plan, selected).break_after = true;
@@ -223,7 +230,7 @@ pub fn plan_break(rows: &[CommitRow], selected: usize) -> Result<RebasePlan, &'s
 pub fn plan_stops(rows: &[CommitRow], stops: &[usize]) -> Result<RebasePlan, &'static str> {
     let oldest = *stops.iter().max().ok_or("No commits")?;
     if rows.get(oldest).is_some_and(|row| row.parents.is_empty()) {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let mut plan = picks(linear_range(rows, oldest)?)?;
     for &stop in stops {
@@ -298,7 +305,7 @@ pub fn plan_autosquash(rows: &[CommitRow]) -> Result<RebasePlan, &'static str> {
     let pairs = fixup_targets(rows)?;
     let deepest = pairs.iter().map(|&(_, target)| target).max().unwrap_or(0);
     if rows[deepest].parents.is_empty() {
-        return Err("Cannot rewrite the first commit");
+        return Err(FIRST_COMMIT);
     }
     let picked = picks(linear_range(rows, deepest)?)?;
     let n = picked.steps.len();
@@ -1050,7 +1057,11 @@ mod tests {
     #[test]
     fn a_range_refuses_every_other_edit() {
         for edit in [Edit::Reword, Edit::Stop, Edit::Pick] {
-            assert!(plan_range(&linear(), &[0, 1], edit).is_err(), "{edit:?}");
+            assert_eq!(
+                plan_range(&linear(), &[0, 1], edit),
+                Err(RANGE_EDIT),
+                "{edit:?}"
+            );
         }
     }
 
