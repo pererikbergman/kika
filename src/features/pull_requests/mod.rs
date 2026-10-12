@@ -25,7 +25,10 @@
 //! - core `merge_pr` uses `REFRESH_LIMITED`, `same_repo` and
 //!   `record_rate_limit`. Whichever slice moves `merge_pr` into a feature
 //!   must first lift these into core;
-//! - the fetch completion in core calls `load_pull_requests`.
+//! - core calls `load_pull_requests` when a branch list loads
+//!   (`branches_loaded`) and after a merge (`merge_pr`). A fetch, pull or
+//!   push sets `forge.want_refresh()` in sync's `remote_finished`, and the
+//!   branch reload that follows starts the load.
 
 mod badges;
 mod create;
