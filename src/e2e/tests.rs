@@ -2473,6 +2473,90 @@ async fn a_todo_list_that_differs_from_the_autosquash_plan_aborts_and_changes_no
     assert!(!repo.path().join(".git/rebase-merge").exists());
 }
 
+/// A clone that lacks a pull request's head: the "GitHub" remote is a
+/// local bare repository that `https://github.com/acme/widgets` is
+/// rewritten to, holding the head only under `refs/pull/12/head`.
+/// Returns the clone, the temp dir holding the remote, and the head and
+/// base ids.
+fn clone_missing_a_pull_request_head() -> (TestRepo, TempDir, String, String) {
+    let repo = TestRepo::new()
+        .write("src/cache.rs", "one\n")
+        .commit("base");
+    let base = repo.head().trim().to_string();
+    let tmp = TempDir::new("e2e-forge");
+    let bare = tmp.path().join("remote.git");
+    let bare_path = bare.to_string_lossy().into_owned();
+    let repo_path = repo.path().to_string_lossy().into_owned();
+    git(
+        tmp.path(),
+        &["clone", "-q", "--bare", &repo_path, &bare_path],
+    );
+    let work = tmp.path().join("work");
+    git(tmp.path(), &["clone", "-q", &bare_path, "work"]);
+    git(&work, &["config", "user.name", "Kika Test"]);
+    git(&work, &["config", "user.email", "test@example.com"]);
+    git(&work, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(work.join("src/cache.rs"), "two\n").unwrap();
+    git(&work, &["commit", "-q", "-am", "head"]);
+    let head = String::from_utf8(git(&work, &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_string();
+    git(&work, &["push", "-q", "origin", "HEAD:refs/pull/12/head"]);
+    repo.git(["remote", "add", "origin", "https://github.com/acme/widgets"]);
+    let rewrite = format!("url.{bare_path}.insteadOf");
+    repo.git(["config", &rewrite, "https://github.com/acme/widgets"]);
+    (repo, tmp, head, base)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn review_files_fetch_a_missing_head_once_then_list_and_diff_it_locally() {
+    use std::sync::Arc;
+
+    use crate::forge::github::{FakeGh, answer};
+    use crate::forge::review::fixtures::{DETAIL, QUEUES};
+    use crate::model::review::ReviewScreen;
+
+    let (repo, _remote, head, base) = clone_missing_a_pull_request_head();
+    assert!(!repo.try_git(["cat-file", "-e", &format!("{head}^{{commit}}")]));
+    let detail = DETAIL
+        .replace(&"1".repeat(40), &head)
+        .replace(&"2".repeat(40), &base);
+    let gh = Arc::new(FakeGh::new().reply(answer(QUEUES)).reply(answer(&detail)));
+    let mut app = Harness::start_with_forge(&repo, Arc::clone(&gh)).await;
+    let refs_before = repo.git(["for-each-ref"]);
+
+    app.type_text("G").await;
+    app.press(KeyCode::Enter).await;
+    app.assert_screen_contains("Add widget caching");
+    app.press(KeyCode::Char('f')).await;
+
+    assert_eq!(app.state().review.screen, ReviewScreen::Files(12));
+    app.assert_screen_contains("PR #12 · files (1/1)");
+    app.assert_screen_contains("M ✓ src/cache.rs");
+    app.assert_screen_contains("+1 −1");
+    app.assert_screen_contains("+two");
+    assert!(repo.try_git(["cat-file", "-e", &format!("{head}^{{commit}}")]));
+    assert_eq!(repo.git(["for-each-ref"]), refs_before, "a ref was written");
+    assert_eq!(app.state().review.fetched_heads.len(), 1);
+
+    // The diff searches like the workspace's, once it has the keys.
+    app.press(KeyCode::Tab).await;
+    app.type_text("/two\n").await;
+    app.assert_screen_contains("match 1 of 1");
+    app.press(KeyCode::Esc).await;
+    app.press(KeyCode::Esc).await;
+
+    // Back to the pull request and in again: the head is here now, so
+    // nothing more is fetched, and GitHub was asked only twice.
+    app.press(KeyCode::Esc).await;
+    assert_eq!(app.state().review.screen, ReviewScreen::Detail(12));
+    app.press(KeyCode::Char('f')).await;
+    app.assert_screen_contains("+two");
+    assert_eq!(app.state().review.fetched_heads.len(), 1);
+    assert_eq!(gh.calls().len(), 2);
+}
+
 /// Twenty numbered lines, with `changes` (line number, new text) made.
 #[cfg(unix)]
 fn numbered(changes: &[(usize, &str)]) -> String {

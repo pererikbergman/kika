@@ -36,13 +36,14 @@ use crate::git::left_behind::read_left_behind;
 use crate::git::log::{LogQuery, branch_commit, log_page, markers};
 use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
+use crate::git::pr_objects::{self, CommitsHere};
 use crate::git::prompts::read_prompt_facts;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
-use crate::git::remotes::list_remotes;
+use crate::git::remotes::{RemoteName, list_remotes};
 use crate::git::repo_root::init_repo;
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
@@ -392,6 +393,32 @@ pub enum Effect {
         repo: Option<ForgeRepo>,
         number: u64,
         limited: Vec<(ForgeHost, i64)>,
+    },
+    /// See whether a pull request's `head` and `base` commits are here;
+    /// for missing ones, find the remote of `repo` on one of `hosts` to
+    /// fetch them from. Local only. Always answered by one
+    /// `ReviewObjectsChecked`.
+    CheckReviewCommits {
+        tag: Tag,
+        head: CommitId,
+        base: CommitId,
+        hosts: Vec<ForgeHost>,
+        repo: ForgeRepo,
+    },
+    /// Fetch `oids` from `remote` by id, with git's and ssh's questions
+    /// sent as `CredentialAsked`. Always answered by one
+    /// `ReviewHeadFetched`.
+    FetchReviewCommits {
+        tag: Tag,
+        remote: RemoteName,
+        oids: Vec<CommitId>,
+    },
+    /// The merge base of `base` and `head`, and the files the pull request
+    /// changes from it. Always answered by one `ReviewFilesLoaded`.
+    LoadReviewFiles {
+        tag: Tag,
+        head: CommitId,
+        base: CommitId,
     },
 }
 
@@ -1390,6 +1417,68 @@ impl Runtime {
                         repo,
                         result,
                     });
+                });
+            }
+            Effect::CheckReviewCommits {
+                tag,
+                head,
+                base,
+                hosts,
+                repo,
+            } => {
+                tokio::spawn(async move {
+                    // A panic still answers, or the files screen would wait forever.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let missing =
+                            pr_objects::missing_commits(runner.as_ref(), &[&head, &base])?;
+                        if missing.is_empty() {
+                            return Ok(CommitsHere::All);
+                        }
+                        Ok(CommitsHere::Missing {
+                            oids: missing,
+                            remote: review::fetch_remote(runner.as_ref(), &hosts, &repo),
+                        })
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git cat-file crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::ReviewObjectsChecked { tag, result });
+                });
+            }
+            Effect::FetchReviewCommits { tag, remote, oids } => {
+                let slot = Arc::clone(&self.credential);
+                tokio::spawn(async move {
+                    let bridge_tx = tx.clone();
+                    // A panic still answers, or `op_seq` would block every later op.
+                    let result = tokio::task::spawn_blocking(move || {
+                        let bridge = Bridge::open(tag, bridge_tx, slot);
+                        pr_objects::fetch_commits(
+                            runner.as_ref(),
+                            &remote,
+                            &oids,
+                            bridge.env.as_ref(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(terminal_safe(format!("git crashed: {e}").as_bytes())));
+                    let _ = tx.send(AppIntent::ReviewHeadFetched { tag, result });
+                });
+            }
+            Effect::LoadReviewFiles { tag, head, base } => {
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        pr_objects::pr_files(runner.as_ref(), &base, &head)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git diff-tree crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::ReviewFilesLoaded { tag, result });
                 });
             }
             Effect::LoadPullRequests {

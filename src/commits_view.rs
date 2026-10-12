@@ -263,19 +263,24 @@ fn picked_file_line(patch: &CustomPatch, file: &CommitFile, width: usize) -> Lin
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
 pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
-    let colour = match file.status {
-        'A' => Color::Green,
-        'D' => Color::Red,
-        'M' => Color::Yellow,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Reset,
-    };
+    let colour = status_colour(file.status);
     let path = drawn_path(file);
     Line::from(vec![
         Span::styled(file.status.to_string(), Style::new().fg(colour)),
         Span::raw(" "),
         Span::raw(elide_right(&path, width.saturating_sub(2))),
     ])
+}
+
+/// The colour of a changed file's status letter.
+pub(crate) fn status_colour(status: char) -> Color {
+    match status {
+        'A' => Color::Green,
+        'D' => Color::Red,
+        'M' => Color::Yellow,
+        'R' | 'C' => Color::Cyan,
+        _ => Color::Reset,
+    }
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last

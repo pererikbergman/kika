@@ -104,6 +104,13 @@ pub fn remote_command(op: &RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand
                 .arg(refspec)
         }
     };
+    with_prompts(cmd, askpass)
+}
+
+/// `cmd` set up to talk to a remote as [`remote_command`] does: never on
+/// the terminal, and with git's and ssh's questions going to `askpass`
+/// when there is one.
+pub(crate) fn with_prompts(cmd: GitCommand, askpass: Option<&AskpassEnv>) -> GitCommand {
     let cmd = cmd
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -150,10 +157,7 @@ fn run_remote_with(
             "Push to a remote named like an option with git directly".into(),
         ));
     }
-    let askpass = askpass.map(|env| AskpassEnv {
-        git_askpass: env.git_askpass && !user_askpass(runner, env_set),
-        ..env.clone()
-    });
+    let askpass = askpass_for(runner, askpass, env_set);
     let cmd = remote_command(op, askpass.as_ref());
     let output = runner
         .run(&cmd)
@@ -182,6 +186,19 @@ fn run_remote_with(
     }
 }
 
+/// The bridge as a remote command uses it: without `GIT_ASKPASS` when the
+/// user has their own askpass program for git.
+pub(crate) fn askpass_for(
+    runner: &dyn GitRunner,
+    askpass: Option<&AskpassEnv>,
+    env_set: &dyn Fn(&str) -> bool,
+) -> Option<AskpassEnv> {
+    askpass.map(|env| AskpassEnv {
+        git_askpass: env.git_askpass && !user_askpass(runner, env_set),
+        ..env.clone()
+    })
+}
+
 /// Whether the user chose their own askpass program for git, which
 /// [`remote_command`] then leaves in place. Any doubt, such as a failed
 /// config read, keeps theirs.
@@ -198,7 +215,7 @@ fn user_askpass(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> bool 
 }
 
 /// Git's words, safe to draw and with no credentials in them.
-fn safe(bytes: &[u8]) -> String {
+pub(crate) fn safe(bytes: &[u8]) -> String {
     redact_userinfo(&terminal_safe(bytes))
 }
 
