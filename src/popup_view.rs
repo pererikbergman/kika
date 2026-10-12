@@ -458,10 +458,10 @@ fn render_credential(prompt: &CredentialPrompt, top: bool, frame: &mut Frame, ar
         ..answer
     };
     let line = prompt.input.line();
-    let shown = if prompt.masked {
-        "•".repeat(line.text.chars().count())
-    } else {
+    let shown = if prompt.shows_typed_text() {
         line.text.clone()
+    } else {
+        "•".repeat(line.text.chars().count())
     };
     render_input_line(&shown, line.col, top, frame, answer);
 }
@@ -1852,6 +1852,46 @@ mod tests {
             assert!(contains(&rows, line), "{line:?} missing: {rows:#?}");
         }
         assert!(!contains(&rows, "•"), "{rows:#?}");
+    }
+
+    const HOST_KEY_QUESTION: &str = "The authenticity of host 'h' can't be established.\n\
+         Are you sure you want to continue connecting (yes/no/[fingerprint])? ";
+
+    #[test]
+    fn a_secret_typed_into_a_host_key_question_is_drawn_as_dots() {
+        let state = asked(HOST_KEY_QUESTION, "hunter2");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " ••••••• "), "{rows:#?}");
+        assert!(!contains(&rows, "hunter2"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_fingerprint_typed_into_a_host_key_question_is_drawn_as_typed() {
+        let fingerprint = "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s";
+        let state = asked(HOST_KEY_QUESTION, fingerprint);
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, fingerprint), "{rows:#?}");
+        assert!(!contains(&rows, "•"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_host_key_answer_turns_to_dots_once_it_is_no_longer_an_answer() {
+        use crate::keymap::KeyPress;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let mut state = asked(HOST_KEY_QUESTION, "yes");
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " yes "), "{rows:#?}");
+
+        let Some(Popup::Credential(credential)) = state.popups.last_mut() else {
+            panic!("no credential popup");
+        };
+        credential
+            .input
+            .edit(KeyPress::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " •••• "), "{rows:#?}");
+        assert!(!contains(&rows, "yesx"), "{rows:#?}");
     }
 
     #[test]
