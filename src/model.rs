@@ -5568,6 +5568,7 @@ impl AppState {
             KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.filter),
             KeyScope::Remotes => (InputTarget::RemotesFilter, &self.branches.remotes.filter),
             KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
+            KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
             }
@@ -5613,6 +5614,8 @@ impl AppState {
             InputTarget::BranchesFilter | InputTarget::RemotesFilter | InputTarget::TagsFilter => {
                 return self.apply_branches_filter(input.target, text);
             }
+            // A reflog row drives nothing, so a moved cursor loads nothing.
+            InputTarget::ReflogFilter => self.commits.reflog.set_filter(text),
             InputTarget::DiffSearch => {
                 if let Focus::Diff(view) = &mut self.focus {
                     view.set_search(&text, self.emoji_zwj);
@@ -5694,7 +5697,8 @@ impl AppState {
 
     /// Esc in a list: clear the range, else the filter, else (in Commits)
     /// the diff mark, else the log query, else quit as Esc always has. In
-    /// the Worktrees popup: clear the filter, else close the popup.
+    /// the Worktrees popup: clear the filter, else close the popup. The
+    /// Reflog tab has no range: clear the filter, else quit.
     fn list_escape(&mut self) -> Vec<Effect> {
         if self.key_focus() == KeyScope::Worktrees {
             if let Some(list) = self.worktree_list_mut()
@@ -5722,6 +5726,7 @@ impl AppState {
                 branches.tags.range_anchor.take().is_some(),
                 &mut branches.tags.filter,
             ),
+            KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
             _ => return self.update(AppIntent::Quit),
         };
         if cleared {
@@ -15575,6 +15580,158 @@ mod tests {
         assert_eq!(state.commits.tab, CommitsTab::Log);
         assert_eq!(state.key_focus(), KeyScope::Commits);
         assert_eq!(press_char(&mut state, ']'), vec![], "read once");
+    }
+
+    /// The Reflog tab shown, its read landed: second, first, root.
+    fn on_reflog_tab() -> AppState {
+        let mut state = undoable();
+        let tag = reflog_tag(&press_char(&mut state, ']'));
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        state
+    }
+
+    #[test]
+    fn slash_in_the_reflog_tab_narrows_it_as_typed_and_enter_keeps_it() {
+        let mut state = on_reflog_tab();
+        press_char(&mut state, '/');
+        let input = state.input.as_ref().expect("the input opens");
+        assert_eq!(input.target, InputTarget::ReflogFilter);
+        assert_eq!(input.target.prompt(), "/");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        type_text(&mut state, "bbb");
+        assert_eq!(state.commits.reflog.visible(), [1], "by short id");
+        assert_eq!(state.commits.reflog.selected, 1, "the cursor follows");
+        for _ in 0..3 {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "root");
+        assert_eq!(state.commits.reflog.visible(), [2], "by message");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.input, None);
+        assert_eq!(state.commits.reflog.filter, "root");
+        assert_eq!(state.key_focus(), KeyScope::Reflog);
+        // `/` again starts from the kept text.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "root");
+    }
+
+    #[test]
+    fn esc_in_the_reflog_tab_clears_the_filter_then_quits_and_v_sets_no_range() {
+        let mut state = on_reflog_tab();
+        assert_eq!(press_char(&mut state, 'V'), vec![]);
+        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.popups, []);
+        press_char(&mut state, '/');
+        type_text(&mut state, "first\n");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.commits.reflog.filter, "");
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit);
+    }
+
+    #[test]
+    fn the_reflog_filter_stops_at_its_limit() {
+        let mut state = on_reflog_tab();
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(
+            state.commits.reflog.filter.chars().count(),
+            list_filter::MAX_INPUT
+        );
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+    }
+
+    #[test]
+    fn the_log_and_the_reflog_keep_their_own_filters() {
+        let mut state = on_reflog_tab();
+        press_char(&mut state, '/');
+        type_text(&mut state, "root\n");
+        press_char(&mut state, '[');
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().unwrap().target,
+            InputTarget::CommitsFilter
+        );
+        assert_eq!(state.input.as_ref().unwrap().line.text, "");
+        type_text(&mut state, "c1\n");
+        assert_eq!(state.commits.filter, "c1");
+        assert_eq!(state.commits.reflog.filter, "root");
+        press_char(&mut state, ']');
+        assert_eq!(state.commits.reflog.filter, "root");
+        assert_eq!(state.commits.filter, "c1");
+        // Esc in the Reflog tab clears only its own.
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.commits.reflog.filter, "");
+        assert_eq!(state.commits.filter, "c1");
+    }
+
+    #[test]
+    fn the_reflog_filter_never_reaches_git_nor_changes_the_undo_plan() {
+        let hostile = "--force -D x\x1b[31m";
+        let leaks = |effects: &[Effect]| {
+            let debug = format!("{effects:?}");
+            debug.contains("--force") || debug.contains("-D x") || debug.contains("[31m")
+        };
+        let mut state = on_reflog_tab();
+        let mut effects = press_char(&mut state, '/');
+        for c in hostile.chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
+        assert!(state.commits.reflog.visible().is_empty());
+        assert!(!leaks(&effects), "{effects:?}");
+
+        // A refresh asks git exactly what it asks with no filter set.
+        let refresh = press_char(&mut state, 'r');
+        assert!(!leaks(&refresh), "{refresh:?}");
+        assert_eq!(refresh, press_char(&mut on_reflog_tab(), 'r'));
+        let tag = refresh
+            .iter()
+            .find_map(|e| match e {
+                Effect::LoadReflog { tag } => Some(*tag),
+                _ => None,
+            })
+            .expect("a refresh rereads the reflog");
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+
+        // Undo plans from every entry, though the filter hides them all.
+        let undo = ctrl(&mut state, 'z');
+        assert!(!leaks(&undo), "{undo:?}");
+        let tag = reflog_tag(&undo);
+        let loaded = state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        assert!(!leaks(&loaded), "{loaded:?}");
+        match state.popups.as_slice() {
+            [Popup::Travel(confirm)] => assert_eq!(confirm.op, undo_commit_op()),
+            other => panic!("expected the undo question, got {other:?}"),
+        }
+        let ran = press_char(&mut state, 'y');
+        assert!(!leaks(&ran), "{ran:?}");
+        assert_eq!(op_of(&ran).1, undo_commit_op());
+
+        state.op_seq = None;
+        let redo = ctrl(&mut state, 'r');
+        assert!(!leaks(&redo), "{redo:?}");
+        let tag = reflog_tag(&redo);
+        let loaded = state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        assert!(!leaks(&loaded), "{loaded:?}");
+        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
     }
 
     #[test]

@@ -97,6 +97,12 @@ pub(crate) fn render_commits_panel(
     } else if expanded && !reflog && !selected.is_empty() {
         name = format!("{base}{selected}");
         last.clone_from(&name);
+    } else if reflog && !panel.reflog.filter.is_empty() {
+        let list = &panel.reflog;
+        let total = list.data.as_ref().map_or(0, |d| d.entries.len());
+        let counts = format!("{} of {total}", list.visible().len());
+        name = filter_title(look, "Reflog", &list.filter, &counts);
+        last.clone_from(&name);
     }
     let last = last.as_str();
     let mut candidates = match state.copied.len() {
