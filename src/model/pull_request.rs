@@ -27,6 +27,9 @@ const NOT_GITHUB: &str = "Pull requests can only be created on GitHub";
 const NO_UPSTREAM: &str = "Push the branch first";
 const RATE_LIMITED: &str = "GitHub is rate limited; fetch after the limit resets";
 const CREATING: &str = "A pull request is being created";
+const NOT_ALLOWED: &str = "No target repository is allowed by [forge.allow] in the global config";
+const NOT_ASKED: &str =
+    "The remote is on no forge host in the global config, or not in [forge.allow]";
 const NO_HOSTS: &str = "Name GitHub hosts under [forge] in the global config";
 const REFRESHING: &str = "Pull requests are already being refreshed";
 const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
@@ -148,7 +151,7 @@ pub(crate) fn create_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// Why the badges cannot be asked for again now: no host opted in, the
-/// remote on none of them, a call already running, or the host rate
+/// remote on none of them or left out by `[forge.allow]`, a call already running, or the host rate
 /// limited until a second still to come. Fixed text only, never the
 /// forge's.
 pub(crate) fn refresh_disabled(state: &AppState) -> Option<Reason> {
@@ -157,7 +160,7 @@ pub(crate) fn refresh_disabled(state: &AppState) -> Option<Reason> {
         return Some(NO_HOSTS.into());
     }
     let Some(repo) = &forge.repo else {
-        return Some(NO_FORGE.into());
+        return Some(NOT_ASKED.into());
     };
     if forge.in_flight {
         return Some(REFRESHING.into());
@@ -292,7 +295,13 @@ impl AppState {
             .filter(|r| r.configured)
             .filter_map(|r| Some((r.name.clone(), repo_of(r, &self.forge.hosts, &[])?.1)))
             .filter(|(_, repo)| repo.host.eq_ignore_ascii_case(&head_repo.host))
-            .collect();
+            // Only the repository `gh` is asked to change must be allowed;
+            // the head may be in the user's own, unlisted fork.
+            .filter(|(_, repo)| matches(repo, &self.forge.hosts).is_some_and(|h| h.allows(repo)))
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Err(NOT_ALLOWED);
+        }
         Ok(PrDraft {
             branch: branch.name.clone(),
             head_remote: head_remote.name.clone(),
@@ -426,6 +435,10 @@ impl AppState {
             self.notice = Some(NO_FORGE.into());
             return vec![];
         };
+        if !host.allows(&target) {
+            self.notice = Some(NOT_ALLOWED.into());
+            return vec![];
+        }
         if self.forge.limited.contains_key(host.as_str()) {
             self.notice = Some(RATE_LIMITED.into());
             return vec![];
@@ -1023,6 +1036,42 @@ mod tests {
         press(&mut state, crossterm::event::KeyCode::Esc);
         assert!(state.popups.is_empty());
         assert_eq!(state.pr_draft, None);
+    }
+
+    /// `remotes` on github.com, which `[forge.allow]` narrows to `acme`.
+    fn acme_only(remotes: Vec<Remote>) -> AppState {
+        let mut state = on_github(remotes);
+        let rule = crate::forge::allow::AllowRule::parse("acme").unwrap();
+        state.forge.hosts = vec![host("github.com").with_allow(vec![rule])];
+        state
+    }
+
+    #[test]
+    fn a_target_the_allow_list_leaves_out_is_refused() {
+        let mut state = acme_only(vec![remote(
+            "origin",
+            "git@github.com:other/repo.git",
+            &["main", "topic"],
+        )]);
+        assert_eq!(state.update(AppIntent::CreatePrStart), vec![]);
+        assert_eq!(state.notice.as_deref(), Some(NOT_ALLOWED));
+        assert_eq!(state.pr_draft, None);
+        assert!(state.popups.is_empty());
+    }
+
+    #[test]
+    fn a_fork_into_an_allowed_target_proceeds_and_the_unlisted_fork_is_no_target() {
+        let mut state = acme_only(vec![
+            remote("origin", "git@github.com:me/repo.git", &["main", "topic"]),
+            remote("upstream", "https://github.com/acme/repo", &["main"]),
+        ]);
+        state.update(AppIntent::CreatePrStart);
+        let draft = state.pr_draft.as_ref().unwrap();
+        assert_eq!(draft.targets, [("upstream".into(), repo("acme", "repo"))]);
+        state.update(AppIntent::SubmitPrompt);
+        let (_, target, head, base, _) = created(&press_char(&mut state, 'y'));
+        assert_eq!(target, repo("acme", "repo"));
+        assert_eq!((head.as_str(), base.as_str()), ("me:topic", "main"));
     }
 
     /// Run a create from `state` to its effect; the effect's tag.
