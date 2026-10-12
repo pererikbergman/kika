@@ -1,6 +1,7 @@
-//! Searching the focused Diff pane: where a typed text appears in the rows
-//! as drawn, and which match the cursor is on. Pure; the hunk view keeps
-//! one and the view highlights its matches.
+//! Searching a pane of text: where a typed text appears in the rows as
+//! drawn, and which match the cursor is on. Pure; the hunk view, the diff
+//! preview, the blame and the blame's commit each keep one, and the view
+//! highlights its matches.
 
 use crate::list_filter::same_char;
 
@@ -27,7 +28,12 @@ impl DiffSearch {
     /// after row `from`, else the first, so a search starts where the
     /// user is looking.
     pub fn new(query: &str, rows: &[String], from: usize) -> Self {
-        let matches = find(rows, query);
+        Self::new_in(query, rows.iter().map(String::as_str), from)
+    }
+
+    /// [`Self::new`] over borrowed rows, so a pane need not copy its lines.
+    pub fn new_in<'a>(query: &str, rows: impl Iterator<Item = &'a str>, from: usize) -> Self {
+        let matches = find_in(rows, query);
         let current = at_or_after(&matches, from);
         Self {
             query: query.to_string(),
@@ -39,8 +45,28 @@ impl DiffSearch {
     /// Search new rows for the same query, as after a reload. The current
     /// match stays on the first at or after the old one's row.
     pub fn refresh(&mut self, rows: &[String]) {
+        self.refresh_in(rows.iter().map(String::as_str));
+    }
+
+    /// [`Self::refresh`] over borrowed rows.
+    pub fn refresh_in<'a>(&mut self, rows: impl Iterator<Item = &'a str>) {
         let from = self.current_match().map_or(0, |m| m.row);
-        *self = Self::new(&self.query, rows, from);
+        *self = Self::new_in(&self.query, rows, from);
+    }
+
+    /// Search rows added after the others, the first of them being row
+    /// `first`, as when a streamed diff brings more lines. The matches so
+    /// far and the current one stay; with none current, the first match
+    /// found becomes it.
+    pub fn extend_in<'a>(&mut self, rows: impl Iterator<Item = &'a str>, first: usize) {
+        let added = find_in(rows, &self.query).into_iter().map(|m| SearchMatch {
+            row: m.row + first,
+            ..m
+        });
+        self.matches.extend(added);
+        if self.current.is_none() && !self.matches.is_empty() {
+            self.current = Some(0);
+        }
     }
 
     pub fn current_match(&self) -> Option<&SearchMatch> {
@@ -80,15 +106,22 @@ fn at_or_after(matches: &[SearchMatch], row: usize) -> Option<usize> {
 
 /// Every place `query` appears in `rows`, as a substring, not fuzzily.
 /// Case is ignored unless the query has an uppercase char. Matches in a row
-/// do not overlap. An empty query finds nothing.
+/// do not overlap. An empty query finds nothing. The panes search with
+/// [`find_in`]; this is its owned-rows form.
+#[cfg(test)]
 pub fn find(rows: &[String], query: &str) -> Vec<SearchMatch> {
+    find_in(rows.iter().map(String::as_str), query)
+}
+
+/// [`find`] over borrowed rows, so a caller need not copy its lines.
+pub fn find_in<'a>(rows: impl Iterator<Item = &'a str>, query: &str) -> Vec<SearchMatch> {
     let query: Vec<char> = query.chars().collect();
     if query.is_empty() {
         return Vec::new();
     }
     let exact = query.iter().any(|c| c.is_uppercase());
     let mut found = Vec::new();
-    for (row, text) in rows.iter().enumerate() {
+    for (row, text) in rows.enumerate() {
         let text: Vec<char> = text.chars().collect();
         let mut start = 0;
         while start + query.len() <= text.len() {
@@ -109,6 +142,20 @@ pub fn find(rows: &[String], query: &str) -> Vec<SearchMatch> {
         }
     }
     found
+}
+
+/// The scroll that shows `row` in a view of `rows` rows now scrolled to
+/// `scroll`, moving it as little as it can: a row above goes to the top, a
+/// row below to the bottom, and a row in view stays where it is.
+pub fn reveal(row: usize, scroll: usize, rows: usize) -> usize {
+    let rows = rows.max(1);
+    if row < scroll {
+        row
+    } else if row >= scroll + rows {
+        row + 1 - rows
+    } else {
+        scroll
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +219,47 @@ mod tests {
         let text = rows(&["x", "y", "x", "x"]);
         assert_eq!(DiffSearch::new("x", &text, 1).current, Some(1));
         assert_eq!(DiffSearch::new("x", &text, 9).current, Some(0));
+    }
+
+    #[test]
+    fn find_in_reads_borrowed_rows_and_finds_what_find_does() {
+        let text = rows(&["-foo Foo", "", "+foofoo", "é foo"]);
+        for query in ["foo", "Foo", "o", "", "zz"] {
+            assert_eq!(
+                find_in(text.iter().map(String::as_str), query),
+                find(&text, query),
+                "{query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reveal_moves_the_least_that_shows_the_row() {
+        // A 5-row view from row 10 shows rows 10..15.
+        assert_eq!(reveal(3, 10, 5), 3, "above: the row goes to the top");
+        assert_eq!(reveal(10, 10, 5), 10, "inside: no move");
+        assert_eq!(reveal(14, 10, 5), 10, "inside at the bottom: no move");
+        assert_eq!(reveal(15, 10, 5), 11, "below: the row goes to the bottom");
+        assert_eq!(reveal(40, 10, 5), 36);
+        assert_eq!(reveal(7, 0, 0), 7, "a zero-row view counts as one row");
+    }
+
+    #[test]
+    fn extending_adds_the_new_rows_matches_and_keeps_the_current_one() {
+        let mut search = DiffSearch::new("x", &rows(&["x x", "y"]), 0);
+        search.next();
+        assert_eq!(search.current, Some(1));
+        search.extend_in(["a", "x"].into_iter(), 2);
+        assert_eq!(search.matches, [at(0, 0, 1), at(0, 2, 3), at(3, 0, 1)]);
+        assert_eq!(search.current, Some(1), "the same match stays current");
+
+        let mut none = DiffSearch::new("x", &rows(&["y"]), 0);
+        none.extend_in(["x"].into_iter(), 1);
+        assert_eq!(
+            none.current,
+            Some(0),
+            "the first match found becomes current"
+        );
     }
 
     #[test]

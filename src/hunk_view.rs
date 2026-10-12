@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::diff_search::DiffSearch;
+use crate::diff_search::{DiffSearch, reveal};
 use crate::git::commit_files::CommitRange;
 use crate::git::diff::{DiffSide, EmojiZwj, sanitize, sanitize_body};
 use crate::git::patch::{self, FilePatch, LineId, PatchLineKind};
@@ -192,12 +192,7 @@ impl HunkView {
         if let Some(hunk) = self.rows().get(row).and_then(|r| r.hunk) {
             self.hunk = hunk;
         }
-        let rows = rows.max(1);
-        if row < self.scroll {
-            self.scroll = row;
-        } else if row >= self.scroll + rows {
-            self.scroll = row + 1 - rows;
-        }
+        self.scroll = reveal(row, self.scroll, rows);
     }
 
     /// Step the search forward, or back with `back`, and go there.
