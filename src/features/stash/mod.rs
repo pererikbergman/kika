@@ -37,13 +37,25 @@
 //! - the `STASH` menu table (`menu.rs`), the drop question's rendering
 //!   (`popup_view.rs`) and the bottom bar (`view.rs`).
 //!
-//! Its git reads and argv builders (`git/stash.rs` and the stash code in
-//! `op.rs`) arrive as `git.rs` in the next slice.
+//! Its git code:
+//! - `git.rs`: the list and an entry's files, `StashMode` and the argv
+//!   builders and checks `op.rs` delegates to: `push_command`,
+//!   `stash_command`, `store_command`, `verify_stash`,
+//!   `staged_stash_supported` and `rename_stash`;
+//! - `push.rs`: stashing selected files, `stash_file_for` and
+//!   `stash_files_for` (which keys and handlers call), and
+//!   `push_with_fixups`, which `run_op` delegates to.
+//!
+//! `StashEntry`, `StashFile`, `StashMode` and `StashRef` are re-exported
+//! for core, which names them in `GitOp`, `AppIntent` and `Effect`.
 
 pub(crate) mod effects;
+pub(crate) mod git;
 pub(crate) mod keys;
 pub(crate) mod list;
+pub(crate) mod push;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use git::{StashEntry, StashFile, StashMode, StashRef};
 pub(crate) use list::{StashDraft, StashList};
