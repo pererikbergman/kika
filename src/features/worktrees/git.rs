@@ -6,12 +6,12 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use super::branches::BranchName;
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::path::{RepoPath, os_string};
-use super::runner::{GitCommand, GitRunner};
-use super::worktree_trust::mark_untrusted;
+use super::trust::mark_untrusted;
+use crate::git::branches::BranchName;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::path::{RepoPath, os_string};
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// One worktree as `git worktree list --porcelain` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -873,11 +873,11 @@ mod tests {
     }
 
     impl GitRunner for WorkdirRunner {
-        fn run(&self, cmd: &GitCommand) -> std::io::Result<super::super::runner::GitOutput> {
+        fn run(&self, cmd: &GitCommand) -> std::io::Result<crate::git::runner::GitOutput> {
             self.fake.run(cmd)
         }
 
-        fn spawn(&self, cmd: &GitCommand) -> std::io::Result<super::super::runner::GitChild> {
+        fn spawn(&self, cmd: &GitCommand) -> std::io::Result<crate::git::runner::GitChild> {
             self.fake.spawn(cmd)
         }
 

@@ -3,8 +3,8 @@
 //! plus why its keys cannot run. Pure; the model loads it and moves the
 //! cursor.
 
+use super::git::Worktree;
 use crate::git::branches::BranchName;
-use crate::git::worktrees::Worktree;
 use crate::keymap::{FILTER_HIDES_ROW, OP_RUNNING, Reason};
 use crate::list_filter;
 use crate::model::AppState;
@@ -226,7 +226,7 @@ pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::worktrees::parse_list;
+    use crate::features::worktrees::git::parse_list;
 
     fn list(paths: &[&str]) -> Vec<Worktree> {
         let out: String = paths
