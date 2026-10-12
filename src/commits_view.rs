@@ -896,6 +896,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: todo.to_vec(),
             done: Some(b"pick 0000000 done\n".to_vec()),
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
@@ -907,6 +908,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: b"pick 1111111 one\nexec make test-everything --verbose\n".to_vec(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
@@ -918,6 +920,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: todo.into_bytes(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
     }
 
@@ -1093,6 +1096,7 @@ mod tests {
             path: "/r/.git/rebase-merge/git-rebase-todo".into(),
             todo: b"pick 1111111 one\nexec make test\n".to_vec(),
             done: None,
+            comment: Ok(b"#".to_vec()),
         })));
         let rows = buffer_rows(&draw(&state, 100, 30));
         let heading = rows

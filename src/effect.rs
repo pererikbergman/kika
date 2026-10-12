@@ -27,6 +27,7 @@ use crate::git::blame::{read_blame, read_commit};
 use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
+use crate::git::comment_prefix::read_comment_prefix;
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
 use crate::git::fetch::run_fetch;
@@ -277,8 +278,11 @@ pub enum Effect {
     /// answered by one `RebaseTodoLoaded`.
     LoadRebaseTodo {
         tag: Tag,
+        /// The installed git reads `core.commentString` (2.45).
+        string_too: bool,
     },
-    /// Check `content` as an edit of `expected`, then write it over the
+    /// Check `content` as an edit of `expected`, both read with the
+    /// `comment` prefix `expected` was loaded with, then write it over the
     /// todo list at `path` only while it still holds `expected`; always
     /// answered by one `RebaseTodoWritten`.
     WriteRebaseTodo {
@@ -286,6 +290,7 @@ pub enum Effect {
         path: PathBuf,
         expected: Vec<u8>,
         content: Vec<u8>,
+        comment: Vec<u8>,
     },
     /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
     /// `ReflogLoaded`.
@@ -423,9 +428,11 @@ pub enum Effect {
 }
 
 /// The todo list of the rebase in progress and its `done` list, from
-/// `<git dir>/rebase-merge/`. `None` when there is no todo file: a rebase
-/// that is not interactive, or one between steps.
-fn read_rebase_todo(runner: &dyn GitRunner) -> Result<Option<TodoFile>, String> {
+/// `<git dir>/rebase-merge/`, with the comment prefix git reads them by.
+/// `None` when there is no todo file: a rebase that is not interactive,
+/// or one between steps. A prefix that cannot be read still loads the
+/// list, to be shown read-only with why.
+fn read_rebase_todo(runner: &dyn GitRunner, string_too: bool) -> Result<Option<TodoFile>, String> {
     let output = runner
         .run(&git_dir_command())
         .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
@@ -439,13 +446,25 @@ fn read_rebase_todo(runner: &dyn GitRunner) -> Result<Option<TodoFile>, String> 
     }
     let todo = worktree_file::read_file(&path, MAX_TODO)?;
     let done = worktree_file::read_file(&dir.join("done"), MAX_TODO).ok();
-    Ok(Some(TodoFile { path, todo, done }))
+    let comment = read_comment_prefix(runner, string_too);
+    Ok(Some(TodoFile {
+        path,
+        todo,
+        done,
+        comment,
+    }))
 }
 
 /// Write an edited todo list, once it is sure to be git's todo file and a
-/// safe edit of what was read. The model checked the same; this is the
-/// check that counts.
-fn write_rebase_todo(path: &Path, expected: &[u8], content: &[u8]) -> Result<(), String> {
+/// safe edit of what was read, both read with `comment`, the prefix the
+/// list was loaded with. The model checked the same; this is the check
+/// that counts.
+fn write_rebase_todo(
+    path: &Path,
+    expected: &[u8],
+    content: &[u8],
+    comment: &[u8],
+) -> Result<(), String> {
     let dir = path.parent();
     let is_todo = path
         .file_name()
@@ -456,11 +475,15 @@ fn write_rebase_todo(path: &Path, expected: &[u8], content: &[u8]) -> Result<(),
     if !is_todo {
         return Err(format!("Not a rebase todo list: {}", path.display()));
     }
-    let before = parse_todo(expected)?;
-    let after = parse_todo(content)?;
+    // A list whose prefix could not be read is never edited.
+    if comment.is_empty() {
+        return Err("No comment prefix to read the todo list with".into());
+    }
+    let before = parse_todo(expected, comment)?;
+    let after = parse_todo(content, comment)?;
     let done_empty = dir
         .and_then(|dir| worktree_file::read_file(&dir.join("done"), MAX_TODO).ok())
-        .is_some_and(|done| nothing_done(&done));
+        .is_some_and(|done| nothing_done(&done, comment));
     validate_edit(&before, &after, done_empty)?;
     worktree_file::replace_file(path, expected, content)
 }
@@ -1246,17 +1269,18 @@ impl Runtime {
                     let _ = tx.send(AppIntent::BranchTipsLoaded { tag, result });
                 });
             }
-            Effect::LoadRebaseTodo { tag } => {
+            Effect::LoadRebaseTodo { tag, string_too } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the panel would wait forever.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_rebase_todo(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("Reading the todo list crashed: {e}").as_bytes(),
-                                ))
-                            });
+                    let result = tokio::task::spawn_blocking(move || {
+                        read_rebase_todo(runner.as_ref(), string_too)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("Reading the todo list crashed: {e}").as_bytes(),
+                        ))
+                    });
                     let _ = tx.send(AppIntent::RebaseTodoLoaded { tag, result });
                 });
             }
@@ -1265,11 +1289,12 @@ impl Runtime {
                 path,
                 expected,
                 content,
+                comment,
             } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the todo would stay locked.
                     let result = tokio::task::spawn_blocking(move || {
-                        write_rebase_todo(&path, &expected, &content)
+                        write_rebase_todo(&path, &expected, &content, &comment)
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -4242,7 +4267,10 @@ mod tests {
             b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\nexec rm -rf /\n",
             b"pick 1111 one\npick 2222 two\n",
         ] {
-            assert!(write_rebase_todo(&path, TODO, bad).is_err(), "{bad:?}");
+            assert!(
+                write_rebase_todo(&path, TODO, bad, b"#").is_err(),
+                "{bad:?}"
+            );
             assert_eq!(std::fs::read(&path).unwrap(), TODO);
         }
         // A line git rejects is not a comment: a list holding one is not
@@ -4253,26 +4281,29 @@ mod tests {
             listed.extend_from_slice(b"pick 3333 three\n");
             std::fs::write(&path, &listed).unwrap();
             let edit = b"pick 1111 one\nupdate-ref refs/heads/x\ndrop 2222 two\n";
-            assert!(write_rebase_todo(&path, &listed, edit).is_err(), "{odd:?}");
+            assert!(
+                write_rebase_todo(&path, &listed, edit, b"#").is_err(),
+                "{odd:?}"
+            );
             assert_eq!(std::fs::read(&path).unwrap(), listed);
         }
         // Git stops at a NUL; a list holding one is not edited.
         let nul = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\0\n";
         std::fs::write(&path, nul).unwrap();
         let moved = b"pick 1111 one\nupdate-ref refs/heads/x\npick 2222 two\n";
-        assert!(write_rebase_todo(&path, nul, moved).is_err());
+        assert!(write_rebase_todo(&path, nul, moved, b"#").is_err());
         assert_eq!(std::fs::read(&path).unwrap(), nul);
         std::fs::write(&path, TODO).unwrap();
         let other = tmp.path().join("git-rebase-todo");
         std::fs::write(&other, TODO).unwrap();
         let edit = b"pick 1111 one\nbreak\nupdate-ref refs/heads/x\ndrop 2222 two\n";
-        assert!(write_rebase_todo(&other, TODO, edit).is_err());
+        assert!(write_rebase_todo(&other, TODO, edit, b"#").is_err());
         assert_eq!(
             // The same commands, but not the bytes on disk.
-            write_rebase_todo(&path, &TODO[..TODO.len() - 7], edit),
+            write_rebase_todo(&path, &TODO[..TODO.len() - 7], edit, b"#"),
             Err(crate::worktree_file::CHANGED_ON_DISK.to_string())
         );
-        assert_eq!(write_rebase_todo(&path, TODO, edit), Ok(()));
+        assert_eq!(write_rebase_todo(&path, TODO, edit, b"#"), Ok(()));
         assert_eq!(std::fs::read(&path).unwrap(), edit);
     }
 
@@ -4282,30 +4313,71 @@ mod tests {
         let todo = b"pick 1111 one\npick 2222 two\n";
         let path = rebase_dir(&tmp, todo, b"");
         let fold = b"fixup 1111 one\npick 2222 two\n";
-        assert!(write_rebase_todo(&path, todo, fold).is_err());
+        assert!(write_rebase_todo(&path, todo, fold, b"#").is_err());
         std::fs::write(path.with_file_name("done"), "pick 0000 z\n").unwrap();
-        assert_eq!(write_rebase_todo(&path, todo, fold), Ok(()));
+        assert_eq!(write_rebase_todo(&path, todo, fold, b"#"), Ok(()));
     }
 
+    const COMMENT_CONFIG: [&str; 4] = [
+        "config",
+        "-z",
+        "--get-regexp",
+        r"^core\.comment(char|string)$",
+    ];
+
     #[test]
-    fn the_todo_is_read_from_git_s_dir_and_none_without_one() {
+    fn the_todo_is_read_from_git_s_dir_with_its_comment_prefix_and_none_without_one() {
         let tmp = crate::git::fake::TempDir::new("effect-todo");
         let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
         git_dir.push(b'\n');
         let runner = FakeRunner::new()
             .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir))
-            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir));
-        assert_eq!(read_rebase_todo(&runner), Ok(None));
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir))
+            .expect(&COMMENT_CONFIG, ok(b"core.commentstring\n//\0"))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir))
+            .expect(&COMMENT_CONFIG, ok(b"core.commentstring\n//\0"));
+        assert_eq!(read_rebase_todo(&runner, true), Ok(None));
         let path = rebase_dir(&tmp, TODO, b"pick 0000 z\n");
-        assert_eq!(
-            read_rebase_todo(&runner),
+        let file = |comment: &[u8]| {
             Ok(Some(TodoFile {
-                path,
+                path: path.clone(),
                 todo: TODO.to_vec(),
                 done: Some(b"pick 0000 z\n".to_vec()),
+                comment: Ok(comment.to_vec()),
             }))
-        );
+        };
+        assert_eq!(read_rebase_todo(&runner, true), file(b"//"));
+        // An older git ignores `core.commentString`.
+        assert_eq!(read_rebase_todo(&runner, false), file(b"#"));
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_comment_prefix_that_cannot_be_read_still_loads_the_todo() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let mut git_dir = tmp.path().as_os_str().as_encoded_bytes().to_vec();
+        git_dir.push(b'\n');
+        let runner = FakeRunner::new()
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(&git_dir))
+            .expect(&COMMENT_CONFIG, fail("fatal: bad config line 1\n"));
+        rebase_dir(&tmp, TODO, b"");
+        let file = read_rebase_todo(&runner, true).unwrap().unwrap();
+        assert_eq!(file.todo, TODO);
+        assert_eq!(file.comment, Err("fatal: bad config line 1".into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_todo_write_reads_both_lists_with_the_loaded_comment_prefix() {
+        let tmp = crate::git::fake::TempDir::new("effect-todo");
+        let todo = b"; Rebase 1..2 onto 1\npick 1111 one\npick 2222 two\n; help\n";
+        let path = rebase_dir(&tmp, todo, b"pick 0000 z\n");
+        let edit = b"pick 2222 two\npick 1111 one\n";
+        assert!(write_rebase_todo(&path, todo, edit, b"#").is_err());
+        assert!(write_rebase_todo(&path, todo, edit, b"").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), todo);
+        assert_eq!(write_rebase_todo(&path, todo, edit, b";"), Ok(()));
+        assert_eq!(std::fs::read(&path).unwrap(), edit);
     }
 
     #[tokio::test]

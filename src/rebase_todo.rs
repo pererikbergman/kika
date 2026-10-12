@@ -20,19 +20,31 @@ const READ_ONLY: &str = "Read-only, fix with git rebase --edit-todo:";
 /// The most characters of a todo line a reason quotes.
 const QUOTED: usize = 20;
 
-/// Why `todo` is shown but not edited: the line that stops it, by number,
-/// as the user can find it in the file, after how to fix it.
-pub fn not_editable(todo: &[u8]) -> String {
-    match unreadable(todo) {
+/// The most characters of a config error a reason shows.
+const CONFIG_WHY: usize = 60;
+
+/// Why `todo` is shown but not edited, after how to fix it: the comment
+/// prefix git would use could not be read, or the line that stops it, by
+/// number, as the user can find it in the file. `comment` is the prefix
+/// read through `git config`.
+pub fn not_editable(todo: &[u8], comment: &Result<Vec<u8>, String>) -> String {
+    let prefix = match comment {
+        Ok(prefix) => prefix.as_slice(),
+        Err(why) => {
+            let why = cut(why.replace('\n', " "), CONFIG_WHY);
+            return format!("{READ_ONLY} core.commentChar: {why}");
+        }
+    };
+    match unreadable(todo, prefix) {
         Some(Unreadable::Nul) => format!("{READ_ONLY} a NUL byte ends what git reads"),
         Some(Unreadable::Line { number, text }) => {
             // Every command starts with a letter; a line led by another
-            // mark is most likely a comment, written with the comment
-            // character a user's core.commentChar chose instead of `#`.
+            // mark is most likely a comment written with another prefix
+            // than the one git will use, which git would refuse.
             let cause = if text.first().is_some_and(u8::is_ascii_punctuation) {
-                "comment not using #"
+                format!("comment not using {}", quoted(prefix))
             } else {
-                "unknown command"
+                "unknown command".into()
             };
             format!("{READ_ONLY} line {number}, {cause} \"{}\"", quoted(text))
         }
@@ -42,11 +54,15 @@ pub fn not_editable(todo: &[u8]) -> String {
 
 /// `text`, safe to print and cut to [`QUOTED`] characters.
 fn quoted(text: &[u8]) -> String {
-    let safe = terminal_safe(text);
-    if safe.chars().count() <= QUOTED {
+    cut(terminal_safe(text), QUOTED)
+}
+
+/// `safe` cut to `max` characters, the last one an ellipsis when cut.
+fn cut(safe: String, max: usize) -> String {
+    if safe.chars().count() <= max {
         return safe;
     }
-    let mut cut: String = safe.chars().take(QUOTED - 1).collect();
+    let mut cut: String = safe.chars().take(max - 1).collect();
     cut.push('…');
     cut
 }
@@ -63,6 +79,8 @@ pub struct TodoFile {
     pub todo: Vec<u8>,
     /// `rebase-merge/done`; `None` when it could not be read.
     pub done: Option<Vec<u8>>,
+    /// The prefix git skips lines by, or why it could not be read.
+    pub comment: Result<Vec<u8>, String>,
 }
 
 /// What a key asks of a commit, on a log row or a todo row.
@@ -84,27 +102,40 @@ pub struct RebaseTodo {
     pub editable: Result<(), String>,
     /// Git has done no step yet, so there is nothing to fold into.
     pub done_empty: bool,
+    /// The comment prefix the list was read with, which a write checks
+    /// it with again. Empty when it could not be read: no line is then a
+    /// comment, and the list is not edited.
+    pub comment: Vec<u8>,
 }
 
 impl RebaseTodo {
     pub fn load(file: TodoFile) -> Self {
-        let (entries, editable) = match parse_todo(&file.todo) {
-            Ok(entries) => (entries, Ok(())),
-            Err(_) => (Vec::new(), Err(not_editable(&file.todo))),
+        let comment = file.comment.clone().unwrap_or_default();
+        let parsed = match &file.comment {
+            Ok(_) => parse_todo(&file.todo, &comment).ok(),
+            Err(_) => None,
         };
-        let done_empty = file.done.as_deref().is_some_and(nothing_done);
+        let (entries, editable) = match parsed {
+            Some(entries) => (entries, Ok(())),
+            None => (Vec::new(), Err(not_editable(&file.todo, &file.comment))),
+        };
+        let done_empty = file
+            .done
+            .as_deref()
+            .is_some_and(|done| nothing_done(done, &comment));
         Self {
             path: file.path,
             original: file.todo,
             entries,
             editable,
             done_empty,
+            comment,
         }
     }
 
     /// The command lines as git wrote them, for a list that is not edited.
     pub fn raw_lines(&self) -> Vec<&[u8]> {
-        command_lines(&self.original).collect()
+        command_lines(&self.original, &self.comment).collect()
     }
 
     /// How many rows the panel shows for it.
@@ -130,9 +161,10 @@ impl RebaseTodo {
     }
 }
 
-/// Whether git's `done` list holds no step yet.
-pub fn nothing_done(done: &[u8]) -> bool {
-    command_lines(done).next().is_none()
+/// Whether git's `done` list holds no step yet, lines led by `comment`
+/// skipped.
+pub fn nothing_done(done: &[u8], comment: &[u8]) -> bool {
+    command_lines(done, comment).next().is_none()
 }
 
 /// Swap row `i` with the next to run (`Up`, as the list reads like future
@@ -281,6 +313,7 @@ mod tests {
             path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
             todo: todo.to_vec(),
             done: done.map(<[u8]>::to_vec),
+            comment: Ok(b"#".to_vec()),
         }
     }
 
@@ -308,11 +341,97 @@ mod tests {
         );
     }
 
+    fn file_with(todo: &[u8], comment: Result<&[u8], &str>) -> TodoFile {
+        TodoFile {
+            comment: comment.map(<[u8]>::to_vec).map_err(str::to_string),
+            ..file(todo, Some(b""))
+        }
+    }
+
+    #[test]
+    fn comments_led_by_the_configured_prefix_keep_the_list_editable() {
+        let text = b"; Rebase 1..2 onto 1\npick 1234 a\n";
+        let todo = RebaseTodo::load(file_with(text, Ok(b";")));
+        assert_eq!(todo.editable, Ok(()));
+        assert_eq!(todo.entries.len(), 1);
+        assert_eq!(todo.comment, b";");
+        assert_eq!(todo.raw_lines(), [&b"pick 1234 a"[..]]);
+        let hashed = RebaseTodo::load(file_with(text, Ok(b"#")));
+        assert_eq!(
+            hashed.editable,
+            Err(
+                "Read-only, fix with git rebase --edit-todo: line 1, comment not using # \
+                 \"; Rebase 1..2 onto 1\""
+                    .to_string()
+            )
+        );
+        let todo = RebaseTodo::load(TodoFile {
+            done: Some(b"; nothing yet\n".to_vec()),
+            ..file_with(b"pick 1234 a\n", Ok(b";"))
+        });
+        assert!(todo.done_empty);
+    }
+
+    #[test]
+    fn a_line_not_led_by_the_prefix_still_makes_the_list_read_only() {
+        let todo = RebaseTodo::load(file_with(b"pick 1234 a\n# help\n", Ok(b";")));
+        assert_eq!(
+            todo.editable,
+            Err(
+                "Read-only, fix with git rebase --edit-todo: line 2, comment not using ; \
+                 \"# help\""
+                    .to_string()
+            )
+        );
+        let todo = RebaseTodo::load(file_with(b"pick 1234 a\nexec make\n", Ok(b";")));
+        assert!(
+            todo.editable
+                .unwrap_err()
+                .ends_with("line 2, unknown command \"exec make\"")
+        );
+        let todo = RebaseTodo::load(file_with(b"# x\n", Ok(b"\x1b[2J")));
+        let why = todo.editable.unwrap_err();
+        assert!(why.contains("comment not using \u{FFFD}[2J"), "{why}");
+    }
+
+    #[test]
+    fn a_prefix_that_could_not_be_read_hides_nothing_and_names_the_error() {
+        let why = "fatal: bad config line 1\nin file .git/config";
+        for text in [
+            &b"# Rebase 1..2 onto 1\npick 1234 a\n"[..],
+            b"pick 1234 a\n",
+        ] {
+            let todo = RebaseTodo::load(file_with(text, Err(why)));
+            assert_eq!(
+                todo.editable,
+                Err(
+                    "Read-only, fix with git rebase --edit-todo: core.commentChar: \
+                     fatal: bad config line 1 in file .git/config"
+                        .to_string()
+                )
+            );
+            assert!(todo.entries.is_empty());
+            assert!(todo.comment.is_empty());
+            assert_eq!(
+                todo.edit(0, Rewrite::Edit(Edit::Drop)),
+                Err(todo.editable.clone().unwrap_err())
+            );
+        }
+        let todo = RebaseTodo::load(file_with(b"# c\npick 1234 a\n", Err(why)));
+        assert_eq!(todo.raw_lines(), [&b"# c"[..], b"pick 1234 a"]);
+        let long = "e".repeat(200);
+        let todo = RebaseTodo::load(file_with(b"", Err(&long)));
+        let shown = todo.editable.unwrap_err();
+        let cause = shown.split("core.commentChar: ").nth(1).unwrap();
+        assert_eq!(cause.chars().count(), CONFIG_WHY, "{shown}");
+        assert!(cause.ends_with('…'), "{shown}");
+    }
+
     #[test]
     fn a_quoted_line_is_made_safe_and_cut_short() {
         let mut line = b"exec \x1b[31m".to_vec();
         line.extend_from_slice("é".repeat(60).as_bytes());
-        let why = not_editable(&line);
+        let why = not_editable(&line, &Ok(b"#".to_vec()));
         assert!(!why.contains('\x1b'), "{why}");
         let quote = why.split('"').nth(1).unwrap();
         assert_eq!(quote.chars().count(), QUOTED);
@@ -329,7 +448,7 @@ mod tests {
         let todo = RebaseTodo::load(file(b"pick 1111 one\n\texec touch x\n", Some(b"")));
         assert!(todo.editable.as_ref().unwrap_err().contains(": line 2, "));
         assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..], b"exec touch x"]);
-        assert!(!nothing_done(b"  pick 1111 one\n"));
+        assert!(!nothing_done(b"  pick 1111 one\n", b"#"));
     }
 
     #[test]
@@ -345,7 +464,7 @@ mod tests {
         );
         let todo = RebaseTodo::load(file(b"pick 1111 one\0\n", None));
         assert_eq!(todo.raw_lines(), [&b"pick 1111 one"[..]]);
-        assert!(nothing_done(b"\0pick 1111 one\n"));
+        assert!(nothing_done(b"\0pick 1111 one\n", b"#"));
     }
 
     #[test]
@@ -465,6 +584,6 @@ mod tests {
             text,
             b"edit aaaa subject aaaa\nbreak\nupdate-ref refs/heads/x\ndrop bbbb\n"
         );
-        assert_eq!(parse_todo(&text), Ok(entries));
+        assert_eq!(parse_todo(&text, b"#"), Ok(entries));
     }
 }
