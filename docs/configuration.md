@@ -1216,6 +1216,18 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Leave commits behind?
+
+Asked before a detached `HEAD` moves off commits that no branch, tag or
+remote-tracking branch reaches. Afterwards only the reflog has them, so
+`enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `leave_commits.yes` | `y` | Yes, move HEAD and leave the commits behind | locked |
+| `leave_commits.no` | `n`, `esc` | No, stay where HEAD is | locked |
+| `leave_commits.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Drop stash?
 
 A dropped stash is gone from the stash list, so `enter` does not answer it.

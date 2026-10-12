@@ -18,6 +18,7 @@ pub mod fetch;
 pub mod forge_remote;
 pub mod head;
 mod joiner;
+pub mod left_behind;
 pub mod log;
 pub mod ops;
 pub mod patch;
