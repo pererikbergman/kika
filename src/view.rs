@@ -21,6 +21,7 @@ use crate::popup_view;
 use crate::remote_run::RemoteRun;
 use crate::remotes_view;
 use crate::rendered_view::RenderedDiff;
+use crate::stash_view;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -73,7 +74,9 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             SidePanel::Commits => {
                 commits_view::render_commits_panel(state, &look, expanded, frame, area)
             }
-            SidePanel::Stash => render_placeholder(side, &look, expanded, frame, area),
+            SidePanel::Stash => {
+                stash_view::render_stash_panel(&state.stash, &look, expanded, frame, area)
+            }
         }
     }
     let Some(area) = layout.rect(Panel::Diff) else {
@@ -106,6 +109,16 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         // A commit's file, streamed like a working-tree diff; never rendered.
         (Focus::Commits, ..) if state.commits.open.is_some() => {
             render_diff_pane(&state.diff, options, &look, frame, area)
+        }
+        // A stash's file, the same way.
+        (Focus::Stash, ..) if state.stash.open.is_some() => {
+            render_diff_pane(&state.diff, options, &look, frame, area)
+        }
+        // A tool's rows show no patch lines, so no cursor is drawn on them.
+        (Focus::Diff(view), Some(rendered), Some(label)) if state.display_only() => {
+            let suffix = format!("{label} (display only)");
+            let block = look.block(hunk_title(view, options, &suffix, &look));
+            render_rendered(rendered, block, None, hint, frame, area);
         }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
@@ -237,25 +250,6 @@ fn panel_block(title: String, focused: bool) -> Block<'static> {
     } else {
         block.border_style(Style::new().fg(Color::DarkGray))
     }
-}
-
-/// A side panel with nothing to show yet. Expanded, it says so.
-fn render_placeholder(
-    side: SidePanel,
-    look: &PanelLook,
-    expanded: bool,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let text = if expanded {
-        Line::styled("Nothing here yet", Style::new().fg(Color::DarkGray))
-    } else {
-        Line::raw("")
-    };
-    frame.render_widget(
-        Paragraph::new(text).block(look.block(look.title(side.title()))),
-        area,
-    );
 }
 
 /// Where the user is: the branch, its upstream, and any operation in
@@ -1870,7 +1864,7 @@ mod tests {
     fn the_launch_repository_has_a_plain_status_title() {
         let state = on(branch(Head::Branch("main".into())));
         let rows = draw(&state, 80, 24);
-        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
     }
 
     /// The Files panel's title row and the row below it.
@@ -1887,13 +1881,22 @@ mod tests {
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
         state.selected = Some(0);
 
-        // 80x24: the others keep a border and a line each.
+        // 80x24: the others drop to a title and a line each, so Files
+        // keeps 13 rows inside its border.
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[0].starts_with("┌ [1] Status "), "{rows:#?}");
-        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        assert!(rows[1].starts_with("main "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
-        assert_eq!(title, 3, "{rows:#?}");
+        assert_eq!(title, 2, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
+        for row in &rows[3..16] {
+            assert!(row.starts_with('│'), "{rows:#?}");
+        }
+        assert!(rows[16].starts_with('└'), "{rows:#?}");
+        for (row, name) in [(17, "[3] Branches"), (19, "[4] Commits"), (21, "[5] Stash")] {
+            assert!(rows[row].starts_with(&format!(" {name} ─")), "{rows:#?}");
+            assert!(!rows[row + 1].starts_with('│'), "{rows:#?}");
+        }
 
         // 80x12: only their titles, on a top border.
         // A title row carries the branch, the panel's one line.
@@ -1925,7 +1928,7 @@ mod tests {
         let mut state = on(main);
         state.files = vec![file("a.rs")];
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+        assert!(rows[1].starts_with("main "), "{rows:#?}");
         assert!(!contains(&rows, "origin/main"), "{rows:#?}");
 
         // Height 10: 9 rows over the bar; four title rows leave Status five.
@@ -1941,27 +1944,14 @@ mod tests {
     fn a_collapsed_files_panel_counts_the_files() {
         let mut state = status_focused(&loaded(vec![file("a.rs"), file("b.rs")]));
         let rows = draw(&state, 80, 24);
-        assert!(contains(&rows, "│2 files "), "{rows:#?}");
+        assert!(files_rows(&rows).1.starts_with("2 files "), "{rows:#?}");
         assert!(!contains(&rows, " M a.rs"), "{rows:#?}");
         state.files.pop();
-        assert!(contains(&draw(&state, 80, 24), "│1 file "));
+        let rows = draw(&state, 80, 24);
+        assert!(files_rows(&rows).1.starts_with("1 file "), "{rows:#?}");
         state.files.clear();
-        assert!(contains(&draw(&state, 80, 24), "│No changes "));
-    }
-
-    #[test]
-    fn an_expanded_placeholder_says_nothing_is_here_yet() {
-        let mut state = loaded(vec![]);
-        assert!(!contains(&draw(&state, 80, 24), "Nothing here yet"));
-        // Only Stash is still a placeholder.
-        let side = SidePanel::Stash;
-        state.focus = Focus::side(side);
-        state.expanded = side;
-        let buffer = draw_buffer(&state, 80, 24);
-        let (x, y) = find(&buffer, "Nothing here yet");
-        assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
-        let title = format!("[{}] {}", side.number(), side.title());
-        assert!(y > find(&buffer, &title).1);
+        let rows = draw(&state, 80, 24);
+        assert!(files_rows(&rows).1.starts_with("No changes "), "{rows:#?}");
     }
 
     #[test]
@@ -2114,7 +2104,7 @@ mod tests {
             state,
             &[
                 ("workspace.zoom", &["Z"]),
-                ("workspace.focus_status", &["s"]),
+                ("workspace.focus_status", &["x"]),
             ],
         );
         state.help_open = true;
@@ -2126,11 +2116,11 @@ mod tests {
                 .clone()
         };
         assert!(row("Zoom the focused panel").contains(" Z "), "{rows:#?}");
-        assert!(row("Focus the Status panel").contains(" s "), "{rows:#?}");
+        assert!(row("Focus the Status panel").contains(" x "), "{rows:#?}");
 
         state.help_open = false;
         state.update(crate::intent::AppIntent::Key(crate::keymap::KeyPress::new(
-            crossterm::event::KeyCode::Char('s'),
+            crossterm::event::KeyCode::Char('x'),
             crossterm::event::KeyModifiers::NONE,
         )));
         assert_eq!(state.focus, Focus::Status);
@@ -3494,7 +3484,7 @@ mod tests {
         // Without colour too: the focused frame is thick, the others thin.
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "┏ [2] Files ━"), "{rows:#?}");
-        assert!(contains(&rows, "┌ [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
         assert!(contains(&rows, "┌ [0] Diff "), "{rows:#?}");
         for other in ["[1] Status", "[3] Branches", "[5] Stash", "[0] Diff"] {
             let (border, title) = frame_style(&buffer, other);
@@ -3887,7 +3877,7 @@ mod tests {
         let state = on(main);
         let buffer = draw_buffer(&state, 80, 24);
         let rows = buffer_rows(&buffer);
-        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
+        assert!(rows[1].starts_with("main rebasing "), "{rows:#?}");
         let (x, y) = find(&buffer, "rebasing");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
     }
@@ -4078,6 +4068,7 @@ mod tests {
         state.renderers = vec![ExternalRenderer {
             label: "delta".into(),
             argv: vec!["delta".into()],
+            kind: crate::external_diff::RendererKind::Pager,
         }];
         state.renderer = Some(0);
         let side = match &state.focus {
@@ -4197,6 +4188,26 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_tools_rows_are_drawn_display_only_without_a_cursor() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        // Side by side, so a pager's rows here would be unmapped.
+        through_renderer(&mut state, "old one │ new one\nsame │ same\n");
+        state.renderers[0].label = "difft".into();
+        state.renderers[0].kind = crate::external_diff::RendererKind::Tool;
+        if let Some(rendered) = &mut state.rendered {
+            rendered.map.clear();
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(
+            contains(&rows, " Unstaged a.rs · difft (display only) "),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "old one │ new one"), "{rows:#?}");
+        assert!(!contains(&rows, "-old one"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains('▌')), "{rows:#?}");
+    }
+
+    #[test]
     fn a_renderer_error_or_a_render_in_flight_says_so() {
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
         through_renderer(&mut state, "");
@@ -4258,6 +4269,7 @@ mod tests {
             .push(crate::external_diff::ExternalRenderer {
                 label: "riff".into(),
                 argv: vec!["riff".into()],
+                kind: crate::external_diff::RendererKind::Pager,
             });
         let rows = draw(&state, 80, 24);
         assert!(

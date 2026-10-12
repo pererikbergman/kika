@@ -2,13 +2,15 @@
 //! is an intent, and it can be disabled with a reason, as a key can.
 
 use crate::bisect;
+use crate::clipboard::CopyWhat;
 use crate::git::bisect::BisectMark;
 use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::git::repo_state::Operation;
+use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    Reason, amend_disabled, commit_disabled, merge_disabled, never, reset_disabled,
-    stage_all_disabled, stage_disabled,
+    OP_RUNNING, Reason, amend_disabled, commit_disabled, merge_disabled, never, no_commit_selected,
+    reset_disabled, stage_all_disabled, stage_disabled,
 };
 use crate::model::AppState;
 use crate::popup::{ConfirmKind, PromptKind};
@@ -21,8 +23,12 @@ pub enum MenuId {
     Merge,
     /// Reset the current branch to the selected commit.
     Reset,
+    /// Put changes aside in a new stash.
+    Stash,
     /// Mark the selected commit for a bisect, or end the bisect.
     Bisect,
+    /// Copy the selected commit's hash or message to the clipboard.
+    Copy,
 }
 
 impl MenuId {
@@ -32,7 +38,9 @@ impl MenuId {
             MenuId::Stage => "Stage",
             MenuId::Merge => "Merge / rebase",
             MenuId::Reset => "Reset to commit",
+            MenuId::Stash => "Stash",
             MenuId::Bisect => "Bisect",
+            MenuId::Copy => "Copy",
         }
     }
 }
@@ -157,6 +165,75 @@ static RESET: &[MenuItem] = &[
     },
 ];
 
+/// Why nothing can be stashed now: one operation at a time, and git
+/// cannot stash a conflicted index.
+fn stash_blocked(state: &AppState) -> Option<Reason> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING.into())
+    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+        Some("Resolve conflicts first".into())
+    } else {
+        None
+    }
+}
+
+/// Untracked files stay behind, so they alone are nothing to stash.
+pub(crate) fn stash_all_disabled(state: &AppState) -> Option<Reason> {
+    stash_blocked(state).or_else(|| {
+        (!state.files.iter().any(|f| f.kind != EntryKind::Untracked))
+            .then_some("No changes to stash".into())
+    })
+}
+
+pub(crate) fn stash_untracked_disabled(state: &AppState) -> Option<Reason> {
+    stash_blocked(state).or_else(|| {
+        state
+            .files
+            .is_empty()
+            .then_some("No changes to stash".into())
+    })
+}
+
+pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
+    stash_blocked(state).or_else(|| {
+        (!state.files.iter().any(|f| !matches!(f.index, '.' | '?')))
+            .then_some("Nothing staged".into())
+    })
+}
+
+pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
+    stash_blocked(state).or_else(|| {
+        state
+            .selected
+            .and_then(|i| state.files.get(i))
+            .is_none()
+            .then_some("No file selected".into())
+    })
+}
+
+static STASH: &[MenuItem] = &[
+    MenuItem {
+        label: "Stash all changes…",
+        intent: AppIntent::StashAll,
+        disabled: stash_all_disabled,
+    },
+    MenuItem {
+        label: "Stash all, including untracked…",
+        intent: AppIntent::StashIncludingUntracked,
+        disabled: stash_untracked_disabled,
+    },
+    MenuItem {
+        label: "Stash staged changes only…",
+        intent: AppIntent::StashStaged,
+        disabled: stash_staged_disabled,
+    },
+    MenuItem {
+        label: "Stash this file…",
+        intent: AppIntent::StashFile,
+        disabled: stash_file_disabled,
+    },
+];
+
 static BISECT: &[MenuItem] = &[
     MenuItem {
         label: "Mark selected bad (starts a bisect)",
@@ -180,6 +257,29 @@ static BISECT: &[MenuItem] = &[
     },
 ];
 
+static COPY: &[MenuItem] = &[
+    MenuItem {
+        label: "Full hash",
+        intent: AppIntent::CopyCommitText(CopyWhat::Hash),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Short hash",
+        intent: AppIntent::CopyCommitText(CopyWhat::ShortHash),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Subject",
+        intent: AppIntent::CopyCommitText(CopyWhat::Subject),
+        disabled: no_commit_selected,
+    },
+    MenuItem {
+        label: "Full message",
+        intent: AppIntent::CopyCommitText(CopyWhat::Message),
+        disabled: no_commit_selected,
+    },
+];
+
 pub fn items(id: MenuId) -> &'static [MenuItem] {
     match id {
         MenuId::Actions => ACTIONS,
@@ -187,5 +287,91 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
         MenuId::Merge => MERGE,
         MenuId::Reset => RESET,
         MenuId::Bisect => BISECT,
+        MenuId::Copy => COPY,
+        MenuId::Stash => STASH,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::FileEntry;
+    use crate::model::Context;
+
+    fn file(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind,
+        }
+    }
+
+    /// Each stash item's reason; all of them are fixed text.
+    fn reasons(files: Vec<FileEntry>, selected: Option<usize>) -> Vec<Option<&'static str>> {
+        let mut state = AppState::new(Context::Workspace);
+        state.files = files;
+        state.selected = selected;
+        items(MenuId::Stash)
+            .iter()
+            .map(|item| match (item.disabled)(&state) {
+                Some(std::borrow::Cow::Borrowed(reason)) => Some(reason),
+                Some(owned) => panic!("not fixed text: {owned}"),
+                None => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_stash_item_says_when_it_has_nothing_to_take() {
+        let none = "No changes to stash";
+        assert_eq!(
+            reasons(vec![], None),
+            [
+                Some(none),
+                Some(none),
+                Some("Nothing staged"),
+                Some("No file selected")
+            ]
+        );
+        // Only an untracked file: only "including untracked" and "this file".
+        let untracked = file("new", '?', '?', EntryKind::Untracked);
+        assert_eq!(
+            reasons(vec![untracked], Some(0)),
+            [Some(none), None, Some("Nothing staged"), None]
+        );
+        let unstaged = file("a", '.', 'M', EntryKind::Changed);
+        assert_eq!(
+            reasons(vec![unstaged.clone()], Some(0)),
+            [None, None, Some("Nothing staged"), None]
+        );
+        let staged = file("b", 'M', '.', EntryKind::Changed);
+        assert_eq!(
+            reasons(vec![unstaged, staged], None),
+            [None, None, None, Some("No file selected")]
+        );
+    }
+
+    #[test]
+    fn every_stash_item_waits_for_conflicts_and_running_ops() {
+        let files = vec![
+            file("a", 'M', 'M', EntryKind::Changed),
+            file("both", 'U', 'U', EntryKind::Conflicted),
+        ];
+        let conflicts = Some("Resolve conflicts first");
+        assert_eq!(reasons(files.clone(), Some(0)), [conflicts; 4]);
+
+        let mut state = AppState::new(Context::Workspace);
+        state.files = files;
+        state.op_seq = Some(1);
+        for item in items(MenuId::Stash) {
+            assert_eq!(
+                (item.disabled)(&state),
+                Some(OP_RUNNING.into()),
+                "{}",
+                item.label
+            );
+        }
     }
 }

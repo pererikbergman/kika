@@ -74,6 +74,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::DropStash(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Worktrees(list) => {
                 crate::worktrees_view::render_worktrees(state, list, top, frame, area)
@@ -713,6 +719,34 @@ mod tests {
     }
 
     #[test]
+    fn the_drop_stash_question_names_the_entry_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::stash::StashRef;
+        use crate::popup::DropStashConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::DropStash(DropStashConfirm {
+            label: "stash@{1}: On main: wip".into(),
+            op: GitOp::StashDrop(StashRef {
+                index: 1,
+                oid: CommitId::parse("abc").unwrap(),
+            }),
+        })];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Drop stash "), "{rows:#?}");
+        assert!(
+            contains(
+                &rows,
+                "Drop stash@{1}: On main: wip? It cannot be recovered"
+            ),
+            "{rows:#?}"
+        );
+        assert!(
+            rows[11].starts_with(" y drop  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
         use crate::git::commit_files::CommitId;
         use crate::git::undo::{Direction, Expected, Step};
@@ -1250,5 +1284,37 @@ mod tests {
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Reset bisect "), "{rows:#?}");
         assert!(contains(&rows, "HEAD goes back to feature;"), "{rows:#?}");
+    }
+
+    #[test]
+    fn the_copy_menu_draws_its_four_items_and_the_bar_says_what_was_copied() {
+        let mut state = workspace(&[]);
+        state.commits.rows = vec![crate::git::log::CommitRow {
+            oid: "abc1234def".into(),
+            short_oid: "abc1234".into(),
+            parents: vec![],
+            author: "Ann".into(),
+            time: 0,
+            subject: "s".into(),
+        }];
+        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        state.commits.graph = vec![graph];
+        state.popups = vec![Popup::Menu {
+            id: MenuId::Copy,
+            cursor: 0,
+        }];
+        let (_, rows) = draw(&state, 80, 24);
+        assert!(contains(&rows, " Copy "), "{rows:#?}");
+        for label in ["Full hash", "Short hash", "Subject", "Full message"] {
+            assert!(contains(&rows, label), "{label}: {rows:#?}");
+        }
+
+        state.popups.clear();
+        state.update(crate::intent::AppIntent::CopyCommitText(
+            crate::clipboard::CopyWhat::Hash,
+        ));
+        let (_, rows) = draw(&state, 80, 24);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("Copied hash: abc1234def"), "{bar:?}");
     }
 }

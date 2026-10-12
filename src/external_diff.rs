@@ -1,8 +1,12 @@
-//! Diff renderers the user already reads diffs through, such as a pager
-//! configured for `git diff`. Found once at boot, run on one file's plain
-//! diff at a time, and never through a shell: a value that needs one is
-//! refused. Rendered rows are mapped back to the patch lines they show, so
-//! hunk and line staging still act on the parsed patch.
+//! Diff renderers the user already reads diffs through. Two kinds: a pager
+//! (such as one configured for `git diff`) reads one file's plain diff on
+//! stdin, and its rendered rows are mapped back to the patch lines they
+//! show, so hunk and line staging still act on the parsed patch. A tool
+//! (the global config's `[diff] tool`) is given the old and new contents
+//! as two temp files instead; its rows have no line identity, so the pane
+//! is display-only while it is active. Both are found once at boot, run
+//! with the same caps, and never through a shell: a value that needs one
+//! is refused.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
@@ -24,12 +28,22 @@ pub struct ExternalRenderer {
     /// The program's basename, for the pane title.
     pub label: String,
     pub argv: Vec<OsString>,
+    pub kind: RendererKind,
+}
+
+/// How a renderer is fed, and so whether its rows can be staged from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererKind {
+    /// Reads the plain diff on stdin; rows map back to patch lines.
+    Pager,
+    /// Run on `-- OLD NEW` temp files; rows are for reading only.
+    Tool,
 }
 
 /// What `R` says when there is nothing to cycle through, and where
 /// renderers are found.
 pub const NO_RENDERER: &str =
-    "No renderer: set [diff] pager in the global config or git core.pager";
+    "No renderer: set [diff] pager or tool in the global config, or git core.pager";
 
 /// The most diff fed to a renderer, and the most output taken back.
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -73,10 +87,17 @@ pub fn parse_command(value: &str) -> Result<Vec<OsString>, &'static str> {
 
 /// The renderers to offer, in cycle order: `configured` (the global Kika
 /// config's `[diff] pager`), then the user's global git `pager.diff` and
-/// `core.pager`. Only global config is read: a repository's own config can
-/// come with a copy from someone else, and renderers run without the user
-/// typing a command. Switches and plain viewers are skipped from any source.
-pub fn discover(runner: &dyn GitRunner, configured: Option<String>) -> Vec<ExternalRenderer> {
+/// `core.pager`, then `tool` (the global Kika config's `[diff] tool`). Only
+/// global config is read: a repository's own config can come with a copy
+/// from someone else, and renderers run without the user typing a command.
+/// Switches and plain viewers are skipped from any pager source. The tool
+/// comes from Kika's file alone: git's own external diff settings run
+/// through a shell, so they are never looked up.
+pub fn discover(
+    runner: &dyn GitRunner,
+    configured: Option<String>,
+    tool: Option<String>,
+) -> Vec<ExternalRenderer> {
     let git = ["pager.diff", "core.pager"]
         .into_iter()
         .map(|key| global_config(runner, key));
@@ -92,7 +113,18 @@ pub fn discover(runner: &dyn GitRunner, configured: Option<String>) -> Vec<Exter
         if VIEWERS.contains(&label.as_str()) || found.iter().any(|r| r.argv == argv) {
             continue;
         }
-        found.push(ExternalRenderer { label, argv });
+        found.push(ExternalRenderer {
+            label,
+            argv,
+            kind: RendererKind::Pager,
+        });
+    }
+    if let Some(argv) = tool.as_deref().and_then(|t| parse_command(t).ok()) {
+        found.push(ExternalRenderer {
+            label: basename(&argv[0]),
+            argv,
+            kind: RendererKind::Tool,
+        });
     }
     found
 }
@@ -153,6 +185,19 @@ pub fn read_diff(
     Ok(diff)
 }
 
+/// How long a renderer may run and how much it may print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub timeout: Duration,
+    pub max_output: usize,
+}
+
+/// The caps every renderer runs under.
+pub const LIMITS: Limits = Limits {
+    timeout: TIMEOUT,
+    max_output: MAX_BYTES,
+};
+
 /// Run `renderer` on `input` at `cols` columns, in `workdir`, within the
 /// time and output caps.
 pub fn run_renderer(
@@ -161,19 +206,18 @@ pub fn run_renderer(
     input: &[u8],
     cols: u16,
 ) -> Result<Vec<u8>, String> {
-    run_limited(renderer, workdir, input, cols, TIMEOUT, MAX_BYTES)
+    run(renderer, workdir, &[], input, cols, LIMITS)
 }
 
-/// [`run_renderer`] with its caps as parameters, so tests can shorten them.
-/// Repo content reaches the renderer on stdin only, never in argv or env.
-fn run_limited(
+/// The renderer's process, not yet started: its argv, then `extra_args`,
+/// with the program found by [`resolve`] and the pane width in `COLUMNS`
+/// and `DFT_WIDTH` (a tool that ignores `COLUMNS` when piped reads that).
+/// No shell is involved.
+fn command(
     renderer: &ExternalRenderer,
-    workdir: &Path,
-    input: &[u8],
+    extra_args: &[OsString],
     cols: u16,
-    timeout: Duration,
-    max_output: usize,
-) -> Result<Vec<u8>, String> {
+) -> Result<Command, String> {
     let label = &renderer.label;
     let (program, args) = renderer
         .argv
@@ -183,18 +227,40 @@ fn run_limited(
     let mut command = Command::new(program);
     command
         .args(args)
+        .args(extra_args)
         .env("COLUMNS", cols.to_string())
+        .env("DFT_WIDTH", cols.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so a kill reaches whatever it starts.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    Ok(command)
+}
+
+/// Run `renderer` with `extra_args` after its argv and `input` on stdin,
+/// within `limits`. A pager gets repo content on stdin only; a tool gets
+/// the names of Kika's own temp files, never a repo file name.
+pub fn run(
+    renderer: &ExternalRenderer,
+    workdir: &Path,
+    extra_args: &[OsString],
+    input: &[u8],
+    cols: u16,
+    limits: Limits,
+) -> Result<Vec<u8>, String> {
+    let Limits {
+        timeout,
+        max_output,
+    } = limits;
+    let label = &renderer.label;
+    let mut command = command(renderer, extra_args, cols)?;
     // A runner with no directory has nothing to offer; the program is
     // already absolute, so the current one does no harm.
     if !workdir.as_os_str().is_empty() {
         command.current_dir(workdir);
     }
-    // Its own process group, so a kill reaches whatever it starts.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command
         .spawn()
         .map_err(|e| terminal_safe(format!("{label}: {e}").as_bytes()))?;
@@ -355,6 +421,7 @@ mod tests {
         ExternalRenderer {
             label: basename(OsStr::new(argv[0])),
             argv: os(argv),
+            kind: RendererKind::Pager,
         }
     }
 
@@ -405,7 +472,7 @@ mod tests {
         let runner = FakeRunner::new()
             .expect(&PAGER, ok(b"delta --dark\n"))
             .expect(&CORE, ok(b"/opt/bin/diff-so-fancy\n"));
-        let found = discover(&runner, Some("riff".into()));
+        let found = discover(&runner, Some("riff".into()), None);
         assert_eq!(labels(&found), ["riff", "delta", "diff-so-fancy"]);
         assert_eq!(found[1].argv, os(&["delta", "--dark"]));
         runner.assert_done();
@@ -416,7 +483,7 @@ mod tests {
         let runner = FakeRunner::new()
             .expect(&PAGER, fail(""))
             .expect(&CORE, ok(b"delta\n"));
-        assert_eq!(labels(&discover(&runner, None)), ["delta"]);
+        assert_eq!(labels(&discover(&runner, None, None)), ["delta"]);
         // `expect` checked each argv in full, `--global` included.
         runner.assert_done();
     }
@@ -435,14 +502,73 @@ mod tests {
             let runner = FakeRunner::new()
                 .expect(&PAGER, ok(value))
                 .expect(&CORE, ok(b""));
-            assert!(discover(&runner, None).is_empty(), "{value:?}");
+            assert!(discover(&runner, None, None).is_empty(), "{value:?}");
             // The same rules hold for Kika's own `[diff] pager`.
             let runner = FakeRunner::new()
                 .expect(&PAGER, ok(b""))
                 .expect(&CORE, ok(b""));
             let configured = String::from_utf8(value.to_vec()).unwrap();
-            assert!(discover(&runner, Some(configured)).is_empty(), "{value:?}");
+            assert!(
+                discover(&runner, Some(configured), None).is_empty(),
+                "{value:?}"
+            );
         }
+    }
+
+    #[test]
+    fn discover_offers_the_tool_after_the_pagers_without_asking_git_about_it() {
+        let runner = FakeRunner::new()
+            .expect(&PAGER, ok(b"delta\n"))
+            .expect(&CORE, ok(b""));
+        let found = discover(
+            &runner,
+            Some("riff".into()),
+            Some("difft --color=always".into()),
+        );
+        assert_eq!(labels(&found), ["riff", "delta", "difft"]);
+        let kinds: Vec<RendererKind> = found.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [RendererKind::Pager, RendererKind::Pager, RendererKind::Tool]
+        );
+        assert_eq!(found[2].argv, os(&["difft", "--color=always"]));
+        // Only the two pager lookups: no other git config is read.
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_tool_is_offered_even_with_a_viewer_name_but_never_when_refused() {
+        let empty = || {
+            FakeRunner::new()
+                .expect(&PAGER, ok(b""))
+                .expect(&CORE, ok(b""))
+        };
+        // A tool is what the user named for it; the pager filters do not apply.
+        let found = discover(&empty(), None, Some("cat".into()));
+        assert_eq!(labels(&found), ["cat"]);
+        assert_eq!(found[0].kind, RendererKind::Tool);
+        assert!(discover(&empty(), None, Some("difft | less".into())).is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore = "sh is a Unix name")]
+    fn the_tool_command_is_argv_only_with_the_pane_width() {
+        let tool = ExternalRenderer {
+            label: "sh".into(),
+            argv: os(&["sh", "--flag"]),
+            kind: RendererKind::Tool,
+        };
+        let extra = os(&["--", "/tmp/k/old.rs", "/tmp/k/new.rs"]);
+        let command = command(&tool, &extra, 61).unwrap();
+        assert_eq!(
+            Some(command.get_program()),
+            resolve(OsStr::new("sh")).as_deref().map(Path::as_os_str)
+        );
+        let args: Vec<&OsStr> = command.get_args().collect();
+        assert_eq!(args, ["--flag", "--", "/tmp/k/old.rs", "/tmp/k/new.rs"]);
+        let envs: Vec<(&OsStr, Option<&OsStr>)> = command.get_envs().collect();
+        assert!(envs.contains(&(OsStr::new("COLUMNS"), Some(OsStr::new("61")))));
+        assert!(envs.contains(&(OsStr::new("DFT_WIDTH"), Some(OsStr::new("61")))));
     }
 
     #[test]
@@ -450,7 +576,10 @@ mod tests {
         let runner = FakeRunner::new()
             .expect(&PAGER, ok(b"delta"))
             .expect(&CORE, ok(b"delta"));
-        assert_eq!(labels(&discover(&runner, Some("delta".into()))), ["delta"]);
+        assert_eq!(
+            labels(&discover(&runner, Some("delta".into()), None)),
+            ["delta"]
+        );
     }
 
     #[test]
@@ -485,7 +614,11 @@ mod tests {
     fn a_renderer_past_its_time_is_killed_and_reported() {
         let r = renderer(&["sh", "-c", "sleep 30"]);
         let start = Instant::now();
-        let result = run_limited(&r, Path::new("/"), b"", 80, Duration::from_millis(200), 100);
+        let limits = Limits {
+            timeout: Duration::from_millis(200),
+            max_output: 100,
+        };
+        let result = run(&r, Path::new("/"), &[], b"", 80, limits);
         assert_eq!(result, Err("sh timed out".into()));
         assert!(start.elapsed() < Duration::from_secs(5));
     }
@@ -494,7 +627,11 @@ mod tests {
     #[test]
     fn too_much_output_is_refused() {
         let r = renderer(&["sh", "-c", "yes"]);
-        let result = run_limited(&r, Path::new("/"), b"", 80, Duration::from_secs(10), 1000);
+        let limits = Limits {
+            timeout: Duration::from_secs(10),
+            max_output: 1000,
+        };
+        let result = run(&r, Path::new("/"), &[], b"", 80, limits);
         assert_eq!(result, Err("Output of sh is too large".into()));
     }
 

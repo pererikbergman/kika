@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use crossterm::event::{Event, KeyEventKind};
 
 use crate::ansi::StyledRow;
+use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
@@ -13,7 +14,7 @@ use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branch_tips::Tip;
 use crate::git::branches::{Branch, LogRow};
-use crate::git::commit_files::CommitFile;
+use crate::git::commit_files::{CommitFile, CommitId};
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
@@ -27,10 +28,12 @@ use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
+use crate::git::stash::{StashEntry, StashFile};
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::git::tags::TagRef;
 use crate::git::worktrees::Worktree;
+use crate::gitignore::IgnoreAdded;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -241,6 +244,48 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<Vec<CommitFile>, String>,
     },
+    /// The stash list was read; `tag` says which load.
+    StashesLoaded {
+        tag: Tag,
+        result: Result<Vec<StashEntry>, String>,
+    },
+    /// Move the stash cursor down or up.
+    StashNext,
+    StashPrev,
+    /// Show the selected stash's files in place of the list.
+    OpenStashFiles,
+    /// Back from a stash's files to the list, at the same entry.
+    CloseStashFiles,
+    /// Move the cursor in a stash's files down or up.
+    StashFileNext,
+    StashFilePrev,
+    /// A stash's files were read; `tag` says which load.
+    StashFilesLoaded {
+        tag: Tag,
+        result: Result<Vec<StashFile>, String>,
+    },
+    /// Apply the selected stash and keep it.
+    ApplyStash,
+    /// Apply the selected stash and drop it.
+    PopStash,
+    /// Ask before dropping the selected stash.
+    DropStash,
+    /// Drop the stash the question was about.
+    ConfirmDropStash,
+    /// Ask for a new message for the selected stash.
+    RenameStash,
+    /// The new message typed for the stash the prompt was about.
+    RenameStashTo(String),
+    /// Ask for a message, then stash every tracked change.
+    StashAll,
+    /// Ask for a message, then stash every change, untracked files too.
+    StashIncludingUntracked,
+    /// Ask for a message, then stash only the staged changes.
+    StashStaged,
+    /// Ask for a message, then stash only the selected file.
+    StashFile,
+    /// The message typed for the stash being made; empty for git's own.
+    StashMessageAnswered(String),
     /// Open the list of submodules and load it.
     OpenSubmodules,
     /// The submodule list was read; `tag` says which load.
@@ -542,6 +587,28 @@ pub enum AppIntent {
     ClearCopied,
     /// Cherry-pick the copied commits onto the current branch.
     PasteCommits,
+    /// Put the selected commit's hash, subject or message on the system
+    /// clipboard.
+    CopyCommitText(CopyWhat),
+    /// A commit's full message was read to copy it; `tag` says which read.
+    CommitMessageLoaded {
+        tag: Tag,
+        oid: CommitId,
+        result: Result<String, String>,
+    },
+    /// The text could not be sent to the clipboard, and why.
+    CopyFailed(String),
+    /// Ask which pattern to add to `.gitignore` for the selected
+    /// untracked file, offering the one that matches exactly it.
+    OpenIgnore,
+    /// The pattern the `.gitignore` prompt was accepted with.
+    IgnorePatternAnswered(String),
+    /// The pattern was added to `.gitignore`, or was there already, or
+    /// why not. The text is the pattern as shown.
+    IgnoreWritten {
+        tag: Tag,
+        result: Result<IgnoreAdded, String>,
+    },
     /// Reset the current branch to the selected commit. A hard reset asks
     /// first.
     ResetTo(ResetMode),

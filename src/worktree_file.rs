@@ -1,15 +1,16 @@
-//! Reading and replacing one file in the worktree by its repo path, for
-//! the conflict view, or one file by its full path, for git's own files.
-//! Blocking; called from tasks.
+//! Reading, replacing and creating one file in the worktree by its repo
+//! path, for the conflict view and `.gitignore`, or one file by its full
+//! path, for git's own files. Blocking; called from tasks.
 //!
-//! The path comes from the repository, which may be hostile, so neither
-//! call follows a symlink anywhere along it or leaves the worktree. A
-//! replace is atomic: a temp file beside the target is written, synced
-//! and renamed over it, so a crash never leaves half a file.
+//! The path comes from the repository, which may be hostile, so no call
+//! follows a symlink anywhere along it or leaves the worktree. A replace
+//! is atomic: a temp file beside the target is written, synced and renamed
+//! over it, so a crash never leaves half a file. A create links its temp
+//! file into place, which fails on anything already there.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -115,6 +116,79 @@ fn read_capped(file: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
+/// Write `content` to `path` under `root`, which must not exist yet;
+/// its directories must. The temp file is hard-linked into place, which
+/// fails on anything there, a symlink included, so a file that appeared
+/// meanwhile is left alone and reported as [`CHANGED_ON_DISK`]. Where hard
+/// links are unsupported, the target is opened with `create_new` instead.
+pub fn create(root: &Path, path: &RepoPath, content: &[u8]) -> Result<(), String> {
+    let (file, exists) = located(root, path)?;
+    if exists {
+        return Err(CHANGED_ON_DISK.to_string());
+    }
+    let fail = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
+    let (temp, mut handle) = create_temp(&file).map_err(fail)?;
+    let written = (|| {
+        handle.write_all(content)?;
+        handle.sync_all()
+    })();
+    drop(handle);
+    if let Err(e) = written {
+        remove_temp(&temp);
+        return Err(fail(e));
+    }
+    let linked = fs::hard_link(&temp, &file);
+    remove_temp(&temp);
+    match linked {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => Err(CHANGED_ON_DISK.to_string()),
+        Err(_) => create_in_place(&file, content).map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => CHANGED_ON_DISK.to_string(),
+            _ => fail(e),
+        }),
+    }
+}
+
+/// `create` without a hard link: `create_new` still refuses anything
+/// already there, but a crash can leave the file short.
+fn create_in_place(file: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut handle = OpenOptions::new().write(true).create_new(true).open(file)?;
+    handle.write_all(content)?;
+    handle.sync_all()
+}
+
+/// Change `path` under `root` with `change`, which gets the current
+/// bytes (`None` when there is no file) and returns the new ones, or
+/// `None` to leave it. An existing file is replaced only while it still
+/// holds what was read, and a missing one is created; when someone else
+/// writes in between, it is read and changed once more, and a second race
+/// is [`CHANGED_ON_DISK`]. Returns whether anything was written.
+pub fn update(
+    root: &Path,
+    path: &RepoPath,
+    max: u64,
+    mut change: impl FnMut(Option<&[u8]>) -> Option<Vec<u8>>,
+) -> Result<bool, String> {
+    for _ in 0..2 {
+        let old = match located(root, path)? {
+            (_, true) => Some(read(root, path, max)?),
+            (_, false) => None,
+        };
+        let Some(new) = change(old.as_deref()) else {
+            return Ok(false);
+        };
+        let written = match &old {
+            Some(old) => replace(root, path, old, &new),
+            None => create(root, path, &new),
+        };
+        match written {
+            Err(e) if e == CHANGED_ON_DISK => continue,
+            written => return written.map(|()| true),
+        }
+    }
+    Err(CHANGED_ON_DISK.to_string())
+}
+
 /// Remove a temp file left by a failed replace. It may carry a read-only
 /// target's permissions, which on Windows keep it from being removed.
 fn remove_temp(temp: &Path) {
@@ -169,8 +243,22 @@ fn create_temp(file: &Path) -> std::io::Result<(PathBuf, File)> {
 /// The file `path` names under `root`, once it is sure to be a regular
 /// file reached through real directories inside `root`.
 fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, String> {
-    let shown = path.display();
-    let refuse = |why: &str| format!("Kika will not touch {shown}: {why}");
+    match located(root, path)? {
+        (at, true) => Ok(at),
+        (_, false) => Err(refusal(path, "it does not exist")),
+    }
+}
+
+/// Why `path` is not touched.
+fn refusal(path: &RepoPath, why: &str) -> String {
+    format!("Kika will not touch {}: {why}", path.display())
+}
+
+/// The file `path` names under `root`, reached through real directories
+/// inside `root`, and whether it exists. Anything there but a regular
+/// file, a symlink included, is an error.
+fn located(root: &Path, path: &RepoPath) -> Result<(PathBuf, bool), String> {
+    let refuse = |why: &str| refusal(path, why);
     let parts = components(path).ok_or_else(|| refuse("the path is not a plain repo path"))?;
     let Some((name, dirs)) = parts.split_last() else {
         return Err(refuse("the path is empty"));
@@ -192,12 +280,18 @@ fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, String> {
     if at.parent() != Some(parent.as_path()) || !at.starts_with(root) {
         return Err(refuse("it is outside the repository"));
     }
-    let meta = fs::symlink_metadata(&at).map_err(|e| refuse(&e.to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(refuse("it is a symlink"));
-    }
-    if !meta.is_file() {
-        return Err(refuse("it is not a regular file"));
+    let meta = match fs::symlink_metadata(&at) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => return Err(refuse(&e.to_string())),
+    };
+    if let Some(meta) = &meta {
+        if meta.file_type().is_symlink() {
+            return Err(refuse("it is a symlink"));
+        }
+        if !meta.is_file() {
+            return Err(refuse("it is not a regular file"));
+        }
     }
     let inside = match (fs::canonicalize(root), fs::canonicalize(&parent)) {
         (Ok(root), Ok(parent)) => parent.starts_with(root),
@@ -206,7 +300,8 @@ fn checked(root: &Path, path: &RepoPath) -> Result<PathBuf, String> {
     if !inside {
         return Err(refuse("it is outside the repository"));
     }
-    Ok(at)
+    let exists = meta.is_some();
+    Ok((at, exists))
 }
 
 /// The `/`-separated parts of a relative path, from its raw bytes. `None`
@@ -434,6 +529,114 @@ mod tests {
             assert_eq!(fs::read(dir.join("todo")).unwrap(), b"old\n");
         }
         assert_eq!(temps(&dir), Vec::<String>::new());
+    }
+
+    #[test]
+    fn create_writes_a_new_file_and_refuses_one_already_there() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let path = RepoPath::from(".gitignore");
+
+        assert_eq!(create(root, &path, b"/a\n"), Ok(()));
+        assert_eq!(fs::read(root.join(".gitignore")).unwrap(), b"/a\n");
+        assert_eq!(
+            create(root, &path, b"/b\n"),
+            Err(CHANGED_ON_DISK.to_string())
+        );
+        assert_eq!(fs::read(root.join(".gitignore")).unwrap(), b"/a\n");
+        assert_eq!(temps(root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn update_creates_a_missing_file_and_appends_to_one_there() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let path = RepoPath::from(".gitignore");
+        let add = |old: Option<&[u8]>| {
+            let mut new = old.unwrap_or_default().to_vec();
+            new.extend_from_slice(b"x\n");
+            Some(new)
+        };
+
+        assert_eq!(update(root, &path, 1024, add), Ok(true));
+        assert_eq!(update(root, &path, 1024, add), Ok(true));
+        assert_eq!(update(root, &path, 1024, |_| None), Ok(false));
+        assert_eq!(fs::read(root.join(".gitignore")).unwrap(), b"x\nx\n");
+        assert_eq!(temps(root), Vec::<String>::new());
+    }
+
+    #[test]
+    fn update_refuses_a_symlink_or_a_symlinked_directory_and_leaves_the_target() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path().join("repo");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join(".gitignore"), "secret\n").unwrap();
+        symlink(outside.join(".gitignore"), root.join(".gitignore")).unwrap();
+        symlink(&outside, root.join("dir")).unwrap();
+        symlink(outside.join("missing"), root.join("dangling")).unwrap();
+        let add = |_: Option<&[u8]>| Some(b"pwned\n".to_vec());
+
+        for name in [".gitignore", "dir/.gitignore", "dir/new", "dangling"] {
+            let path = RepoPath::from(name);
+            assert!(update(&root, &path, 1024, add).is_err(), "update {name:?}");
+            assert!(create(&root, &path, b"pwned\n").is_err(), "create {name:?}");
+        }
+        assert_eq!(fs::read(outside.join(".gitignore")).unwrap(), b"secret\n");
+        assert!(!outside.join("new").exists());
+        assert!(!outside.join("missing").exists());
+        assert_eq!(temps(&root), Vec::<String>::new());
+        assert_eq!(temps(&outside), Vec::<String>::new());
+    }
+
+    #[test]
+    fn update_reads_again_after_a_race_and_gives_up_after_a_second() {
+        let tmp = TempDir::new("worktree-file");
+        let root = tmp.path();
+        let file = root.join(".gitignore");
+        let path = RepoPath::from(".gitignore");
+
+        // Someone writes once between the read and the replace: the
+        // retry sees their line and keeps it.
+        fs::write(&file, "a\n").unwrap();
+        let mut calls = 0;
+        let result = update(root, &path, 1024, |old| {
+            calls += 1;
+            if calls == 1 {
+                fs::write(&file, "a\nb\n").unwrap();
+            }
+            Some([old.unwrap_or_default(), b"c\n"].concat())
+        });
+        assert_eq!(result, Ok(true));
+        assert_eq!(calls, 2);
+        assert_eq!(fs::read(&file).unwrap(), b"a\nb\nc\n");
+
+        // Every time: the second race is reported, and their write stays.
+        let mut n = 0;
+        let result = update(root, &path, 1024, |old| {
+            n += 1;
+            fs::write(&file, format!("theirs {n}\n")).unwrap();
+            Some([old.unwrap_or_default(), b"c\n"].concat())
+        });
+        assert_eq!(result, Err(CHANGED_ON_DISK.to_string()));
+        assert_eq!(n, 2);
+        assert_eq!(fs::read(&file).unwrap(), b"theirs 2\n");
+
+        // A file that appears before a create is a race too, so the
+        // retry reads it and appends to it.
+        fs::remove_file(&file).unwrap();
+        let mut created = false;
+        let result = update(root, &path, 1024, |old| {
+            if !created {
+                created = true;
+                fs::write(&file, "theirs\n").unwrap();
+            }
+            Some([old.unwrap_or_default(), b"mine\n"].concat())
+        });
+        assert_eq!(result, Ok(true));
+        assert_eq!(fs::read(&file).unwrap(), b"theirs\nmine\n");
+        assert_eq!(temps(root), Vec::<String>::new());
     }
 
     #[test]

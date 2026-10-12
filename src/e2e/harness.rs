@@ -16,6 +16,7 @@ use ratatui::widgets::Block;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::app;
+use crate::clipboard::RecordingSink;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
 use crate::external_diff::ExternalRenderer;
@@ -47,6 +48,8 @@ pub struct Harness {
     /// The test binary is not Kika, so a script runs it as Kika's hidden
     /// mode instead (see [`use_test_binary_as_sequence_editor`]).
     sequence_editor: Option<std::path::PathBuf>,
+    /// What the app sent to the clipboard, in place of the terminal.
+    clipboard: Arc<RecordingSink>,
 }
 
 impl Harness {
@@ -68,7 +71,8 @@ impl Harness {
     pub async fn start_with(runner: CliRunner, width: u16, height: u16) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let runner = Arc::new(runner);
-        let runtime = Runtime::new(runner.clone(), tx);
+        let clipboard = Arc::new(RecordingSink::default());
+        let runtime = Runtime::new(runner.clone(), tx).with_clipboard(clipboard.clone());
         // As `main` does, so submodule paths start from the right root.
         let launch = runner.workdir();
         let repo = find_toplevel(runner.as_ref());
@@ -84,6 +88,7 @@ impl Harness {
             terminal: Terminal::new(TestBackend::new(width, height)).unwrap(),
             renderers_found: false,
             sequence_editor: None,
+            clipboard,
         };
         app::boot(&mut harness.state, &harness.runtime, width, height);
         harness.wait_idle().await;
@@ -218,6 +223,11 @@ impl Harness {
         );
     }
 
+    /// Every OSC 52 sequence sent to the clipboard, oldest first.
+    pub fn clipboard(&self) -> Vec<Vec<u8>> {
+        self.clipboard.copies()
+    }
+
     pub fn state(&self) -> &AppState {
         &self.state
     }
@@ -268,7 +278,8 @@ impl Harness {
 
 /// Whether nothing more will change without input: no status load or Git
 /// operation in flight, no background or recent-list load pending, the
-/// diff settled and no commits page, markers or reflog on their way.
+/// diff settled and no commits page, markers, reflog or stash list on
+/// their way.
 /// Diff streams and background loads stay out of `busy`, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
@@ -286,6 +297,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && state.commits.markers_seq.is_none()
         && state.commits.tips_seq.is_none()
         && state.commits.todo_seq.is_none()
+        && state.stash.seq.is_none()
         && state.commits.reflog.seq.is_none()
 }
 
