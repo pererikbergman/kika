@@ -6,6 +6,7 @@ use crate::commit_editor::CommitEditor;
 use crate::effect::{Effect, Tag};
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
+use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::{DiffLine, DiffRequest, LineKind};
@@ -35,6 +36,7 @@ use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::path::Path;
 
 pub(crate) fn untracked(path: &str) -> FileEntry {
     FileEntry {
@@ -848,6 +850,59 @@ pub(crate) fn press_with(state: &mut AppState, c: char, modifiers: KeyModifiers)
 pub(crate) fn start_bisecting(state: &mut AppState) {
     let branch = state.branch.get_or_insert_with(|| on_branch("main"));
     branch.in_progress.push(Operation::Bisect);
+}
+
+pub(crate) fn bisect_branch(
+    head: Head,
+    ops: &[Operation],
+    bisect: Option<BisectState>,
+) -> BranchStatus {
+    BranchStatus {
+        head,
+        in_progress: ops.to_vec(),
+        bisect,
+        ..on_branch("main")
+    }
+}
+
+/// `with_commits` on `main` with no bisect, `c0` selected.
+pub(crate) fn ready_to_bisect() -> AppState {
+    let mut state = with_commits(3, true);
+    state.branch = Some(on_branch("main"));
+    state.files_loaded = true;
+    state
+}
+
+/// A bisect testing `c1`, with the Status panel focused.
+pub(crate) fn testing_c1(ops: &[Operation]) -> AppState {
+    let mut state = with_commits(3, true);
+    let bisect = BisectState {
+        start: "main".into(),
+        ..BisectState::default()
+    };
+    state.branch = Some(bisect_branch(
+        Head::Detached("c1".into()),
+        ops,
+        Some(bisect),
+    ));
+    state.update(AppIntent::FocusPanel(layout::Panel::Side(
+        SidePanel::Status,
+    )));
+    assert_eq!(state.key_focus(), KeyScope::Status);
+    state
+}
+
+pub(crate) fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp {
+    GitOp::BisectMark {
+        mark,
+        commit: cid(commit),
+        start,
+    }
+}
+
+pub(crate) fn rev_parse(dir: &Path, rev: &str) -> CommitId {
+    let out = crate::git::fake::git(dir, &["rev-parse", rev]);
+    cid(String::from_utf8(out).unwrap().trim())
 }
 
 pub(crate) fn stash_entry(index: usize, oid: &str, subject: &str) -> StashEntry {
