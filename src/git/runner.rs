@@ -687,11 +687,16 @@ mod tests {
 
     /// Regression: quitting while a hook waits used to leave git (and the
     /// hook) running, and the blocked read kept Kika from exiting.
+    ///
+    /// It interrupts only once the hanging `sleep` exists and the runner
+    /// holds git, so the interrupt must work, however loaded the machine.
+    /// The only time bound is from the interrupt to git's exit.
     #[cfg(unix)]
     #[test]
     fn interrupt_stops_a_commit_whose_hook_hangs_and_git_cleans_its_lock() {
         use crate::git::fake::{TempDir, git};
         use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
         use std::time::{Duration, Instant};
 
         let tmp = TempDir::new("interrupt");
@@ -700,45 +705,80 @@ mod tests {
         git(dir, &["config", "core.hooksPath", ".git/hooks"]);
         std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
         let hook = dir.join(".git/hooks/pre-commit");
-        // `sleep` is a grandchild that holds git's output pipes open.
-        std::fs::write(&hook, "#!/bin/sh\ntouch started\nsleep 30\n").unwrap();
+        std::fs::write(&hook, HANGING_HOOK).unwrap();
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::write(dir.join("a"), "a\n").unwrap();
         git(dir, &["add", "a"]);
 
         let runner = Arc::new(CliRunner::new(dir));
+        // SAFETY: `getpgrp` only reads this process's group id.
+        let ours = unsafe { libc::getpgrp() };
         let cmd = GitCommand::new("-c")
             .arg("user.name=t")
             .arg("-c")
             .arg("user.email=t@t")
             .arg("commit")
+            // `-a` holds the index lock while the hook runs; a plain
+            // commit has already released it.
+            .arg("-a")
             .arg("-F")
             .arg("-")
+            .env("OUTER_GROUP", ours.to_string())
             .stdin(b"msg\n".to_vec());
-        let worker = {
+        // A channel, not `join`, so a failed interrupt cannot hang the test.
+        let (tx, rx) = mpsc::channel();
+        {
             let runner = Arc::clone(&runner);
-            std::thread::spawn(move || runner.run(&cmd))
+            std::thread::spawn(move || {
+                let _ = tx.send(runner.run(&cmd));
+            });
+        }
+        // Built before anything can panic on `started`, so a failure past
+        // this point still cleans up whatever was recorded.
+        let mut hanging = GroupGuard {
+            pids: Vec::new(),
+            group: String::new(),
         };
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while !dir.join("started").exists() {
             assert!(Instant::now() < deadline, "the hook never started");
             std::thread::sleep(Duration::from_millis(10));
         }
+        // The hook, its sleep, and git.
+        hanging.record(&dir.join("started"));
+        // `run` registers git just after spawning it; an interrupt before
+        // that would find nothing to stop.
+        while lock(&runner.running).len() != 1 {
+            assert!(Instant::now() < deadline, "the runner never held git");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(dir.join(".git/index.lock").exists(), "git holds no lock");
 
-        let start = Instant::now();
         runner.interrupt();
-        let output = worker.join().unwrap().unwrap();
+        let output = rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the interrupt left the hung hook running")
+            .unwrap();
 
         assert!(!output.success);
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "{:?}",
-            start.elapsed()
-        );
         assert!(!dir.join(".git/index.lock").exists());
         // Nothing is left to interrupt, so a second call is harmless.
         runner.interrupt();
     }
+
+    /// Hangs in a `sleep` that holds git's output pipes open. It announces
+    /// itself only once that `sleep` exists, so a group SIGTERM from then on
+    /// reaches it. The hang far outlasts the test's bound, so a failed
+    /// interrupt fails the test rather than passing slowly. It refuses to
+    /// run in the test's group, or without knowing it, like `STOPPING_HOOK`.
+    #[cfg(unix)]
+    const HANGING_HOOK: &str = "#!/bin/sh\n\
+         group=$(ps -o pgid= -p $$ | tr -d ' ')\n\
+         [ -n \"$OUTER_GROUP\" ] && [ -n \"$group\" ] && [ \"$group\" != \"$OUTER_GROUP\" ] || exit 1\n\
+         sleep 300 &\n\
+         s=$!\n\
+         echo \"$$ $s $group\" > started.tmp && mv started.tmp started\n\
+         wait $s\n";
 
     /// With a terminal, the read stops git's background group with SIGTTIN;
     /// without one the hook stops the group itself. It refuses to if it
@@ -753,19 +793,33 @@ mod tests {
          kill -STOP 0\n\
          sleep 30\n";
 
-    /// SIGKILLs what is left of a stopped group if the test fails before the
-    /// interrupt ends it. Each pid is signalled only while it is still in
-    /// git's group, and never if that group is ours, so a reused pid or an
-    /// unrelated process is never touched. It never panics: a panic inside
+    /// SIGKILLs what is left of a hook's group (stopped or hanging) if the
+    /// test fails before the interrupt ends it. Each pid is signalled only
+    /// while it is still in git's group, and never if that group is ours, so
+    /// a reused pid or an unrelated process is never touched. It never panics: a panic inside
     /// `drop` while the test unwinds would abort the whole test binary.
     #[cfg(unix)]
-    struct StoppedGroup {
+    struct GroupGuard {
         pids: Vec<String>,
         group: String,
     }
 
     #[cfg(unix)]
-    impl Drop for StoppedGroup {
+    impl GroupGuard {
+        /// Takes the pids a hook wrote to `started` ("pid ... group"), plus
+        /// the group's leader: git.
+        fn record(&mut self, started: &std::path::Path) {
+            let started = std::fs::read_to_string(started).unwrap();
+            let mut ids: Vec<String> = started.split_whitespace().map(String::from).collect();
+            let group = ids.pop().expect("started names the hook's group");
+            ids.push(group.clone());
+            self.pids = ids;
+            self.group = group;
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for GroupGuard {
         fn drop(&mut self) {
             // SAFETY: `getpgrp` only reads this process's group id.
             let ours = unsafe { libc::getpgrp() }.to_string();
@@ -805,19 +859,23 @@ mod tests {
         }
     }
 
-    /// The hook must stop nothing unless it knows the test's group. It runs
-    /// in a group of its own, so a regressed guard stops only that child.
+    /// A hook must stop or hang nothing unless it knows the test's group.
+    /// It runs in a group of its own, so a regressed guard reaches only that
+    /// child.
     #[cfg(unix)]
     #[test]
-    fn stopping_hook_refuses_without_outer_group() {
+    fn hooks_refuse_without_outer_group() {
         use crate::git::fake::TempDir;
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
 
-        let tmp = TempDir::new("stopping-hook-guard");
+        let tmp = TempDir::new("hook-guard");
         let dir = tmp.path();
-        std::fs::write(dir.join("hook"), STOPPING_HOOK).unwrap();
-        for outer in [None, Some("")] {
+        for (hook, outer) in [STOPPING_HOOK, HANGING_HOOK]
+            .into_iter()
+            .flat_map(|hook| [(hook, None), (hook, Some(""))])
+        {
+            std::fs::write(dir.join("hook"), hook).unwrap();
             let mut cmd = Command::new("sh");
             cmd.arg("hook")
                 .current_dir(dir)
@@ -833,15 +891,21 @@ mod tests {
 
             let status = exit_within_10s(&mut child);
 
-            assert_eq!(status.code(), Some(1), "OUTER_GROUP={outer:?}");
-            assert!(!dir.join("started").exists(), "OUTER_GROUP={outer:?}");
-            assert!(!dir.join("started.tmp").exists(), "OUTER_GROUP={outer:?}");
+            assert_eq!(status.code(), Some(1), "OUTER_GROUP={outer:?}\n{hook}");
+            assert!(
+                !dir.join("started").exists(),
+                "OUTER_GROUP={outer:?}\n{hook}"
+            );
+            assert!(
+                !dir.join("started.tmp").exists(),
+                "OUTER_GROUP={outer:?}\n{hook}"
+            );
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn dropping_stopped_group_kills_its_stopped_members() {
+    fn dropping_a_group_guard_kills_its_stopped_members() {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
 
         let mut cmd = Command::new("sleep");
@@ -853,7 +917,7 @@ mod tests {
         // leader of its own group.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) };
 
-        drop(StoppedGroup {
+        drop(GroupGuard {
             pids: vec![pid.to_string()],
             group: pid.to_string(),
         });
@@ -864,7 +928,7 @@ mod tests {
         let mut gone = Command::new("true").spawn().unwrap();
         let gone_pid = gone.id().to_string();
         gone.wait().unwrap();
-        drop(StoppedGroup {
+        drop(GroupGuard {
             pids: vec![gone_pid.clone()],
             group: gone_pid,
         });
@@ -912,7 +976,7 @@ mod tests {
         }
         // Built before anything can panic on `started`, so a failure past
         // this point still cleans up whatever was recorded.
-        let mut stopped = StoppedGroup {
+        let mut stopped = GroupGuard {
             pids: Vec::new(),
             group: String::new(),
         };
@@ -921,13 +985,8 @@ mod tests {
             assert!(Instant::now() < deadline, "the hook never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let started = std::fs::read_to_string(dir.join("started")).unwrap();
-        let mut ids: Vec<String> = started.split_whitespace().map(String::from).collect();
-        let group = ids.pop().expect("started names the hook's group");
         // The hook, its git, and the group's leader.
-        ids.push(group.clone());
-        stopped.pids = ids;
-        stopped.group = group;
+        stopped.record(&dir.join("started"));
         loop {
             let stat = Command::new("ps")
                 .args(["-o", "stat=", "-p", &stopped.pids[0]])
@@ -968,7 +1027,7 @@ mod tests {
 
     /// The pgid of process `pid`, as `ps` prints it, or `None` if `ps`
     /// fails or knows no such process. `None` rather than a panic, because
-    /// `StoppedGroup::drop` calls it.
+    /// `GroupGuard::drop` calls it.
     #[cfg(unix)]
     fn pgid_of(pid: &str) -> Option<String> {
         let out = Command::new("ps")
