@@ -4276,7 +4276,7 @@ mod tests {
 
     /// `state` with one global `[[commands]]` entry for the file list.
     fn with_files_command(mut state: AppState, description: &str) -> AppState {
-        use crate::custom_command::{OutputMode, Panel, test_table};
+        use crate::features::custom_commands::{OutputMode, Panel, test_table};
         let mut table = test_table(
             Panel::Files,
             &["ctrl-t", "T"],
@@ -4409,8 +4409,8 @@ mod tests {
 
     #[test]
     fn a_bidi_character_in_a_command_description_is_shown_escaped() {
-        use crate::custom_command::{OutputMode, Panel, test_table};
         use crate::effect::Effect;
+        use crate::features::custom_commands::{OutputMode, Panel, test_table};
         use crate::intent::AppIntent;
         use crate::keymap::KeyPress;
         use crossterm::event::{KeyCode, KeyModifiers};

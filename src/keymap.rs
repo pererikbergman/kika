@@ -9,11 +9,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::bisect;
 use crate::commit_files::CommitFilesList;
 use crate::conflict::Choice;
-use crate::custom_command::{CommandTable, CustomCommand};
 use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
-use crate::features::{blame, command_log, repos, submodules, worktrees};
+use crate::features::custom_commands::{CommandTable, CustomCommand};
+use crate::features::{blame, command_log, custom_commands, repos, submodules, worktrees};
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -1321,10 +1321,6 @@ pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
         }
         Some(_) => None,
     }
-}
-
-fn no_command_running(state: &AppState) -> Option<Reason> {
-    (!state.command_running).then_some("No command is running".into())
 }
 
 /// Why the diff cannot take focus: with a commit's files open, the hunks
@@ -2896,23 +2892,6 @@ static CUSTOM_PATCH_WORKSPACE: &[Binding] = &[
         label: "patch",
         bar: false,
         disabled: never,
-    },
-];
-
-// Chunk 8: custom_commands
-#[rustfmt::skip]
-static CUSTOM_COMMANDS_WORKSPACE: &[Binding] = &[
-    Binding {
-        id: "workspace.cancel_command",
-        keys: &[KeyPattern::exact(KeyCode::Char('x'), KeyModifiers::CONTROL)],
-        // Not `esc` or `ctrl-c`, which quit; the bar shows it only while a
-        // command runs.
-        scope: KeyScope::Workspace,
-        intent: AppIntent::CancelCommand,
-        description: "Stop the running command",
-        label: "cancel command",
-        bar: false,
-        disabled: no_command_running,
     },
 ];
 
@@ -6191,7 +6170,7 @@ static CHUNKS: &[&[Binding]] = &[
     DIFF_WORKSPACE,
     CORE_FOCUS,
     CUSTOM_PATCH_WORKSPACE,
-    CUSTOM_COMMANDS_WORKSPACE,
+    custom_commands::keys::CUSTOM_COMMANDS_WORKSPACE,
     REFLOG_WORKSPACE,
     FILES_NAV,
     COMMITS_KEYS,
@@ -6280,7 +6259,7 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::custom_command::{OutputMode, Panel, test_table};
+    use crate::features::custom_commands::{OutputMode, Panel, test_table};
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
 
@@ -10089,26 +10068,6 @@ mod tests {
         );
         // Keys a binding already had are not new, so the defaults pass.
         assert!(build(&[("diff.back", &["h", "left"])], Trust::Repo).is_ok());
-    }
-
-    #[test]
-    fn ctrl_x_cancels_a_running_command_from_every_command_panel() {
-        let ctrl_x = key(KeyCode::Char('x'), KeyModifiers::CONTROL);
-        let mut state = AppState::new(Context::Workspace);
-        for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Blame] {
-            let at =
-                |state: &AppState| resolve(registry(), &Keymap::default(), scope, state, ctrl_x);
-            state.command_running = false;
-            assert!(
-                matches!(at(&state), Resolution::Disabled(ref reason) if reason == "No command is running"),
-                "{scope:?}"
-            );
-            state.command_running = true;
-            assert!(
-                matches!(at(&state), Resolution::Run(b) if b.intent == AppIntent::CancelCommand),
-                "{scope:?}"
-            );
-        }
     }
 
     fn commands(tables: &[CommandTable]) -> Result<Keymap, String> {
