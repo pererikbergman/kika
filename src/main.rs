@@ -7,8 +7,6 @@ mod branches_view;
 mod captured_command;
 mod cli;
 mod clipboard;
-mod command_log;
-mod command_log_view;
 mod commit_editor;
 mod commit_files;
 mod commit_graph;

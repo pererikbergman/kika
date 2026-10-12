@@ -7,9 +7,9 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::custom_patch::PatchAction;
+use crate::features::command_log::CommandLogView;
 use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;

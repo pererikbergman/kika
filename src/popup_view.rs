@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use crate::features::command_log;
 use crate::git::diff::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
@@ -122,7 +123,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 area,
             ),
             Popup::CommandLog(view) => {
-                crate::command_log_view::render(&state.command_log, view, top, frame, area)
+                command_log::view::render(&state.command_log, view, top, frame, area)
             }
             Popup::MergePullRequest(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
