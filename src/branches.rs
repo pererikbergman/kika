@@ -2,12 +2,12 @@
 //! selection, the Remotes and Tags tabs, and the selected branch's log
 //! shown in the Diff pane's place. Pure; the model loads them and moves the selection.
 
+use crate::features::branches::tags::{PendingTag, TagsList};
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::terminal_safe;
 use crate::intent::Scroll;
 use crate::list_filter;
 use crate::remotes::RemotesList;
-use crate::tags::{PendingTag, TagsList};
 
 /// Which list the Branches panel shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
