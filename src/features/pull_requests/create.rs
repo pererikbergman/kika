@@ -10,7 +10,9 @@ use crate::clipboard::CopyWhat;
 use crate::effect::Effect;
 use crate::forge::remote::matches;
 use crate::forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
-use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus, ForgeView, PrBadge, PrState};
+use crate::forge::{
+    CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
+};
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
@@ -33,7 +35,6 @@ const NOT_ASKED: &str =
     "The remote is on no forge host in the global config, or not in [forge.allow]";
 const NO_HOSTS: &str = "Name GitHub hosts under [forge] in the global config";
 const REFRESHING: &str = "Pull requests are already being refreshed";
-pub(crate) const REFRESH_LIMITED: &str = "GitHub is rate limited; refresh after the limit resets";
 
 /// A pull request being put together. Its parts are taken when each step
 /// is answered, so a reload meanwhile cannot change what is created.
@@ -72,13 +73,6 @@ fn forge_link(state: &AppState) -> Option<(ForgeKind, ForgeRepo)> {
         &state.forge.hosts,
         &state.forge_gitlab_hosts,
     )
-}
-
-/// GitHub compares owners and names without regard to case.
-pub(crate) fn same_repo(a: &ForgeRepo, b: &ForgeRepo) -> bool {
-    a.host.eq_ignore_ascii_case(&b.host)
-        && a.owner.eq_ignore_ascii_case(&b.owner)
-        && a.name.eq_ignore_ascii_case(&b.name)
 }
 
 /// The selected branch's pull request page on GitHub, or its merge
@@ -477,19 +471,6 @@ impl AppState {
         }]
     }
 
-    /// GitHub refuses calls to `host` until `until`: no create, merge or
-    /// load asks it before then, and the status line says so when it is
-    /// the badges' host.
-    pub(crate) fn record_rate_limit(&mut self, host: &ForgeHost, until: i64) {
-        let host = host.as_str();
-        self.forge.limited.insert(host.to_string(), until);
-        let here = self.forge.repo.as_ref();
-        if here.is_some_and(|r| r.host.eq_ignore_ascii_case(host)) {
-            self.forge.limited_until = Some(until);
-            self.forge.status = ForgeView::Problem(ForgeStatus::RateLimited);
-        }
-    }
-
     /// GitHub answered the create. A new pull request on the repository
     /// the badges come from shows its badge at once, and the badges are
     /// asked for again; one on another repository is only said.
@@ -535,7 +516,7 @@ impl AppState {
                 self.load_pull_requests()
             }
             Err(CreateError::RateLimited { until }) => {
-                self.record_rate_limit(&creating.host, until);
+                self.forge.record_rate_limit(&creating.host, until);
                 self.notice = Some("GitHub is rate limiting: no pull request was created".into());
                 vec![]
             }
@@ -557,7 +538,7 @@ mod tests {
 
     use super::*;
     use crate::effect::Tag;
-    use crate::forge::{CiState, ForgeHost};
+    use crate::forge::{CiState, ForgeHost, ForgeStatus, ForgeView};
     use crate::git::branches::{Branch, Track};
     use crate::git::log::CommitRow;
     use crate::git::remotes::{Remote, RemoteBranch};

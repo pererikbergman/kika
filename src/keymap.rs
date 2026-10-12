@@ -13,8 +13,8 @@ use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::{
-    blame, command_log, conflicts, custom_commands, operation, pull_requests, repos, submodules,
-    sync, worktrees,
+    blame, command_log, conflicts, custom_commands, operation, pull_requests, repos, review,
+    submodules, sync, worktrees,
 };
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
@@ -3474,233 +3474,6 @@ static FILES_DISCARD_OPEN: &[Binding] = &[
     },
 ];
 
-// Chunk 27: review
-static REVIEW_KEYS: &[Binding] = &[
-    // Free in the workspace, every panel and the global scope.
-    Binding {
-        id: "workspace.review",
-        keys: &[KeyPattern::any(KeyCode::Char('G'))],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::EnterReview,
-        description: "Review this repository's pull requests on GitHub",
-        label: "review",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Review,
-        intent: AppIntent::ReviewNext,
-        description: "Select the next pull request or file, or scroll the open one down",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Review,
-        intent: AppIntent::ReviewPrev,
-        description: "Select the previous pull request or file, or scroll the open one up",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review.open",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Review,
-        intent: AppIntent::OpenPr,
-        description: "Open the selected pull request",
-        label: "open",
-        bar: true,
-        disabled: crate::model::review::open_pr_disabled,
-    },
-    Binding {
-        id: "review.next_queue",
-        keys: &[KeyPattern::any(KeyCode::Tab)],
-        scope: KeyScope::Review,
-        intent: AppIntent::NextQueue,
-        description: "Show the next queue",
-        label: "queue",
-        bar: true,
-        disabled: crate::model::review::queue_keys_disabled,
-    },
-    Binding {
-        id: "review.prev_queue",
-        keys: &[KeyPattern::any(KeyCode::BackTab)],
-        scope: KeyScope::Review,
-        intent: AppIntent::PrevQueue,
-        description: "Show the previous queue",
-        label: "",
-        bar: false,
-        disabled: crate::model::review::queue_keys_disabled,
-    },
-    Binding {
-        id: "review.filter",
-        keys: &[KeyPattern::any(KeyCode::Char('/'))],
-        scope: KeyScope::Review,
-        intent: AppIntent::OpenFilter,
-        description: "Filter the queue by number, title or author",
-        label: "filter",
-        bar: false,
-        disabled: crate::model::review::queue_keys_disabled,
-    },
-    Binding {
-        id: "review.refresh",
-        keys: &[KeyPattern::exact(KeyCode::Char('r'), NONE)],
-        scope: KeyScope::Review,
-        intent: AppIntent::RefreshReview,
-        description: "Ask GitHub again for the queues or the open pull request",
-        label: "refresh",
-        bar: true,
-        disabled: crate::model::review::refresh_review_disabled,
-    },
-    Binding {
-        id: "review.open_check",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Review,
-        intent: AppIntent::OpenCheckDetails,
-        description: "Open a failing check's page in the browser",
-        label: "check page",
-        bar: true,
-        disabled: crate::model::review::open_check_disabled,
-    },
-    Binding {
-        id: "review.merge",
-        keys: &[KeyPattern::any(KeyCode::Char('M'))],
-        scope: KeyScope::Review,
-        intent: AppIntent::OpenMergePr,
-        description: "Merge the open pull request on GitHub, after a question only y answers",
-        label: "merge",
-        bar: true,
-        disabled: crate::model::merge_pr::merge_disabled,
-    },
-    Binding {
-        id: "review.back",
-        keys: &[KeyPattern::any(KeyCode::Esc)],
-        scope: KeyScope::Review,
-        intent: AppIntent::CloseReviewDetail,
-        description: "Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace",
-        label: "back",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "review.files",
-        keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
-        scope: KeyScope::Review,
-        intent: AppIntent::OpenReviewFiles,
-        description: "Show the pull request's changed files and diff, fetching its commits once if they are not here",
-        label: "files",
-        bar: true,
-        disabled: crate::model::review_files::review_files_disabled,
-    },
-    Binding {
-        id: "review_files.focus",
-        keys: &[KeyPattern::any(KeyCode::Tab)],
-        scope: KeyScope::ReviewFiles,
-        intent: AppIntent::ToggleReviewFilesFocus,
-        description: "Move the keys between the file list and the diff",
-        label: "list/diff",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.down",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::ScrollDiff(Scroll::LineDown),
-        description: "Scroll the diff down a line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.up",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::ScrollDiff(Scroll::LineUp),
-        description: "Scroll the diff up a line",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.page_down",
-        keys: &[KeyPattern::any(KeyCode::PageDown)],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::ScrollDiff(Scroll::PageDown),
-        description: "Scroll the diff down a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.page_up",
-        keys: &[KeyPattern::any(KeyCode::PageUp)],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::ScrollDiff(Scroll::PageUp),
-        description: "Scroll the diff up a page",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.search",
-        keys: &[KeyPattern::any(KeyCode::Char('/'))],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::OpenSearch,
-        description: "Search the lines of the diff loaded so far for typed text",
-        label: "search",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "review_diff.search_next",
-        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::SearchNext,
-        description: "Go to the next match of the search",
-        label: "next match",
-        bar: false,
-        disabled: crate::model::review_files::review_search_step_disabled,
-    },
-    Binding {
-        id: "review_diff.search_prev",
-        keys: &[KeyPattern::any(KeyCode::Char('N'))],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::SearchPrev,
-        description: "Go to the previous match of the search",
-        label: "previous match",
-        bar: false,
-        disabled: crate::model::review_files::review_search_step_disabled,
-    },
-    Binding {
-        id: "review_diff.escape",
-        keys: &[KeyPattern::any(KeyCode::Esc)],
-        scope: KeyScope::ReviewDiff,
-        intent: AppIntent::DiffEscape,
-        description: "Clear the search, else go back to the file list",
-        label: "back",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 29: diff
 #[rustfmt::skip]
 static DIFF_FILES: &[Binding] = &[
@@ -5149,45 +4922,6 @@ static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 71b: review
-static REVIEW_MERGE_CONFIRM: &[Binding] = &[
-    // Merging a pull request reaches GitHub and cannot be undone, so
-    // Enter is left unbound.
-    Binding {
-        id: "merge_pr.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::MergePullRequest,
-        intent: AppIntent::ConfirmMergePr,
-        description: "Yes, merge the pull request on GitHub",
-        label: "merge",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "merge_pr.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::MergePullRequest,
-        intent: AppIntent::ConfirmNo,
-        description: "No, merge nothing",
-        label: "cancel",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "merge_pr.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::MergePullRequest,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 72: core
 static CORE_FILTER_SEARCH: &[Binding] = &[
     // List filters, ranges and the diff search.
@@ -5751,7 +5485,7 @@ static CHUNKS: &[&[Binding]] = &[
     worktrees::keys::WORKTREES_WORKSPACE,
     command_log::keys::COMMAND_LOG_WORKSPACE,
     repos::keys::REPOS_WORKSPACE,
-    REVIEW_KEYS,
+    review::keys::REVIEW_KEYS,
     blame::keys::BLAME_FILES,
     DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
@@ -5796,7 +5530,7 @@ static CHUNKS: &[&[Binding]] = &[
     worktrees::keys::WORKTREES_REMOVE_CONFIRM,
     repos::keys::REPOS_RECENT,
     pull_requests::keys::PULL_REQUESTS_PICK_CREATE,
-    REVIEW_MERGE_CONFIRM,
+    review::keys::REVIEW_MERGE_CONFIRM,
     CORE_FILTER_SEARCH,
     COMMITS_LOG_FILTER,
     COMPARE_COMMITS,

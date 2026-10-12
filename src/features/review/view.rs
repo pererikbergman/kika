@@ -8,16 +8,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+use super::files::{FilesFocus, FilesStage, PrFile, PrFiles};
+use super::git::FileCounts;
+use super::markdown;
+use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
 use crate::forge::merge::{MergeBlock, merge_options};
 use crate::forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
 };
 use crate::forge::{ForgeStatus, PrState};
-use crate::git::pr_objects::FileCounts;
-use crate::markdown;
 use crate::model::AppState;
-use crate::model::review::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
-use crate::model::review_files::{FilesFocus, FilesStage, PrFile, PrFiles};
 use crate::rows::{clock, drawn_path, status_colour};
 use crate::view::{self, elide_right};
 
@@ -549,10 +549,12 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::features::review::state::tests::{
+        detail_from, fixture_detail, fixture_queues, repo,
+    };
     use crate::forge::ForgeHost;
     use crate::forge::review::tests::hostile_detail;
     use crate::model::Context;
-    use crate::model::review::tests::{detail_from, fixture_detail, fixture_queues, repo};
     use crate::view::buffer_rows;
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -956,7 +958,7 @@ mod tests {
             (FilesStage::Listing, "Loading files…"),
             (FilesStage::Fetching, "Fetching PR head…"),
             (
-                FilesStage::Failed(crate::model::review_files::NO_FETCH_REMOTE.into()),
+                FilesStage::Failed(crate::features::review::files::NO_FETCH_REMOTE.into()),
                 "PR head is not here",
             ),
         ] {

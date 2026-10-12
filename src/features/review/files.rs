@@ -4,16 +4,16 @@
 //! stream the selected file's diff into the same Diff pane the workspace
 //! uses. The viewed marks come from GitHub's detail, matched by path.
 
-use super::review::{ReviewScreen, ReviewState};
-use super::{AppState, Context};
+use super::git::{CommitsHere, FileCounts, PrFileRow};
+use super::state::{ReviewScreen, ReviewState};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::forge::review::ViewedState;
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::DiffRequest;
-use crate::git::pr_objects::{CommitsHere, FileCounts, PrFileRow};
 use crate::intent::Scroll;
 use crate::keymap::{OP_RUNNING, Reason};
+use crate::model::{AppState, Context};
 
 pub const STILL_MISSING: &str = "PR head is not available locally after fetch";
 pub const FETCHED_BEFORE: &str =
@@ -162,7 +162,7 @@ pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
         return Some(reason);
     }
     if state.review_repo().is_none() {
-        return Some(super::review::NO_FORGE.into());
+        return Some(super::state::NO_FORGE.into());
     }
     state.op_seq.is_some().then_some(OP_RUNNING.into())
 }
@@ -188,11 +188,11 @@ impl AppState {
     pub(super) fn review_diff_rows(&self) -> usize {
         let screen = ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1);
         let [main, _] = crate::layout::screen_layout(screen);
-        crate::review_view::files_diff_rows(main).max(1)
+        super::view::files_diff_rows(main).max(1)
     }
 
     /// Rows of the pane the streamed diff is drawn in now.
-    pub(super) fn diff_rows(&self) -> usize {
+    pub(crate) fn diff_rows(&self) -> usize {
         if files_screen(self).is_some() {
             self.review_diff_rows()
         } else {
@@ -224,7 +224,7 @@ impl AppState {
 
     /// `f`: show the open pull request's files, starting by checking its
     /// commits are here.
-    pub(super) fn open_review_files(&mut self) -> Vec<Effect> {
+    pub(crate) fn open_review_files(&mut self) -> Vec<Effect> {
         if let Some(reason) = review_files_disabled(self) {
             self.notice = Some(reason);
             return vec![];
@@ -251,7 +251,7 @@ impl AppState {
         }]
     }
 
-    pub(super) fn review_objects_checked(
+    pub(crate) fn review_objects_checked(
         &mut self,
         tag: Tag,
         result: Result<CommitsHere, String>,
@@ -312,11 +312,11 @@ impl AppState {
     }
 
     /// The fetch is the review's; questions it asks may be answered.
-    pub(super) fn review_fetch_running(&self, tag: Tag) -> bool {
+    pub(crate) fn review_fetch_running(&self, tag: Tag) -> bool {
         tag.generation == self.generation && self.op_seq == Some(tag.seq) && tag.user
     }
 
-    pub(super) fn review_head_fetched(
+    pub(crate) fn review_head_fetched(
         &mut self,
         tag: Tag,
         result: Result<(), String>,
@@ -346,7 +346,7 @@ impl AppState {
         self.check_review_commits(next)
     }
 
-    pub(super) fn review_files_loaded(
+    pub(crate) fn review_files_loaded(
         &mut self,
         tag: Tag,
         result: Result<(CommitRange, Vec<PrFileRow>), String>,
@@ -415,7 +415,7 @@ impl AppState {
         self.review_file_diff()
     }
 
-    pub(super) fn toggle_review_files_focus(&mut self) {
+    pub(crate) fn toggle_review_files_focus(&mut self) {
         if let Some(files) = &mut self.review.files {
             files.focus = match files.focus {
                 FilesFocus::List => FilesFocus::Diff,
@@ -436,13 +436,13 @@ impl AppState {
     }
 
     /// Scroll the review diff, asking for more lines only past those asked.
-    pub(super) fn scroll_review_diff(&mut self, by: Scroll) -> Vec<Effect> {
+    pub(crate) fn scroll_review_diff(&mut self, by: Scroll) -> Vec<Effect> {
         let rows = self.review_diff_rows();
         self.diff.scroll(by, rows)
     }
 
     /// Esc in the review diff: clear the search, else back to the list.
-    pub(super) fn review_diff_escape(&mut self) {
+    pub(crate) fn review_diff_escape(&mut self) {
         if self.diff.search.take().is_none()
             && let Some(files) = &mut self.review.files
         {
@@ -451,7 +451,7 @@ impl AppState {
     }
 
     /// Whether review mode shows the files screen.
-    pub(super) fn review_files_shown(&self) -> bool {
+    pub(crate) fn review_files_shown(&self) -> bool {
         self.context != Context::Workspace && files_screen(self).is_some()
     }
 }
@@ -462,11 +462,11 @@ mod tests {
 
     use super::*;
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
     use crate::git::diff::{DiffChunk, DiffLine, LineKind};
     use crate::git::remotes::RemoteName;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
-    use crate::model::review::tests::{github, in_detail, press, repo, type_char};
 
     fn id(c: char) -> CommitId {
         CommitId::parse(&c.to_string().repeat(40)).unwrap()
