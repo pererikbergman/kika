@@ -621,7 +621,10 @@ mod tests {
             cursor: 0,
         }];
         let (_, rows) = draw(&state, 80, 24);
-        let row = format!(" Stash selected files…  {} ", crate::menu::STASH_APART);
+        let row = format!(
+            " Stash selected files…  {} ",
+            crate::features::stash::keys::STASH_APART
+        );
         let (x, y) = find(&rows, &row);
         // The row ends inside the box, with its right border after it.
         let after: String = rows[y as usize]

@@ -9,18 +9,18 @@ use crate::features::operation::keys::merge_disabled;
 use crate::features::pull_requests::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
-use crate::git::FileEntry;
+use crate::features::stash::keys::{
+    stash_all_disabled, stash_file_disabled, stash_staged_disabled, stash_untracked_disabled,
+};
 use crate::git::bisect::BisectMark;
-use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
-use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
-    OP_RUNNING, Reason, amend_disabled, commit_disabled, files_stage_disabled, list_guard, never,
-    no_commit_selected, reset_disabled, stage_all_disabled,
+    Reason, amend_disabled, commit_disabled, files_stage_disabled, never, no_commit_selected,
+    reset_disabled, stage_all_disabled,
 };
 use crate::model::AppState;
-use crate::op::{GitOp, MergeStrategy, ResetMode, leading_dirs};
+use crate::op::{MergeStrategy, ResetMode};
 use crate::popup::{ConfirmKind, PromptKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,101 +232,6 @@ static RESET: &[MenuItem] = &[
     },
 ];
 
-/// Why nothing can be stashed now: one operation at a time, and git
-/// cannot stash a conflicted index.
-fn stash_blocked(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some("Resolve conflicts first".into())
-    } else {
-        None
-    }
-}
-
-/// Untracked files stay behind, so they alone are nothing to stash.
-pub(crate) fn stash_all_disabled(state: &AppState) -> Option<Reason> {
-    stash_blocked(state).or_else(|| {
-        (!state.files.iter().any(|f| f.kind != EntryKind::Untracked))
-            .then_some("No changes to stash".into())
-    })
-}
-
-pub(crate) fn stash_untracked_disabled(state: &AppState) -> Option<Reason> {
-    stash_blocked(state).or_else(|| {
-        state
-            .files
-            .is_empty()
-            .then_some("No changes to stash".into())
-    })
-}
-
-pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
-    stash_blocked(state).or_else(|| {
-        (!state.files.iter().any(|f| !matches!(f.index, '.' | '?')))
-            .then_some("Nothing staged".into())
-    })
-}
-
-/// Why a set with a staged deletion and an untracked file is refused;
-/// see `GitOp::stash_files_for`.
-pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
-
-/// Why a staged rename is refused when a file sits at its old path again.
-pub(crate) use crate::op::STASH_RENAME_TAKEN;
-
-/// Why a staged deletion is refused when a file sits at its path again.
-pub(crate) use crate::op::STASH_DELETED_TAKEN;
-
-/// Stashing selected files acts on the marked set: the Files range when
-/// one is set, else the row under the cursor. A filter that hides the
-/// cursor's row refuses it, as other row actions are refused. A staged
-/// rename is refused when any listed entry sits at its old path or at a
-/// directory that path needs: the restore after the push would overwrite
-/// or unlink that file. A staged deletion is refused the same way when any
-/// other entry sits at its path or a directory it needs: git checks
-/// `HEAD`'s version out there after the push. Names are compared ignoring
-/// ASCII case, since a case-insensitive filesystem folds them; on another
-/// one this only refuses more.
-pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, true)
-        .or_else(|| stash_blocked(state))
-        .or_else(|| {
-            let (entries, _) = state.files_marked();
-            let sets: Vec<_> = (entries.iter())
-                .filter_map(|e| GitOp::stash_file_for(e).map(|set| (*e, set)))
-                .collect();
-            // Whether an entry other than `own` sits at `path` or a
-            // directory it needs.
-            let taken = |own: Option<&FileEntry>, path: &RepoPath| {
-                let mut at = leading_dirs(path);
-                at.push(path.clone());
-                at.iter().any(|taken| {
-                    (state.files.iter())
-                        .filter(|f| !own.is_some_and(|own| std::ptr::eq(*f, own)))
-                        .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
-                })
-            };
-            let renamed_taken = (sets.iter())
-                .flat_map(|(_, set)| &set.restore)
-                .any(|old| taken(None, old));
-            let deleted_taken = (sets.iter())
-                .flat_map(|(own, set)| set.unstage.iter().map(move |gone| (*own, gone)))
-                .any(|(own, gone)| taken(Some(own), gone));
-            if entries.is_empty() {
-                Some("No file selected".into())
-            } else if renamed_taken {
-                Some(STASH_RENAME_TAKEN.into())
-            } else if deleted_taken {
-                Some(STASH_DELETED_TAKEN.into())
-            } else if GitOp::stash_files_for(&entries).is_none() {
-                Some(STASH_APART.into())
-            } else {
-                None
-            }
-        })
-}
-
 static STASH: &[MenuItem] = &[
     MenuItem {
         label: "Stash all changes…",
@@ -437,6 +342,8 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
 mod tests {
     use super::*;
     use crate::git::FileEntry;
+    use crate::git::status::EntryKind;
+    use crate::keymap::OP_RUNNING;
     use crate::model::Context;
 
     fn file(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {

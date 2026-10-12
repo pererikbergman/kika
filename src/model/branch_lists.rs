@@ -5,6 +5,7 @@
 
 use super::{
     AppState, Context, RemoteRow, SELECTION_CLEARED, change_remote_disabled, delete_tag_disabled,
+    drop_stash_disabled,
 };
 use crate::branches::BranchesTab;
 use crate::effect::Effect;
@@ -60,7 +61,7 @@ impl AppState {
             RangeKind::Branches => keymap::delete_branch_disabled,
             RangeKind::Tags => delete_tag_disabled,
             RangeKind::Remotes => change_remote_disabled,
-            RangeKind::Stashes => keymap::drop_stash_disabled,
+            RangeKind::Stashes => drop_stash_disabled,
         };
         if let Some(reason) = disabled(self) {
             self.notice = Some(reason);
