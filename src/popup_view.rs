@@ -101,7 +101,7 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
             ),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Worktrees(list) => {
-                crate::worktrees_view::render_worktrees(state, list, top, frame, area)
+                crate::features::worktrees::view::render_worktrees(state, list, top, frame, area)
             }
             Popup::RemoveWorktree(confirm) => render_question(
                 &format!(" {} ", confirm.title()),

@@ -16,7 +16,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
-use crate::features::{repos, submodules};
+use crate::features::{repos, submodules, worktrees};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
@@ -49,7 +49,6 @@ use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
 use crate::git::tags::list_tags;
-use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
@@ -1013,49 +1012,12 @@ impl Runtime {
                 });
             }
             Effect::LoadSubmodules { tag } => submodules::effects::load(runner, tx, tag),
-            Effect::LoadWorktrees { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_worktrees(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("git worktree list crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::WorktreesLoaded { tag, result });
-                });
-            }
+            Effect::LoadWorktrees { tag } => worktrees::effects::load(runner, tx, tag),
             Effect::AddWorktree { tag, path, branch } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        add_worktree(runner.as_ref(), &path, &branch)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("git worktree add crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::WorktreeAdded { tag, result });
-                });
+                worktrees::effects::add(runner, tx, tag, path, branch)
             }
             Effect::RemoveWorktree { tag, path } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || {
-                        remove_worktree(runner.as_ref(), &path)
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(
-                            format!("git worktree remove crashed: {e}").as_bytes(),
-                        ))
-                    });
-                    let _ = tx.send(AppIntent::WorktreeRemoved { tag, result });
-                });
+                worktrees::effects::remove(runner, tx, tag, path)
             }
             Effect::LoadBranches { tag } => {
                 tokio::spawn(async move {
@@ -3504,82 +3466,6 @@ mod tests {
                 list: vec![repo]
             })
         );
-    }
-
-    #[tokio::test]
-    async fn worktree_effects_report_back_with_the_same_tag() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &["worktree", "list", "--porcelain", "-z"],
-                    ok(b"worktree /r\0bare\0\0"),
-                )
-                .expect(
-                    &["worktree", "remove", "--", "/r/x"],
-                    fail("fatal: '/r/x' is locked\n"),
-                ),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 4,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadWorktrees { tag });
-        match rx.recv().await {
-            Some(AppIntent::WorktreesLoaded {
-                tag: got,
-                result: Ok(list),
-            }) => {
-                assert_eq!(got, tag);
-                assert_eq!(list[0].path.display(), "/r");
-            }
-            other => panic!("expected WorktreesLoaded, got {other:?}"),
-        }
-        runtime.spawn(Effect::RemoveWorktree {
-            tag,
-            path: "/r/x".into(),
-        });
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::WorktreeRemoved {
-                tag,
-                result: Err("fatal: '/r/x' is locked".into()),
-            })
-        );
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_failing_worktree_add_still_reports_back() {
-        // No workdir and no answers: the git-dir read fails, which must
-        // still answer once.
-        let runner = Arc::new(FakeRunner::new().expect(
-            &["rev-parse", "--git-dir", "--git-common-dir"],
-            fail("fatal: not a git repository\n"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 0,
-            seq: 1,
-            user: true,
-        };
-        runtime.spawn(Effect::AddWorktree {
-            tag,
-            path: "../x".into(),
-            branch: "feature".into(),
-        });
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::WorktreeAdded {
-                tag,
-                result: Err("fatal: not a git repository".into()),
-            })
-        );
-        runner.assert_done();
     }
 
     #[tokio::test]

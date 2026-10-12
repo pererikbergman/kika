@@ -12,6 +12,7 @@ use crate::custom_patch::PatchAction;
 use crate::features::command_log::CommandLogView;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
+use crate::features::worktrees::WorktreeList;
 use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
@@ -24,7 +25,6 @@ use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::pick_list::PickList;
-use crate::worktree_list::WorktreeList;
 
 /// One entry on the popup stack. The top one takes the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
