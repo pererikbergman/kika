@@ -357,10 +357,7 @@ fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
     } else {
         counts
     };
-    let path = match &row.file.orig_path {
-        Some(orig) => format!("{} → {}", orig.display(), row.file.path.display()),
-        None => row.file.path.display().to_string(),
-    };
+    let path = crate::commit_files::drawn_path(&row.file);
     let room = width.saturating_sub(4 + counts_width);
     let path = view::elide_left(&path, room);
     let pad = room.saturating_sub(width_of(&path));

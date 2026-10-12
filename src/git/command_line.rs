@@ -17,9 +17,15 @@ pub const REDACTED: &str = "<redacted>";
 /// Subcommands whose `-m` and `--message` carry a message, not a name.
 const MESSAGE_SUBCOMMANDS: [&str; 6] = ["commit", "commit-tree", "tag", "merge", "stash", "notes"];
 
-/// Global options before the subcommand that take the next arg as a path
-/// or name.
-const GLOBAL_WITH_VALUE: [&str; 4] = ["-C", "--git-dir", "--work-tree", "--namespace"];
+/// Global options before the subcommand that take the next arg as a path,
+/// name or tree.
+const GLOBAL_WITH_VALUE: [&str; 5] = [
+    "-C",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--attr-source",
+];
 
 /// Where a message's subject ends: every line break a terminal or a font
 /// may draw as one.
@@ -67,6 +73,9 @@ pub fn display_line(cmd: &GitCommand) -> String {
         if secret_value {
             words.push(REDACTED.to_string());
         } else if !options || arg == "--" {
+            // `git config -- <key> <value>`: after `--` an arg is a key
+            // even if it starts with `-`, so it is still checked.
+            secret_value = config && !options && secret_key(arg);
             options = false;
             words.push(plain(arg));
         } else if messages && arg.starts_with('-') {
@@ -166,7 +175,9 @@ fn config_pair(pair: &str) -> String {
     format!("{}={value}", safe(key))
 }
 
-/// Whether a config key's value may be a secret or a command line.
+/// Whether a config key's value may be a secret or a command line. A last
+/// segment that merely contains `pass` (`smtpPass`, `passphrase`, but also
+/// `bypass`) counts, as a false alarm only hides a harmless value.
 fn secret_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     let last = key.rsplit('.').next().unwrap_or_default();
@@ -176,7 +187,7 @@ fn secret_key(key: &str) -> bool {
         || key == "core.askpass"
         || key == "core.sshcommand"
         || key.starts_with("http.") && key.ends_with(".extraheader")
-        || ["password", "token", "secret", "cookie"]
+        || ["pass", "token", "secret", "cookie"]
             .iter()
             .any(|word| last.contains(word))
 }
@@ -319,6 +330,10 @@ mod tests {
             ("foo.apiToken=t0k", "foo.apiToken=<redacted>"),
             ("foo.SECRET_key=s", "foo.SECRET_key=<redacted>"),
             ("x.y.sessionCookie=c", "x.y.sessionCookie=<redacted>"),
+            ("sendemail.smtpPass=x", "sendemail.smtpPass=<redacted>"),
+            ("imap.pass=x", "imap.pass=<redacted>"),
+            ("IMAP.PASS=x", "IMAP.PASS=<redacted>"),
+            ("foo.passphrase=x", "foo.passphrase=<redacted>"),
         ];
         for (pair, want) in cases {
             let line = display_line(&cmd(&["-c", pair, "status"]));
@@ -334,6 +349,7 @@ mod tests {
             ("commit.gpgsign", "commit.gpgsign"),
             // A token-looking word in a non-final segment is not a secret key.
             ("token.enabled=yes", "token.enabled=yes"),
+            ("pass.enabled=yes", "pass.enabled=yes"),
             ("remote.o.url=https://u:p@h/r", "remote.o.url=https://h/r"),
             ("core.editor=\x1b[2Jvi", "core.editor=\u{FFFD}[2Jvi"),
         ];
@@ -396,6 +412,24 @@ mod tests {
                     "s\nbody secret",
                 ],
                 "git -C sub --no-pager -c a.b=c commit -m s…",
+            ),
+            // `--attr-source <tree>` takes the next arg, so the subcommand
+            // after it is still found.
+            (
+                &["--attr-source", "HEAD", "config", "credential.helper", "x"],
+                "git --attr-source HEAD config credential.helper <redacted>",
+            ),
+            (
+                &["--attr-source", "HEAD", "commit", "-m", "s\nbody secret"],
+                "git --attr-source HEAD commit -m s…",
+            ),
+            (
+                &["--attr-source=HEAD", "config", "credential.helper", "x"],
+                "git --attr-source=HEAD config credential.helper <redacted>",
+            ),
+            (
+                &["--attr-source=HEAD", "commit", "-m", "s\nbody secret"],
+                "git --attr-source=HEAD commit -m s…",
             ),
         ];
         for (args, want) in cases {
@@ -466,6 +500,38 @@ mod tests {
                 "git config --get core.askPass",
             ),
             (&["config", "user.name", "Ann"], "git config user.name Ann"),
+            (
+                &["config", "sendemail.smtpPass", "hunter2"],
+                "git config sendemail.smtpPass <redacted>",
+            ),
+        ];
+        for (args, want) in cases {
+            assert_eq!(display_line(&cmd(args)), *want, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_config_key_after_dashes_is_still_checked() {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["config", "--", "credential.helper", "x"],
+                "git config -- credential.helper <redacted>",
+            ),
+            (
+                &["config", "set", "--local", "--", "imap.pass", "p"],
+                "git config set --local -- imap.pass <redacted>",
+            ),
+            (
+                &["config", "--", "user.name", "Ann"],
+                "git config -- user.name Ann",
+            ),
+            // After `--` a key is a key even if it starts with `-`.
+            (
+                &["config", "--", "-x.password", "p"],
+                "git config -- -x.password <redacted>",
+            ),
+            // `--` outside `config` still means everything after it is plain.
+            (&["add", "--", "imap.pass", "x"], "git add -- imap.pass x"),
         ];
         for (args, want) in cases {
             assert_eq!(display_line(&cmd(args)), *want, "{args:?}");
