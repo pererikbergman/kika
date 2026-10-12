@@ -34,7 +34,9 @@ impl AppState {
         let Some(open) = &self.commits.open else {
             return vec![];
         };
-        if let Some(reason) = keymap::commit_source_disabled(self, open) {
+        if let Some(reason) =
+            keymap::list_guard(self, false).or_else(|| keymap::commit_source_disabled(self, open))
+        {
             self.notice = Some(reason);
             return vec![];
         }

@@ -1125,7 +1125,8 @@ goes back to the log.
 | `commit_files.search` | `ctrl-f` | Search the selected file's change for typed text | |
 | `commit_files.search_next` | `n` | Go to the next match of the diff search | |
 | `commit_files.search_prev` | `N` | Go to the previous match of the diff search | |
-| `commit_files.escape` | `esc` | Clear the diff search, else go back to the log, at the same commit | locked |
+| `commit_files.filter` | `/` | Filter the commit's files by typed text | |
+| `commit_files.escape` | `esc` | Clear the filter, else the diff search, else go back to the log, at the same commit | locked |
 
 #### Custom patches
 
