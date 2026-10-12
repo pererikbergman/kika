@@ -34,14 +34,17 @@ pub async fn run_captured(argv: Vec<OsString>, workdir: PathBuf) -> Result<Strin
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let mut child = tokio::process::Command::new(program)
-        .args(args)
-        .current_dir(&workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+    let mut child = crate::program::command(program)
+        .and_then(|command| {
+            tokio::process::Command::from(command)
+                .args(args)
+                .current_dir(&workdir)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+        })
         .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
