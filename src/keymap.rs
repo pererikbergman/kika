@@ -623,6 +623,10 @@ pub const REPO_LOCKED: &[&str] = &[
     "tags.escape",
     "reflog.escape",
     "input.quit",
+    "commit_files.escape",
+    "stash_files.escape",
+    "blame.escape",
+    "blame_commit.escape",
 ];
 
 /// The keys in force: the registry's, except where the user's config
@@ -2306,6 +2310,55 @@ fn search_step_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
+/// The preview search works on the built-in diff of a loaded file.
+fn preview_search_disabled(state: &AppState) -> Option<Reason> {
+    if state.rendered_shown().is_some() {
+        Some("Search works in the built-in diff".into())
+    } else if state.diff.path.is_none() {
+        Some("No file selected".into())
+    } else {
+        None
+    }
+}
+
+fn preview_step_disabled(state: &AppState) -> Option<Reason> {
+    preview_search_disabled(state).or_else(|| {
+        let searched = state.diff.search.is_some();
+        (!searched).then_some("Nothing searched yet (ctrl-f)".into())
+    })
+}
+
+/// The blame, or the commit opened from it, once its lines are in.
+fn pane_search_disabled(state: &AppState) -> Option<Reason> {
+    let Focus::Blame(view) = &state.focus else {
+        return None;
+    };
+    let (loaded, error, empty) = match &view.commit {
+        Some(commit) => (commit.loaded, &commit.error, commit.lines.is_empty()),
+        None => (view.loaded, &view.error, view.lines.is_empty()),
+    };
+    if !loaded {
+        Some("Loading…".into())
+    } else if error.is_some() || empty {
+        Some("Nothing to search".into())
+    } else {
+        None
+    }
+}
+
+fn pane_step_disabled(state: &AppState) -> Option<Reason> {
+    pane_search_disabled(state).or_else(|| {
+        let searched = match &state.focus {
+            Focus::Blame(view) => match &view.commit {
+                Some(commit) => commit.search.is_some(),
+                None => view.search.is_some(),
+            },
+            _ => false,
+        };
+        (!searched).then_some("Nothing searched yet (/)".into())
+    })
+}
+
 const NONE: KeyModifiers = KeyModifiers::NONE;
 
 static REGISTRY: &[Binding] = &[
@@ -2977,8 +3030,9 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "commit_files.back",
+        // Esc is `commit_files.escape`, which clears a search first and stands in
+        // for this one in the bar.
         keys: &[
-            KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
             KeyPattern::any(KeyCode::Left),
         ],
@@ -2986,7 +3040,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::CloseCommitFiles,
         description: "Back to the log, at the same commit",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -3093,15 +3147,14 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "stash_files.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::any(KeyCode::Backspace),
-        ],
+        // Esc is `stash_files.escape`, which clears a search first and
+        // stands in for this one in the bar.
+        keys: &[KeyPattern::any(KeyCode::Backspace)],
         scope: KeyScope::StashFiles,
         intent: AppIntent::CloseStashFiles,
         description: "Back to the stash list, at the same stash",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -3627,8 +3680,9 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "blame.back",
+        // Esc is `blame.escape`, which clears a search first and stands in
+        // for this one in the bar.
         keys: &[
-            KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
             KeyPattern::any(KeyCode::Left),
         ],
@@ -3636,7 +3690,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::CloseBlame,
         description: "Back to the file list",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -3763,8 +3817,9 @@ static REGISTRY: &[Binding] = &[
     },
     Binding {
         id: "blame_commit.back",
+        // Esc is `blame_commit.escape`, which clears a search first and stands in
+        // for this one in the bar.
         keys: &[
-            KeyPattern::any(KeyCode::Esc),
             KeyPattern::exact(KeyCode::Char('h'), NONE),
             KeyPattern::any(KeyCode::Left),
         ],
@@ -3772,7 +3827,7 @@ static REGISTRY: &[Binding] = &[
         intent: AppIntent::CloseBlameCommit,
         description: "Back to the blame, at the same line",
         label: "back",
-        bar: true,
+        bar: false,
         disabled: never,
     },
     Binding {
@@ -5436,7 +5491,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::Files,
         intent: AppIntent::ListEscape,
-        description: "Clear the selection, else the filter, else quit Kika",
+        description: "Clear the selection, else the filter, else the diff search, else quit Kika",
         label: "clear",
         bar: false,
         disabled: never,
@@ -5597,6 +5652,196 @@ static REGISTRY: &[Binding] = &[
         scope: KeyScope::Diff,
         intent: AppIntent::DiffEscape,
         description: "Clear the search, else go back to the side panel",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "files.search_diff",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenPreviewSearch,
+        description: "Search the selected file's diff for typed text",
+        label: "search diff",
+        bar: false,
+        disabled: preview_search_disabled,
+    },
+    Binding {
+        id: "files.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the diff search",
+        label: "next match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "files.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::Files,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the diff search",
+        label: "previous match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "commit_files.search",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::OpenPreviewSearch,
+        description: "Search the selected file's change for typed text",
+        label: "search diff",
+        bar: false,
+        disabled: preview_search_disabled,
+    },
+    Binding {
+        id: "commit_files.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the diff search",
+        label: "next match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "commit_files.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the diff search",
+        label: "previous match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "commit_files.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::CommitFiles,
+        intent: AppIntent::PaneEscape,
+        description: "Clear the diff search, else go back to the log, at the same commit",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "stash_files.search",
+        keys: &[KeyPattern::exact(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::OpenPreviewSearch,
+        description: "Search the selected file's change for typed text",
+        label: "search diff",
+        bar: false,
+        disabled: preview_search_disabled,
+    },
+    Binding {
+        id: "stash_files.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the diff search",
+        label: "next match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "stash_files.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the diff search",
+        label: "previous match",
+        bar: false,
+        disabled: preview_step_disabled,
+    },
+    Binding {
+        id: "stash_files.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::StashFiles,
+        intent: AppIntent::PaneEscape,
+        description: "Clear the diff search, else go back to the stash list, at the same stash",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "blame.search",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Blame,
+        intent: AppIntent::OpenSearch,
+        description: "Search the blamed lines' text for typed text",
+        label: "search",
+        bar: false,
+        disabled: pane_search_disabled,
+    },
+    Binding {
+        id: "blame.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::Blame,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the search",
+        label: "next match",
+        bar: false,
+        disabled: pane_step_disabled,
+    },
+    Binding {
+        id: "blame.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::Blame,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the search",
+        label: "previous match",
+        bar: false,
+        disabled: pane_step_disabled,
+    },
+    Binding {
+        id: "blame.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Blame,
+        intent: AppIntent::PaneEscape,
+        description: "Clear the search, else go back to the file list",
+        label: "back",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "blame_commit.search",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::OpenSearch,
+        description: "Search the commit for typed text",
+        label: "search",
+        bar: false,
+        disabled: pane_search_disabled,
+    },
+    Binding {
+        id: "blame_commit.search_next",
+        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::SearchNext,
+        description: "Go to the next match of the search",
+        label: "next match",
+        bar: false,
+        disabled: pane_step_disabled,
+    },
+    Binding {
+        id: "blame_commit.search_prev",
+        keys: &[KeyPattern::any(KeyCode::Char('N'))],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::SearchPrev,
+        description: "Go to the previous match of the search",
+        label: "previous match",
+        bar: false,
+        disabled: pane_step_disabled,
+    },
+    Binding {
+        id: "blame_commit.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::BlameCommit,
+        intent: AppIntent::PaneEscape,
+        description: "Clear the search, else go back to the blame, at the same line",
         label: "back",
         bar: true,
         disabled: never,
@@ -5942,7 +6187,7 @@ mod tests {
         assert_eq!(KeyScope::StashFiles.parent(), Some(KeyScope::Workspace));
         assert_eq!(KeyScope::StashFiles.title(), "Stash files");
         let files = |k| from(KeyScope::StashFiles, k);
-        assert_eq!(files(key(KeyCode::Esc, none)), Some(CloseStashFiles));
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(PaneEscape));
         assert_eq!(files(key(KeyCode::Backspace, none)), Some(CloseStashFiles));
         assert_eq!(files(plain('j')), Some(StashFileNext));
         assert_eq!(files(key(KeyCode::Up, none)), Some(StashFilePrev));
@@ -6119,11 +6364,9 @@ mod tests {
         assert_eq!(KeyScope::CommitFiles.parent(), Some(KeyScope::Workspace));
         assert_eq!(KeyScope::CommitFiles.title(), "Commit files");
         let files = |k| from(KeyScope::CommitFiles, k);
-        for k in [
-            key(KeyCode::Esc, none),
-            plain('h'),
-            key(KeyCode::Left, none),
-        ] {
+        // Esc clears a search first, then goes back.
+        assert_eq!(files(key(KeyCode::Esc, none)), Some(PaneEscape));
+        for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(files(k), Some(CloseCommitFiles), "{k:?}");
         }
         assert_eq!(files(plain('j')), Some(CommitFileNext));
@@ -6323,11 +6566,9 @@ mod tests {
         assert_eq!(blame(key(KeyCode::PageDown, none)), Some(BlamePageDown));
         assert_eq!(blame(key(KeyCode::PageUp, none)), Some(BlamePageUp));
         assert_eq!(blame(key(KeyCode::Enter, none)), Some(OpenBlameCommit));
-        for k in [
-            key(KeyCode::Esc, none),
-            plain('h'),
-            key(KeyCode::Left, none),
-        ] {
+        // Esc clears a search first, then closes the blame.
+        assert_eq!(blame(key(KeyCode::Esc, none)), Some(PaneEscape));
+        for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(blame(k), Some(CloseBlame), "{k:?}");
         }
         assert_eq!(blame(plain('q')), Some(Quit));
@@ -6343,11 +6584,8 @@ mod tests {
             commit(key(KeyCode::PageDown, none)),
             Some(ScrollCommit(Scroll::PageDown))
         );
-        for k in [
-            key(KeyCode::Esc, none),
-            plain('h'),
-            key(KeyCode::Left, none),
-        ] {
+        assert_eq!(commit(key(KeyCode::Esc, none)), Some(PaneEscape));
+        for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(commit(k), Some(CloseBlameCommit), "{k:?}");
         }
         assert_eq!(commit(key(KeyCode::Enter, none)), None);
@@ -8271,6 +8509,88 @@ mod tests {
     }
 
     #[test]
+    fn the_preview_blame_and_commit_search_keys_clash_with_nothing_their_scope_reaches() {
+        use KeyScope::*;
+        let mut new: Vec<(String, &[KeyScope])> = Vec::new();
+        for id in [
+            "files.search_diff",
+            "files.search_next",
+            "files.search_prev",
+        ] {
+            new.push((id.to_string(), &[Files, Workspace, Global]));
+        }
+        let panes: [(&str, &[KeyScope]); 4] = [
+            ("commit_files", &[CommitFiles, Workspace, Global]),
+            ("stash_files", &[StashFiles, Workspace, Global]),
+            ("blame", &[Blame, Workspace, Global]),
+            ("blame_commit", &[BlameCommit, Workspace, Global]),
+        ];
+        for (pane, reached) in panes {
+            for action in ["search", "search_next", "search_prev", "escape"] {
+                new.push((format!("{pane}.{action}"), reached));
+            }
+        }
+        for (id, reached) in &new {
+            let new = binding(id);
+            assert_eq!(new.scope, reached[0], "{id}");
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != id && reached.contains(&b.scope))
+            {
+                // Esc clears a search first and only then closes the pane;
+                // taking it from quit is the point.
+                if id.ends_with(".escape") && other.id == "global.quit" {
+                    continue;
+                }
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+        // ctrl-f in the Commits log is a sibling scope's, so no clash.
+        let ctrl_f = key(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert!(binding("commits.create_fixup").matches(ctrl_f));
+        for id in [
+            "files.search_diff",
+            "commit_files.search",
+            "stash_files.search",
+        ] {
+            assert!(binding(id).matches(ctrl_f), "{id}");
+            assert_eq!(binding(id).intent, AppIntent::OpenPreviewSearch, "{id}");
+        }
+        for id in ["blame.search", "blame_commit.search"] {
+            assert!(binding(id).matches(plain('/')), "{id}");
+            assert_eq!(binding(id).intent, AppIntent::OpenSearch, "{id}");
+        }
+    }
+
+    #[test]
+    fn the_new_pane_escapes_are_locked_and_the_search_keys_are_not() {
+        for pane in ["commit_files", "stash_files", "blame", "blame_commit"] {
+            // Unbound, Esc would fall through to quit.
+            let id = format!("{pane}.escape");
+            assert!(REPO_LOCKED.contains(&id.as_str()), "{id}");
+            assert!(build(&[(&id, &["Z"])], Trust::Repo).is_err(), "{id}");
+            assert!(build(&[(&id, &[])], Trust::Repo).is_err(), "{id}");
+            for action in ["search", "search_next", "search_prev"] {
+                let id = format!("{pane}.{action}");
+                assert!(!REPO_LOCKED.contains(&id.as_str()), "{id}");
+                assert!(build(&[(&id, &["Z"])], Trust::Repo).is_ok(), "{id}");
+            }
+        }
+        for id in [
+            "files.search_diff",
+            "files.search_next",
+            "files.search_prev",
+        ] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_ok(), "{id}");
+        }
+    }
+
+    #[test]
     fn the_log_query_and_diff_mark_keys_clash_with_nothing_their_scope_reaches() {
         use KeyScope::*;
         let new: &[(&str, &[KeyScope])] = &[
@@ -9261,6 +9581,7 @@ mod tests {
                     | PickSelect
                     // Esc falls through to quit without it.
                     | CloseReviewDetail
+                    | PaneEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
         }
