@@ -237,16 +237,24 @@ impl AppState {
             Some(StashDraft {
                 mode,
                 paths: vec![],
+                from_range: false,
             })
         });
     }
 
-    /// Fix the file under the cursor, then ask for the stash's message.
+    /// Fix the marked files, then ask for the stash's message: the Files
+    /// range when one is set there, else the file under the cursor. Only
+    /// the loaded list names them; the filter only chose which rows the
+    /// range spans.
     pub(super) fn ask_stash_file_message(&mut self) {
         self.ask_stash_draft(menu::stash_file_disabled, |state| {
-            let entry = state.selected.and_then(|i| state.files.get(i))?;
-            let (mode, paths) = GitOp::stash_file_for(entry)?;
-            Some(StashDraft { mode, paths })
+            let (entries, from_range) = state.files_marked();
+            let (mode, paths) = GitOp::stash_files_for(&entries)?;
+            Some(StashDraft {
+                mode,
+                paths,
+                from_range,
+            })
         });
     }
 
@@ -275,12 +283,31 @@ impl AppState {
     /// Stash what was drafted when the prompt opened, with the message
     /// typed, or git's own when it is empty.
     pub(super) fn stash_message_answered(&mut self, text: &str) -> Vec<Effect> {
-        let Some(StashDraft { mode, paths }) = self.stash_draft.take() else {
+        let Some(StashDraft {
+            mode,
+            paths,
+            from_range,
+        }) = self.stash_draft.take()
+        else {
             return vec![];
         };
         if self.op_seq.is_some() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
+        }
+        // A range's set is checked again: a reload while the message was
+        // typed may have cleared the range or changed what its files need,
+        // and a push must never take a set other than the one shown.
+        if from_range {
+            let (entries, still_range) = self.files_marked();
+            let now = still_range
+                .then(|| GitOp::stash_files_for(&entries))
+                .flatten();
+            if now.as_ref() != Some(&(mode, paths.clone())) {
+                self.notice = Some(super::STASH_SET_CHANGED.into());
+                return vec![];
+            }
+            self.files_anchor = None;
         }
         let message = Some(text.trim())
             .filter(|m| !m.is_empty())
