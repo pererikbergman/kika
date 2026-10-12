@@ -272,7 +272,7 @@ impl PanelLook {
 /// A panel's frame: focused, a thick coloured border and a bold title, so
 /// the panel with the keys stands out without colour too; else a thin dim
 /// border.
-fn panel_block(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     let block = Block::bordered().title(title);
     if focused {
         block
@@ -1632,41 +1632,54 @@ fn render_diff_pane(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let position = if diff.lines.is_empty() || diff.error.is_some() {
-        String::new()
-    } else {
-        let first = (diff.scroll + 1).min(diff.lines.len());
-        let more = if diff.done { "" } else { "+" };
-        format!(" · {first}/{}{more}", diff.lines.len())
-    };
     let found = found_note(diff.search.as_ref(), !diff.done);
-    let tail = format!("{position}{found}{}", options_note(options));
+    let tail = format!("{}{found}{}", diff_position(diff), options_note(options));
     let title = match &diff.path {
         Some(path) => look.path_title("Diff", path.display(), &tail),
         None => look.title(&format!("Diff{tail}")),
     };
     let block = look.block(title);
     let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    let pane = if let Some(error) = &diff.error {
-        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if diff.show_loading {
-        Paragraph::new("Loading…")
-    } else if diff.done && diff.lines.is_empty() {
-        Paragraph::new("No diff")
-    } else {
-        // Only the visible slice: a 50,000-line diff costs a screenful per frame.
-        let start = diff.scroll.min(diff.lines.len());
-        let end = start.saturating_add(rows).min(diff.lines.len());
-        Paragraph::new(
-            diff.lines[start..end]
-                .iter()
-                .zip(start..)
-                .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
-                .collect::<Vec<_>>(),
-        )
-    };
+    let pane = diff_pane_body(diff, inner);
     frame.render_widget(pane.block(block), area);
+}
+
+/// Where in the streamed diff the pane is: ` · <first shown>/<loaded>`,
+/// `+` while more are coming; empty with nothing to show.
+pub(crate) fn diff_position(diff: &DiffPane) -> String {
+    if diff.lines.is_empty() || diff.error.is_some() {
+        return String::new();
+    }
+    let first = (diff.scroll + 1).min(diff.lines.len());
+    let more = if diff.done { "" } else { "+" };
+    format!(" · {first}/{}{more}", diff.lines.len())
+}
+
+/// The inside of a streamed Diff pane at `inner`'s size: an error, a
+/// delayed "Loading…", "No diff", or the visible lines, with the
+/// search's matches marked on them.
+pub(crate) fn diff_pane_body(diff: &DiffPane, inner: Rect) -> Paragraph<'static> {
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    if let Some(error) = &diff.error {
+        let lines = error.lines().map(|l| Line::from(l.to_string()));
+        return Paragraph::new(lines.collect::<Vec<_>>()).wrap(Wrap { trim: false });
+    }
+    if diff.show_loading {
+        return Paragraph::new("Loading…");
+    }
+    if diff.done && diff.lines.is_empty() {
+        return Paragraph::new("No diff");
+    }
+    // Only the visible slice: a 50,000-line diff costs a screenful per frame.
+    let start = diff.scroll.min(diff.lines.len());
+    let end = start.saturating_add(rows).min(diff.lines.len());
+    Paragraph::new(
+        diff.lines[start..end]
+            .iter()
+            .zip(start..)
+            .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The focused Diff pane: one side of the file as hunks, the selected one
@@ -1887,7 +1900,7 @@ fn hunk_title(view: &HunkView, options: DiffOptions, suffix: &str, look: &PanelL
 /// Where a search is, for a pane's title: " · match i of n", with `+` on
 /// the count while `more` lines can still come, or " · no matches". Never
 /// the query: the bottom bar shows that, escaped.
-fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
+pub(crate) fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
     let more = if more { "+" } else { "" };
     match search {
         Some(search) => match search.current {
