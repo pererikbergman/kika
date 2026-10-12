@@ -1,8 +1,10 @@
 //! The last pull requests seen per repository, on disk, so the badges show
 //! at once on startup. Machine-written state in the user's cache
-//! directory, private to them. It holds badges, the branches asked about,
-//! the probe's validated ETag and the key they belong to: no token, title,
-//! URL userinfo or anything else `gh` printed.
+//! directory, private to them. It holds badges, the heads asked about
+//! (each branch with the owner and ref name read from local git config),
+//! whether the repository is a fork, the probe's validated ETag and the
+//! key they belong to: no token, title, URL userinfo or anything else `gh`
+//! printed.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -13,11 +15,12 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::github::{MAX_BRANCHES, valid_etag};
+use super::head::Head;
 use super::{CiState, ForgeRepo, PrBadge, PrState};
 use crate::git::branches::BranchName;
 
 /// The file format; another version is a miss.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 /// Far more than 500 badges take; anything larger is not ours.
 const MAX_FILE: u64 = 1024 * 1024;
 
@@ -103,8 +106,12 @@ struct CacheFile {
     fetched_at: i64,
     /// The pull-request list's ETag, for the next conditional probe.
     etag: Option<String>,
-    /// The branches the badges were asked for; another set needs a new ask.
-    queried: Vec<String>,
+    /// The heads the badges were asked for, as (branch, owner, ref name);
+    /// another set needs a new ask.
+    queried: Vec<(String, String, String)>,
+    /// GitHub named a parent, so the probe, which only sees this
+    /// repository's own pull requests, is skipped.
+    forked: bool,
     prs: HashMap<String, StoredBadge>,
 }
 
@@ -114,7 +121,10 @@ pub struct Cached {
     pub badges: HashMap<BranchName, PrBadge>,
     /// Validated on read and write; an invalid one is dropped.
     pub etag: Option<String>,
-    pub queried: Vec<BranchName>,
+    pub queried: Vec<Head>,
+    /// The repository is a fork: its own pull-request list says nothing
+    /// about the parent's, so no probe can vouch for the badges.
+    pub forked: bool,
     /// When GitHub last answered with these badges, in seconds since the
     /// epoch. A 304 does not move it, so its age bounds how long a
     /// probe alone may vouch for them.
@@ -223,9 +233,14 @@ pub fn read(dir: &Path, key: &CacheKey) -> Option<Cached> {
         etag: stored.etag.as_deref().and_then(valid_etag),
         queried: stored
             .queried
-            .iter()
-            .map(|name| BranchName::from(name.as_str()))
+            .into_iter()
+            .map(|(branch, owner, name)| Head {
+                branch: BranchName::from(branch.as_str()),
+                owner,
+                name,
+            })
             .collect(),
+        forked: stored.forked,
         fetched_at: stored.fetched_at,
     })
 }
@@ -250,7 +265,12 @@ pub fn write(dir: &Path, key: &CacheKey, cached: &Cached) -> io::Result<()> {
         key: key.clone(),
         fetched_at: cached.fetched_at,
         etag: cached.etag.as_deref().and_then(valid_etag),
-        queried: cached.queried.iter().filter_map(utf8).collect(),
+        queried: cached
+            .queried
+            .iter()
+            .filter_map(|head| Some((utf8(&head.branch)?, head.owner.clone(), head.name.clone())))
+            .collect(),
+        forked: cached.forked,
         prs,
     };
     let bytes = serde_json::to_vec(&file).map_err(io::Error::other)?;
@@ -360,11 +380,24 @@ mod tests {
         ])
     }
 
+    fn head(branch: &str, owner: &str, name: &str) -> Head {
+        Head {
+            branch: branch.into(),
+            owner: owner.into(),
+            name: name.into(),
+        }
+    }
+
     fn cached() -> Cached {
         Cached {
             badges: badges(),
             etag: Some("W/\"abc\"".into()),
-            queried: vec!["main".into(), "feature/x".into(), "no-pr".into()],
+            queried: vec![
+                head("main", "acme", "main"),
+                head("feature/x", "me", "feature/x"),
+                head("no-pr", "acme", "renamed"),
+            ],
+            forked: true,
             fetched_at: 1_700_000_000,
         }
     }
@@ -430,7 +463,7 @@ mod tests {
         let path = tmp.path().join(key("/a").file_name());
         let valid = |extra: &str| {
             format!(
-                r#"{{"version":2,"key":{{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"}},"fetched_at":0,"etag":null,"queried":["main"],"prs":{{"main":{{"number":1,"state":"open","ci":null}}}}{extra}}}"#
+                r#"{{"version":3,"key":{{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"}},"fetched_at":0,"etag":null,"queried":[["main","acme","main"]],"forked":false,"prs":{{"main":{{"number":1,"state":"open","ci":null}}}}{extra}}}"#
             )
         };
         fs::write(&path, valid("")).unwrap();
@@ -438,7 +471,8 @@ mod tests {
         for bad in [
             "{".to_string(),
             valid(r#","token":"x""#),
-            valid("").replace("\"version\":2", "\"version\":3"),
+            valid("").replace("\"version\":3", "\"version\":4"),
+            valid("").replace("[\"main\",\"acme\",\"main\"]", "\"main\""),
             valid("").replace("\"open\"", "\"weird\""),
             valid("").replace("\"number\":1", "\"number\":-1"),
         ] {
@@ -457,6 +491,25 @@ mod tests {
         let v1 = r#"{"version":1,"key":{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"},"fetched_at":0,"prs":{"main":{"number":1,"state":"open","ci":null}}}"#;
         fs::write(tmp.path().join(key("/a").file_name()), v1).unwrap();
         assert_eq!(read(tmp.path(), &key("/a")), None);
+    }
+
+    #[test]
+    fn a_version_2_file_is_a_miss() {
+        let tmp = TempDir::new("forge-cache");
+        let v2 = r#"{"version":2,"key":{"host":"github.com","owner":"acme","repo":"widgets","top":"/a"},"fetched_at":0,"etag":null,"queried":["main"],"prs":{"main":{"number":1,"state":"open","ci":null}}}"#;
+        fs::write(tmp.path().join(key("/a").file_name()), v2).unwrap();
+        assert_eq!(read(tmp.path(), &key("/a")), None);
+    }
+
+    #[test]
+    fn heads_and_forked_round_trip() {
+        let tmp = TempDir::new("forge-cache");
+        for forked in [true, false] {
+            let cached = Cached { forked, ..cached() };
+            write(tmp.path(), &key("/a"), &cached).unwrap();
+            let back = read(tmp.path(), &key("/a")).unwrap();
+            assert_eq!((back.queried, back.forked), (cached.queried, forked));
+        }
     }
 
     #[test]
