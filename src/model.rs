@@ -17,7 +17,7 @@ use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
-use crate::external_diff::{self, ExternalRenderer, map_rows};
+use crate::external_diff::{self, ExternalRenderer, RendererKind, map_rows};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
 use crate::git::bisect::{BisectMark, BisectState};
@@ -482,7 +482,13 @@ impl AppState {
                 self.follow_cursor();
             }
             AppIntent::ToggleHunkStage => return self.toggle_hunk_stage(),
-            AppIntent::EnterLineMode => self.with_lines(HunkView::enter_lines),
+            AppIntent::EnterLineMode => {
+                if self.display_only() && matches!(self.focus, Focus::Diff(_)) {
+                    self.notice = Some(keymap::DISPLAY_ONLY);
+                } else {
+                    self.with_lines(HunkView::enter_lines);
+                }
+            }
             AppIntent::ExitLineMode => self.with_lines(HunkView::exit_lines),
             AppIntent::NextLine { extend } => self.with_lines(|view| view.next_line(extend)),
             AppIntent::PrevLine { extend } => self.with_lines(|view| view.prev_line(extend)),
@@ -1115,6 +1121,13 @@ impl AppState {
         self.renderer.and_then(|i| self.renderers.get(i))
     }
 
+    /// Whether the active renderer is a tool, whose rows show no patch
+    /// lines: the Diff pane can be read but not staged from.
+    pub fn display_only(&self) -> bool {
+        self.active_renderer()
+            .is_some_and(|r| r.kind == RendererKind::Tool)
+    }
+
     /// The diff the Diff pane shows: the selected file's from the Files
     /// panel, the focused view's side with the Diff pane focused (renames
     /// off, as its patch has them), nothing behind a blame or a conflict.
@@ -1149,9 +1162,13 @@ impl AppState {
 
     /// The rendered diff when the Diff pane draws it. With the pane
     /// focused, only while the selection has rows: a cursor on rows the
-    /// renderer did not draw would lie, so the built-in view is drawn.
+    /// renderer did not draw would lie, so the built-in view is drawn. A
+    /// tool's rows have no cursor to lie with, so they are always drawn.
     pub fn rendered_shown(&self) -> Option<&RenderedDiff> {
         let rendered = self.rendered_for_shown()?;
+        if self.display_only() {
+            return Some(rendered);
+        }
         match &self.focus {
             Focus::Diff(view) if rendered.error.is_none() && !rendered.rendering() => {
                 let picked = view.picked();
@@ -1237,10 +1254,16 @@ impl AppState {
 
     /// Map the rendered rows to the focused view's patch, when both are
     /// of the same file and side, then bring the selection into view.
+    /// A tool's rows are never mapped: they show the files, not the patch.
     fn remap(&mut self) {
+        let display_only = self.display_only();
         let Some(rendered) = &mut self.rendered else {
             return;
         };
+        if display_only {
+            rendered.map.clear();
+            return;
+        }
         rendered.map = match &self.focus {
             Focus::Diff(view) if view.path == rendered.path && view.side == rendered.side => view
                 .patch
@@ -1365,6 +1388,9 @@ impl AppState {
             // Bound only in Files and the diff; nothing to discard elsewhere.
             _ => return Ok(None),
         };
+        if self.display_only() {
+            return Err(keymap::DISPLAY_ONLY);
+        }
         if self.diff_options.ignore_whitespace {
             return Err(keymap::WHITESPACE_HIDDEN);
         }
@@ -1429,6 +1455,10 @@ impl AppState {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
+        if self.display_only() {
+            self.notice = Some(keymap::DISPLAY_ONLY);
+            return vec![];
+        }
         if view.lines.is_some() {
             return vec![];
         }
@@ -1986,6 +2016,10 @@ impl AppState {
         let Focus::Diff(view) = &self.focus else {
             return vec![];
         };
+        if self.display_only() {
+            self.notice = Some(keymap::DISPLAY_ONLY);
+            return vec![];
+        }
         if self.diff_options.ignore_whitespace {
             self.notice = Some(keymap::WHITESPACE_HIDDEN);
             return vec![];
@@ -10657,6 +10691,7 @@ mod tests {
         ExternalRenderer {
             label: label.into(),
             argv: vec![label.into()],
+            kind: crate::external_diff::RendererKind::Pager,
         }
     }
 
@@ -10893,6 +10928,108 @@ mod tests {
         let expected = op_of(&press(&mut built_in, KeyCode::Char(' '))).1;
         let (_, op) = op_of(&press(&mut through, KeyCode::Char(' ')));
         assert_eq!(op, expected);
+    }
+
+    fn tool(label: &str) -> ExternalRenderer {
+        ExternalRenderer {
+            kind: crate::external_diff::RendererKind::Tool,
+            ..renderer(label)
+        }
+    }
+
+    #[test]
+    fn r_cycles_through_the_pagers_then_the_tool_then_built_in() {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![
+            renderer("delta"),
+            tool("difft"),
+        ]));
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            state.update(AppIntent::CycleRenderer);
+            seen.push(state.active_renderer().map(|r| r.label.clone()));
+        }
+        assert_eq!(seen, [Some("delta".into()), Some("difft".into()), None]);
+
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            state.update(AppIntent::CycleRenderer);
+            seen.push((
+                state.active_renderer().map(|r| r.label.clone()),
+                state.display_only(),
+            ));
+        }
+        assert_eq!(seen, [(Some("difft".into()), true), (None, false)]);
+    }
+
+    /// The first of `three_files` focused with `TWO_HUNKS` loaded, drawn
+    /// by tool `difft` as rows that match no patch line.
+    fn focused_through_tool() -> AppState {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        let effects = press(&mut state, KeyCode::Enter);
+        let (tag, _) = patch_load(&effects);
+        state.update(AppIntent::PatchLoaded {
+            tag,
+            result: Ok(patch_of(TWO_HUNKS)),
+        });
+        let (tag, _, _) = render_of(&effects);
+        state.update(rendered(tag, "1 old one   1 new one\n2 same      2 same\n"));
+        state
+    }
+
+    #[test]
+    fn the_tool_view_shows_its_rows_unmapped() {
+        let state = focused_through_tool();
+        assert!(state.display_only());
+        let shown = state.rendered_shown().expect("the tool rows are shown");
+        assert_eq!(shown.rows.len(), 2);
+        assert!(shown.map.is_empty());
+    }
+
+    #[test]
+    fn the_tool_view_refuses_staging_discard_and_hunk_edits() {
+        for intent in [
+            AppIntent::ToggleHunkStage,
+            AppIntent::EnterLineMode,
+            AppIntent::Discard,
+            AppIntent::EditHunk,
+        ] {
+            let mut state = focused_through_tool();
+            assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
+            assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY), "{intent:?}");
+            assert_eq!(state.popups, [], "{intent:?}");
+            assert_eq!(view(&state).lines, None, "{intent:?}");
+        }
+        // Line mode entered before the tool, then staged by intent.
+        let mut state = focused_through(false);
+        state.update(AppIntent::EnterLineMode);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        state.notice = None;
+        assert_eq!(state.update(AppIntent::ToggleLinesStage), vec![]);
+        assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY));
+    }
+
+    #[test]
+    fn back_on_the_built_in_view_a_hunk_stages_again() {
+        let mut state = focused_through_tool();
+        assert_eq!(state.update(AppIntent::ToggleHunkStage), vec![]);
+        state.update(AppIntent::CycleRenderer);
+        assert!(!state.display_only());
+        op_of(&state.update(AppIntent::ToggleHunkStage));
+    }
+
+    #[test]
+    fn the_tool_view_leaves_whole_file_staging_alone() {
+        let mut state = with_renderers(three_files(), &[]);
+        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::CycleRenderer);
+        assert!(state.display_only());
+        assert_eq!(state.focus, Focus::Files);
+        op_of(&press_char(&mut state, ' '));
     }
 
     #[test]

@@ -107,6 +107,12 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (Focus::Commits, ..) if state.commits.open.is_some() => {
             render_diff_pane(&state.diff, options, &look, frame, area)
         }
+        // A tool's rows show no patch lines, so no cursor is drawn on them.
+        (Focus::Diff(view), Some(rendered), Some(label)) if state.display_only() => {
+            let suffix = format!("{label} (display only)");
+            let block = look.block(hunk_title(view, options, &suffix, &look));
+            render_rendered(rendered, block, None, hint, frame, area);
+        }
         (Focus::Diff(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
             render_rendered(rendered, block, Some(view), hint, frame, area);
@@ -4078,6 +4084,7 @@ mod tests {
         state.renderers = vec![ExternalRenderer {
             label: "delta".into(),
             argv: vec!["delta".into()],
+            kind: crate::external_diff::RendererKind::Pager,
         }];
         state.renderer = Some(0);
         let side = match &state.focus {
@@ -4197,6 +4204,26 @@ mod tests {
     }
 
     #[test]
+    fn a_diff_tools_rows_are_drawn_display_only_without_a_cursor() {
+        let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
+        // Side by side, so a pager's rows here would be unmapped.
+        through_renderer(&mut state, "old one │ new one\nsame │ same\n");
+        state.renderers[0].label = "difft".into();
+        state.renderers[0].kind = crate::external_diff::RendererKind::Tool;
+        if let Some(rendered) = &mut state.rendered {
+            rendered.map.clear();
+        }
+        let rows = draw(&state, 100, 20);
+        assert!(
+            contains(&rows, " Unstaged a.rs · difft (display only) "),
+            "{rows:#?}"
+        );
+        assert!(contains(&rows, "old one │ new one"), "{rows:#?}");
+        assert!(!contains(&rows, "-old one"), "{rows:#?}");
+        assert!(!rows.iter().any(|r| r.contains('▌')), "{rows:#?}");
+    }
+
+    #[test]
     fn a_renderer_error_or_a_render_in_flight_says_so() {
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+built in")]);
         through_renderer(&mut state, "");
@@ -4258,6 +4285,7 @@ mod tests {
             .push(crate::external_diff::ExternalRenderer {
                 label: "riff".into(),
                 argv: vec!["riff".into()],
+                kind: crate::external_diff::RendererKind::Pager,
             });
         let rows = draw(&state, 80, 24);
         assert!(
