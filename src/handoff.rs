@@ -171,10 +171,8 @@ fn run_command(argv: &[OsString], workdir: &Path) -> Result<(), CommandFailure> 
     let Some((program, args)) = argv.split_first() else {
         return Err(CommandFailure::Launch("The command is empty".into()));
     };
-    let status = std::process::Command::new(program)
-        .args(args)
-        .current_dir(workdir)
-        .status()
+    let status = crate::program::command(program)
+        .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| CommandFailure::Launch(start_error(program, &e)))?;
     if status.success() {
         Ok(())
@@ -382,10 +380,8 @@ fn launch(editor: &str, file: &Path, line: Option<u32>, workdir: &Path) -> Resul
     let Some((program, args)) = argv.split_first() else {
         return Err("Could not start the editor: no program".into());
     };
-    let status = std::process::Command::new(program)
-        .args(args)
-        .current_dir(workdir)
-        .status()
+    let status = crate::program::command(program)
+        .and_then(|mut command| command.args(args).current_dir(workdir).status())
         .map_err(|e| terminal_safe(format!("Could not start the editor: {e}").as_bytes()))?;
     if status.success() {
         Ok(())
@@ -605,6 +601,25 @@ mod tests {
         ];
         out.extend(args.iter().map(|a| a.to_string()));
         out
+    }
+
+    /// Hidden: run by `program`'s decoy test, from a directory of decoys
+    /// with only relative and empty `PATH` entries.
+    #[cfg(unix)]
+    #[test]
+    fn decoy_child_run_command_and_editor() {
+        use crate::program::NOT_FOUND;
+        if !crate::program::in_decoy_child() {
+            return;
+        }
+        let here = std::env::current_dir().unwrap();
+        match run_command(&["kika-decoy".into()], &here) {
+            Err(CommandFailure::Launch(e)) => assert!(e.contains(NOT_FOUND), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        let e = launch("kika-decoy", Path::new("file"), None, &here).unwrap_err();
+        assert!(e.starts_with("Could not start the editor"), "{e}");
+        assert!(e.contains(NOT_FOUND), "{e}");
     }
 
     #[test]
