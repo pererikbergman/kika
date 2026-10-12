@@ -2335,6 +2335,11 @@ impl AppState {
                     effects.extend(self.close_stash_files());
                 }
                 self.focus = Focus::side(side);
+                // Another panel has no keys to step or clear the preview
+                // search, so it would stay marked with no way out.
+                if side != self.expanded {
+                    self.diff.search = None;
+                }
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
                 effects.extend(self.render_if_stale());
@@ -6357,6 +6362,7 @@ fn failure_title(op: &GitOp) -> &'static str {
 mod branch_lists;
 mod custom_patch;
 mod fixup;
+pub(crate) mod forge_load;
 mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
@@ -18229,6 +18235,98 @@ mod tests {
         assert_eq!(state.notice, Some("Nothing searched yet (ctrl-f)".into()));
         press(&mut state, KeyCode::Esc);
         assert!(state.should_quit, "then Esc quits as before");
+    }
+
+    /// Files with a found preview search for "foo".
+    fn files_searching_foo() -> AppState {
+        let (mut state, effects) = with_files(three_files(), 24);
+        preview_loaded(&mut state, diff_tag(&effects));
+        ctrl(&mut state, 'f');
+        type_text(&mut state, "foo\n");
+        assert!(state.diff.search.is_some());
+        assert_eq!(state.focus, Focus::Files);
+        state
+    }
+
+    #[test]
+    fn switching_the_side_panel_clears_the_preview_search() {
+        for (key, side) in [('1', SidePanel::Status), ('4', SidePanel::Commits)] {
+            let mut state = files_searching_foo();
+            press_char(&mut state, key);
+            assert_eq!(state.expanded, side, "{key}");
+            assert_eq!(state.diff.search, None, "{key}");
+        }
+        for back in [false, true] {
+            let mut state = files_searching_foo();
+            state.update(AppIntent::CycleFocus { back });
+            assert_ne!(state.expanded, SidePanel::Files, "back: {back}");
+            assert_eq!(state.diff.search, None, "back: {back}");
+        }
+    }
+
+    #[test]
+    fn the_diff_pane_and_back_to_files_keeps_the_preview_search() {
+        let mut state = files_searching_foo();
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
+        assert!(matches!(state.focus, Focus::Diff(_)), "{:?}", state.focus);
+        state.update(AppIntent::FocusLeft);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+        // Files again by its number: the side panel did not change.
+        press_char(&mut state, '2');
+        assert_eq!(state.focus, Focus::Files);
+        assert!(state.diff.search.is_some());
+    }
+
+    #[test]
+    fn esc_in_the_preview_search_input_clears_it_and_stays_in_files() {
+        let mut state = files_searching_foo();
+        ctrl(&mut state, 'f');
+        assert!(state.input.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(state.diff.search, None);
+        assert_eq!(state.focus, Focus::Files);
+        assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn esc_in_the_blame_search_input_clears_it_and_keeps_the_blame() {
+        let mut state = blamed_foo();
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(blame(&state).search, None);
+    }
+
+    #[test]
+    fn esc_in_the_blame_commit_search_input_clears_it_and_keeps_the_commit() {
+        let mut state = blamed_foo();
+        let tag = match press(&mut state, KeyCode::Enter).as_slice() {
+            [Effect::LoadCommit { tag, .. }] => *tag,
+            other => panic!("expected one LoadCommit, got {other:?}"),
+        };
+        state.update(AppIntent::CommitLoaded {
+            tag,
+            result: Ok(vec![line("+foo")]),
+        });
+        type_text(&mut state, "/foo\n");
+        assert!(blame(&state).commit.as_ref().unwrap().search.is_some());
+        press_char(&mut state, '/');
+        assert_eq!(
+            state.input.as_ref().map(|i| i.target),
+            Some(InputTarget::BlameCommitSearch)
+        );
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        let commit = blame(&state).commit.as_ref().expect("still open");
+        assert_eq!(commit.search, None);
     }
 
     #[test]

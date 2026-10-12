@@ -528,12 +528,14 @@ fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppInten
         let _ = tx.send(AppIntent::OpenUrlFailed("No browser is configured".into()));
         return;
     };
-    let spawned = std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let spawned = crate::program::command(program).and_then(|mut command| {
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    });
     match spawned {
         Ok(mut child) => {
             std::thread::spawn(move || {
@@ -572,7 +574,7 @@ fn run_clipboard_command(
     timeout: Duration,
 ) {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let start = std::time::Instant::now();
     let finished = log_program(&argv, sink);
@@ -587,7 +589,15 @@ fn run_clipboard_command(
             "{why}. Check clipboard.command in the global config."
         )));
     };
-    let spawned = Command::new(program)
+    let mut command = match crate::program::command(program) {
+        Ok(command) => command,
+        Err(e) => {
+            finished(CommandOutcome::NotStarted);
+            fail(format!("Could not start {name}: {e}"));
+            return;
+        }
+    };
+    let spawned = command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1473,8 +1483,10 @@ impl Runtime {
                 base,
                 title,
             } => {
-                let Some(forge) = self.forge.clone() else {
-                    // No forge client: nothing may reach the network.
+                // No forge client, or a repository `[forge.allow]` leaves
+                // out (the model never asks for one): nothing may reach
+                // the network.
+                let Some(forge) = self.forge.clone().filter(|_| host.allows(&repo)) else {
                     let _ = tx.send(AppIntent::PullRequestCreated {
                         tag,
                         result: Err(CreateError::Status(ForgeStatus::Failed)),
@@ -1968,6 +1980,45 @@ mod tests {
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn a_create_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
+        use crate::forge::allow::AllowRule;
+        use crate::forge::github::FakeGh;
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        let other = AllowRule::parse("other").unwrap();
+        runtime.spawn(Effect::CreatePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![other]),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            head: "me:topic".into(),
+            base: "main".into(),
+            title: "Add login".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestCreated {
+                tag: forge_tag(),
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
     }
 
     #[tokio::test]
@@ -4523,6 +4574,39 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"hi");
         assert!(osc.copies().is_empty(), "the program replaces OSC 52");
         assert!(rx.try_recv().is_err(), "a copy that worked sends nothing");
+    }
+
+    /// Hidden: run by `program`'s decoy test, from a directory of decoys
+    /// with only relative and empty `PATH` entries.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn decoy_child_open_url_and_clipboard() {
+        if !crate::program::in_decoy_child() {
+            return;
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let url = vec!["kika-decoy".into(), "https://example.com".into()];
+        open_url(url, CommandSink::new(), tx.clone());
+        let copy = vec!["kika-decoy".into()];
+        run_clipboard_command(
+            copy,
+            b"x".to_vec(),
+            CommandSink::new(),
+            tx,
+            CLIPBOARD_TIMEOUT,
+        );
+        let clear = |notice: &str| {
+            assert!(notice.contains(crate::program::NOT_FOUND), "{notice}");
+            assert!(!notice.chars().any(char::is_control), "{notice:?}");
+        };
+        match rx.recv().await {
+            Some(AppIntent::OpenUrlFailed(notice)) => clear(&notice),
+            other => panic!("{other:?}"),
+        }
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(notice)) => clear(&notice),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test]
