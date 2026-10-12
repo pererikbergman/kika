@@ -67,6 +67,7 @@ pub fn runs_attached(op: &GitOp) -> bool {
         GitOp::Merge { strategy, .. } => *strategy == MergeStrategy::NoFastForward,
         GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
+        | GitOp::CustomPatch { .. }
         | GitOp::Revert(_)
         | GitOp::CherryPick(_)
         | GitOp::Continue(_)

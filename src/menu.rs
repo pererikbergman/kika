@@ -3,6 +3,7 @@
 
 use crate::bisect;
 use crate::clipboard::CopyWhat;
+use crate::custom_patch::PatchChoice;
 use crate::git::bisect::BisectMark;
 use crate::git::ops::{MergeStrategy, ResetMode};
 use crate::git::repo_state::Operation;
@@ -10,7 +11,8 @@ use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
     OP_RUNNING, Reason, amend_disabled, commit_disabled, files_stage_disabled, list_guard,
-    merge_disabled, never, no_commit_selected, reset_disabled, stage_all_disabled,
+    merge_disabled, never, no_commit_selected, patch_rewrite_disabled, reset_disabled,
+    stage_all_disabled,
 };
 use crate::model::AppState;
 use crate::model::pull_request::{
@@ -34,6 +36,8 @@ pub enum MenuId {
     Copy,
     /// Open, copy or create the selected branch's pull request.
     PullRequest,
+    /// Rewrite history with the custom patch, or drop it.
+    CustomPatch,
 }
 
 impl MenuId {
@@ -47,6 +51,7 @@ impl MenuId {
             MenuId::Bisect => "Bisect",
             MenuId::Copy => "Copy",
             MenuId::PullRequest => "Pull request",
+            MenuId::CustomPatch => "Custom patch",
         }
     }
 }
@@ -114,6 +119,59 @@ static ACTIONS: &[MenuItem] = &[
         label: "Quit…",
         intent: AppIntent::Ask(ConfirmKind::Quit),
         disabled: never,
+    },
+];
+
+fn remove_disabled(state: &AppState) -> Option<Reason> {
+    patch_rewrite_disabled(state, PatchChoice::Remove)
+}
+
+fn move_disabled(state: &AppState) -> Option<Reason> {
+    patch_rewrite_disabled(state, PatchChoice::MoveToSelected)
+}
+
+fn to_index_disabled(state: &AppState) -> Option<Reason> {
+    patch_rewrite_disabled(state, PatchChoice::ToIndex)
+}
+
+fn new_commit_disabled(state: &AppState) -> Option<Reason> {
+    patch_rewrite_disabled(state, PatchChoice::NewCommit)
+}
+
+fn no_patch(state: &AppState) -> Option<Reason> {
+    state
+        .custom_patch
+        .is_none()
+        .then_some("No custom patch".into())
+}
+
+/// Each rewrite asks with `y` only before it runs; a reset only drops
+/// Kika's selection, so it does not ask.
+static CUSTOM_PATCH: &[MenuItem] = &[
+    MenuItem {
+        label: "Remove from commit",
+        intent: AppIntent::ChoosePatchAction(PatchChoice::Remove),
+        disabled: remove_disabled,
+    },
+    MenuItem {
+        label: "Move to selected commit",
+        intent: AppIntent::ChoosePatchAction(PatchChoice::MoveToSelected),
+        disabled: move_disabled,
+    },
+    MenuItem {
+        label: "Move to index",
+        intent: AppIntent::ChoosePatchAction(PatchChoice::ToIndex),
+        disabled: to_index_disabled,
+    },
+    MenuItem {
+        label: "New commit after source…",
+        intent: AppIntent::ChoosePatchAction(PatchChoice::NewCommit),
+        disabled: new_commit_disabled,
+    },
+    MenuItem {
+        label: "Reset patch",
+        intent: AppIntent::ResetPatch,
+        disabled: no_patch,
     },
 ];
 
@@ -323,6 +381,7 @@ pub fn items(id: MenuId) -> &'static [MenuItem] {
         MenuId::Copy => COPY,
         MenuId::Stash => STASH,
         MenuId::PullRequest => PULL_REQUEST,
+        MenuId::CustomPatch => CUSTOM_PATCH,
     }
 }
 

@@ -8,6 +8,7 @@ use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::conflict::Choice;
 use crate::custom_command::{CommandFailure, OutputMode};
+use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::forge::review::{PrDetail, Queues, ReviewError};
@@ -647,6 +648,21 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<FixupBase, String>,
     },
+    /// Pick the selected commit file whole into the custom patch, or drop
+    /// it.
+    PatchToggleFile,
+    /// Show what can be done with the custom patch.
+    OpenPatchMenu,
+    /// A rewrite chosen from the patch menu: ask its message first, or
+    /// ask whether to go ahead.
+    ChoosePatchAction(PatchChoice),
+    /// The new commit's message for "New commit after source", as typed.
+    PatchCommitMessage(String),
+    /// Run the rewrite, as the question asked.
+    ConfirmPatchAction(PatchAction),
+    /// Drop the custom patch. Only Kika's selection goes; the repository
+    /// does not change.
+    ResetPatch,
     /// Stop the rebase after the selected commit, or toggle the stop
     /// after the selected todo row.
     InsertBreak,
