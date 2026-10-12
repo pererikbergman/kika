@@ -13,7 +13,7 @@ use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
-use crate::features::{command_log, custom_commands, repos, submodules, worktrees};
+use crate::features::{command_log, custom_commands, repos, submodules, sync, worktrees};
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -2300,27 +2300,6 @@ pub(crate) fn remote_disabled(state: &AppState) -> Option<Reason> {
 
 pub(crate) const REMOTE_BUSY: &str = "Another operation is running";
 
-/// A fetch also waits for auto-fetch, which would race it for the same refs.
-pub(crate) fn fetch_disabled(state: &AppState) -> Option<Reason> {
-    remote_disabled(state).or_else(|| {
-        state
-            .watch
-            .fetch_pending
-            .then_some("A background fetch is running".into())
-    })
-}
-
-/// Pull and push work on the current branch, so they need one.
-pub(crate) fn pull_push_disabled(state: &AppState) -> Option<Reason> {
-    remote_disabled(state).or_else(|| {
-        let detached = state
-            .branch
-            .as_ref()
-            .is_some_and(|b| matches!(b.head, Head::Detached(_)));
-        detached.then_some("HEAD is detached".into())
-    })
-}
-
 /// Why an action on the selected row cannot run: the filter hides it.
 pub(crate) const FILTER_HIDES_ROW: &str = "No row matches the filter";
 
@@ -2678,40 +2657,6 @@ static CORE_GLOBAL: &[Binding] = &[
         label: "refresh",
         bar: true,
         disabled: never,
-    },
-];
-
-// Chunk 2: sync
-static SYNC_WORKSPACE: &[Binding] = &[
-    Binding {
-        id: "workspace.fetch",
-        keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::Fetch,
-        description: "Fetch every remote",
-        label: "fetch",
-        bar: false,
-        disabled: fetch_disabled,
-    },
-    Binding {
-        id: "workspace.pull",
-        keys: &[KeyPattern::exact(KeyCode::Char('p'), NONE)],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::Pull,
-        description: "Pull into the current branch",
-        label: "pull",
-        bar: false,
-        disabled: pull_push_disabled,
-    },
-    Binding {
-        id: "workspace.push",
-        keys: &[KeyPattern::any(KeyCode::Char('P'))],
-        scope: KeyScope::Workspace,
-        intent: AppIntent::Push,
-        description: "Push the current branch",
-        label: "push",
-        bar: false,
-        disabled: pull_push_disabled,
     },
 ];
 
@@ -4679,40 +4624,6 @@ static CORE_POPUPS: &[Binding] = &[
     },
 ];
 
-// Chunk 42: sync
-static SYNC_CREDENTIAL: &[Binding] = &[
-    Binding {
-        id: "credential.answer",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Credential,
-        intent: AppIntent::SubmitCredential,
-        description: "Send the typed answer to git",
-        label: "send",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "credential.cancel",
-        keys: &[KeyPattern::any(KeyCode::Esc)],
-        scope: KeyScope::Credential,
-        intent: AppIntent::CredentialAnswered(None),
-        description: "Cancel the question, which fails the operation",
-        label: "cancel",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "credential.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Credential,
-        intent: AppIntent::Quit,
-        description: "Cancel the question and quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 43: core
 static CORE_ERROR: &[Binding] = &[
     Binding {
@@ -6338,7 +6249,7 @@ static CORE_INPUT_QUIT: &[Binding] = &[
 /// this order. A feature moving out of core changes only its paths here.
 static CHUNKS: &[&[Binding]] = &[
     CORE_GLOBAL,
-    SYNC_WORKSPACE,
+    sync::keys::SYNC_WORKSPACE,
     CORE_SCROLL,
     submodules::keys::SUBMODULES_WORKSPACE,
     DIFF_WORKSPACE,
@@ -6378,7 +6289,7 @@ static CHUNKS: &[&[Binding]] = &[
     STASH_FROM_FILES,
     COMMIT_KEYS,
     CORE_POPUPS,
-    SYNC_CREDENTIAL,
+    sync::keys::SYNC_CREDENTIAL,
     CORE_ERROR,
     FILES_DISCARD_CONFIRM,
     BRANCHES_KEYS,

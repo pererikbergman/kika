@@ -765,6 +765,32 @@ pub(crate) fn remote_finished(
     AppIntent::RemoteFinished { tag, op, result }
 }
 
+pub(crate) const PUSH: RemoteOp = RemoteOp::Push {
+    force_with_lease: false,
+};
+
+pub(crate) fn asked(tag: Tag, prompt: &str, confirm: bool) -> AppIntent {
+    AppIntent::CredentialAsked {
+        tag,
+        prompt: prompt.into(),
+        confirm,
+    }
+}
+
+/// A push waiting on a password typed as `typed`.
+pub(crate) fn typing_password(typed: &str) -> (AppState, Tag) {
+    let mut state = remote_ready();
+    let (tag, _) = remote_of(&shift(&mut state, 'P'));
+    assert_eq!(
+        state.update(asked(tag, "Password for 'https://u@h':", false)),
+        []
+    );
+    for c in typed.chars() {
+        press_char(&mut state, c);
+    }
+    (state, tag)
+}
+
 /// `with_commits(3)` with full ids on one line, `aaa…` at `HEAD`, the
 /// last loaded commit on `ddd…`, and `bbb…` selected.
 pub(crate) fn on_linear_log() -> AppState {
