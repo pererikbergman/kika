@@ -465,11 +465,9 @@ fn write_rebase_todo(path: &Path, expected: &[u8], content: &[u8]) -> Result<(),
     worktree_file::replace_file(path, expected, content)
 }
 
-/// Start `argv` (the browser and the URL last) with no shell and nothing
-/// to read or write, logged in the Command log. It is waited for on a
-/// thread of its own, so a browser that stays open holds nothing up;
-/// only a failure to start is reported, as `OpenUrlFailed`.
-fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppIntent>) {
+/// Log `argv` as started in the Command log, and return what logs it as
+/// finished, with its outcome and how long it ran.
+fn log_program(argv: &[OsString], sink: CommandSink) -> impl FnOnce(CommandOutcome) + Send + use<> {
     let line = argv
         .iter()
         .map(|arg| terminal_safe(arg.as_encoded_bytes()))
@@ -482,13 +480,21 @@ fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppInten
         attached: false,
     });
     let start = std::time::Instant::now();
-    let finished = move |outcome| {
+    move |outcome| {
         sink.send(CommandEvent::Finished {
             id,
             outcome,
             elapsed: start.elapsed(),
         })
-    };
+    }
+}
+
+/// Start `argv` (the browser and the URL last) with no shell and nothing
+/// to read or write, logged in the Command log. It is waited for on a
+/// thread of its own, so a browser that stays open holds nothing up;
+/// only a failure to start is reported, as `OpenUrlFailed`.
+fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppIntent>) {
+    let finished = log_program(&argv, sink);
     let Some((program, args)) = argv.split_first() else {
         finished(CommandOutcome::NotStarted);
         let _ = tx.send(AppIntent::OpenUrlFailed("No browser is configured".into()));
@@ -519,6 +525,104 @@ fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppInten
             )));
         }
     }
+}
+
+/// How long a clipboard program may take before it is stopped. Programs
+/// that keep owning the selection fork and return well within it.
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Copy with `argv`, the global config's clipboard program, given `bytes`
+/// on stdin; never in argv or the Command log. Spawning is quick, and
+/// writing and waiting run on threads of their own, so a program that does
+/// not read or does not exit holds nothing up: past `timeout` it is killed.
+/// Any failure comes back as `CopyFailed`.
+fn run_clipboard_command(
+    argv: Vec<OsString>,
+    bytes: Vec<u8>,
+    sink: CommandSink,
+    tx: UnboundedSender<AppIntent>,
+    timeout: Duration,
+) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let start = std::time::Instant::now();
+    let finished = log_program(&argv, sink);
+    // `check_argv` refuses an empty command, so this is only a guard.
+    let Some((program, args)) = argv.split_first() else {
+        finished(CommandOutcome::NotStarted);
+        return;
+    };
+    let name = terminal_safe(program.as_encoded_bytes());
+    let fail = move |why: String| {
+        let _ = tx.send(AppIntent::CopyFailed(format!(
+            "{why}. Check clipboard.command in the global config."
+        )));
+    };
+    let spawned = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            finished(CommandOutcome::NotStarted);
+            fail(format!("Could not start {name}: {e}"));
+            return;
+        }
+    };
+    let stdin = child.stdin.take();
+    std::thread::spawn(move || {
+        // On a thread of its own: a program that never reads would block
+        // the write once the pipe is full. Dropping stdin closes it.
+        let (wrote_tx, wrote) = std::sync::mpsc::channel();
+        if let Some(mut stdin) = stdin {
+            std::thread::spawn(move || {
+                let _ = wrote_tx.send(stdin.write_all(&bytes));
+            });
+        }
+        let deadline = start + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(format!(
+                        "{name} did not finish within {}s",
+                        timeout.as_secs_f32()
+                    ));
+                }
+                Err(e) => break Err(format!("Could not wait for {name}: {e}")),
+            }
+        };
+        // The pipe is closed once it exits, so the write ends at once.
+        let write = wrote.recv_timeout(Duration::from_secs(1));
+        match (status, write) {
+            (Ok(status), _) if !status.success() => {
+                finished(CommandOutcome::Failed(Some(status.to_string())));
+                fail(format!("{name} failed: {status}"));
+            }
+            (Ok(_), Ok(Ok(()))) => finished(CommandOutcome::Ok),
+            (Ok(_), Ok(Err(e))) => {
+                finished(CommandOutcome::Failed(None));
+                fail(format!("Could not send the text to {name}: {e}"));
+            }
+            (Ok(_), Err(_)) => {
+                finished(CommandOutcome::Failed(None));
+                fail(format!("Could not send the text to {name}"));
+            }
+            (Err(why), _) => {
+                finished(CommandOutcome::Failed(None));
+                fail(why);
+            }
+        }
+    });
 }
 
 /// Seconds since the epoch, which relative commit dates count from.
@@ -567,6 +671,9 @@ pub struct Runtime {
     forge: Option<ForgeContext>,
     /// Where copied text goes: the terminal, unless a test records it.
     clipboard: Arc<dyn ClipboardSink>,
+    /// The global config's `[clipboard] command`, read once at startup;
+    /// when set it copies instead of OSC 52.
+    clipboard_command: Option<Vec<OsString>>,
     /// Where programs Kika starts outside git are logged, as git's are.
     sink: CommandSink,
 }
@@ -586,6 +693,7 @@ impl Runtime {
             credential: AnswerSlot::default(),
             forge: None,
             clipboard: Arc::new(TerminalSink),
+            clipboard_command: None,
             sink: CommandSink::new(),
         }
     }
@@ -608,9 +716,30 @@ impl Runtime {
         Self { clipboard, ..self }
     }
 
+    /// Copy with `command`, given the text on stdin, instead of OSC 52.
+    pub fn with_clipboard_command(self, clipboard_command: Option<Vec<OsString>>) -> Self {
+        Self {
+            clipboard_command,
+            ..self
+        }
+    }
+
     /// Put `text` on the clipboard now, on the caller's thread, so the
-    /// bytes never land inside a frame being drawn.
+    /// bytes never land inside a frame being drawn. With a clipboard
+    /// program, only starting it happens here; a failure arrives later as
+    /// `CopyFailed`.
     pub fn copy_to_clipboard(&self, text: &str) -> Result<(), String> {
+        if let Some(argv) = &self.clipboard_command {
+            let bytes = clipboard::command_payload(text)?;
+            run_clipboard_command(
+                argv.clone(),
+                bytes,
+                self.sink.clone(),
+                self.tx.clone(),
+                CLIPBOARD_TIMEOUT,
+            );
+            return Ok(());
+        }
         let bytes = clipboard::osc52(text)?;
         self.clipboard
             .copy(&bytes)
@@ -4231,5 +4360,170 @@ mod tests {
             }
             other => panic!("expected a failed ReflogLoaded, got {other:?}"),
         }
+    }
+
+    /// A runtime that copies with `argv`, its log, and where intents land.
+    fn clipboard_runtime(
+        argv: &[&str],
+    ) -> (
+        Runtime,
+        Arc<crate::clipboard::RecordingSink>,
+        std::sync::mpsc::Receiver<CommandEvent>,
+        mpsc::UnboundedReceiver<AppIntent>,
+    ) {
+        let sink = CommandSink::new();
+        let (log_tx, log_rx) = std::sync::mpsc::channel();
+        sink.connect(move |ev| {
+            let _ = log_tx.send(ev);
+        });
+        let osc = Arc::new(crate::clipboard::RecordingSink::default());
+        let (tx, rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx)
+            .with_command_sink(sink)
+            .with_clipboard(osc.clone())
+            .with_clipboard_command(Some(argv.iter().map(OsString::from).collect()));
+        (runtime, osc, log_rx, rx)
+    }
+
+    /// The next Command log event, waiting at most a few seconds.
+    fn next_event(log: &std::sync::mpsc::Receiver<CommandEvent>) -> CommandEvent {
+        log.recv_timeout(Duration::from_secs(10))
+            .expect("a Command log event")
+    }
+
+    #[test]
+    fn with_no_clipboard_command_a_copy_is_osc_52() {
+        let osc = Arc::new(crate::clipboard::RecordingSink::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(FakeRunner::new()), tx).with_clipboard(osc.clone());
+        assert_eq!(runtime.copy_to_clipboard("abc"), Ok(()));
+        assert_eq!(osc.copies(), [crate::clipboard::osc52("abc").unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clipboard_command_gets_the_cleaned_text_on_stdin_and_not_in_argv() {
+        let tmp = crate::git::fake::TempDir::new("clipboard-command");
+        let out = tmp.path().join("copied");
+        // The test's own fake clipboard program; Kika itself never builds a shell line.
+        let script = format!("cat > '{}'", out.display());
+        let (runtime, osc, log, mut rx) = clipboard_runtime(&["sh", "-c", &script]);
+
+        assert_eq!(runtime.copy_to_clipboard("hi\x1b"), Ok(()));
+        let CommandEvent::Started { id, line, .. } = next_event(&log) else {
+            panic!("expected the program to be logged first");
+        };
+        assert_eq!(line, format!("sh -c {script}"));
+        assert!(!line.contains("hi"), "{line}");
+        match next_event(&log) {
+            CommandEvent::Finished {
+                id: done, outcome, ..
+            } => {
+                assert_eq!(done, id);
+                assert_eq!(outcome, CommandOutcome::Ok);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&out).unwrap(), b"hi");
+        assert!(osc.copies().is_empty(), "the program replaces OSC 52");
+        assert!(rx.try_recv().is_err(), "a copy that worked sends nothing");
+    }
+
+    #[tokio::test]
+    async fn a_clipboard_command_that_cannot_start_says_so_later() {
+        let (runtime, osc, log, mut rx) = clipboard_runtime(&["/nonexistent/kika-clip"]);
+        assert_eq!(runtime.copy_to_clipboard("abc"), Ok(()));
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(message)) => {
+                assert!(
+                    message.starts_with("Could not start /nonexistent/kika-clip: "),
+                    "{message}"
+                );
+                assert!(
+                    message.ends_with(" Check clipboard.command in the global config."),
+                    "{message}"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(next_event(&log), CommandEvent::Started { .. }));
+        assert!(matches!(
+            next_event(&log),
+            CommandEvent::Finished {
+                outcome: CommandOutcome::NotStarted,
+                ..
+            }
+        ));
+        assert!(osc.copies().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clipboard_command_that_fails_names_its_exit_status() {
+        let (runtime, osc, _log, mut rx) = clipboard_runtime(&["false"]);
+        assert_eq!(runtime.copy_to_clipboard("abc"), Ok(()));
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(message)) => {
+                assert!(
+                    message.starts_with("false failed: exit status: 1"),
+                    "{message}"
+                );
+                assert!(message.ends_with(" Check clipboard.command in the global config."));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(osc.copies().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_clipboard_command_that_hangs_is_stopped_and_reported() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = CommandSink::new();
+        let (log_tx, log) = std::sync::mpsc::channel();
+        sink.connect(move |ev| {
+            let _ = log_tx.send(ev);
+        });
+        let start = std::time::Instant::now();
+        // It never reads its input, so a large text would fill the pipe too.
+        run_clipboard_command(
+            vec!["sleep".into(), "30".into()],
+            vec![b'x'; crate::clipboard::MAX_COPY],
+            sink,
+            tx,
+            Duration::from_millis(200),
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "it returns at once"
+        );
+        match rx.recv().await {
+            Some(AppIntent::CopyFailed(message)) => {
+                assert!(message.starts_with("sleep did not finish"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(matches!(next_event(&log), CommandEvent::Started { .. }));
+        assert!(matches!(
+            next_event(&log),
+            CommandEvent::Finished {
+                outcome: CommandOutcome::Failed(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn text_too_long_for_a_clipboard_command_starts_nothing() {
+        let (runtime, osc, log, mut rx) = clipboard_runtime(&["/nonexistent/kika-clip"]);
+        let long = "x".repeat(crate::clipboard::MAX_COPY + 1);
+        assert_eq!(
+            runtime.copy_to_clipboard(&long),
+            Err(crate::clipboard::TOO_LONG.to_string())
+        );
+        assert!(log.try_recv().is_err(), "nothing was started");
+        assert!(rx.try_recv().is_err());
+        assert!(osc.copies().is_empty());
     }
 }

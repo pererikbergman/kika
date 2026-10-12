@@ -271,3 +271,13 @@ fn the_page_documents_every_forge_key_and_the_pull_request_menu() {
         );
     }
 }
+
+#[test]
+fn the_page_documents_the_clipboard_command() {
+    for needle in ["[clipboard]", "command = [", "clipboard.command"] {
+        assert!(
+            PAGE.contains(needle),
+            "docs/configuration.md lacks {needle:?}"
+        );
+    }
+}

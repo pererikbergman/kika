@@ -46,6 +46,9 @@ browser = ["open"]        # opens forge pages; leave out to keep it off
 
 [display]
 emoji_zwj_terminals = ["WezTerm"]   # leave out to keep emoji joiners escaped
+
+[clipboard]
+command = ["pbcopy"]   # copies instead of OSC 52; leave out to keep it off
 ```
 
 Earlier versions of this example bound `files.stage` to `s`. `s` now opens
@@ -445,6 +448,41 @@ emoji_zwj_terminals = ["WezTerm", "ghostty"]
 
 **Changes to `[display]` take effect after a restart.**
 
+## `[clipboard]` (global file only)
+
+Kika copies with the OSC 52 terminal escape (see the Copy menu under
+Commits). If your terminal does not support OSC 52, or has it turned off,
+`command` names a program to copy with instead. It is off by default.
+
+```toml
+[clipboard]
+command = ["pbcopy"]                           # macOS
+# command = ["wl-copy"]                        # Linux, Wayland
+# command = ["xclip", "-selection", "clipboard"]  # Linux, X11
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `command` | The program and its arguments as a list, run directly with no shell | unset: copies use OSC 52 |
+
+- The copied text goes to the program on stdin, never in its arguments. It
+  is cleaned of control characters first, and more than 64 KB is refused,
+  as with OSC 52.
+- When `command` is set it replaces OSC 52: Kika never sends both, since it
+  cannot tell whether an OSC 52 copy worked.
+- The program must be a bare name, looked up on `PATH`, or an absolute path.
+  An empty list, a relative path such as `bin/copy`, a control character, or
+  a single string instead of a list is refused, and the whole file is ignored
+  with a `clipboard.command` error.
+- "Copied" shows as soon as the program starts. If it cannot start, exits
+  with an error, or has not finished after 5 seconds (it is then stopped),
+  a "Could not copy" error says so. Kika never waits for it while you type.
+- The program runs on the machine Kika runs on. Over SSH that fills the
+  remote machine's clipboard, not yours; OSC 52 is the way to reach your own.
+- Each run is listed in the Command log with its arguments, never the text.
+
+**Changes to `[clipboard]` take effect after a restart.**
+
 ## Custom commands
 
 `[[commands]]` binds a key to a program of your own. Each entry works in one
@@ -672,6 +710,9 @@ Pass values as arguments after the code, and read them from there (`"$1"`,
 - **`[forge]` is allowed only in the global file**, since it lets Kika contact
   a host and names the browser it runs. A `[forge]` table in `.kika.toml` is
   an error, and the whole file is ignored.
+- **`[clipboard]` is allowed only in the global file**, since it names a
+  program for Kika to run. A `[clipboard]` table in `.kika.toml` is an error,
+  and the whole file is ignored.
 - **A repository's `.kika.toml` comes with a clone and is not trusted.** It
   may hold only `[keys]`. It cannot change any binding marked `locked` in the
   table below, and it cannot add a key that would hide a locked binding in an
@@ -1014,7 +1055,8 @@ clipboard program and works over SSH. Some terminals do not support OSC 52 or
 turn it off by default, and none says whether a copy worked, so "Copied" means
 it was sent. Inside tmux it needs `set -g set-clipboard on`; GNU screen is not
 supported. Text is cleaned of control characters first, and more than 64 KB
-is refused.
+is refused. If OSC 52 does not work in your terminal, set `[clipboard]
+command` in the global file to copy with a program such as `pbcopy` instead.
 
 `t` asks for a tag name and tags the selected commit; `T` then asks for a
 one-line message too and makes an annotated tag. The commit is the one
