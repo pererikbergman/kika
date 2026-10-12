@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791804970",
-  "issue_count": 13,
+  "timestamp": "1791805776",
+  "issue_count": 14,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/forge",
     "coupling_violation:src/e2e -> src/git",
@@ -15,6 +15,7 @@
     "zone_flag:src/forge",
     "zone_flag:src/git",
     "low_cohesion:src/features",
+    "low_cohesion:src/features/repos",
     "low_cohesion:src/model"
   ]
 }
