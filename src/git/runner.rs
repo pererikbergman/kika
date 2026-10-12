@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use super::diff::terminal_safe;
+
 /// A `git` invocation as argv plus environment, and optionally bytes for its
 /// stdin. Kept as separate arguments so paths and user input can never be
 /// interpreted by a shell.
@@ -484,6 +486,20 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Run `cmd`, with git's message, made safe to draw, as the error.
+pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
+    let output = runner.run(cmd).map_err(|e| e.to_string())?;
+    if output.success {
+        return Ok(output);
+    }
+    let message = terminal_safe(&output.stderr);
+    if message.is_empty() {
+        let subcommand = cmd.subcommand().to_string_lossy();
+        return Err(format!("git {subcommand} failed"));
+    }
+    Err(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,10 +559,10 @@ mod tests {
     #[test]
     fn every_command_kind_runs_in_the_workdir() {
         use crate::git::diff::{DiffRequest, DiffSide, diff_command, patch_diff_command};
-        use crate::git::ops::{GitOp, op_command};
         use crate::git::path::RepoPath;
         use crate::git::repo_state::git_dir_command;
         use crate::git::status::status_command;
+        use crate::op::{GitOp, op_command};
         use std::path::Path;
 
         let top = Path::new("/r/top");

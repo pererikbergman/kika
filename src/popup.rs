@@ -15,12 +15,12 @@ use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
-use crate::git::ops::GitOp;
 use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
+use crate::op::GitOp;
 use crate::pick_list::PickList;
 use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
@@ -352,7 +352,7 @@ impl LeaveCommitsConfirm {
     }
 
     pub fn question(&self) -> String {
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let count = self.left.len();
         let (noun, are) = if count == 1 {
             ("commit", "is")
@@ -1006,7 +1006,7 @@ mod tests {
     #[test]
     fn the_hard_reset_question_names_the_target_and_what_is_lost() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let ask = ResetHardConfirm {
             short_oid: "abc1234".into(),
             op: GitOp::Reset {
@@ -1033,7 +1033,7 @@ mod tests {
         }
     }
 
-    fn reset(mode: crate::git::ops::ResetMode) -> GitOp {
+    fn reset(mode: crate::op::ResetMode) -> GitOp {
         GitOp::Reset {
             to: crate::git::commit_files::CommitId::parse("abc1234").unwrap(),
             mode,
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn the_leave_commits_question_lists_five_then_how_many_more() {
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let q = leave(reset(ResetMode::Soft), 7).question();
         assert!(q.starts_with("Reset to abc1234 and leave 7 commits"), "{q}");
         assert!(q.contains("(000, 111, 222, 333, 444 and 2 more)"), "{q}");
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn the_hard_reset_version_warns_about_the_changes_first() {
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let q = leave(reset(ResetMode::Hard), 2).question();
         assert!(
             q.starts_with(
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn every_leave_commits_question_says_how_to_keep_them() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
         for op in [
             checkout,

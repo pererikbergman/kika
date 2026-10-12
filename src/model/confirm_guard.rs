@@ -3,7 +3,7 @@
 //! the opening key asked once more before anything runs.
 
 use super::AppState;
-use crate::git::ops::GitOp;
+use crate::op::GitOp;
 
 impl AppState {
     /// Whether the guard the key that opened the question uses for `op`

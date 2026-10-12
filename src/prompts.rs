@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use super::diff::terminal_safe;
-use super::ops::{GitOp, MergeStrategy};
-use super::runner::{GitCommand, GitRunner};
+use crate::git::diff::terminal_safe;
+use crate::git::runner::{GitCommand, GitRunner};
+use crate::op::{GitOp, MergeStrategy};
 
 /// The hooks a commit can run. `pre-auto-gc` is left out: it runs only when
 /// a commit triggers a gc, which is rare and not worth a screen switch.
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn only_ops_that_can_commit_run_attached() {
         use crate::git::commit_files::CommitId;
-        use crate::git::ops::ResetMode;
+        use crate::op::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
         let stash = || crate::git::stash::StashRef {
             index: 0,
@@ -205,7 +205,7 @@ mod tests {
             GitOp::StageAll,
             // A stash makes commits, but no hooks run for them.
             GitOp::StashPush {
-                mode: crate::git::ops::StashMode::All,
+                mode: crate::op::StashMode::All,
                 message: None,
                 paths: vec![],
                 restore: vec![],

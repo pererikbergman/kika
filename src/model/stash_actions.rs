@@ -6,10 +6,10 @@ use super::{AppState, Context, Focus};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
-use crate::git::ops::{GitOp, StashMode, StashSet};
 use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::keymap;
 use crate::menu;
+use crate::op::{GitOp, StashMode, StashSet};
 use crate::popup::{DeleteRangeConfirm, DropStashConfirm, LineInput, Popup, PromptKind, RangeKind};
 use crate::stash::{StashDraft, StashFilesList};
 

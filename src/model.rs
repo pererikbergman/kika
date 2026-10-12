@@ -34,10 +34,8 @@ use crate::git::diff::{
     sanitize,
 };
 use crate::git::log::LogQuery;
-use crate::git::ops::{GitOp, MergeStrategy, ResetMode, StashMode};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::rebase_plan;
 use crate::git::recording::CommandEvent;
 use crate::git::reflog::Reflog;
@@ -59,12 +57,14 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
 use crate::menu;
+use crate::op::{GitOp, MergeStrategy, ResetMode, StashMode};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
     DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind, RemoveRemoteConfirm,
     RemoveWorktreeConfirm, TravelConfirm,
 };
+use crate::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
 use crate::recent_list::{RecentList, RecentRow};
 use crate::refresh::{self, RefreshPlan, Scope, Selection};
@@ -19035,8 +19035,8 @@ mod tests {
             op,
             GitOp::StashDrops(vec![stash_ref(0, "a0"), stash_ref(1, "a1")])
         );
-        for step in crate::git::ops::op_steps(&op) {
-            let argv: Vec<String> = crate::git::ops::op_command(&step)
+        for step in crate::op::op_steps(&op) {
+            let argv: Vec<String> = crate::op::op_command(&step)
                 .args()
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())

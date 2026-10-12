@@ -85,9 +85,9 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, git, ok, try_git};
-    use crate::git::ops::{GitOp, run_op};
     use crate::git::repo_state::Operation;
     use crate::git::status::read_status;
+    use crate::op::{GitOp, run_op};
 
     fn id(hex: char) -> CommitId {
         CommitId::parse(&hex.to_string().repeat(40)).unwrap()

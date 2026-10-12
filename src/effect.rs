@@ -36,10 +36,8 @@ use crate::git::fixup_base::find_fixup_base;
 use crate::git::head::{read_commit_message, read_head_message};
 use crate::git::left_behind::read_left_behind;
 use crate::git::log::{LogQuery, branch_commit, log_page, markers};
-use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::pr_objects::{self, CommitsHere};
-use crate::git::prompts::read_prompt_facts;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::reflog::read_reflog;
@@ -56,6 +54,8 @@ use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
+use crate::op::{GitOp, run_op};
+use crate::prompts::read_prompt_facts;
 use crate::rebase_todo::{TodoFile, nothing_done, serialize};
 use crate::recent;
 use crate::sequence_editor::MAX_TODO;
@@ -2849,7 +2849,7 @@ mod tests {
             Some(AppIntent::CommitProbed {
                 tag,
                 op: commit_op(),
-                facts: Some(crate::git::prompts::PromptFacts {
+                facts: Some(crate::prompts::PromptFacts {
                     signs: true,
                     hooks: vec![],
                 }),

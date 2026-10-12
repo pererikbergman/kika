@@ -6,8 +6,8 @@ use super::{AppState, Context};
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::CommitId;
 use crate::git::fixup_base::{FixupBase, candidates_notice};
-use crate::git::ops::GitOp;
 use crate::keymap;
+use crate::op::GitOp;
 use crate::popup::{ConfirmKind, ErrorPopup, Popup};
 
 impl AppState {

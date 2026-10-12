@@ -6,7 +6,6 @@ use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectMark;
-use crate::git::ops::{GitOp, MergeStrategy, ResetMode, leading_dirs};
 use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
@@ -20,6 +19,7 @@ use crate::model::AppState;
 use crate::model::pull_request::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
+use crate::op::{GitOp, MergeStrategy, ResetMode, leading_dirs};
 use crate::popup::{ConfirmKind, PromptKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,10 +272,10 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
 
 /// Why a staged rename is refused when a file sits at its old path again.
-pub(crate) use crate::git::ops::STASH_RENAME_TAKEN;
+pub(crate) use crate::op::STASH_RENAME_TAKEN;
 
 /// Why a staged deletion is refused when a file sits at its path again.
-pub(crate) use crate::git::ops::STASH_DELETED_TAKEN;
+pub(crate) use crate::op::STASH_DELETED_TAKEN;
 
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
