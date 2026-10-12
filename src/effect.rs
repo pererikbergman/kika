@@ -9,13 +9,13 @@ use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
-use crate::diff_stream::DiffStreamer;
 use crate::features::branches::{remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::commits::rewrite;
 use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
+use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
 use crate::features::{
     blame, conflicts, custom_commands, pull_requests, repos, review, stash, submodules, sync,
@@ -990,12 +990,7 @@ impl Runtime {
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
             Effect::DiffDemand { seq, want } => self.diff.demand(seq, want),
             Effect::CancelDiff => self.diff.cancel(),
-            Effect::DiffLoadingDelay { tag } => {
-                tokio::spawn(async move {
-                    tokio::time::sleep(DIFF_LOADING_DELAY).await;
-                    let _ = tx.send(AppIntent::DiffSlow { tag });
-                });
-            }
+            Effect::DiffLoadingDelay { tag } => diff::effects::loading_delay(tx, tag),
             // Synchronous: the loop exits right after, and the runtime's
             // shutdown must not wait on git.
             Effect::InterruptGit => self.runner.interrupt(),
