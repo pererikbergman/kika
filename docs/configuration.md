@@ -252,27 +252,53 @@ github = ["github.com", "github.example.com"]
   on the standard port, and the host must equal one you listed. Any other
   repository shows nothing. A branch shows the newest pull request
   into that repository whose head branch has the same name.
-- Opening any clone whose origin is on a listed host runs one read-only
-  `gh` query under your account, for that clone's owner/repo and branch
-  names.
+- Opening any clone whose origin is on a listed host runs read-only `gh`
+  calls under your account, for that clone's owner/repo and branch names.
 - Kika asks GitHub through the [GitHub CLI](https://cli.github.com), `gh`,
   which must be installed and logged in for the host (`gh auth login
   --hostname <host>`, or `GH_TOKEN`, `GITHUB_TOKEN` or `GH_ENTERPRISE_TOKEN`
   in the environment). `gh` holds your login: Kika never reads, stores,
-  passes or shows a token. Each call shows in the Command log as
-  `gh api graphql --hostname <host> --input -`.
+  passes or shows a token. Each call shows in the Command log under its own
+  line. A refresh first asks whether the pull requests changed:
+
+  ```
+  gh api --include --hostname <host> -H "Accept: application/vnd.github+json" -H "If-None-Match: <etag>" repos/<owner>/<repo>/pulls?state=all&sort=updated&direction=desc&per_page=1
+  ```
+
+  and then, when needed, reads the badges with
+  `gh api graphql --include --hostname <host> --input -` (one call per 50
+  branches). The `If-None-Match` part is left out when nothing is cached,
+  and the log shows `<etag>`, never the value.
 - Pull requests load when the repository opens, and again after a fetch,
   pull or push you start. There is no timer.
+- When the pull requests have not changed, GitHub answers that first
+  conditional request for free (it does not count against your rate
+  limit), and the cached badges are kept without the GraphQL query. The
+  query still runs when the branches differ from the ones last asked about,
+  when an open pull request's checks were still running or had failed, or
+  when the last query is 15 minutes old or more, since checks can finish or
+  re-run without changing the pull request. So a check that turns red on
+  the same commit shows at the first refresh after those 15 minutes, at
+  the latest.
 - The last result is cached so it shows at once on the next start, in
   `$XDG_CACHE_HOME/kika/forge`, else `~/Library/Caches/kika/forge` (macOS),
   `~/.cache/kika/forge` (Linux) or `%LOCALAPPDATA%\kika\cache\forge`
-  (Windows). It holds the host, owner, repository name and path, and each
-  branch's number, state and checks, nothing else. Only you can read it.
+  (Windows). It holds the host, owner, repository name and path, the
+  branch names asked about, GitHub's ETag for the pull-request list, and
+  each branch's number, state and checks, nothing else. Only you can read
+  it.
 - When GitHub cannot be reached, a line at the bottom of the Branches panel
   says why (`GitHub: offline`, `GitHub: not logged in`, `GitHub: gh not
   found`, …), and the badges already shown stay, marked `· cached`. Where
   the panel is wide enough, the line also says what to do, such as
   `run gh auth login --hostname github.com`. Nothing else waits on it.
+- When GitHub rate limits you, the line says `GitHub: rate limited`, and,
+  where it fits, `until HH:MM UTC` (the badges shown are the cached ones,
+  though the line leaves out `· cached` to keep room for the time). Kika then runs no `gh` call to that
+  host until the limit resets (at least a minute, at most an hour), even
+  for another repository. It does not retry by itself: the next open,
+  fetch, pull or push after the reset asks again. The wait is kept only
+  while Kika runs.
 
 **Changes to `[forge]` take effect after a restart.**
 

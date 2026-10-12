@@ -1,0 +1,8 @@
+HTTP/2.0 403 Forbidden
+Content-Type: application/json; charset=utf-8
+Retry-After: 120
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4800
+X-Ratelimit-Reset: 1700003600
+
+{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}

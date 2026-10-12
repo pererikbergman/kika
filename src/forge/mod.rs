@@ -98,6 +98,8 @@ pub enum ForgeStatus {
     Offline,
     NoAccess,
     Failed,
+    /// GitHub refuses calls for now; none is made until the limit resets.
+    RateLimited,
 }
 
 /// What the Branches panel says about the forge.
@@ -132,6 +134,12 @@ pub struct ForgeState {
     pub branches: Vec<BranchName>,
     /// The last load found the remote on no configured host.
     pub unmatched: bool,
+    /// Per configured host, the second its rate limit resets. Kept across
+    /// repositories, since the limit is the account's, and in memory only.
+    pub limited: HashMap<String, i64>,
+    /// When the current repository's host may be asked again, for the
+    /// status line.
+    pub limited_until: Option<i64>,
 }
 
 impl Default for ForgeState {
@@ -152,6 +160,8 @@ impl ForgeState {
             seq: None,
             branches: Vec::new(),
             unmatched: false,
+            limited: HashMap::new(),
+            limited_until: None,
         }
     }
 
@@ -159,9 +169,12 @@ impl ForgeState {
         !self.hosts.is_empty()
     }
 
-    /// Back to nothing known, for another repository. The hosts stay.
+    /// Back to nothing known, for another repository. The hosts and
+    /// their rate limits stay.
     pub fn reset(&mut self) {
+        let limited = std::mem::take(&mut self.limited);
         *self = Self::new(std::mem::take(&mut self.hosts));
+        self.limited = limited;
     }
 
     /// Remember the listed branches; names that are not UTF-8 cannot be
@@ -195,6 +208,11 @@ impl ForgeState {
             refresh,
             // A refresh reads the remote again, in case its URL changed.
             known: self.repo.clone().filter(|_| !refresh),
+            limited: self
+                .hosts
+                .iter()
+                .filter_map(|host| Some((host.clone(), *self.limited.get(host.as_str())?)))
+                .collect(),
         })
     }
 
@@ -235,18 +253,35 @@ impl ForgeState {
     }
 
     /// The forge answered. A failure keeps the badges shown and only says
-    /// why in the status line: it never interrupts local work.
-    pub fn fetched(&mut self, tag: Tag, result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>) {
+    /// why in the status line: it never interrupts local work. A rate
+    /// limit is remembered for the host until `limited_until`; an answer
+    /// clears it.
+    pub fn fetched(
+        &mut self,
+        tag: Tag,
+        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+        limited_until: Option<i64>,
+    ) {
         if !self.current(tag) {
             return;
         }
         self.in_flight = false;
+        let host = self.repo.as_ref().map(|r| r.host.to_ascii_lowercase());
+        self.limited_until = limited_until;
         match result {
             Ok(badges) => {
                 self.badges = badges;
                 self.status = ForgeView::Fresh;
+                if let Some(host) = host {
+                    self.limited.remove(&host);
+                }
             }
-            Err(status) => self.status = ForgeView::Problem(status),
+            Err(status) => {
+                self.status = ForgeView::Problem(status);
+                if let (Some(host), Some(until)) = (host, limited_until) {
+                    self.limited.insert(host, until);
+                }
+            }
         }
     }
 
@@ -280,11 +315,12 @@ impl AppState {
         &mut self,
         tag: Tag,
         result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+        limited_until: Option<i64>,
     ) -> Vec<Effect> {
         if tag.generation != self.generation {
             return vec![];
         }
-        self.forge.fetched(tag, result);
+        self.forge.fetched(tag, result, limited_until);
         if self.forge.refresh_wanted {
             self.load_pull_requests()
         } else {
@@ -473,6 +509,7 @@ pub(crate) mod tests {
         state.update(AppIntent::PullRequestsFetched {
             tag: first,
             result: Ok(HashMap::new()),
+            limited_until: None,
         });
         assert!(!state.forge.in_flight);
         assert_eq!(state.forge.status, ForgeView::Fresh);
@@ -495,6 +532,7 @@ pub(crate) mod tests {
         let effects = state.update(AppIntent::PullRequestsFetched {
             tag: first,
             result: Ok(HashMap::new()),
+            limited_until: None,
         });
         let [(second, true)] = loads(&effects)[..] else {
             panic!("{effects:?}")
@@ -502,6 +540,7 @@ pub(crate) mod tests {
         state.update(AppIntent::PullRequestsFetched {
             tag: second,
             result: Ok(HashMap::new()),
+            limited_until: None,
         });
 
         for (intent, op) in [
@@ -515,6 +554,7 @@ pub(crate) mod tests {
             state.update(AppIntent::PullRequestsFetched {
                 tag,
                 result: Ok(HashMap::new()),
+                limited_until: None,
             });
         }
     }
@@ -533,6 +573,7 @@ pub(crate) mod tests {
         state.update(AppIntent::PullRequestsFetched {
             tag: old,
             result: Ok(HashMap::from([("main".into(), badge(9))])),
+            limited_until: None,
         });
         assert!(state.forge.badges.is_empty());
         assert!(matches!(
@@ -555,6 +596,7 @@ pub(crate) mod tests {
         state.update(AppIntent::PullRequestsFetched {
             tag,
             result: Ok(HashMap::new()),
+            limited_until: None,
         });
         let known = |effects: &[Effect]| {
             effects.iter().find_map(|e| match e {
@@ -576,6 +618,87 @@ pub(crate) mod tests {
         assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
         let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
         assert_eq!(known(&effects), Some((None, true)));
+    }
+
+    #[test]
+    fn a_rate_limit_is_remembered_for_the_host_until_an_answer_clears_it() {
+        const T: i64 = 1_700_000_000;
+        let limited_of = |effects: &[Effect]| {
+            effects
+                .iter()
+                .find_map(|e| match e {
+                    Effect::LoadPullRequests { limited, .. } => Some(limited.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no load in {effects:?}"))
+        };
+        let mut state = in_repo(github());
+        let effects = list_branches(&mut state, &["main"]);
+        assert_eq!(limited_of(&effects), []);
+        let [(tag, true)] = loads(&effects)[..] else {
+            panic!()
+        };
+        let shown = HashMap::from([("main".into(), badge(3))]);
+        state.update(AppIntent::PullRequestsCached {
+            tag,
+            repo: ForgeRepo {
+                host: "GitHub.com".into(),
+                ..repo()
+            },
+            badges: Some(shown.clone()),
+        });
+        let effects = state.update(AppIntent::PullRequestsFetched {
+            tag,
+            result: Err(ForgeStatus::RateLimited),
+            limited_until: Some(T),
+        });
+        assert_eq!(effects, []);
+        assert_eq!(
+            state.forge.limited,
+            HashMap::from([("github.com".into(), T)])
+        );
+        assert_eq!(state.forge.limited_until, Some(T));
+        assert_eq!(state.forge.badges, shown);
+        assert_eq!(
+            state.forge.status,
+            ForgeView::Problem(ForgeStatus::RateLimited)
+        );
+        assert_eq!(state.op_error, None);
+        assert!(state.popups.is_empty());
+
+        // A user fetch hands the limit to the task, which decides by the clock.
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        assert_eq!(limited_of(&effects), [(github()[0].clone(), T)]);
+
+        // Another repository: the limit is the account's, so it stays.
+        state.generation += 1;
+        state.forge.reset();
+        assert_eq!(
+            state.forge.limited,
+            HashMap::from([("github.com".into(), T)])
+        );
+        assert_eq!(state.forge.limited_until, None);
+        let effects = list_branches(&mut state, &["main"]);
+        assert_eq!(limited_of(&effects), [(github()[0].clone(), T)]);
+        let [(tag2, true)] = loads(&effects)[..] else {
+            panic!("{effects:?}")
+        };
+
+        // An answer clears it.
+        state.update(AppIntent::PullRequestsCached {
+            tag: tag2,
+            repo: repo(),
+            badges: None,
+        });
+        state.update(AppIntent::PullRequestsFetched {
+            tag: tag2,
+            result: Ok(HashMap::new()),
+            limited_until: None,
+        });
+        assert!(state.forge.limited.is_empty());
+        assert_eq!(state.forge.limited_until, None);
+        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        assert_eq!(limited_of(&effects), []);
     }
 
     #[test]
@@ -630,6 +753,7 @@ pub(crate) mod tests {
         let effects = state.update(AppIntent::PullRequestsFetched {
             tag,
             result: Err(ForgeStatus::Offline),
+            limited_until: None,
         });
         assert_eq!(effects, []);
         assert_eq!(state.forge.badges[&BranchName::from("main")], badge(3));
@@ -682,6 +806,7 @@ pub(crate) mod tests {
         state.update(AppIntent::PullRequestsFetched {
             tag: old,
             result: Err(ForgeStatus::Failed),
+            limited_until: None,
         });
         assert!(state.forge.in_flight);
         assert_eq!(state.forge.repo, None);

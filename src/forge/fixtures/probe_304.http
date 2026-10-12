@@ -1,0 +1,8 @@
+HTTP/2.0 304 Not Modified
+Cache-Control: private, max-age=60, s-maxage=60
+Etag: "abc"
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4999
+X-Ratelimit-Reset: 1700003600
+X-Ratelimit-Resource: core
+
