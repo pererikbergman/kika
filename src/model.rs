@@ -1105,6 +1105,11 @@ impl AppState {
             }
             AppIntent::DeleteBranch => self.ask_delete_branch(),
             AppIntent::CreateBranchNamed(text) => {
+                // A bisect may have begun while the prompt was open.
+                if self.bisect_refuses() {
+                    self.branches.pending = None;
+                    return vec![];
+                }
                 return self
                     .named_branch_op(&text, |from, name| GitOp::CreateBranch { name, from });
             }
@@ -2673,10 +2678,25 @@ impl AppState {
         vec![effect(tag, op)]
     }
 
+    /// Whether a bisect in progress refuses an answer that would move
+    /// `HEAD` or make a commit, saying why in the bar.
+    fn bisect_refuses(&mut self) -> bool {
+        let reason = crate::bisect::head_move_disabled(self);
+        let refused = reason.is_some();
+        if refused {
+            self.notice = reason;
+        }
+        refused
+    }
+
     /// Open the commit popup: straight to the editor when something is
     /// staged, else ask whether to stage everything first.
     fn open_commit(&mut self) {
         if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
+            return;
+        }
+        if let Some(reason) = keymap::commit_disabled(self) {
+            self.notice = Some(reason);
             return;
         }
         let staged = self.files.iter().any(|f| !matches!(f.index, '.' | '?'));
@@ -2691,6 +2711,10 @@ impl AppState {
     /// is asked about staging: with nothing staged, only the message changes.
     fn open_amend(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace || self.commit != CommitFlow::Closed {
+            return vec![];
+        }
+        if let Some(reason) = keymap::amend_disabled(self) {
+            self.notice = Some(reason);
             return vec![];
         }
         let seq = self.take_seq();
@@ -2746,6 +2770,10 @@ impl AppState {
             return vec![];
         };
         let editor = editor.clone();
+        // A bisect may have begun while the editor was open; the text stays.
+        if self.bisect_refuses() {
+            return vec![];
+        }
         let op = GitOp::Commit {
             message,
             stage_all: editor.stage_all,
@@ -4741,7 +4769,12 @@ impl AppState {
     /// Ask for a branch name, keeping the selected branch for the answer.
     /// Renaming starts from the old name.
     fn ask_branch_name(&mut self, kind: PromptKind) {
-        let Some(name) = self.branch_for_action(keymap::branch_action_disabled) else {
+        let disabled = match kind {
+            // Creating a branch checks it out, which moves `HEAD`.
+            PromptKind::NewBranch => keymap::new_branch_disabled,
+            _ => keymap::branch_action_disabled,
+        };
+        let Some(name) = self.branch_for_action(disabled) else {
             return;
         };
         let input = match kind {
@@ -4893,6 +4926,10 @@ impl AppState {
         let Some(RemotePending::Track(from)) = self.branches.remotes.pending.take() else {
             return vec![];
         };
+        // A bisect may have begun while the prompt was open.
+        if self.bisect_refuses() {
+            return vec![];
+        }
         let name = text.trim();
         if name.is_empty() {
             self.notice = Some("A branch needs a name".into());
@@ -13626,10 +13663,14 @@ mod tests {
     }
 
     #[test]
-    fn a_bisect_alone_does_not_stop_a_merge() {
+    fn a_bisect_alone_stops_a_merge_until_it_is_reset() {
         let mut state = in_progress(&[Operation::Bisect]);
         state.update(AppIntent::BranchNext);
-        op_of(&state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)));
+        assert_eq!(
+            state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)),
+            vec![]
+        );
+        assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()));
     }
 
     #[test]
@@ -16642,6 +16683,272 @@ mod tests {
         idle.update(AppIntent::MenuSelect);
         assert_eq!(idle.notice, Some(bisect::NO_BISECT.into()));
         assert_eq!(idle.update(AppIntent::ConfirmBisectReset), vec![]);
+    }
+
+    /// `state` as git leaves it once a bisect has begun.
+    fn start_bisecting(state: &mut AppState) {
+        let branch = state.branch.get_or_insert_with(|| on_branch("main"));
+        branch.in_progress.push(Operation::Bisect);
+    }
+
+    fn key(c: char) -> AppIntent {
+        AppIntent::Key(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    fn files_to_commit() -> AppState {
+        with_files(three_files(), 24).0
+    }
+
+    fn on_remote_topic() -> AppState {
+        on_remote_row(3)
+    }
+
+    /// An action that moves `HEAD` or makes a commit: a name, the state it
+    /// runs from, the intents that lead up to it, and the action.
+    type HeadMove = (&'static str, fn() -> AppState, Vec<AppIntent>, AppIntent);
+
+    fn head_moves() -> Vec<HeadMove> {
+        use rebase_plan::{Direction, Edit};
+        let to_commit = files_to_commit as fn() -> AppState;
+        let actions_menu = |moves: usize| {
+            let mut pre = vec![AppIntent::OpenMenu(MenuId::Actions)];
+            pre.extend(std::iter::repeat_n(AppIntent::MenuNext, moves));
+            pre
+        };
+        // Rows 0 and 1, folded into row 2.
+        let range = || vec![key('k'), key('V'), key('j')];
+        let mut cases: Vec<HeadMove> = vec![
+            ("commit key", to_commit, vec![], key('c')),
+            ("amend key", to_commit, vec![], key('A')),
+            ("open commit", to_commit, vec![], AppIntent::OpenCommit),
+            ("open amend", to_commit, vec![], AppIntent::OpenAmend),
+            (
+                "commit item",
+                to_commit,
+                actions_menu(1),
+                AppIntent::MenuSelect,
+            ),
+            (
+                "amend item",
+                to_commit,
+                actions_menu(2),
+                AppIntent::MenuSelect,
+            ),
+            (
+                "checkout commit",
+                on_commit,
+                vec![],
+                AppIntent::CheckoutCommit,
+            ),
+            ("revert", on_commit, vec![], AppIntent::RevertCommit),
+            ("reset menu", on_commit, vec![], key('X')),
+            ("paste", one_copied, vec![], AppIntent::PasteCommits),
+            (
+                "move up",
+                on_linear_log,
+                vec![],
+                AppIntent::MoveCommit(Direction::Up),
+            ),
+            (
+                "move down",
+                on_linear_log,
+                vec![],
+                AppIntent::MoveCommit(Direction::Down),
+            ),
+            ("autosquash", with_a_fixup, vec![], AppIntent::Autosquash),
+            ("create fixup", with_a_fixup, vec![], AppIntent::CreateFixup),
+            (
+                "checkout branch",
+                with_branches,
+                vec![AppIntent::BranchNext],
+                AppIntent::CheckoutBranch,
+            ),
+            ("new branch", with_branches, vec![], AppIntent::NewBranch),
+            (
+                "new branch named",
+                with_branches,
+                vec![AppIntent::NewBranch],
+                AppIntent::CreateBranchNamed("x".into()),
+            ),
+            (
+                "track",
+                on_remote_topic,
+                vec![],
+                AppIntent::TrackRemoteBranch,
+            ),
+            (
+                "track named",
+                on_remote_topic,
+                vec![AppIntent::TrackRemoteBranch],
+                AppIntent::TrackRemoteBranchNamed("x".into()),
+            ),
+            (
+                "merge key",
+                with_branches,
+                vec![AppIntent::BranchNext],
+                key('m'),
+            ),
+            (
+                "rebase onto",
+                with_branches,
+                vec![AppIntent::BranchNext],
+                AppIntent::RebaseOnto,
+            ),
+        ];
+        for mode in [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard] {
+            cases.push(("reset to", on_commit, vec![], AppIntent::ResetTo(mode)));
+        }
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop, Edit::Reword] {
+            cases.push((
+                "rewrite",
+                on_linear_log,
+                vec![],
+                AppIntent::RewriteCommit(edit),
+            ));
+        }
+        for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
+            cases.push((
+                "range rewrite",
+                on_linear_log,
+                range(),
+                AppIntent::RewriteCommit(edit),
+            ));
+        }
+        for strategy in [
+            MergeStrategy::FastForwardOnly,
+            MergeStrategy::NoFastForward,
+            MergeStrategy::Squash,
+        ] {
+            cases.push((
+                "merge",
+                with_branches,
+                vec![AppIntent::BranchNext],
+                AppIntent::Merge(strategy),
+            ));
+        }
+        cases
+    }
+
+    #[test]
+    fn during_a_bisect_nothing_moves_head_or_makes_a_commit() {
+        for (name, make, pre, action) in head_moves() {
+            let ready = || {
+                let mut state = make();
+                state.branch.get_or_insert_with(|| on_branch("main"));
+                for intent in &pre {
+                    state.update(intent.clone());
+                }
+                state.notice = None;
+                state
+            };
+            // Without a bisect the action runs or asks, so the bisect is
+            // what stops it below.
+            let mut idle = ready();
+            let popups = idle.popups.len();
+            let effects = idle.update(action.clone());
+            assert_ne!(idle.notice, Some(bisect::RESET_FIRST.into()), "{name}");
+            assert!(
+                !effects.is_empty()
+                    || idle.popups.len() > popups
+                    || idle.commit != CommitFlow::Closed,
+                "{name} {action:?} did nothing: {:?}",
+                idle.notice
+            );
+
+            let mut state = ready();
+            start_bisecting(&mut state);
+            let popups = state.popups.clone();
+            assert_eq!(state.update(action.clone()), vec![], "{name} {action:?}");
+            assert_eq!(
+                state.notice,
+                Some(bisect::RESET_FIRST.into()),
+                "{name} {action:?}"
+            );
+            assert_eq!(state.popups, popups, "{name} {action:?}");
+            assert_eq!(state.commit, CommitFlow::Closed, "{name} {action:?}");
+            assert_eq!(state.op_seq, None, "{name} {action:?}");
+        }
+    }
+
+    #[test]
+    fn an_editor_open_when_a_bisect_began_does_not_commit() {
+        let mut state = editing();
+        type_text(&mut state, "fix");
+        let before = state.commit.clone();
+        assert!(matches!(before, CommitFlow::Editing(_)));
+        start_bisecting(&mut state);
+        let effects = state.update(AppIntent::SubmitCommit);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ProbeCommit { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()));
+        assert_eq!(state.commit, before);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn marks_and_reset_still_run_during_a_bisect() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let (_, op) = op_of(&state.update(AppIntent::BisectHead(BisectMark::Good)));
+        assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Bad)));
+        assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", false));
+        state.op_seq = None;
+        state.update(AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)));
+        let (_, op) = op_of(&state.update(AppIntent::ConfirmBisectReset));
+        assert_eq!(op, GitOp::BisectReset);
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn without_a_bisect_head_moves_are_not_refused_for_one() {
+        let state = ready_to_bisect();
+        let guards: [fn(&AppState) -> Option<Reason>; 6] = [
+            keymap::commit_disabled,
+            keymap::amend_disabled,
+            keymap::checkout_commit_disabled,
+            keymap::reset_disabled,
+            keymap::merge_disabled,
+            keymap::new_branch_disabled,
+        ];
+        for guard in guards {
+            assert_ne!(guard(&state), Some(bisect::RESET_FIRST.into()));
+        }
+        let mut state = ready_to_bisect();
+        state.commits.selected = 1;
+        state.update(AppIntent::CheckoutCommit);
+        assert_eq!(state.notice, None);
+        assert_ne!(state.popups, []);
+        let mut state = ready_to_bisect();
+        state.commits.selected = 1;
+        assert_ne!(state.update(AppIntent::ResetTo(ResetMode::Soft)), vec![]);
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn with_a_rebase_and_a_bisect_the_rebase_is_named_first() {
+        let mut state = testing_c1(&[Operation::Rebase, Operation::Bisect]);
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Commits,
+        )));
+        for action in [
+            AppIntent::RevertCommit,
+            AppIntent::ResetTo(ResetMode::Soft),
+            AppIntent::RewriteCommit(rebase_plan::Edit::Drop),
+        ] {
+            state.notice = None;
+            assert_eq!(state.update(action.clone()), vec![], "{action:?}");
+            assert_eq!(
+                state.notice,
+                Some("Finish or abort the operation in progress".into()),
+                "{action:?}"
+            );
+        }
     }
 
     fn status_with(tag: Tag, branch: BranchStatus) -> AppIntent {
@@ -19936,6 +20243,28 @@ mod tests {
                     _ => vec![id(2)],
                 };
                 assert_eq!(edits, want, "{action:?}");
+            }
+        }
+
+        #[test]
+        fn during_a_bisect_no_patch_rewrite_asks_or_runs() {
+            for choice in [
+                PatchChoice::Remove,
+                PatchChoice::MoveToSelected,
+                PatchChoice::ToIndex,
+                PatchChoice::NewCommit,
+            ] {
+                let mut idle = with_patch(0);
+                idle.update(AppIntent::ChoosePatchAction(choice));
+                assert_eq!(idle.popups.len(), 1, "{choice:?} asks without a bisect");
+
+                let mut state = with_patch(0);
+                start_bisecting(&mut state);
+                let effects = state.update(AppIntent::ChoosePatchAction(choice));
+                assert_eq!(effects, vec![], "{choice:?}");
+                assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()), "{choice:?}");
+                assert_eq!(state.popups, [], "{choice:?}");
+                assert_eq!(state.op_seq, None, "{choice:?}");
             }
         }
 
