@@ -12332,6 +12332,17 @@ mod tests {
     }
 
     #[test]
+    fn in_the_tool_view_the_hunk_keys_say_why_and_keep_the_selection() {
+        for code in [KeyCode::Char('j'), KeyCode::Down, KeyCode::Char('k')] {
+            let mut state = focused_through_tool();
+            assert_eq!(view(&state).hunk, 0);
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY.into()), "{code:?}");
+            assert_eq!(view(&state).hunk, 0, "{code:?}");
+        }
+    }
+
+    #[test]
     fn the_tool_view_refuses_staging_discard_and_hunk_edits() {
         for intent in [
             AppIntent::ToggleHunkStage,
