@@ -2,15 +2,16 @@
 //! entry to its files, the actions on the selected entry, and stashing
 //! from the Files panel's menu.
 
+use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use super::keys;
 use super::list::{StashDraft, StashFilesList};
+use super::push::{self, StashSet};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
-use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::keymap;
 use crate::model::{AppState, Context, Focus};
-use crate::op::{GitOp, StashMode, StashSet};
+use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, DropStashConfirm, LineInput, Popup, PromptKind, RangeKind};
 
 /// Said when a range's stash is refused because its files changed while
@@ -255,7 +256,7 @@ impl AppState {
     pub(crate) fn ask_stash_file_message(&mut self) {
         self.ask_stash_draft(keys::stash_file_disabled, |state| {
             let (entries, from_range) = state.files_marked();
-            let set = GitOp::stash_files_for(&entries)?;
+            let set = push::stash_files_for(&entries)?;
             Some(StashDraft {
                 mode: set.mode,
                 paths: set.paths,
@@ -311,7 +312,7 @@ impl AppState {
         if from_range {
             let (entries, still_range) = self.files_marked();
             let now = still_range
-                .then(|| GitOp::stash_files_for(&entries))
+                .then(|| push::stash_files_for(&entries))
                 .flatten();
             let drafted = StashSet {
                 mode,

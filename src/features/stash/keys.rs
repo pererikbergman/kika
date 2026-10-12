@@ -4,6 +4,7 @@
 //! imports. `CHUNKS` in `keymap.rs` places the chunks, so their position
 //! there is behaviour.
 
+use super::push::{self, leading_dirs};
 use crate::git::FileEntry;
 use crate::git::path::RepoPath;
 use crate::git::status::EntryKind;
@@ -11,7 +12,6 @@ use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never};
 use crate::menu::MenuId;
 use crate::model::AppState;
-use crate::op::{GitOp, leading_dirs};
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Nothing in the Stash panel can be opened or acted on before it lists
@@ -98,14 +98,14 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// Why a set with a staged deletion and an untracked file is refused;
-/// see `GitOp::stash_files_for`.
+/// see `push::stash_files_for`.
 pub(crate) const STASH_APART: &str = "Stash deleted files apart from untracked";
 
 /// Why a staged rename is refused when a file sits at its old path again.
-pub(crate) use crate::op::STASH_RENAME_TAKEN;
+pub(crate) use super::push::STASH_RENAME_TAKEN;
 
 /// Why a staged deletion is refused when a file sits at its path again.
-pub(crate) use crate::op::STASH_DELETED_TAKEN;
+pub(crate) use super::push::STASH_DELETED_TAKEN;
 
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
@@ -123,7 +123,7 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
         .or_else(|| {
             let (entries, _) = state.files_marked();
             let sets: Vec<_> = (entries.iter())
-                .filter_map(|e| GitOp::stash_file_for(e).map(|set| (*e, set)))
+                .filter_map(|e| push::stash_file_for(e).map(|set| (*e, set)))
                 .collect();
             // Whether an entry other than `own` sits at `path` or a
             // directory it needs.
@@ -148,7 +148,7 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
                 Some(STASH_RENAME_TAKEN.into())
             } else if deleted_taken {
                 Some(STASH_DELETED_TAKEN.into())
-            } else if GitOp::stash_files_for(&entries).is_none() {
+            } else if push::stash_files_for(&entries).is_none() {
                 Some(STASH_APART.into())
             } else {
                 None
@@ -415,7 +415,7 @@ mod tests {
             stash_menu_disabled(&state),
             Some("No changes to stash".into())
         );
-        state.stash.entries = vec![crate::git::stash::StashEntry {
+        state.stash.entries = vec![crate::features::stash::StashEntry {
             index: 0,
             oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
             base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
@@ -437,7 +437,7 @@ mod tests {
         let entries = ["a0", "a1", "a2"]
             .iter()
             .enumerate()
-            .map(|(index, oid)| crate::git::stash::StashEntry {
+            .map(|(index, oid)| crate::features::stash::StashEntry {
                 index,
                 oid: crate::git::commit_files::CommitId::parse(oid).unwrap(),
                 base: crate::git::commit_files::CommitId::parse("b0").unwrap(),

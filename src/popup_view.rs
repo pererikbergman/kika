@@ -1427,8 +1427,8 @@ mod tests {
 
     #[test]
     fn the_drop_stash_question_names_the_entry_and_offers_no_enter() {
+        use crate::features::stash::StashRef;
         use crate::git::commit_files::CommitId;
-        use crate::git::stash::StashRef;
         use crate::popup::DropStashConfirm;
         let mut state = workspace(&["a.rs"]);
         state.popups = vec![Popup::DropStash(DropStashConfirm {

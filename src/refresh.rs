@@ -283,9 +283,8 @@ mod tests {
 
     #[test]
     fn stash_ops_reload_the_list_and_what_they_change_in_the_worktree() {
+        use crate::features::stash::{StashMode, StashRef};
         use crate::git::commit_files::CommitId;
-        use crate::git::stash::StashRef;
-        use crate::op::StashMode;
         let at = || StashRef {
             index: 1,
             oid: CommitId::parse("abc").unwrap(),
