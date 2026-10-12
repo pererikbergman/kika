@@ -49,8 +49,6 @@ mod popup_view;
 mod program;
 mod prompts;
 mod rebase_todo;
-mod recent;
-mod recent_list;
 mod reflog;
 mod reflog_view;
 mod refresh;
@@ -150,7 +148,7 @@ fn main() -> color_eyre::Result<ExitCode> {
         .with_forge_hosts(config.forge_hosts.clone())
         .with_forge_links(config.forge_gitlab_hosts.clone(), config.browser.clone());
     state.emoji_zwj = emoji_zwj;
-    let recent_store = recent::default_path(|key| std::env::var_os(key));
+    let recent_store = features::repos::recent::default_path(|key| std::env::var_os(key));
     let runtime = tokio::runtime::Runtime::new()?;
 
     let terminal = ratatui::init();

@@ -14,6 +14,7 @@ use crate::custom_patch::{PatchAction, PatchChoice};
 use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::command_log;
+use crate::features::repos;
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
@@ -1615,19 +1616,6 @@ pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<Reason> {
         Some("Not in a submodule".into())
     } else if state.op_seq.is_some() {
         Some("Wait for the operation to finish".into())
-    } else {
-        None
-    }
-}
-
-/// Why `i` cannot make the launch directory a repository: it is offered
-/// only by the recent list shown outside one.
-pub(crate) fn init_repo_disabled(state: &AppState) -> Option<Reason> {
-    let offered = matches!(state.popups.last(), Some(Popup::Recent(list)) if list.offer_init);
-    if state.repo.is_some() || !offered {
-        Some("Already in a repository".into())
-    } else if state.busy > 0 {
-        Some("Loading…".into())
     } else {
         None
     }
@@ -3718,22 +3706,6 @@ static WORKTREES_WORKSPACE: &[Binding] = &[
         label: "worktrees",
         bar: false,
         disabled: worktrees_disabled,
-    },
-];
-
-// Chunk 26: repos
-#[rustfmt::skip]
-static REPOS_WORKSPACE: &[Binding] = &[
-    Binding {
-        id: "workspace.recent",
-        keys: &[KeyPattern::any(KeyCode::Char('O'))],
-        // From the Diff pane too, so switching away can keep it focused.
-        scope: KeyScope::Workspace,
-        intent: AppIntent::OpenRecent,
-        description: "Show recent repositories, to switch to one",
-        label: "recent",
-        bar: false,
-        disabled: never,
     },
 ];
 
@@ -6030,79 +6002,6 @@ static WORKTREES_REMOVE_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 70: repos
-static REPOS_RECENT: &[Binding] = &[
-    Binding {
-        id: "recent.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Recent,
-        intent: AppIntent::RecentNext,
-        description: "Select the next row",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "recent.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Recent,
-        intent: AppIntent::RecentPrev,
-        description: "Select the previous row",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "recent.open",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Recent,
-        intent: AppIntent::RecentSelect,
-        description: "Open the selected repository",
-        label: "open",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "recent.init",
-        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
-        scope: KeyScope::Recent,
-        intent: AppIntent::InitRepo,
-        description: "Make the directory Kika started in a repository",
-        label: "init",
-        bar: true,
-        disabled: init_repo_disabled,
-    },
-    Binding {
-        id: "recent.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
-        scope: KeyScope::Recent,
-        intent: AppIntent::PopPopup,
-        description: "Close the list",
-        label: "close",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "recent.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::Recent,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 71: pull_requests
 static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
     Binding {
@@ -6801,7 +6700,7 @@ static CHUNKS: &[&[Binding]] = &[
     SUBMODULES_FILES,
     WORKTREES_WORKSPACE,
     command_log::keys::COMMAND_LOG_WORKSPACE,
-    REPOS_WORKSPACE,
+    repos::keys::REPOS_WORKSPACE,
     REVIEW_KEYS,
     BLAME_FILES,
     DIFF_FILES,
@@ -6845,7 +6744,7 @@ static CHUNKS: &[&[Binding]] = &[
     WORKTREES_KEYS,
     command_log::keys::COMMAND_LOG_KEYS,
     WORKTREES_REMOVE_CONFIRM,
-    REPOS_RECENT,
+    repos::keys::REPOS_RECENT,
     PULL_REQUESTS_PICK_CREATE,
     REVIEW_MERGE_CONFIRM,
     CORE_FILTER_SEARCH,
@@ -6874,7 +6773,7 @@ mod tests {
     use super::*;
     use crate::custom_command::{OutputMode, Panel, test_table};
     use crate::model::Context;
-    use crate::test_support::{binding, build, key, layer, plain};
+    use crate::test_support::{binding, build, from, key, layer, plain};
 
     fn off(_: &AppState) -> Option<Reason> {
         Some("off".into())
@@ -7024,41 +6923,6 @@ mod tests {
                 &AppIntent::Quit
             ]
         );
-    }
-
-    fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
-        // Every binding is enabled on a workspace with a stageable file
-        // selected, a commit in the log and a stash in the list.
-        let mut state = AppState::new(Context::Workspace);
-        state.stash.entries = vec![crate::git::stash::StashEntry {
-            index: 0,
-            oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
-            base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
-            untracked: None,
-            subject: "On main: wip".into(),
-        }];
-        state.files = vec![crate::git::FileEntry {
-            path: "a.rs".into(),
-            orig_path: None,
-            index: '.',
-            worktree: 'M',
-            kind: EntryKind::Changed,
-        }];
-        state.selected = Some(0);
-        state.commits.rows = vec![crate::git::log::CommitRow {
-            oid: "abc".into(),
-            short_oid: "abc".into(),
-            parents: vec![],
-            author: "Ann".into(),
-            time: 0,
-            subject: "s".into(),
-            subject_altered: false,
-        }];
-        match resolve(registry(), &Keymap::default(), focus, &state, key) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
-            Resolution::Unbound | Resolution::Command(_) => None,
-        }
     }
 
     #[test]
@@ -11026,60 +10890,6 @@ mod tests {
         );
         // Keys a binding already had are not new, so the defaults pass.
         assert!(build(&[("diff.back", &["h", "left"])], Trust::Repo).is_ok());
-    }
-
-    #[test]
-    fn shift_o_opens_the_recent_list_from_the_workspace_panels() {
-        let o = key(KeyCode::Char('O'), KeyModifiers::SHIFT);
-        for scope in [
-            KeyScope::Files,
-            KeyScope::Diff,
-            KeyScope::Lines,
-            KeyScope::Blame,
-        ] {
-            assert_eq!(from(scope, o), Some(AppIntent::OpenRecent), "{scope:?}");
-        }
-    }
-
-    #[test]
-    fn the_recent_list_has_its_own_keys() {
-        use AppIntent::*;
-        let recent = |k| from(KeyScope::Recent, k);
-        assert_eq!(recent(plain('j')), Some(RecentNext));
-        assert_eq!(
-            recent(key(KeyCode::Down, KeyModifiers::NONE)),
-            Some(RecentNext)
-        );
-        assert_eq!(recent(plain('k')), Some(RecentPrev));
-        assert_eq!(
-            recent(key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(RecentPrev)
-        );
-        assert_eq!(
-            recent(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(RecentSelect)
-        );
-        assert_eq!(
-            recent(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(PopPopup)
-        );
-        assert_eq!(recent(plain('q')), Some(PopPopup));
-        assert_eq!(
-            recent(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(Quit)
-        );
-        // `i` only where the list offers it.
-        let state = AppState::new(Context::Workspace);
-        assert!(matches!(
-            resolve(
-                registry(),
-                &Keymap::default(),
-                KeyScope::Recent,
-                &state,
-                plain('i')
-            ),
-            Resolution::Disabled(ref reason) if reason == "Already in a repository"
-        ));
     }
 
     #[test]
