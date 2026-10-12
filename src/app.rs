@@ -261,6 +261,9 @@ impl Drop for Suspended {
 struct CatchInterrupts {
     #[cfg(unix)]
     previous: libc::sigaction,
+    /// The handler this guard put in place, so a test can recognise it.
+    #[cfg(all(unix, test))]
+    installed: libc::sighandler_t,
 }
 
 impl CatchInterrupts {
@@ -277,7 +280,11 @@ impl CatchInterrupts {
             if libc::sigaction(libc::SIGINT, &action, &mut previous) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self { previous })
+            Ok(Self {
+                previous,
+                #[cfg(all(unix, test))]
+                installed: action.sa_sigaction,
+            })
         }
     }
 
@@ -301,7 +308,7 @@ impl Drop for CatchInterrupts {
 #[cfg(unix)]
 extern "C" fn ignore_interrupt(_: libc::c_int) {}
 
-/// `ignore_interrupt` in the form `sigaction` stores, so it can be compared.
+/// `ignore_interrupt` in the form `sigaction` stores.
 #[cfg(unix)]
 fn ignore_interrupt_handler() -> libc::sighandler_t {
     ignore_interrupt as extern "C" fn(libc::c_int) as libc::sighandler_t
@@ -866,7 +873,12 @@ mod tests {
 
             let guard = CatchInterrupts::new().expect("guard installs");
             let during = sigint_action();
-            assert_eq!(during.sa_sigaction, ignore_interrupt_handler());
+            // Not compared with `ignore_interrupt_handler()`: in optimised
+            // builds a function can have more than one address.
+            assert_eq!(during.sa_sigaction, guard.installed);
+            assert_ne!(during.sa_sigaction, before.sa_sigaction);
+            assert_ne!(during.sa_sigaction, libc::SIG_IGN);
+            assert_ne!(during.sa_sigaction, libc::SIG_DFL);
             // SAFETY: SIGINT now runs the guard's no-op handler.
             unsafe { libc::raise(libc::SIGINT) };
             let held = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await;
