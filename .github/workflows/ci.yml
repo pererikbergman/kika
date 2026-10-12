@@ -60,3 +60,45 @@ jobs:
 
       - name: cargo test
         run: cargo test --locked
+
+  # Architecture checks (noupling). Fails only on Issues missing from the
+  # committed baseline; see docs/architecture-checks.md.
+  architecture:
+    name: architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      NOUPLING_VERSION: v0.9.2
+      # Digest of noupling-linux-x86_64 for NOUPLING_VERSION. Hard-coded so a
+      # replaced release asset fails the check instead of running.
+      NOUPLING_SHA256: 08ccc01082dfeba071b5914f5b3bcfc0a8ad6ee1e5c0e38a4198577a7ab3eec8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install noupling
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bin"
+          curl -fsSL --retry 3 -o noupling \
+            "https://github.com/pererikbergman/noupling/releases/download/${NOUPLING_VERSION}/noupling-linux-x86_64"
+          echo "${NOUPLING_SHA256}  noupling" | sha256sum -c -
+          chmod +x noupling
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: noupling scan
+        run: |
+          noupling --version
+          noupling scan .
+
+      # Runs before the gate so the summary is written even when the gate fails.
+      - name: Architecture summary
+        run: |
+          noupling report . --format pr --baseline
+          cat .noupling/pr.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail on Issues not in the baseline
+        run: noupling audit . --baseline

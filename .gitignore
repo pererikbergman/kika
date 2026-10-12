@@ -9,3 +9,8 @@
 
 # macOS
 .DS_Store
+
+# noupling runtime output (history.db, reports); config and baseline are committed
+/.noupling/*
+!/.noupling/settings.json
+!/.noupling/baseline.json
