@@ -782,6 +782,10 @@ pub enum AppIntent {
     /// Put the selected branch's pull request or merge request list URL
     /// on the clipboard.
     CopyForgeUrl,
+    /// Ask the forge again for the branches' pull requests, at the user's
+    /// request: only on an opted-in host, never past a running call or a
+    /// rate limit.
+    RefreshPullRequests,
     /// The browser could not be started, and why.
     OpenUrlFailed(String),
     /// Start a pull request for the selected branch: pick the target

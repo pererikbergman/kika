@@ -80,13 +80,24 @@ impl Harness {
     /// configured only once the first load is done, so starting asks
     /// GitHub nothing.
     pub async fn start_with_forge(repo: &TestRepo, gh: Arc<FakeGh>) -> Self {
+        let github = vec![ForgeHost::parse("github.com").unwrap()];
+        Self::start_with_forge_hosts(repo, gh, github).await
+    }
+
+    /// As [`start_with_forge`](Self::start_with_forge), with `hosts`
+    /// configured instead: none means the forge is off.
+    pub async fn start_with_forge_hosts(
+        repo: &TestRepo,
+        gh: Arc<FakeGh>,
+        hosts: Vec<ForgeHost>,
+    ) -> Self {
         let forge = ForgeContext {
             gh,
             sink: CommandSink::new(),
             cache_dir: None,
         };
         let mut harness = Self::start_inner(repo.runner(), 120, 30, Some(forge)).await;
-        harness.state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap()];
+        harness.state.forge.hosts = hosts;
         harness
     }
 
@@ -307,8 +318,8 @@ impl Harness {
 
 /// Whether nothing more will change without input: no status load or Git
 /// operation in flight, no background or recent-list load pending, the
-/// diff settled and no commits page, markers, reflog or stash list on
-/// their way.
+/// diff settled, no commits page, markers, reflog or stash list on
+/// their way, and no forge refresh running.
 /// Diff streams and background loads stay out of `busy`, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
@@ -329,6 +340,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && state.stash.seq.is_none()
         && state.commits.reflog.seq.is_none()
         && !state.review.loading()
+        && !state.forge.in_flight
 }
 
 /// Kika's hidden sequence-editor mode, for the script
