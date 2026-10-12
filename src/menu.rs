@@ -5,7 +5,7 @@ use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::custom_patch::PatchChoice;
 use crate::git::bisect::BisectMark;
-use crate::git::ops::{MergeStrategy, ResetMode};
+use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::repo_state::Operation;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
@@ -265,17 +265,25 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
-/// Stashing "this file" acts on the selected row, so a filter that hides it
-/// or a range selected refuses it, as other row actions are refused.
+/// Why a set with a staged rename or deletion and an untracked file is
+/// refused; see `GitOp::stash_files_for`.
+pub(crate) const STASH_APART: &str = "Stash renamed/deleted files apart from untracked";
+
+/// Stashing selected files acts on the marked set: the Files range when
+/// one is set, else the row under the cursor. A filter that hides the
+/// cursor's row refuses it, as other row actions are refused.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false)
+    list_guard(state, true)
         .or_else(|| stash_blocked(state))
         .or_else(|| {
-            state
-                .selected
-                .and_then(|i| state.files.get(i))
-                .is_none()
-                .then_some("No file selected".into())
+            let (entries, _) = state.files_marked();
+            if entries.is_empty() {
+                Some("No file selected".into())
+            } else if GitOp::stash_files_for(&entries).is_none() {
+                Some(STASH_APART.into())
+            } else {
+                None
+            }
         })
 }
 
@@ -296,7 +304,7 @@ static STASH: &[MenuItem] = &[
         disabled: stash_staged_disabled,
     },
     MenuItem {
-        label: "Stash this file…",
+        label: "Stash selected files…",
         intent: AppIntent::StashFile,
         disabled: stash_file_disabled,
     },
@@ -428,7 +436,7 @@ mod tests {
                 Some("No file selected")
             ]
         );
-        // Only an untracked file: only "including untracked" and "this file".
+        // Only an untracked file: only "including untracked" and "selected files".
         let untracked = file("new", '?', '?', EntryKind::Untracked);
         assert_eq!(
             reasons(vec![untracked], Some(0)),

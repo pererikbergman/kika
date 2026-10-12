@@ -219,6 +219,8 @@ impl StashFilesList {
 pub struct StashDraft {
     pub mode: StashMode,
     pub paths: Vec<RepoPath>,
+    /// Drafted from the Files range, which the push then uses up.
+    pub from_range: bool,
 }
 
 #[cfg(test)]
