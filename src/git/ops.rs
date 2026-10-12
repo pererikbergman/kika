@@ -710,9 +710,10 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         // git ignores; they keep the todo list to what the sequence editor
         // accepts. `--update-refs` (git 2.38) or the key turning it off
         // always wins over the user's `rebase.updateRefs`. Comments in the
-        // todo use `#`, the only comment character Kika reads, whatever
-        // the user's `core.commentChar`; the command line's `-c` wins
-        // over every config file.
+        // todo use `#`, which the sequence editor reads them by, whatever
+        // the user's `core.commentChar` or `core.commentString`; the
+        // command line's `-c` wins over every config file. A stopped
+        // rebase's todo is read with the user's own prefix, as git will.
         GitOp::InteractiveRebase(plan) => {
             let mut cmd = GitCommand::new("-c");
             if !plan.update_refs {

@@ -54,7 +54,9 @@ fn run(args: &[OsString], plan: &OsStr) -> Result<(), String> {
     let plan = plan.to_str().ok_or("the plan is not UTF-8")?;
     let steps = decode(plan)?;
     let todo = read_file(path, MAX_TODO)?;
-    let rewritten = apply(&steps, &parse_todo(&todo)?)?;
+    // Kika's rebase passes `-c core.commentChar=#`, so git wrote this
+    // list's comments with `#` whatever the user's config says.
+    let rewritten = apply(&steps, &parse_todo(&todo, b"#")?)?;
     replace_file(path, &todo, &rewritten)
 }
 
