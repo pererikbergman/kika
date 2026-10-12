@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::json;
 
+use super::head::Head;
 use super::url::pull_url;
 use super::{CiState, CreateError, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use crate::git::branches::BranchName;
@@ -266,6 +267,15 @@ pub enum Answer {
     Failed(ForgeStatus),
 }
 
+/// What a fetch found: the badges by local branch, and whether the
+/// repository is a fork, which only the GraphQL answer can tell.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Fetched {
+    pub badges: HashMap<BranchName, PrBadge>,
+    /// GitHub named a `parent` for the repository.
+    pub forked: bool,
+}
+
 /// Why a fetch gave no badges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
@@ -309,26 +319,20 @@ impl Gh<'_> {
         )
     }
 
-    /// The pull request of each of `branches` in `repo`, asked in batches
-    /// of [`BATCH`], one call after another. The first failure or rate
-    /// limit ends it.
-    pub fn fetch_badges(
-        &self,
-        repo: &ForgeRepo,
-        branches: &[BranchName],
-    ) -> Result<HashMap<BranchName, PrBadge>, Refusal> {
-        let mut badges = HashMap::new();
-        let branches = &branches[..branches.len().min(MAX_BRANCHES)];
-        for batch in branches.chunks(BATCH) {
+    /// The pull request of each of `heads`, from `repo` or its parent,
+    /// asked in batches of [`BATCH`], one call after another. The first
+    /// failure or rate limit ends it.
+    pub fn fetch_badges(&self, repo: &ForgeRepo, heads: &[Head]) -> Result<Fetched, Refusal> {
+        let mut fetched = Fetched::default();
+        let heads = &heads[..heads.len().min(MAX_BRANCHES)];
+        for batch in heads.chunks(BATCH) {
             let kind = GhCall::Graphql {
                 body: request_body(repo, batch),
             };
             let result = self.call(
                 kind,
                 |answer| match answer {
-                    Answer::Body { body, .. } => {
-                        read_answer(&body, batch.len()).map_err(Refusal::Status)
-                    }
+                    Answer::Body { body, .. } => read_answer(&body, batch).map_err(Refusal::Status),
                     Answer::Limited { until } => Err(Refusal::Limited { until }),
                     // A 304 to a call that sent no ETag is not an answer.
                     Answer::NotModified => Err(Refusal::Status(ForgeStatus::Failed)),
@@ -340,13 +344,15 @@ impl Gh<'_> {
                     Err(_) => CommandOutcome::Failed(None),
                 },
             );
-            for (branch, badge) in batch.iter().zip(result?) {
+            let (badges, forked) = result?;
+            fetched.forked |= forked;
+            for (head, badge) in batch.iter().zip(badges) {
                 if let Some(badge) = badge {
-                    badges.insert(branch.clone(), badge);
+                    fetched.badges.insert(head.branch.clone(), badge);
                 }
             }
         }
-        Ok(badges)
+        Ok(fetched)
     }
 
     /// Open a pull request on `repo` from `head` (`owner:branch` for a
@@ -500,31 +506,39 @@ fn refusal(body: &[u8]) -> Option<String> {
     })
 }
 
-/// The GraphQL query for `count` branches. Fixed text: aliases are `b0…`,
+/// Pull requests asked per head ref name: one of another owner's forks
+/// may share the name, so the newest few are read and filtered here.
+const NODES: usize = 5;
+
+/// The GraphQL query for `count` heads. Fixed text: aliases are `b0…`,
 /// and every name is a variable, so nothing from the repository is ever
-/// spliced into it.
+/// spliced into it. The same aliases are asked of `parent`, which is null
+/// unless the repository is a fork, so a fork's pull requests into its
+/// upstream are found in the same call.
 fn query(count: usize) -> String {
     let mut params = String::from("$owner:String!,$name:String!");
     let mut fields = String::new();
     for i in 0..count {
         params.push_str(&format!(",$b{i}:String!"));
         fields.push_str(&format!(
-            " b{i}:pullRequests(headRefName:$b{i},first:1,orderBy:{{field:CREATED_AT,direction:DESC}})\
-             {{nodes{{number state isDraft commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}}}}}"
+            " b{i}:pullRequests(headRefName:$b{i},first:{NODES},orderBy:{{field:CREATED_AT,direction:DESC}})\
+             {{nodes{{number state isDraft headRepositoryOwner{{login}} \
+             commits(last:1){{nodes{{commit{{statusCheckRollup{{state}}}}}}}}}}}}"
         ));
     }
-    format!("query({params}){{repository(owner:$owner,name:$name){{{fields} }}}}")
+    format!(
+        "query({params}){{repository(owner:$owner,name:$name){{{fields} parent{{{fields} }} }}}}"
+    )
 }
 
-/// `{query, variables}` for stdin.
-fn request_body(repo: &ForgeRepo, batch: &[BranchName]) -> Vec<u8> {
+/// `{query, variables}` for stdin. Only the ref names are sent; owners
+/// are matched on the answer.
+fn request_body(repo: &ForgeRepo, batch: &[Head]) -> Vec<u8> {
     let mut variables = serde_json::Map::new();
     variables.insert("owner".into(), json!(repo.owner));
     variables.insert("name".into(), json!(repo.name));
-    for (i, branch) in batch.iter().enumerate() {
-        // Only UTF-8 names reach here; see `ForgeState::set_branches`.
-        let name = String::from_utf8_lossy(&branch.0);
-        variables.insert(format!("b{i}"), json!(name));
+    for (i, head) in batch.iter().enumerate() {
+        variables.insert(format!("b{i}"), json!(head.name));
     }
     serde_json::to_vec(&json!({ "query": query(batch.len()), "variables": variables }))
         .unwrap_or_default()
@@ -544,7 +558,15 @@ struct ErrorsOnly {
 
 #[derive(Deserialize)]
 struct Data {
-    repository: Option<HashMap<String, Connection>>,
+    repository: Option<Repository>,
+}
+
+/// The aliases `b0…`, and the same aliases on the parent, if any.
+#[derive(Deserialize)]
+struct Repository {
+    parent: Option<HashMap<String, Connection>>,
+    #[serde(flatten)]
+    aliases: HashMap<String, Connection>,
 }
 
 #[derive(Deserialize)]
@@ -564,7 +586,16 @@ struct PrNode {
     number: u64,
     state: String,
     is_draft: bool,
+    /// Null for a deleted fork, which then matches no head.
+    #[serde(default)]
+    head_repository_owner: Option<Owner>,
     commits: Commits,
+}
+
+/// Compared with a head's owner and dropped: never kept or shown.
+#[derive(Deserialize)]
+struct Owner {
+    login: String,
 }
 
 #[derive(Deserialize)]
@@ -727,8 +758,11 @@ pub fn classify(output: io::Result<GhOutput>, now: i64) -> Answer {
     }
 }
 
-/// The badge for each of `count` aliases in order, from a GraphQL body.
-fn read_answer(body: &[u8], count: usize) -> Result<Vec<Option<PrBadge>>, ForgeStatus> {
+/// The badge for each of `batch`'s aliases in order, from a GraphQL body,
+/// and whether the repository has a parent. An alias's badge is its first
+/// pull request whose head owner is the head's, in the repository and
+/// else in the parent.
+fn read_answer(body: &[u8], batch: &[Head]) -> Result<(Vec<Option<PrBadge>>, bool), ForgeStatus> {
     let response: Response = serde_json::from_slice(body).map_err(|_| ForgeStatus::Failed)?;
     if response.errors.is_some_and(|e| !e.is_empty()) {
         return Err(ForgeStatus::Failed);
@@ -739,13 +773,32 @@ fn read_answer(body: &[u8], count: usize) -> Result<Vec<Option<PrBadge>>, ForgeS
     else {
         return Err(ForgeStatus::Failed);
     };
+    let parent = repository.parent.as_ref();
     // By alias index, never by anything the answer names.
-    Ok((0..count)
-        .map(|i| {
-            let pr = repository.get(&format!("b{i}"))?.nodes.first()?;
+    let badges = batch
+        .iter()
+        .enumerate()
+        .map(|(i, head)| {
+            let alias = format!("b{i}");
+            let pr = head_pr(&repository.aliases, &alias, head)
+                .or_else(|| head_pr(parent?, &alias, head))?;
             badge_of(pr)
         })
-        .collect())
+        .collect();
+    Ok((badges, parent.is_some()))
+}
+
+/// The first pull request under `alias` opened from `head`'s owner.
+fn head_pr<'a>(
+    aliases: &'a HashMap<String, Connection>,
+    alias: &str,
+    head: &Head,
+) -> Option<&'a PrNode> {
+    aliases.get(alias)?.nodes.iter().find(|pr| {
+        pr.head_repository_owner
+            .as_ref()
+            .is_some_and(|owner| owner.login.eq_ignore_ascii_case(&head.owner))
+    })
 }
 
 fn badge_of(pr: &PrNode) -> Option<PrBadge> {
@@ -884,6 +937,9 @@ pub mod fixtures {
     pub const CREATE_201: &str = include_str!("fixtures/create_201.http");
     pub const CREATE_422: &str = include_str!("fixtures/create_422.http");
     pub const CREATE_422_STDERR: &str = include_str!("fixtures/create_422.stderr");
+    pub const FORK_HEADS: &str = include_str!("fixtures/fork_heads.http");
+    pub const FORK_PARENT: &str = include_str!("fixtures/fork_parent.http");
+    pub const RENAMED_HEAD: &str = include_str!("fixtures/renamed_head.http");
 }
 
 #[cfg(test)]
@@ -924,11 +980,20 @@ mod tests {
         }
     }
 
+    /// Each of `branches` as its own name in the repository's owner.
+    fn own(branches: &[BranchName]) -> Vec<Head> {
+        super::super::head::heads(branches, &HashMap::new(), &repo())
+    }
+
+    fn fetch_heads(runner: &FakeGh, repo: &ForgeRepo, heads: &[Head]) -> Result<Fetched, Refusal> {
+        gh(runner, &CommandSink::new(), &host()).fetch_badges(repo, heads)
+    }
+
     fn fetch(
         runner: &FakeGh,
         branches: &[BranchName],
     ) -> Result<HashMap<BranchName, PrBadge>, Refusal> {
-        gh(runner, &CommandSink::new(), &host()).fetch_badges(&repo(), branches)
+        fetch_heads(runner, &repo(), &own(branches)).map(|f| f.badges)
     }
 
     fn body(cmd: &GhCommand) -> serde_json::Value {
@@ -1177,22 +1242,131 @@ mod tests {
     #[test]
     fn names_travel_as_variables_and_never_in_the_query() {
         let runner = FakeGh::new().reply(answer(STATES));
-        let branches: Vec<BranchName> = vec!["feature/login".into(), "fix\"}{repository".into()];
-        fetch(&runner, &branches).unwrap();
+        let heads = [
+            Head {
+                branch: "local-only".into(),
+                owner: "acme".into(),
+                name: "feature/login".into(),
+            },
+            Head {
+                branch: "fix".into(),
+                owner: "forker-owner".into(),
+                name: "fix\"}{repository".into(),
+            },
+        ];
+        fetch_heads(&runner, &repo(), &heads).unwrap();
         let body = body(&runner.calls()[0]);
         let query = body["query"].as_str().unwrap();
-        for word in ["feature/login", "fix\"", "acme", "widgets"] {
+        for word in [
+            "feature/login",
+            "fix\"",
+            "local-only",
+            "forker-owner",
+            "acme",
+            "widgets",
+        ] {
             assert!(!query.contains(word), "{word} in {query}");
         }
+        // The ref names travel; the head owners and local names do not.
         let vars = &body["variables"];
         assert_eq!(vars["owner"], "acme");
         assert_eq!(vars["name"], "widgets");
         assert_eq!(vars["b0"], "feature/login");
         assert_eq!(vars["b1"], "fix\"}{repository");
-        assert!(query.contains(
-            "b1:pullRequests(headRefName:$b1,first:1,orderBy:{field:CREATED_AT,direction:DESC})"
-        ));
+        assert_eq!(vars.as_object().unwrap().len(), 4);
+        let sent = body.to_string();
+        assert!(!sent.contains("forker-owner") && !sent.contains("local-only"));
+        let alias =
+            "b1:pullRequests(headRefName:$b1,first:5,orderBy:{field:CREATED_AT,direction:DESC})";
+        // Each alias is asked of the repository and of its parent.
+        assert_eq!(query.matches(alias).count(), 2, "{query}");
+        assert!(query.find("parent{").unwrap() > query.find(alias).unwrap());
+        assert!(query.contains("headRepositoryOwner{login}"));
         assert!(query.contains("statusCheckRollup{state}"));
+        // The text depends on the count alone.
+        assert_eq!(query, super::query(2));
+    }
+
+    #[test]
+    fn a_fork_pr_is_matched_by_its_head_owner_not_by_order() {
+        // `origin` is o/r; local `fix` tracks `fork/fix`, and `fork` is me/r.
+        let base = ForgeRepo {
+            host: "github.com".into(),
+            owner: "o".into(),
+            name: "r".into(),
+        };
+        let upstreams = HashMap::from([(
+            BranchName::from("fix"),
+            crate::git::forge_remote::Upstream {
+                remote: b"fork".to_vec(),
+                merge: b"refs/heads/fix".to_vec(),
+                url: Some(b"git@github.com:me/r.git".to_vec()),
+            },
+        )]);
+        let heads = super::super::head::heads(&["fix".into()], &upstreams, &base);
+        let runner = FakeGh::new().reply(answer(FORK_HEADS));
+        let fetched = fetch_heads(&runner, &base, &heads).unwrap();
+        // The newer PR from `other` is passed over for the one from `me`.
+        assert_eq!(
+            fetched.badges,
+            HashMap::from([(
+                BranchName::from("fix"),
+                PrBadge {
+                    number: 9,
+                    state: PrState::Open,
+                    ci: Some(CiState::Success),
+                }
+            )])
+        );
+        assert!(!fetched.forked);
+        let body = body(&runner.calls()[0]);
+        assert_eq!(body["variables"]["owner"], "o");
+        assert_eq!(body["variables"]["b0"], "fix");
+    }
+
+    #[test]
+    fn the_parent_answers_when_the_repository_has_no_match() {
+        let head = |owner: &str| Head {
+            branch: "fix".into(),
+            owner: owner.into(),
+            name: "fix".into(),
+        };
+        let badge = |owner: &str| {
+            let runner = FakeGh::new().reply(answer(FORK_PARENT));
+            let fetched = fetch_heads(&runner, &repo(), &[head(owner)]).unwrap();
+            assert!(fetched.forked);
+            fetched
+                .badges
+                .get(&BranchName::from("fix"))
+                .map(|b| b.number)
+        };
+        // Nothing of `me` in the fork; the parent's PR is the one.
+        assert_eq!(badge("me"), Some(31));
+        // The repository's own match wins over the parent's.
+        assert_eq!(badge("someone"), Some(3));
+        // A deleted fork's PR (no owner) matches nobody.
+        assert_eq!(badge("ghost"), None);
+    }
+
+    #[test]
+    fn a_missing_or_null_owner_or_parent_matches_nothing() {
+        let nodes = |owner: &str| {
+            format!(
+                "{{\"data\":{{\"repository\":{{\"b0\":{{\"nodes\":[{{\"number\":1,\
+                 \"state\":\"OPEN\",\"isDraft\":false,{owner}\"commits\":{{\"nodes\":[]}}}}]}},\
+                 \"parent\":null}}}}}}"
+            )
+        };
+        for owner in ["", "\"headRepositoryOwner\":null,"] {
+            let runner = FakeGh::new().reply(answer(&nodes(owner)));
+            let fetched = fetch_heads(&runner, &repo(), &own(&names(1))).unwrap();
+            assert_eq!(fetched, Fetched::default(), "{owner}");
+        }
+        let runner = FakeGh::new().reply(answer(&nodes(
+            "\"headRepositoryOwner\":{\"login\":\"ACME\"},",
+        )));
+        let fetched = fetch_heads(&runner, &repo(), &own(&names(1))).unwrap();
+        assert_eq!(fetched.badges[&names(1)[0]].number, 1);
     }
 
     #[test]
@@ -1241,7 +1415,11 @@ mod tests {
         let branches = names(120);
         let badges = fetch(&runner, &branches).unwrap();
         let calls = runner.calls();
+        // One call per batch, the parent asked in the same call.
         assert_eq!(calls.len(), 3);
+        for call in &calls {
+            assert!(body(call)["query"].as_str().unwrap().contains("parent{"));
+        }
         assert_eq!(body(&calls[1])["variables"]["b0"], "topic-50");
         assert!(body(&calls[2])["variables"].get("b20").is_none());
         // Each batch maps back by its own aliases.
@@ -1510,7 +1688,7 @@ mod tests {
         let taken = sink.next_id();
         let runner = FakeGh::new().reply(answer(STATES)).missing();
         let host = host();
-        let result = gh(&runner, &sink, &host).fetch_badges(&repo(), &names(60));
+        let result = gh(&runner, &sink, &host).fetch_badges(&repo(), &own(&names(60)));
         assert_eq!(result, Err(Refusal::Status(ForgeStatus::NoGh)));
         let events = events.lock().unwrap();
         let line = "gh api graphql --include --hostname github.com --input -";
