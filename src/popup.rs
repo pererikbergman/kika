@@ -7,16 +7,19 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::command_log::CommandLogView;
 use crate::commit_editor::{byte_at, char_len};
 use crate::git::askpass::Secret;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::GitOp;
+use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::recent_list::RecentList;
 use crate::submodule_list::SubmoduleList;
+use crate::worktree_list::WorktreeList;
 
 /// One entry on the popup stack. The top one takes the keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,10 +38,17 @@ pub enum Popup {
     DeleteBranch(DeleteBranchConfirm),
     ResetHard(ResetHardConfirm),
     RemoveRemote(RemoveRemoteConfirm),
+    DeleteTag(DeleteTagConfirm),
     Submodules(SubmoduleList),
+    Worktrees(WorktreeList),
+    RemoveWorktree(RemoveWorktreeConfirm),
     Recent(RecentList),
     /// Git or ssh asks something for a running fetch, pull or push.
     Credential(CredentialPrompt),
+    /// "Undo this?" or "Redo this?", with what would happen.
+    Travel(TravelConfirm),
+    /// The git commands Kika ran; the entries live in `AppState`.
+    CommandLog(CommandLogView),
 }
 
 /// A question from git or ssh, and what the user has typed so far. The
@@ -197,6 +207,24 @@ impl ResetHardConfirm {
     }
 }
 
+/// "Undo this?" or "Redo this?" Like [`ResetHardConfirm`], it carries the
+/// op planned when it was asked, so a reload before the answer cannot
+/// change what moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TravelConfirm {
+    /// `Undo` or `Redo`.
+    pub title: &'static str,
+    /// What will happen, line by line, already terminal-safe.
+    pub preview: Vec<String>,
+    pub op: GitOp,
+}
+
+impl TravelConfirm {
+    pub fn question(&self) -> String {
+        format!("{}\n(y/n)", self.preview.join("\n"))
+    }
+}
+
 /// "Remove this remote?" Like [`DeleteBranchConfirm`], it carries the op
 /// chosen when it was asked, so a reload before the answer cannot change
 /// the target.
@@ -217,6 +245,52 @@ impl RemoveRemoteConfirm {
             "Remove remote {}? Its remote-tracking branches are deleted, and \
              branches tracking it lose their upstream. (y/n)",
             self.name
+        )
+    }
+}
+
+/// "Delete this tag?" Like [`DeleteBranchConfirm`], it carries the op
+/// chosen when it was asked, so a reload before the answer cannot change
+/// the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteTagConfirm {
+    /// The tag's display name, already terminal-safe.
+    pub name: String,
+    pub op: GitOp,
+}
+
+impl DeleteTagConfirm {
+    pub fn title(&self) -> &'static str {
+        "Delete tag"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Delete tag {}? It is not deleted on any remote. (y/n)",
+            self.name
+        )
+    }
+}
+
+/// "Remove this worktree?" It carries the path taken when it was asked,
+/// so a reload before the answer cannot change what is removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveWorktreeConfirm {
+    /// The path's display form, already terminal-safe.
+    pub display: String,
+    pub path: RepoPath,
+}
+
+impl RemoveWorktreeConfirm {
+    pub fn title(&self) -> &'static str {
+        "Remove worktree"
+    }
+
+    pub fn question(&self) -> String {
+        format!(
+            "Remove worktree {}? Git refuses if it has uncommitted or untracked \
+             changes. (y/n)",
+            self.display
         )
     }
 }
@@ -247,7 +321,7 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
             ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
             ConfirmKind::Abort(Operation::Revert) => "Abort revert",
-            ConfirmKind::Abort(Operation::Bisect) => "Abort bisect",
+            ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
             ConfirmKind::DetachedCheckout => "Detached checkout",
         }
@@ -277,8 +351,13 @@ impl ConfirmKind {
                 "Abort the revert and return to where it started? \
                  Resolved conflicts are lost. (y/n)"
             }
-            // Never asked: a bisect is not resumable.
-            ConfirmKind::Abort(Operation::Bisect) => "Abort the bisect? (y/n)",
+            // `AppState::confirm_question` names where the bisect started;
+            // this is the fallback when it cannot.
+            ConfirmKind::Abort(Operation::Bisect) => {
+                "Reset the bisect? Its marks are dropped and HEAD goes back to where \
+                 the bisect started; files change to match. Git refuses if a local \
+                 change would be overwritten. (y/n)"
+            }
             ConfirmKind::StageResolved => {
                 "Every conflict in this file is resolved. Stage it? (y/n)"
             }
@@ -296,6 +375,7 @@ impl ConfirmKind {
         match self {
             ConfirmKind::Quit => AppIntent::Quit,
             ConfirmKind::ForcePush => AppIntent::ForcePush,
+            ConfirmKind::Abort(Operation::Bisect) => AppIntent::ConfirmBisectReset,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
             ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
@@ -335,6 +415,12 @@ pub enum PromptKind {
     RenameRemote,
     /// The remote branch the selected local branch should track.
     SetUpstream,
+    /// Where to add a worktree for the branch `a` was pressed on.
+    WorktreePath,
+    /// A new tag's name.
+    TagName,
+    /// An annotated tag's message, asked after its name.
+    TagMessage,
 }
 
 impl PromptKind {
@@ -349,6 +435,9 @@ impl PromptKind {
             PromptKind::RemoteUrl => "New remote URL",
             PromptKind::RenameRemote => "Rename remote",
             PromptKind::SetUpstream => "Set upstream",
+            PromptKind::WorktreePath => "New worktree",
+            PromptKind::TagName => "New tag",
+            PromptKind::TagMessage => "Tag message",
         }
     }
 
@@ -363,6 +452,9 @@ impl PromptKind {
             PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
             PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
             PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
+            PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
+            PromptKind::TagName => AppIntent::TagNamed(text),
+            PromptKind::TagMessage => AppIntent::TagMessaged(text),
         }
     }
 }
@@ -505,6 +597,25 @@ mod tests {
     }
 
     #[test]
+    fn the_travel_question_is_the_preview_then_y_or_n() {
+        use crate::git::commit_files::CommitId;
+        use crate::git::undo::{Direction, Expected, Step};
+        let ask = TravelConfirm {
+            title: "Undo",
+            preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],
+            op: GitOp::Travel {
+                direction: Direction::Undo,
+                step: Step::MoveTo(CommitId::parse("abc").unwrap()),
+                expect: Expected {
+                    head_ref: None,
+                    oid: CommitId::parse("def").unwrap(),
+                },
+            },
+        };
+        assert_eq!(ask.question(), "Undo: commit: x\nBranch main moves.\n(y/n)");
+    }
+
+    #[test]
     fn typing_inserts_at_the_cursor_by_char() {
         let mut input = typed("héllo 日本");
         assert_eq!(input.col, 8);
@@ -616,6 +727,28 @@ mod tests {
             PromptKind::SetUpstream.submit(t()),
             AppIntent::SetUpstreamTo(t())
         );
+    }
+
+    #[test]
+    fn tag_prompts_answer_with_their_intents_and_delete_asks_plainly() {
+        let t = || "t".to_string();
+        assert_eq!(PromptKind::TagName.submit(t()), AppIntent::TagNamed(t()));
+        assert_eq!(
+            PromptKind::TagMessage.submit(t()),
+            AppIntent::TagMessaged(t())
+        );
+        let ask = DeleteTagConfirm {
+            name: "v1".into(),
+            op: GitOp::DeleteTag {
+                name: "v1".into(),
+                oid: "1".repeat(40),
+            },
+        };
+        assert_eq!(
+            ask.question(),
+            "Delete tag v1? It is not deleted on any remote. (y/n)"
+        );
+        assert_eq!(ask.title(), "Delete tag");
     }
 
     #[test]

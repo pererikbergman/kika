@@ -8,6 +8,7 @@ use crate::git::branch_tips::Tip;
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, Markers};
 use crate::rebase_todo::RebaseTodo;
+use crate::reflog::ReflogList;
 
 /// Commits per page.
 pub const PAGE: usize = 200;
@@ -76,6 +77,29 @@ pub struct CommitsPanel {
     pub todo_selected: Option<usize>,
     /// The write of an edited todo list in flight; one at a time.
     pub todo_write_seq: Option<u64>,
+    /// Which list the panel shows.
+    pub tab: CommitsTab,
+    /// `HEAD`'s reflog, read when its tab is first shown or an undo asks.
+    pub reflog: ReflogList,
+}
+
+/// The Commits panel's two lists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommitsTab {
+    /// The history of `HEAD`.
+    #[default]
+    Log,
+    /// Everywhere `HEAD` has been, newest first.
+    Reflog,
+}
+
+impl CommitsTab {
+    pub fn other(self) -> Self {
+        match self {
+            CommitsTab::Log => CommitsTab::Reflog,
+            CommitsTab::Reflog => CommitsTab::Log,
+        }
+    }
 }
 
 impl CommitsPanel {

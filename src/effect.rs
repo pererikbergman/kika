@@ -18,6 +18,7 @@ use crate::git::askpass::Secret;
 use crate::git::attr::conflict_marker_size;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::branch_tips::read_tips;
+use crate::git::branches::BranchName;
 use crate::git::branches::{branch_log, list_branches};
 use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, load_patch, terminal_safe};
@@ -28,6 +29,7 @@ use crate::git::ops::{GitOp, run_op};
 use crate::git::path::RepoPath;
 use crate::git::prompts::read_prompt_facts;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
+use crate::git::reflog::read_reflog;
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::remotes::list_remotes;
@@ -35,6 +37,8 @@ use crate::git::repo_root::init_repo;
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
+use crate::git::tags::list_tags;
+use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::rebase_todo::{TodoFile, nothing_done};
@@ -105,6 +109,23 @@ pub enum Effect {
     LoadSubmodules {
         tag: Tag,
     },
+    /// List the worktrees; always answered by one `WorktreesLoaded`.
+    LoadWorktrees {
+        tag: Tag,
+    },
+    /// Check the typed `path`, then add a worktree for `branch` there;
+    /// always answered by one `WorktreeAdded`.
+    AddWorktree {
+        tag: Tag,
+        path: String,
+        branch: BranchName,
+    },
+    /// Remove the linked worktree at `path`, never forced; always
+    /// answered by one `WorktreeRemoved`.
+    RemoveWorktree {
+        tag: Tag,
+        path: RepoPath,
+    },
     /// Point git at the repository `nested` names: each path is a
     /// submodule of the one before, starting from the top-level `root`,
     /// which an empty list means. Runs before the next effect starts.
@@ -126,6 +147,10 @@ pub enum Effect {
     /// List the remotes and their remote-tracking branches; always
     /// answered by one `RemotesLoaded`.
     LoadRemotes {
+        tag: Tag,
+    },
+    /// List the tags; always answered by one `TagsLoaded`.
+    LoadTags {
         tag: Tag,
     },
     /// Read the recent-repositories list; answered by `RecentLoaded`
@@ -223,6 +248,11 @@ pub enum Effect {
         path: PathBuf,
         expected: Vec<u8>,
         content: Vec<u8>,
+    },
+    /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
+    /// `ReflogLoaded`.
+    LoadReflog {
+        tag: Tag,
     },
     /// Fetch every remote; always answered by one `FetchFinished`.
     Fetch {
@@ -403,6 +433,50 @@ impl Runtime {
                     let _ = tx.send(AppIntent::SubmodulesLoaded { tag, result });
                 });
             }
+            Effect::LoadWorktrees { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || read_worktrees(runner.as_ref()))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git worktree list crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::WorktreesLoaded { tag, result });
+                });
+            }
+            Effect::AddWorktree { tag, path, branch } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        add_worktree(runner.as_ref(), &path, &branch)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git worktree add crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::WorktreeAdded { tag, result });
+                });
+            }
+            Effect::RemoveWorktree { tag, path } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || {
+                        remove_worktree(runner.as_ref(), &path)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        Err(terminal_safe(
+                            format!("git worktree remove crashed: {e}").as_bytes(),
+                        ))
+                    });
+                    let _ = tx.send(AppIntent::WorktreeRemoved { tag, result });
+                });
+            }
             Effect::LoadBranches { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
@@ -445,6 +519,19 @@ impl Runtime {
                             ))
                         });
                     let _ = tx.send(AppIntent::RemotesLoaded { tag, result });
+                });
+            }
+            Effect::LoadTags { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result = tokio::task::spawn_blocking(move || list_tags(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git for-each-ref crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::TagsLoaded { tag, result });
                 });
             }
             // Synchronous, so no later effect runs in the old repository.
@@ -719,6 +806,17 @@ impl Runtime {
                     let _ = tx.send(AppIntent::RebaseTodoWritten { tag, result });
                 });
             }
+            Effect::LoadReflog { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or an undo would wait forever.
+                    let result = tokio::task::spawn_blocking(move || read_reflog(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(format!("git reflog crashed: {e}").as_bytes()))
+                        });
+                    let _ = tx.send(AppIntent::ReflogLoaded { tag, result });
+                });
+            }
             Effect::Fetch { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or auto-fetch would stop for good.
@@ -789,9 +887,10 @@ impl Runtime {
                 tokio::spawn(async move {
                     let bridge_tx = tx.clone();
                     // A panic still reports back, or `op_seq` would block every later op.
+                    let task_op = op.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         let bridge = Bridge::open(tag, bridge_tx, slot);
-                        run_remote(runner.as_ref(), op, bridge.env.as_ref())
+                        run_remote(runner.as_ref(), &task_op, bridge.env.as_ref())
                     })
                     .await
                     .unwrap_or_else(|e| {
@@ -1012,6 +1111,7 @@ mod tests {
                         upstream: None,
                         ahead_behind: None,
                         in_progress: vec![],
+                        bisect: None,
                     },
                     files: vec![FileEntry {
                         path: "new_file".into(),
@@ -1624,6 +1724,47 @@ mod tests {
             rx.recv().await,
             Some(AppIntent::RemotesLoaded { result: Err(_), .. })
         ));
+        runtime.spawn(Effect::LoadTags { tag });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppIntent::TagsLoaded { result: Err(_), .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_tags_load_reports_back_with_the_same_tag() {
+        let oid = "1".repeat(40);
+        let record = format!("refs/tags/v1\0commit\0{oid}\0\0\0\0d\0s\n");
+        let list = crate::git::tags::list_command();
+        let argv: Vec<String> = list
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let runner = Arc::new(FakeRunner::new().expect(&argv, ok(record.as_bytes())));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 6,
+            user: false,
+        };
+
+        runtime.spawn(Effect::LoadTags { tag });
+
+        match rx.recv().await {
+            Some(AppIntent::TagsLoaded {
+                tag: got,
+                result: Ok(tags),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(tags.len(), 1);
+                assert_eq!(tags[0].name.display(), "v1");
+            }
+            other => panic!("expected TagsLoaded, got {other:?}"),
+        }
+        runner.assert_done();
     }
 
     #[tokio::test]
@@ -1833,6 +1974,82 @@ mod tests {
                 list: vec![repo]
             })
         );
+    }
+
+    #[tokio::test]
+    async fn worktree_effects_report_back_with_the_same_tag() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["worktree", "list", "--porcelain", "-z"],
+                    ok(b"worktree /r\0bare\0\0"),
+                )
+                .expect(
+                    &["worktree", "remove", "--", "/r/x"],
+                    fail("fatal: '/r/x' is locked\n"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 1,
+            seq: 4,
+            user: true,
+        };
+
+        runtime.spawn(Effect::LoadWorktrees { tag });
+        match rx.recv().await {
+            Some(AppIntent::WorktreesLoaded {
+                tag: got,
+                result: Ok(list),
+            }) => {
+                assert_eq!(got, tag);
+                assert_eq!(list[0].path.display(), "/r");
+            }
+            other => panic!("expected WorktreesLoaded, got {other:?}"),
+        }
+        runtime.spawn(Effect::RemoveWorktree {
+            tag,
+            path: "/r/x".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::WorktreeRemoved {
+                tag,
+                result: Err("fatal: '/r/x' is locked".into()),
+            })
+        );
+        runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn a_failing_worktree_add_still_reports_back() {
+        // No workdir and no answers: the git-dir read fails, which must
+        // still answer once.
+        let runner = Arc::new(FakeRunner::new().expect(
+            &["rev-parse", "--git-dir", "--git-common-dir"],
+            fail("fatal: not a git repository\n"),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+        let tag = Tag {
+            generation: 0,
+            seq: 1,
+            user: true,
+        };
+        runtime.spawn(Effect::AddWorktree {
+            tag,
+            path: "../x".into(),
+            branch: "feature".into(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::WorktreeAdded {
+                tag,
+                result: Err("fatal: not a git repository".into()),
+            })
+        );
+        runner.assert_done();
     }
 
     #[tokio::test]
@@ -2367,7 +2584,10 @@ mod tests {
             force_with_lease: false,
         };
 
-        runtime.spawn(Effect::Remote { tag, op });
+        runtime.spawn(Effect::Remote {
+            tag,
+            op: op.clone(),
+        });
 
         assert_eq!(
             rx.recv().await,
@@ -2555,5 +2775,59 @@ mod tests {
             }))
         );
         runner.assert_done();
+    }
+
+    #[tokio::test]
+    async fn load_reflog_reports_the_reflog_with_the_same_tag_even_after_a_panic() {
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &[
+                        "reflog",
+                        "show",
+                        "-z",
+                        "-n",
+                        "1000",
+                        "--format=%H %T %gs",
+                        "HEAD",
+                    ],
+                    ok(b"abc 123 commit: x\0"),
+                )
+                .expect(&["rev-parse", "-q", "--verify", "HEAD"], ok(b"abc\n"))
+                .expect(&["symbolic-ref", "-q", "HEAD"], fail("")),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadReflog { tag: background(8) });
+        match rx.recv().await {
+            Some(AppIntent::ReflogLoaded {
+                tag,
+                result: Ok(reflog),
+            }) => {
+                assert_eq!(tag, background(8));
+                assert_eq!(reflog.entries.len(), 1);
+                assert_eq!(
+                    reflog.head.map(|h| h.as_str().to_string()),
+                    Some("abc".into())
+                );
+            }
+            other => panic!("expected a loaded reflog, got {other:?}"),
+        }
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadReflog { tag: background(9) });
+        match rx.recv().await {
+            Some(AppIntent::ReflogLoaded {
+                tag,
+                result: Err(message),
+            }) => {
+                assert_eq!(tag, background(9));
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed ReflogLoaded, got {other:?}"),
+        }
     }
 }

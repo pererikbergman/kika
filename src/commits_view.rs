@@ -9,11 +9,14 @@ use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::commit_files::CommitFilesList;
 use crate::commit_graph::{GraphCell, GraphRow};
-use crate::commits::{CommitsPanel, Marker};
+use crate::commits::{CommitsPanel, CommitsTab, Marker};
+use crate::copied::CopiedCommits;
 use crate::git::commit_files::CommitFile;
+use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
 use crate::model::AppState;
+use crate::reflog_view::reflog_lines;
 use crate::view::{PanelLook, elide_right, reversed, width_of};
 
 /// Authors longer than this lose their end, so the subject keeps room.
@@ -31,11 +34,48 @@ pub(crate) fn render_commits_panel(
     area: Rect,
 ) {
     let panel = &state.commits;
-    if let Some(open) = panel.open.as_ref().filter(|_| expanded) {
+    let reflog = expanded && panel.tab == CommitsTab::Reflog;
+    if let Some(open) = panel.open.as_ref().filter(|_| expanded && !reflog) {
         return render_commit_files(open, look, frame, area);
     }
-    let block = look.block(look.title("Commits"));
+    // The tab shown is in brackets. Where the whole title does not fit,
+    // the copied count shortens to `+N`, then the panel's name goes, and
+    // the count goes before the tabs do.
+    let tabs = match panel.tab {
+        CommitsTab::Log => "[Log] Reflog",
+        CommitsTab::Reflog => "Log [Reflog]",
+    };
+    let name = if expanded {
+        format!("Commits · {tabs}")
+    } else {
+        "Commits".to_string()
+    };
+    let last = if expanded { tabs } else { "Commits" };
+    let candidates = match state.copied.len() {
+        0 => vec![name, last.to_string()],
+        n => vec![
+            format!("{name} · {n} copied"),
+            format!("{name} +{n}"),
+            format!("{last} +{n}"),
+            last.to_string(),
+        ],
+    };
+    let title = candidates
+        .iter()
+        .find(|text| look.fits(text))
+        .map_or(last, String::as_str);
+    let title = look.title(title);
+    let block = look.block(title);
     let inner = block.inner(area);
+    if reflog {
+        let lines = reflog_lines(
+            &panel.reflog,
+            usize::from(inner.height),
+            usize::from(inner.width),
+        );
+        frame.render_widget(Paragraph::new(lines).block(block), area);
+        return;
+    }
     let dim = Style::new().fg(Color::DarkGray);
     let paragraph = if panel.rows.is_empty() {
         match &panel.error {
@@ -51,9 +91,10 @@ pub(crate) fn render_commits_panel(
             None => Paragraph::new(Line::styled("No commits yet", dim)),
         }
     } else if !expanded {
-        Paragraph::new(commit_lines(panel, 0..1, None, usize::from(inner.width)))
+        let width = usize::from(inner.width);
+        Paragraph::new(commit_lines(panel, &state.copied, 0..1, None, width))
     } else {
-        Paragraph::new(window(panel, inner))
+        Paragraph::new(window(panel, &state.copied, inner))
     };
     frame.render_widget(paragraph.block(block), area);
 }
@@ -121,7 +162,7 @@ fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last
 /// row saying a page is loading or failed. A stopped rebase's todo list
 /// comes first, right above the log it will extend.
-fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
+fn window(panel: &CommitsPanel, copied: &CopiedCommits, area: Rect) -> Vec<Line<'static>> {
     let height = usize::from(area.height);
     let width = usize::from(area.width);
     let note = if panel.more_in_flight {
@@ -155,7 +196,7 @@ fn window(panel: &CommitsPanel, area: Rect) -> Vec<Line<'static>> {
         .saturating_sub(skip)
         .clamp(log_start, panel.rows.len());
     let selected = panel.todo_selected.is_none().then_some(panel.selected);
-    lines.extend(commit_lines(panel, log_start..end, selected, width));
+    lines.extend(commit_lines(panel, copied, log_start..end, selected, width));
     if end == panel.rows.len() {
         lines.extend(note);
     }
@@ -234,6 +275,9 @@ fn todo_line(entry: &TodoEntry, width: usize) -> Line<'static> {
 struct Columns {
     /// Graph lanes shown; wider rows end in `…`.
     lanes: usize,
+    /// Two columns before the hash for the copied mark, kept on every row
+    /// while anything is copied so the hashes line up.
+    mark: bool,
     hash: usize,
     date: bool,
     /// 0 drops the author.
@@ -241,7 +285,7 @@ struct Columns {
 }
 
 impl Columns {
-    fn fit(panel: &CommitsPanel, range: std::ops::Range<usize>, width: usize) -> Self {
+    fn fit(panel: &CommitsPanel, mark: bool, range: std::ops::Range<usize>, width: usize) -> Self {
         // The widest row loaded so far, not just on screen, so the columns
         // stay put while scrolling; never more than a third of the width.
         let lanes = panel.lanes.max(1).min((width / 6).max(1));
@@ -250,13 +294,14 @@ impl Columns {
             .map(|row| width_of(&row.short_oid))
             .max()
             .unwrap_or(0);
-        let fixed = lanes * 2 + 2 + hash + 1;
+        let fixed = lanes * 2 + 2 + if mark { 2 } else { 0 } + hash + 1;
         let left = width.saturating_sub(fixed);
         let date = left >= SUBJECT_MIN + 4;
         let left = if date { left - 4 } else { left };
         let author = left.saturating_sub(SUBJECT_MIN + 1).min(AUTHOR_WIDTH);
         Self {
             lanes,
+            mark,
             hash,
             date,
             author: if author < 4 { 0 } else { author },
@@ -267,16 +312,17 @@ impl Columns {
 /// Lines for `rows[range]` only.
 fn commit_lines(
     panel: &CommitsPanel,
+    copied: &CopiedCommits,
     range: std::ops::Range<usize>,
     selected: Option<usize>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let columns = Columns::fit(panel, range.clone(), width);
+    let columns = Columns::fit(panel, !copied.is_empty(), range.clone(), width);
     range
         .clone()
         .zip(&panel.graph[range])
         .map(|(i, graph)| {
-            let line = commit_line(panel, i, graph, columns, width);
+            let line = commit_line(panel, copied, i, graph, columns, width);
             if Some(i) == selected {
                 reversed(line, width)
             } else {
@@ -286,10 +332,12 @@ fn commit_lines(
         .collect()
 }
 
-/// `<graph> <marker> <hash> <date> <author> <subject>`, padded so each
-/// column starts at the same place on every row, the subject cut to fit.
+/// `<graph> <marker> <copied> <hash> <date> <author> <subject>`, padded
+/// so each column starts at the same place on every row, the subject cut
+/// to fit.
 fn commit_line(
     panel: &CommitsPanel,
+    copied: &CopiedCommits,
     index: usize,
     graph: &GraphRow,
     columns: Columns,
@@ -311,12 +359,25 @@ fn commit_line(
         ),
         marker,
         Span::raw(" "),
+    ];
+    if columns.mark {
+        let is_copied = CommitId::parse(&row.oid).is_some_and(|id| copied.contains(&id));
+        spans.push(if is_copied {
+            Span::styled(
+                "+ ",
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        });
+    }
+    spans.extend([
         Span::styled(
             pad(&row.short_oid, columns.hash),
             Style::new().fg(Color::Cyan),
         ),
         Span::raw(" "),
-    ];
+    ]);
     if columns.date {
         spans.push(Span::styled(
             format!("{:>3} ", relative_date(row.time, panel.loaded_at)),
@@ -513,6 +574,114 @@ mod tests {
         }
     }
 
+    /// `merge_rows` shown, with `b000000` and `a000000` copied.
+    fn two_copied() -> AppState {
+        let mut state = showing(merge_rows());
+        for oid in ["b000000aaa", "a000000aaa"] {
+            state.copied.toggle(crate::copied::CopiedCommit {
+                id: CommitId::parse(oid).unwrap(),
+                short: oid[..7].into(),
+                subject: String::new(),
+            });
+        }
+        state
+    }
+
+    #[test]
+    fn a_copied_row_draws_a_bold_cyan_plus_before_its_hash_and_columns_stay_aligned() {
+        let buffer = draw(&two_copied(), 100, 30);
+        let rows = buffer_rows(&buffer);
+        assert!(line_with(&rows, "Main work").contains("+ b000000"));
+        assert!(line_with(&rows, "Root").contains("+ a000000"));
+        assert!(line_with(&rows, "Side work").contains("  s000000"));
+        assert!(!line_with(&rows, "Side work").contains('+'));
+        assert_eq!(
+            column_of(&rows, "s000000"),
+            column_of(&rows, "b000000"),
+            "{rows:#?}"
+        );
+        assert_eq!(column_of(&rows, "Side work"), column_of(&rows, "Main work"));
+        let y = rows.iter().position(|r| r.contains("Main work")).unwrap();
+        let x = rows[y].chars().take_while(|&c| c != '+').count();
+        let style = buffer[(x as u16, y as u16)].style();
+        assert_eq!(style.fg, Some(Color::Cyan));
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn the_title_counts_the_copied_commits_expanded_and_collapsed() {
+        let mut state = two_copied();
+        line_with(
+            &buffer_rows(&draw(&state, 100, 30)),
+            "Commits · [Log] Reflog · 2 copied",
+        );
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        state.screen_mode = ScreenMode::Normal;
+        line_with(&buffer_rows(&draw(&state, 100, 30)), "Commits · 2 copied");
+        // With nothing copied there is no count.
+        state.copied.clear();
+        let rows = buffer_rows(&draw(&state, 100, 30));
+        assert!(!rows.iter().any(|r| r.contains("copied")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_narrow_panel_shortens_the_count_then_drops_it_before_the_tabs() {
+        let state = two_copied();
+        let title = |width| buffer_rows(&draw(&state, width, 20))[0].clone();
+        assert!(title(60).contains("Commits · [Log] Reflog · 2 copied"));
+        let short = title(42);
+        assert!(short.contains("Commits · [Log] Reflog +2"), "{short}");
+        let shorter = title(32);
+        assert!(shorter.contains("[4] [Log] Reflog +2"), "{shorter}");
+        let tabs = title(26);
+        assert!(tabs.contains("[Log] Reflog"), "{tabs}");
+        assert!(!tabs.contains('+'), "{tabs}");
+    }
+
+    #[test]
+    fn at_80_by_24_the_copied_set_shows_in_the_title_and_the_bar() {
+        let mut state = two_copied();
+        state.screen_mode = ScreenMode::Normal;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "[4] [Log] Reflog +2");
+        line_with(&rows, "+ b000000");
+        assert!(
+            rows[23].starts_with(" 2 copied  v paste  C clear  enter files"),
+            "{}",
+            rows[23]
+        );
+
+        // Collapsed, behind another panel: the count stays, and the bar
+        // does not offer a key that only the Commits panel takes.
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        line_with(&rows, "[4] Commits · 2 copied");
+        assert!(rows[23].starts_with(" 2 copied  "), "{}", rows[23]);
+        assert!(!rows[23].contains("C clear"), "{}", rows[23]);
+        // With nothing copied, clear stays out of the bar.
+        state.focus = Focus::Commits;
+        state.expanded = SidePanel::Commits;
+        state.copied.clear();
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        assert!(!rows[23].contains("copied"), "{}", rows[23]);
+        assert!(!rows[23].contains("C clear"), "{}", rows[23]);
+    }
+
+    #[test]
+    fn a_tiny_screen_with_commits_copied_draws_without_panicking() {
+        let mut state = two_copied();
+        for mode in [ScreenMode::Normal, ScreenMode::Full] {
+            state.screen_mode = mode;
+            for (width, height) in [(20, 8), (12, 5), (4, 3), (1, 1)] {
+                draw(&state, width, height);
+            }
+        }
+        let rows = buffer_rows(&draw(&state, 20, 8));
+        assert!(rows.iter().any(|r| r.contains('+')), "{rows:#?}");
+    }
+
     #[test]
     fn unpushed_and_merged_commits_carry_their_markers() {
         let mut state = showing(merge_rows());
@@ -650,7 +819,7 @@ mod tests {
         let mut state = showing(rows);
         state.commits.selected = 99_990;
 
-        let lines = window(&state.commits, Rect::new(0, 0, 60, 20));
+        let lines = window(&state.commits, &state.copied, Rect::new(0, 0, 60, 20));
         assert_eq!(lines.len(), 20, "one line per visible row, no more");
         let text = |line: &Line| {
             line.spans
@@ -758,7 +927,7 @@ mod tests {
         );
 
         // Narrow, the graph takes at most a third of the width and says so.
-        let lines = commit_lines(&state.commits, 0..1, None, 18);
+        let lines = commit_lines(&state.commits, &state.copied, 0..1, None, 18);
         let text: String = lines[0].spans[0].content.to_string();
         assert_eq!(text, "●─╮─╮…");
         assert!(text.ends_with('…'), "{text:?}");

@@ -1,10 +1,13 @@
 mod ansi;
 mod app;
+mod bisect;
 mod blame_view;
 mod branches;
 mod branches_view;
 mod captured_command;
 mod cli;
+mod command_log;
+mod command_log_view;
 mod commit_editor;
 mod commit_files;
 mod commit_graph;
@@ -15,6 +18,7 @@ mod config;
 mod config_docs;
 mod conflict;
 mod conflict_view;
+mod copied;
 mod custom_command;
 mod diff_pane;
 mod diff_stream;
@@ -35,6 +39,8 @@ mod popup_view;
 mod rebase_todo;
 mod recent;
 mod recent_list;
+mod reflog;
+mod reflog_view;
 mod refresh;
 mod remote_run;
 mod remotes;
@@ -42,9 +48,13 @@ mod remotes_view;
 mod rendered_view;
 mod sequence_editor;
 mod submodule_list;
+mod tags;
+mod tags_view;
 mod view;
 mod watch;
 mod worktree_file;
+mod worktree_list;
+mod worktrees_view;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -56,6 +66,7 @@ use crossterm::execute;
 
 use crate::cli::Cli;
 use crate::config::ConfigPaths;
+use crate::git::recording::{CommandSink, RecordingRunner};
 use crate::git::retry::RetryRunner;
 use crate::git::{CliRunner, repo_root, version};
 use crate::model::AppState;
@@ -103,8 +114,11 @@ fn main() -> color_eyre::Result<ExitCode> {
     // Read once here; the loop reloads the keys on focus-in.
     let config = config::load(&ConfigPaths::new(global_config.clone(), repo.as_deref()));
     let cli_runner = CliRunner::new(workdir);
+    // Every process is logged, each retry too; the loop connects the sink.
+    let sink = CommandSink::new();
+    let recording = RecordingRunner::new(Arc::new(cli_runner), sink.clone());
     // Another process holding a lock for a moment is not worth an error.
-    let runner = Arc::new(RetryRunner::new(Arc::new(cli_runner)));
+    let runner = Arc::new(RetryRunner::new(Arc::new(recording)));
     let state = AppState::new(cli.context())
         .with_location(repo, launch)
         .with_git_version(git_version);
@@ -119,6 +133,7 @@ fn main() -> color_eyre::Result<ExitCode> {
         terminal,
         state,
         runner,
+        sink,
         recent_store,
         global_config,
         config,

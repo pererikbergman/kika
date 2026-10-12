@@ -9,6 +9,7 @@ use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::git::askpass::Secret;
+use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branch_tips::Tip;
 use crate::git::branches::{Branch, LogRow};
@@ -20,12 +21,16 @@ use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::prompts::PromptFacts;
 use crate::git::rebase_plan::{Direction, Edit};
+use crate::git::recording::CommandEvent;
+use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
+use crate::git::tags::TagRef;
+use crate::git::worktrees::Worktree;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -253,6 +258,45 @@ pub enum AppIntent {
     EnterSubmodule,
     /// Back to the repository the current one was entered from.
     LeaveSubmodule,
+    /// Open the list of worktrees and load it.
+    OpenWorktrees,
+    /// The worktree list was read; `tag` says which load.
+    WorktreesLoaded {
+        tag: Tag,
+        result: Result<Vec<Worktree>, String>,
+    },
+    /// Move the worktree cursor down or up.
+    WorktreeNext,
+    WorktreePrev,
+    /// Switch Kika to the worktree under the cursor.
+    OpenWorktree,
+    /// Ask where to add a worktree for the Branches panel's local branch.
+    AddWorktree,
+    /// The typed path for the worktree `AddWorktree` asked about.
+    AddWorktreeAt(String),
+    /// A worktree add finished: where it was made, or why not.
+    WorktreeAdded {
+        tag: Tag,
+        result: Result<PathBuf, String>,
+    },
+    /// Ask before removing the worktree under the cursor.
+    RemoveWorktree,
+    /// Remove the worktree the question named.
+    ConfirmRemoveWorktree,
+    /// A worktree remove finished.
+    WorktreeRemoved {
+        tag: Tag,
+        result: Result<(), String>,
+    },
+    /// A git command started or ended; the runner reports every one.
+    CommandLogged(CommandEvent),
+    /// Show the git commands Kika ran this session.
+    OpenCommandLog,
+    /// Move the Command log cursor a row or a page down or up.
+    CommandLogNext,
+    CommandLogPrev,
+    CommandLogPageDown,
+    CommandLogPageUp,
     /// Blame the selected file: who last changed each line, and when.
     OpenBlame,
     /// A blame load finished; `tag` says which one.
@@ -361,8 +405,34 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<Vec<Remote>, String>,
     },
-    /// Show the Branches panel's other tab: local branches or remotes.
+    /// Show the Branches panel's next tab: local branches, remotes, tags.
     SwitchBranchesTab,
+    /// Show the Branches panel's previous tab.
+    PrevBranchesTab,
+    /// The tags were read; `tag` says which load.
+    TagsLoaded {
+        tag: Tag,
+        result: Result<Vec<TagRef>, String>,
+    },
+    /// Move the Tags tab's selection down or up.
+    TagNext,
+    TagPrev,
+    /// Ask for a name, to tag the selected commit with a lightweight tag.
+    NewTag,
+    /// Ask for a name and then a message, to tag the selected commit with
+    /// an annotated tag.
+    NewAnnotatedTag,
+    /// The tag's name, typed into the `TagName` prompt.
+    TagNamed(String),
+    /// The annotated tag's message, typed into the `TagMessage` prompt.
+    TagMessaged(String),
+    /// Ask before deleting the selected tag.
+    DeleteTag,
+    /// Delete the tag the open question names.
+    ConfirmDeleteTag,
+    /// Push the selected tag to the current branch's remote, or the only
+    /// one.
+    PushTag,
     /// Move the Remotes tab's selection down or up, over remote and
     /// branch rows alike.
     RemoteNext,
@@ -466,6 +536,12 @@ pub enum AppIntent {
     ConfirmCheckoutCommit,
     /// Make a commit that undoes the selected one.
     RevertCommit,
+    /// Add the selected commit to the copied set, or take it out.
+    CopyCommit,
+    /// Empty the copied set.
+    ClearCopied,
+    /// Cherry-pick the copied commits onto the current branch.
+    PasteCommits,
     /// Reset the current branch to the selected commit. A hard reset asks
     /// first.
     ResetTo(ResetMode),
@@ -495,6 +571,29 @@ pub enum AppIntent {
         tag: Tag,
         result: Result<(), String>,
     },
+    /// Mark the selected commit in the Commits panel; with no bisect in
+    /// progress, the mark starts one.
+    BisectSelected(BisectMark),
+    /// Mark the commit git checked out to test.
+    BisectHead(BisectMark),
+    /// End the bisect, as the question asked.
+    ConfirmBisectReset,
+    /// Show the Commits panel's other tab: the log or the reflog.
+    SwitchCommitsTab,
+    /// Move the Reflog tab's selection down or up.
+    ReflogNext,
+    ReflogPrev,
+    /// `HEAD`'s reflog was read; `tag` says which load.
+    ReflogLoaded {
+        tag: Tag,
+        result: Result<Reflog, String>,
+    },
+    /// Reverse the last action, or reapply the last one undone. Each reads
+    /// the reflog afresh, then asks before anything moves.
+    Undo,
+    Redo,
+    /// Run the undo or redo the open question describes.
+    ConfirmTravel,
     /// The config files were read: the keys now in force, and the files
     /// that were ignored and why.
     ConfigLoaded {

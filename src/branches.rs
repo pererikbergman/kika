@@ -1,11 +1,12 @@
 //! The Branches panel's state: the local list as last loaded, the
-//! selection, the Remotes tab, and the selected branch's log shown in the
-//! Diff pane's place. Pure; the model loads them and moves the selection.
+//! selection, the Remotes and Tags tabs, and the selected branch's log
+//! shown in the Diff pane's place. Pure; the model loads them and moves the selection.
 
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::diff::terminal_safe;
 use crate::intent::Scroll;
 use crate::remotes::RemotesList;
+use crate::tags::{PendingTag, TagsList};
 
 /// Which list the Branches panel shows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13,13 +14,25 @@ pub enum BranchesTab {
     #[default]
     Local,
     Remotes,
+    Tags,
 }
 
 impl BranchesTab {
-    pub fn other(self) -> Self {
+    /// The tab to the right, wrapping round.
+    pub fn next(self) -> Self {
         match self {
             BranchesTab::Local => BranchesTab::Remotes,
+            BranchesTab::Remotes => BranchesTab::Tags,
+            BranchesTab::Tags => BranchesTab::Local,
+        }
+    }
+
+    /// The tab to the left, wrapping round.
+    pub fn prev(self) -> Self {
+        match self {
+            BranchesTab::Local => BranchesTab::Tags,
             BranchesTab::Remotes => BranchesTab::Local,
+            BranchesTab::Tags => BranchesTab::Remotes,
         }
     }
 }
@@ -40,6 +53,9 @@ pub struct BranchesPanel {
     pub pending: Option<BranchName>,
     pub tab: BranchesTab,
     pub remotes: RemotesList,
+    pub tags: TagsList,
+    /// The tag the open name or message prompt will make.
+    pub pending_tag: Option<PendingTag>,
 }
 
 /// The selected branch's newest commits.
@@ -125,6 +141,7 @@ impl BranchLog {
         let short = refname
             .strip_prefix(b"refs/heads/")
             .or_else(|| refname.strip_prefix(b"refs/remotes/"))
+            .or_else(|| refname.strip_prefix(b"refs/tags/"))
             .unwrap_or(refname);
         Some(terminal_safe(short))
     }
@@ -252,13 +269,22 @@ mod tests {
         assert_eq!(log.name().as_deref(), Some("feature/x"));
         log.begin(2, b"refs/remotes/origin/\x1bmain".to_vec());
         assert_eq!(log.name().as_deref(), Some("origin/\u{FFFD}main"));
+        log.begin(3, b"refs/tags/v1.0".to_vec());
+        assert_eq!(log.name().as_deref(), Some("v1.0"));
     }
 
     #[test]
-    fn the_tab_switches_back_and_forth() {
-        assert_eq!(BranchesTab::default(), BranchesTab::Local);
-        assert_eq!(BranchesTab::Local.other(), BranchesTab::Remotes);
-        assert_eq!(BranchesTab::Remotes.other(), BranchesTab::Local);
+    fn the_tabs_cycle_forward_and_back() {
+        use BranchesTab::*;
+        assert_eq!(BranchesTab::default(), Local);
+        assert_eq!(
+            [Local.next(), Remotes.next(), Tags.next()],
+            [Remotes, Tags, Local]
+        );
+        assert_eq!(
+            [Local.prev(), Remotes.prev(), Tags.prev()],
+            [Tags, Local, Remotes]
+        );
     }
 
     #[test]

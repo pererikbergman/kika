@@ -1,21 +1,25 @@
 use crate::ansi::StyledRow;
+use crate::bisect;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::command_log::{CommandLog, CommandLogView};
 use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
-use crate::commits::CommitsPanel;
+use crate::commits::{CommitsPanel, CommitsTab};
 use crate::config::ConfigError;
 use crate::conflict::{Choice, ConflictView, PendingPick};
+use crate::copied::{CopiedCommit, CopiedCommits};
 use crate::custom_command::{CommandFailure, CustomCommand, OutputMode, Target};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::external_diff::{self, ExternalRenderer, map_rows};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
+use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -27,13 +31,18 @@ use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::prompts::{PromptFacts, needs_terminal, runs_attached};
 use crate::git::rebase_plan;
+use crate::git::recording::CommandEvent;
+use crate::git::reflog::Reflog;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::submodule::Submodule;
+use crate::git::tags::{TagRef, validate_tag_name};
+use crate::git::undo;
 use crate::git::version::GitVersion;
+use crate::git::worktrees::Worktree;
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
@@ -41,8 +50,9 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::menu;
 use crate::popup::{
-    ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DiscardConfirm, DiscardWhat, ErrorPopup,
-    LineInput, Popup, PromptKind, RemoveRemoteConfirm, ResetHardConfirm,
+    ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
+    DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RemoveRemoteConfirm,
+    RemoveWorktreeConfirm, ResetHardConfirm, TravelConfirm,
 };
 use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
 use crate::recent_list::{RecentList, RecentRow};
@@ -51,8 +61,10 @@ use crate::remote_run::RemoteRun;
 use crate::remotes::RemotePending;
 use crate::rendered_view::RenderedDiff;
 use crate::submodule_list::SubmoduleList;
+use crate::tags::PendingTag;
 use crate::watch::{WatchEvent, WatchState};
 use crate::worktree_file::CHANGED_ON_DISK;
+use crate::worktree_list::{self, WorktreeList};
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +279,14 @@ pub struct AppState {
     /// The installed git, read at startup; `None` when it could not be
     /// read, which counts as older than any feature needs.
     pub git_version: Option<GitVersion>,
+    /// Every git command run this session, recorded whether shown or not.
+    pub command_log: CommandLog,
+    /// The commits a paste cherry-picks. Kept across checkouts, so they
+    /// can be copied on one branch and pasted on another.
+    pub copied: CopiedCommits,
+    /// A notice whose words are made at run time, such as a count. Shown
+    /// and cleared like `notice`, which wins when both are set.
+    pub notice_text: Option<String>,
 }
 
 impl AppState {
@@ -317,6 +337,9 @@ impl AppState {
             remote: None,
             commits: CommitsPanel::default(),
             git_version: None,
+            command_log: CommandLog::default(),
+            copied: CopiedCommits::default(),
+            notice_text: None,
         }
     }
 
@@ -348,6 +371,10 @@ impl AppState {
         match intent {
             AppIntent::Key(key) => {
                 self.notice = None;
+                self.notice_text = None;
+                if key.code == crossterm::event::KeyCode::Enter && self.enter_refused() {
+                    return vec![];
+                }
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
@@ -627,6 +654,18 @@ impl AppState {
                         | PromptKind::RenameRemote,
                     ..
                 }) => self.branches.remotes.pending = None,
+                Some(Popup::Prompt {
+                    kind: PromptKind::WorktreePath,
+                    ..
+                }) => {
+                    if let Some(list) = self.worktree_list_mut() {
+                        list.pending_branch = None;
+                    }
+                }
+                Some(Popup::Prompt {
+                    kind: PromptKind::TagName | PromptKind::TagMessage,
+                    ..
+                }) => self.branches.pending_tag = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -689,6 +728,25 @@ impl AppState {
             }
             AppIntent::EnterSubmodule => return self.enter_submodule(),
             AppIntent::LeaveSubmodule => return self.leave_submodule(),
+            AppIntent::OpenWorktrees => return self.open_worktrees(),
+            AppIntent::WorktreesLoaded { tag, result } => self.worktrees_loaded(tag, result),
+            AppIntent::WorktreeNext => self.move_worktree_cursor(1),
+            AppIntent::WorktreePrev => self.move_worktree_cursor(-1),
+            AppIntent::OpenWorktree => return self.open_worktree(),
+            AppIntent::AddWorktree => self.ask_worktree_path(),
+            AppIntent::AddWorktreeAt(text) => return self.add_worktree_at(text),
+            AppIntent::WorktreeAdded { tag, result } => return self.worktree_added(tag, result),
+            AppIntent::RemoveWorktree => self.ask_remove_worktree(),
+            AppIntent::ConfirmRemoveWorktree => return self.confirm_remove_worktree(),
+            AppIntent::WorktreeRemoved { tag, result } => {
+                return self.worktree_removed(tag, result);
+            }
+            AppIntent::CommandLogged(event) => self.command_logged(event),
+            AppIntent::OpenCommandLog => self.open_command_log(),
+            AppIntent::CommandLogNext => self.move_command_log(1),
+            AppIntent::CommandLogPrev => self.move_command_log(-1),
+            AppIntent::CommandLogPageDown => self.move_command_log(self.command_log_page()),
+            AppIntent::CommandLogPageUp => self.move_command_log(-self.command_log_page()),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -767,7 +825,18 @@ impl AppState {
                 result,
             } => self.branch_log_loaded(tag, refname, result),
             AppIntent::RemotesLoaded { tag, result } => return self.remotes_loaded(tag, result),
-            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(),
+            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(BranchesTab::next),
+            AppIntent::PrevBranchesTab => return self.switch_branches_tab(BranchesTab::prev),
+            AppIntent::TagsLoaded { tag, result } => return self.tags_loaded(tag, result),
+            AppIntent::TagNext => return self.move_tag(1),
+            AppIntent::TagPrev => return self.move_tag(-1),
+            AppIntent::NewTag => self.ask_tag_name(false),
+            AppIntent::NewAnnotatedTag => self.ask_tag_name(true),
+            AppIntent::TagNamed(text) => return self.tag_named(text),
+            AppIntent::TagMessaged(text) => return self.tag_messaged(&text),
+            AppIntent::DeleteTag => self.ask_delete_tag(),
+            AppIntent::ConfirmDeleteTag => return self.confirm_delete_tag(),
+            AppIntent::PushTag => return self.push_tag(),
             AppIntent::RemoteNext => return self.move_remote(1),
             AppIntent::RemotePrev => return self.move_remote(-1),
             AppIntent::TrackRemoteBranch => self.ask_track_name(),
@@ -843,9 +912,13 @@ impl AppState {
             }
             AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
             AppIntent::ContinueOperation => {
-                return self.resume(keymap::resume_disabled, GitOp::Continue);
+                return self.resume(bisect::continue_disabled, GitOp::Continue);
+            }
+            AppIntent::SkipOperation if bisect::bisect_only(self) => {
+                return self.update(AppIntent::BisectHead(BisectMark::Skip));
             }
             AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
+            AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
             AppIntent::ConfirmAbort(operation) => {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
@@ -856,6 +929,12 @@ impl AppState {
                 return self.start_op(Ok(op));
             }
             AppIntent::RevertCommit => return self.revert_commit(),
+            AppIntent::CopyCommit => self.copy_commit(),
+            AppIntent::ClearCopied => {
+                self.copied.clear();
+                self.notice = Some("Cleared copied commits".into());
+            }
+            AppIntent::PasteCommits => return self.paste_commits(),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
@@ -870,6 +949,16 @@ impl AppState {
             AppIntent::RebaseTodoWritten { tag, result } => {
                 return self.rebase_todo_written(tag, result);
             }
+            AppIntent::BisectSelected(mark) => return self.bisect_selected(mark),
+            AppIntent::BisectHead(mark) => return self.bisect_head(mark),
+            AppIntent::ConfirmBisectReset => return self.bisect_reset(),
+            AppIntent::SwitchCommitsTab => return self.switch_commits_tab(),
+            AppIntent::ReflogNext => self.commits.reflog.move_by(1),
+            AppIntent::ReflogPrev => self.commits.reflog.move_by(-1),
+            AppIntent::ReflogLoaded { tag, result } => return self.reflog_loaded(tag, result),
+            AppIntent::Undo => return self.travel(undo::Direction::Undo),
+            AppIntent::Redo => return self.travel(undo::Direction::Redo),
+            AppIntent::ConfirmTravel => return self.confirm_travel(),
         }
         vec![]
     }
@@ -932,7 +1021,11 @@ impl AppState {
             (Context::Workspace, Focus::Branches) => match self.branches.tab {
                 BranchesTab::Local => KeyScope::Branches,
                 BranchesTab::Remotes => KeyScope::Remotes,
+                BranchesTab::Tags => KeyScope::Tags,
             },
+            (Context::Workspace, Focus::Commits) if self.commits.tab == CommitsTab::Reflog => {
+                KeyScope::Reflog
+            }
             (Context::Workspace, Focus::Commits) if self.commits.open.is_some() => {
                 KeyScope::CommitFiles
             }
@@ -962,12 +1055,17 @@ impl AppState {
             Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
             Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
+            Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
+            Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
+            Some(Popup::RemoveWorktree(_)) => return KeyScope::RemoveWorktree,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
             // Ssh's yes/no kind is answered like any other question.
             Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
+            Some(Popup::Travel(_)) => return KeyScope::Travel,
+            Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -1214,11 +1312,18 @@ impl AppState {
             Some(Popup::Discard(confirm)) if yes => self.start_op(Ok(Some(confirm.op))),
             Some(Popup::Discard(_)) => vec![],
             // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
-            // resets and only `ConfirmRemoveRemote` removes; yes here
-            // keeps the question, no closes it.
-            Some(Popup::DeleteBranch(_) | Popup::ResetHard(_) | Popup::RemoveRemote(_)) if !yes => {
-                vec![]
-            }
+            // resets, only `ConfirmRemoveRemote` removes and only
+            // `ConfirmDeleteTag` deletes a tag and only `ConfirmTravel`
+            // undoes or redoes; yes here keeps the question, no closes it.
+            Some(
+                Popup::DeleteBranch(_)
+                | Popup::ResetHard(_)
+                | Popup::RemoveRemote(_)
+                | Popup::DeleteTag(_)
+                | Popup::Travel(_),
+            ) if !yes => vec![],
+            // Only `ConfirmRemoveWorktree` removes a worktree.
+            Some(Popup::RemoveWorktree(_)) if !yes => vec![],
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
@@ -1582,6 +1687,11 @@ impl AppState {
     /// The title of a prompt: a command's comes from the user's config,
     /// made one line and safe to draw.
     pub fn prompt_title(&self, kind: PromptKind) -> String {
+        if kind == PromptKind::WorktreePath
+            && let Some(branch) = self.worktree_list().and_then(|l| l.pending_branch.as_ref())
+        {
+            return format!("New worktree for {}", branch.display());
+        }
         if let Some(name) = &self.branches.pending {
             match kind {
                 PromptKind::NewBranch => return format!("New branch from {}", name.display()),
@@ -1589,6 +1699,21 @@ impl AppState {
                 PromptKind::SetUpstream => return format!("Upstream of {}", name.display()),
                 _ => {}
             }
+        }
+        match (kind, &self.branches.pending_tag) {
+            (PromptKind::TagName, Some(pending)) => {
+                let short = self.commits.short_oid(&pending.target);
+                return format!("New tag on {short}");
+            }
+            (
+                PromptKind::TagMessage,
+                Some(PendingTag {
+                    name: Some(name), ..
+                }),
+            ) => {
+                return format!("Message of tag {}", sanitize(name.as_bytes()));
+            }
+            _ => {}
         }
         match (kind, &self.branches.remotes.pending) {
             (PromptKind::TrackBranch, Some(RemotePending::Track(from))) => {
@@ -1621,6 +1746,9 @@ impl AppState {
                     "Check out {short} as a detached HEAD? You will be on no branch; \
                      new commits there belong to no branch until you create one. (y/n)"
                 ))
+            }
+            (ConfirmKind::Abort(Operation::Bisect), _) => {
+                Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
             }
             _ => Cow::Borrowed(kind.question()),
         }
@@ -2348,7 +2476,7 @@ impl AppState {
         self.commits.begin_page(page.seq, 0);
         self.commits.markers_seq = Some(markers.seq);
         self.commits.tips_seq = Some(tips.seq);
-        vec![
+        let mut effects = vec![
             Effect::LoadCommits {
                 tag: page,
                 tip: None,
@@ -2356,7 +2484,158 @@ impl AppState {
             },
             Effect::LoadMarkers { tag: markers },
             Effect::LoadBranchTips { tag: tips },
-        ]
+        ];
+        // The reflog moves with the log, once it has been read at all.
+        let reflog = &self.commits.reflog;
+        if reflog.data.is_some() || reflog.error.is_some() {
+            effects.extend(self.load_reflog(false));
+        }
+        effects
+    }
+
+    /// Show the Commits panel's other tab, reading the reflog the first
+    /// time it is shown.
+    fn switch_commits_tab(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        self.commits.tab = self.commits.tab.other();
+        let reflog = &self.commits.reflog;
+        let unread = reflog.data.is_none() && reflog.error.is_none() && reflog.seq.is_none();
+        if self.commits.tab == CommitsTab::Reflog && unread {
+            self.load_reflog(true)
+        } else {
+            vec![]
+        }
+    }
+
+    /// `HEAD` is on a branch with no commits, so it has no reflog yet.
+    fn head_unborn(&self) -> bool {
+        self.branch
+            .as_ref()
+            .is_some_and(|b| matches!(b.head, crate::git::status::Head::Unborn(_)))
+    }
+
+    /// Start reading the reflog; `user` as for the branch list. With no
+    /// commits there is nothing to read: the tab shows an empty list.
+    fn load_reflog(&mut self, user: bool) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if self.head_unborn() {
+            let reflog = &mut self.commits.reflog;
+            reflog.data = Some(Reflog::default());
+            reflog.error = None;
+            reflog.seq = None;
+            reflog.selected = 0;
+            return vec![];
+        }
+        let seq = self.take_seq();
+        self.commits.reflog.seq = Some(seq);
+        if user {
+            self.busy += 1;
+        }
+        vec![Effect::LoadReflog {
+            tag: Tag {
+                generation: self.generation,
+                seq,
+                user,
+            },
+        }]
+    }
+
+    /// Show the reflog read, and plan the undo or redo waiting for it. A
+    /// failed read plans nothing: the list shown may be older than the
+    /// key press.
+    fn reflog_loaded(&mut self, tag: Tag, result: Result<Reflog, String>) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        let failed = result.is_err();
+        if !self.commits.reflog.loaded(tag.seq, result) {
+            return vec![];
+        }
+        let Some(direction) = self.commits.reflog.planning.take() else {
+            return vec![];
+        };
+        if failed {
+            self.op_error = self.commits.reflog.error.clone();
+            return vec![];
+        }
+        self.plan_travel(direction);
+        vec![]
+    }
+
+    /// Undo or redo: read the reflog afresh, then plan from it. Nothing
+    /// moves until the question that follows is answered.
+    fn travel(&mut self, direction: undo::Direction) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::undo_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        if self.head_unborn() {
+            self.notice = Some(match direction {
+                undo::Direction::Undo => "Nothing to undo".into(),
+                undo::Direction::Redo => "Nothing to redo".into(),
+            });
+            return vec![];
+        }
+        self.op_error = None;
+        self.commits.reflog.planning = Some(direction);
+        self.load_reflog(true)
+    }
+
+    /// Ask about the plan for `direction` from the reflog just read, or
+    /// say why there is none. The state may have changed while it was
+    /// read, so the refusals are checked again.
+    fn plan_travel(&mut self, direction: undo::Direction) {
+        if let Some(reason) = keymap::undo_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(reflog) = &self.commits.reflog.data else {
+            return;
+        };
+        // The branch as read with the reflog, not as the last status saw it.
+        let branch = reflog
+            .head_ref
+            .as_deref()
+            .and_then(|r| r.strip_prefix(b"refs/heads/"))
+            .map(String::from_utf8_lossy);
+        let ctx = undo::Context {
+            branch: branch.as_deref(),
+            branches: &self.branches.branches,
+            dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
+        };
+        match undo::plan(direction, reflog, &ctx) {
+            Ok(plan) => self.popups.push(Popup::Travel(TravelConfirm {
+                title: plan.direction.title(),
+                preview: plan.preview,
+                op: GitOp::Travel {
+                    direction: plan.direction,
+                    step: plan.step,
+                    expect: plan.expect,
+                },
+            })),
+            Err(message) => self.op_error = Some(message),
+        }
+    }
+
+    /// Undo or redo as the open question said, and only if one is open.
+    fn confirm_travel(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::Travel(_))) {
+            return vec![];
+        }
+        let Some(Popup::Travel(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
     }
 
     /// Load the next page when the cursor nears the end of the log.
@@ -2442,6 +2721,253 @@ impl AppState {
         {
             list.loaded(result);
         }
+    }
+
+    /// The Worktrees popup, wherever it is on the stack.
+    pub fn worktree_list(&self) -> Option<&WorktreeList> {
+        self.popups.iter().rev().find_map(|popup| match popup {
+            Popup::Worktrees(list) => Some(list),
+            _ => None,
+        })
+    }
+
+    fn worktree_list_mut(&mut self) -> Option<&mut WorktreeList> {
+        self.popups.iter_mut().rev().find_map(|popup| match popup {
+            Popup::Worktrees(list) => Some(list),
+            _ => None,
+        })
+    }
+
+    fn move_worktree_cursor(&mut self, delta: isize) {
+        if let Some(list) = self.worktree_list_mut() {
+            list.move_cursor(delta);
+        }
+    }
+
+    /// Show the worktrees, loading them afresh.
+    fn open_worktrees(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = worktree_list::worktrees_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let seq = self.take_seq();
+        self.popups
+            .push(Popup::Worktrees(WorktreeList::loading(seq)));
+        vec![Effect::LoadWorktrees {
+            tag: self.user_tag(seq),
+        }]
+    }
+
+    /// Load the list again for the open popup; nothing while it is closed.
+    fn reload_worktrees(&mut self) -> Vec<Effect> {
+        if self.worktree_list().is_none() {
+            return vec![];
+        }
+        let seq = self.take_seq();
+        if let Some(list) = self.worktree_list_mut() {
+            list.seq = seq;
+        }
+        vec![Effect::LoadWorktrees {
+            tag: self.user_tag(seq),
+        }]
+    }
+
+    /// A tag counted as busy until its answer lands.
+    fn user_tag(&mut self, seq: u64) -> Tag {
+        self.busy += 1;
+        Tag {
+            generation: self.generation,
+            seq,
+            user: true,
+        }
+    }
+
+    fn worktrees_loaded(&mut self, tag: Tag, result: Result<Vec<Worktree>, String>) {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return;
+        }
+        if let Some(list) = self.worktree_list_mut()
+            && list.seq == tag.seq
+        {
+            list.loaded(result);
+        }
+    }
+
+    /// Switch to the selected worktree as to a repository from the recent
+    /// list, so it is parked, recorded and refused the same way.
+    fn open_worktree(&mut self) -> Vec<Effect> {
+        if let Some(reason) = worktree_list::open_worktree_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let Some(path) = self
+            .worktree_list()
+            .and_then(WorktreeList::selected)
+            .map(Worktree::path_buf)
+        else {
+            return vec![];
+        };
+        self.update(AppIntent::OpenRepo(path))
+    }
+
+    /// Ask where to add a worktree for the Branches panel's local branch,
+    /// which is kept now so a reload cannot change it.
+    fn ask_worktree_path(&mut self) {
+        if let Some(reason) = worktree_list::add_worktree_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(branch) = self.branches.selected_branch().map(|b| b.name.clone()) else {
+            return;
+        };
+        let dir = self
+            .repo
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str());
+        let text = match (dir, std::str::from_utf8(&branch.0)) {
+            (Some(dir), Ok(name)) => format!("../{dir}-{}", name.replace('/', "-")),
+            _ => String::new(),
+        };
+        let Some(list) = self.worktree_list_mut() else {
+            return;
+        };
+        list.pending_branch = Some(branch);
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::WorktreePath,
+            input: LineInput::with_text(&text),
+        });
+    }
+
+    /// Add the worktree at the typed path. Empty text or a control
+    /// character keeps the prompt open with a notice instead.
+    fn add_worktree_at(&mut self, text: String) -> Vec<Effect> {
+        if text.trim().is_empty() || text.contains(char::is_control) {
+            self.notice = Some(if text.trim().is_empty() {
+                "Type a path for the worktree".into()
+            } else {
+                "The path has a control character".into()
+            });
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::WorktreePath,
+                input: LineInput::with_text(&text),
+            });
+            return vec![];
+        }
+        let seq = self.take_seq();
+        let Some(list) = self.worktree_list_mut() else {
+            return vec![];
+        };
+        let Some(branch) = list.pending_branch.take() else {
+            return vec![];
+        };
+        list.action_seq = Some(seq);
+        vec![Effect::AddWorktree {
+            tag: self.user_tag(seq),
+            path: text,
+            branch,
+        }]
+    }
+
+    /// Whether an add or remove result is for the open popup's last ask,
+    /// in this repository. Lowers busy either way.
+    fn worktree_action_current(&mut self, tag: Tag) -> bool {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        tag.generation == self.generation
+            && self
+                .worktree_list()
+                .is_some_and(|list| list.action_seq == Some(tag.seq))
+    }
+
+    fn worktree_added(&mut self, tag: Tag, result: Result<PathBuf, String>) -> Vec<Effect> {
+        if !self.worktree_action_current(tag) {
+            return vec![];
+        }
+        match result {
+            Ok(_) => {
+                self.notice = Some("Worktree added; Enter switches to it".into());
+                let mut effects = self.reload_worktrees();
+                effects.extend(self.reload_branches());
+                effects
+            }
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not add worktree",
+                    &message,
+                    "Close this, fix the cause, then try again.",
+                ));
+                vec![]
+            }
+        }
+    }
+
+    /// Ask before removing the selected linked worktree, naming it.
+    fn ask_remove_worktree(&mut self) {
+        if let Some(reason) = worktree_list::remove_worktree_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(path) = self
+            .worktree_list()
+            .and_then(WorktreeList::selected)
+            .map(|w| w.path.clone())
+        else {
+            return;
+        };
+        self.popups
+            .push(Popup::RemoveWorktree(RemoveWorktreeConfirm {
+                display: path.display().to_string(),
+                path,
+            }));
+    }
+
+    /// Remove the worktree the question named, never forced.
+    fn confirm_remove_worktree(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::RemoveWorktree(_))) {
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING.into());
+            return vec![];
+        }
+        let Some(Popup::RemoveWorktree(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        let seq = self.take_seq();
+        let Some(list) = self.worktree_list_mut() else {
+            return vec![];
+        };
+        list.action_seq = Some(seq);
+        vec![Effect::RemoveWorktree {
+            tag: self.user_tag(seq),
+            path: confirm.path,
+        }]
+    }
+
+    fn worktree_removed(&mut self, tag: Tag, result: Result<(), String>) -> Vec<Effect> {
+        if !self.worktree_action_current(tag) {
+            return vec![];
+        }
+        if let Err(message) = result {
+            self.push_error(ErrorPopup::new(
+                "Could not remove worktree",
+                &message,
+                "Close this, fix the cause, then try again.",
+            ));
+            return vec![];
+        }
+        self.notice = Some("Worktree removed".into());
+        let mut effects = self.reload_worktrees();
+        effects.extend(self.reload_branches());
+        effects
     }
 
     /// The paths from the launch repository to the current one.
@@ -2741,6 +3267,8 @@ impl AppState {
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
         self.commits = CommitsPanel::default();
+        // The ids name commits of the repository being left.
+        self.copied.clear();
         // The refs seen belong to the repository being left; the next
         // snapshot is the new one's baseline, not a change.
         self.watch.refs = None;
@@ -2792,7 +3320,8 @@ impl AppState {
                     .map(|f| f.path.clone());
                 self.files = status.files;
                 let rebasing = status.branch.in_progress.contains(&Operation::Rebase);
-                self.branch = Some(status.branch);
+                let before = self.branch.replace(status.branch);
+                self.announce_bisect(before.and_then(|b| b.bisect));
                 self.status_error = None;
                 let mut effects = match self.status_selection {
                     Selection::KeepPath => self.reselect(old_path),
@@ -3061,6 +3590,11 @@ impl AppState {
         if user {
             self.busy += 1;
         }
+        let tags = self.take_seq();
+        self.branches.tags.list_seq = Some(tags);
+        if user {
+            self.busy += 1;
+        }
         let tag = |seq| Tag {
             generation: self.generation,
             seq,
@@ -3069,6 +3603,7 @@ impl AppState {
         vec![
             Effect::LoadBranches { tag: tag(seq) },
             Effect::LoadRemotes { tag: tag(remotes) },
+            Effect::LoadTags { tag: tag(tags) },
         ]
     }
 
@@ -3136,6 +3671,11 @@ impl AppState {
                 .remotes
                 .selected_branch()
                 .map(|b| b.refname.clone()),
+            BranchesTab::Tags => self
+                .branches
+                .tags
+                .selected_tag()
+                .map(|t| t.name.ref_bytes()),
         };
         let Some(refname) = refname else {
             self.branches.log = Default::default();
@@ -3166,13 +3706,40 @@ impl AppState {
         log.apply(tag.seq, result);
     }
 
-    /// Show the other tab, and the log of what is selected there.
-    fn switch_branches_tab(&mut self) -> Vec<Effect> {
+    /// Show the tab `step` gives, and the log of what is selected there.
+    fn switch_branches_tab(&mut self, step: fn(BranchesTab) -> BranchesTab) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
-        self.branches.tab = self.branches.tab.other();
+        self.branches.tab = step(self.branches.tab);
         self.load_branch_log(true)
+    }
+
+    fn move_tag(&mut self, delta: isize) -> Vec<Effect> {
+        if self.branches.tags.move_by(delta) {
+            self.load_branch_log(true)
+        } else {
+            vec![]
+        }
+    }
+
+    /// Show the tags, and on their tab load the selected tag's log afresh,
+    /// as for the local list.
+    fn tags_loaded(&mut self, tag: Tag, result: Result<Vec<TagRef>, String>) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        let tags = &mut self.branches.tags;
+        if tag.generation != self.generation || tags.list_seq != Some(tag.seq) {
+            return vec![];
+        }
+        tags.list_seq = None;
+        tags.loaded(result);
+        if self.branches.tab == BranchesTab::Tags {
+            self.load_branch_log(tag.user)
+        } else {
+            vec![]
+        }
     }
 
     fn move_remote(&mut self, delta: isize) -> Vec<Effect> {
@@ -3312,6 +3879,36 @@ impl AppState {
             Some((id, _)) => self.run_op_where_it_belongs(GitOp::Revert(id)),
             None => vec![],
         }
+    }
+
+    /// Add the selected commit to the copied set, or take it out. Pure, so
+    /// it works while an operation runs.
+    fn copy_commit(&mut self) {
+        let Some((id, _)) = self.commit_for_action(keymap::copy_disabled) else {
+            return;
+        };
+        let row = self.commits.rows.get(self.commits.selected);
+        let subject = row.map(|r| r.subject.clone()).unwrap_or_default();
+        let entry = CopiedCommit::new(id, subject);
+        let short = entry.short.clone();
+        let added = self.copied.toggle(entry);
+        let verb = if added { "Copied" } else { "Removed" };
+        let n = self.copied.len();
+        self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
+    }
+
+    /// Cherry-pick the copied commits on the terminal, so hooks and
+    /// signing work as on the command line. The hand-off puts them parents
+    /// first. The set stays, to paste onto another branch too.
+    fn paste_commits(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::paste_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.run_op_where_it_belongs(GitOp::CherryPick(self.copied.ids()))
     }
 
     /// Reset to the selected commit. Soft and mixed keep the work; hard
@@ -3723,6 +4320,160 @@ impl AppState {
     }
 }
 
+/// Tags: made from the Commits panel, deleted and pushed from the Tags
+/// tab. The commit, and the tag asked about, are taken when the prompt or
+/// question opens, so nothing that moves underneath can change them.
+impl AppState {
+    /// Ask for the new tag's name, keeping the selected commit as its
+    /// target.
+    fn ask_tag_name(&mut self, annotated: bool) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        if let Some(reason) = keymap::tag_commit_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(target) = self
+            .commits
+            .rows
+            .get(self.commits.selected)
+            .and_then(|row| CommitId::parse(&row.oid))
+        else {
+            return;
+        };
+        self.branches.pending_tag = Some(PendingTag {
+            target,
+            annotated,
+            name: None,
+        });
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::TagName,
+            input: LineInput::default(),
+        });
+    }
+
+    /// Check the typed name: a bad one keeps the prompt open with the
+    /// reason; a good one makes a lightweight tag, or asks for the
+    /// annotated tag's message.
+    fn tag_named(&mut self, text: String) -> Vec<Effect> {
+        let Some(pending) = self.branches.pending_tag.as_mut() else {
+            return vec![];
+        };
+        let text = text.trim().to_string();
+        if let Err(reason) = validate_tag_name(&text) {
+            self.notice = Some(reason.into());
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagName,
+                input: LineInput::with_text(&text),
+            });
+            return vec![];
+        }
+        if pending.annotated {
+            pending.name = Some(text);
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                input: LineInput::default(),
+            });
+            return vec![];
+        }
+        let target = pending.target.clone();
+        self.branches.pending_tag = None;
+        self.create_tag(GitOp::CreateTag {
+            name: text,
+            target,
+            message: None,
+        })
+    }
+
+    /// Make the annotated tag named before, once its message has words.
+    fn tag_messaged(&mut self, text: &str) -> Vec<Effect> {
+        let Some(PendingTag {
+            name: Some(name),
+            target,
+            ..
+        }) = self.branches.pending_tag.clone()
+        else {
+            return vec![];
+        };
+        if text.trim().is_empty() {
+            self.notice = Some("An annotated tag needs a message".into());
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                input: LineInput::with_text(text),
+            });
+            return vec![];
+        }
+        self.branches.pending_tag = None;
+        self.create_tag(GitOp::CreateTag {
+            name,
+            target,
+            message: Some(text.to_string()),
+        })
+    }
+
+    fn create_tag(&mut self, op: GitOp) -> Vec<Effect> {
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING.into());
+            return vec![];
+        }
+        self.start_op(Ok(Some(op)))
+    }
+
+    /// Ask before deleting the selected tag, here only.
+    fn ask_delete_tag(&mut self) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        if let Some(reason) = keymap::delete_tag_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(tag) = self.branches.tags.selected_tag() else {
+            return;
+        };
+        let op = GitOp::DeleteTag {
+            name: tag.name.clone(),
+            oid: tag.ref_oid.clone(),
+        };
+        self.popups.push(Popup::DeleteTag(DeleteTagConfirm {
+            name: tag.name.display(),
+            op,
+        }));
+    }
+
+    /// Delete the tag the open question names, and only if one is open.
+    fn confirm_delete_tag(&mut self) -> Vec<Effect> {
+        if !matches!(self.popups.last(), Some(Popup::DeleteTag(_))) {
+            return vec![];
+        }
+        let Some(Popup::DeleteTag(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+
+    /// Push the selected tag to the remote Kika chooses; the network only
+    /// on this key.
+    fn push_tag(&mut self) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = keymap::push_tag_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let (Some(tag), Ok(remote)) = (
+            self.branches.tags.selected_tag(),
+            keymap::push_tag_remote(self),
+        ) else {
+            return vec![];
+        };
+        let tag = tag.name.clone();
+        self.start_remote(RemoteOp::PushTag { remote, tag })
+    }
+}
+
 /// Fetch, pull and push, and the questions git and ssh ask while they run.
 impl AppState {
     /// Start `op` on the current branch, unless something else runs: it
@@ -3734,6 +4485,7 @@ impl AppState {
         let disabled = match op {
             RemoteOp::Fetch => keymap::fetch_disabled,
             RemoteOp::Pull | RemoteOp::Push { .. } => keymap::pull_push_disabled,
+            RemoteOp::PushTag { .. } => keymap::push_tag_disabled,
         };
         if let Some(reason) = disabled(self) {
             self.notice = Some(reason);
@@ -3744,7 +4496,7 @@ impl AppState {
         self.op_seq = Some(seq);
         self.busy += 1;
         let branch = self.branches.current().map(|b| b.name.clone());
-        self.remote = Some(RemoteRun::new(op, seq, branch));
+        self.remote = Some(RemoteRun::new(op.clone(), seq, branch));
         let tag = Tag {
             generation: self.generation,
             seq,
@@ -3829,10 +4581,45 @@ impl AppState {
             }
         }
         if reload {
-            self.apply_plan(refresh::remote_plan(op))
+            self.apply_plan(refresh::remote_plan(&op))
         } else {
             vec![]
         }
+    }
+}
+
+/// The Command log: recording every git command, and its popup.
+impl AppState {
+    /// Record a runner's event, keeping an open log's cursor on its entry
+    /// or on the newest one.
+    fn command_logged(&mut self, event: CommandEvent) {
+        let evicted = self.command_log.apply(event);
+        let len = self.command_log.len();
+        for popup in &mut self.popups {
+            if let Popup::CommandLog(view) = popup {
+                view.logged(len, evicted);
+            }
+        }
+    }
+
+    fn open_command_log(&mut self) {
+        let view = CommandLogView::open(self.command_log.len());
+        self.popups.push(Popup::CommandLog(view));
+    }
+
+    fn move_command_log(&mut self, delta: isize) {
+        let len = self.command_log.len();
+        if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
+            view.move_by(delta, len);
+        }
+    }
+
+    /// Rows a page moves: the log fills the screen above the bottom bar,
+    /// inside its border.
+    fn command_log_page(&self) -> isize {
+        isize::try_from(self.size.1.saturating_sub(3))
+            .unwrap_or(isize::MAX)
+            .max(1)
     }
 }
 
@@ -4049,6 +4836,11 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 /// reloaded, then try again.
 fn failure_next(op: &GitOp) -> &'static str {
     match op {
+        // A pick that the branch already has stops as empty, not on a
+        // conflict; skip drops it.
+        GitOp::CherryPick(_) => {
+            "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
+        }
         GitOp::Merge { .. }
         | GitOp::Rebase { .. }
         | GitOp::InteractiveRebase(_)
@@ -4063,13 +4855,101 @@ fn failure_next(op: &GitOp) -> &'static str {
         | GitOp::UnsetUpstream(_)
         | GitOp::AddRemote { .. }
         | GitOp::RenameRemote { .. }
-        | GitOp::RemoveRemote(_) => {
+        | GitOp::RemoveRemote(_)
+        | GitOp::CreateTag { .. }
+        | GitOp::DeleteTag { .. } => {
             "The branch list was reloaded. Fix the cause above, then try again."
         }
         GitOp::MergeTool(_) => {
             "The file list was reloaded. Check merge.tool, or resolve the file in your editor."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
+    }
+}
+
+/// Bisecting: marks from the Commits and Status panels, the reset, and
+/// saying what a status load found.
+impl AppState {
+    /// Mark the selected commit. With no bisect in progress the mark
+    /// starts one; git checks nothing out until it has a good and a bad.
+    fn bisect_selected(&mut self, mark: BisectMark) -> Vec<Effect> {
+        let disabled = bisect::selected_disabled(mark);
+        let Some((commit, _)) = self.commit_for_action(disabled) else {
+            return vec![];
+        };
+        let start = !bisect::bisecting(self);
+        self.start_op(Ok(Some(GitOp::BisectMark {
+            mark,
+            commit,
+            start,
+        })))
+    }
+
+    /// Mark the commit git checked out to test.
+    fn bisect_head(&mut self, mark: BisectMark) -> Vec<Effect> {
+        if self.context != Context::Workspace {
+            return vec![];
+        }
+        if let Some(reason) = (bisect::head_disabled(mark))(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        let Some(commit) = bisect::head_commit(self) else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(GitOp::BisectMark {
+            mark,
+            commit,
+            start: false,
+        })))
+    }
+
+    /// Ask before resetting: the marks are dropped and the files change.
+    fn ask_bisect_reset(&mut self) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        match bisect::reset_disabled(self) {
+            Some(reason) => self.notice = Some(reason),
+            None => self
+                .popups
+                .push(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))),
+        }
+    }
+
+    fn bisect_reset(&mut self) -> Vec<Effect> {
+        if let Some(reason) = bisect::reset_disabled(self) {
+            self.notice = Some(reason);
+            return vec![];
+        }
+        self.start_op(Ok(Some(GitOp::BisectReset)))
+    }
+
+    /// Say so when this load is the first to show the bisect's outcome;
+    /// the same outcome loaded again says nothing.
+    fn announce_bisect(&mut self, before: Option<BisectState>) {
+        let Some(now) = bisect::bisect_state(self) else {
+            return;
+        };
+        let was_found = before.as_ref().and_then(|b| b.first_bad.as_ref());
+        let was_only_skipped = before.as_ref().is_some_and(|b| b.only_skipped);
+        if let Some(found) = &now.first_bad {
+            if was_found != Some(found) {
+                let short = self.commits.short_oid(&found.commit);
+                self.notice_text = Some(bisect::found_notice(&short, &found.subject));
+            }
+        } else if now.only_skipped && !was_only_skipped {
+            self.notice = Some(bisect::ONLY_SKIPPED.into());
+        }
+    }
+
+    /// Whether the question on top must be answered with `y`: Enter, the
+    /// key for going on elsewhere, is too easy to press by habit.
+    fn enter_refused(&self) -> bool {
+        matches!(
+            self.popups.last(),
+            Some(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect)))
+        )
     }
 }
 
@@ -4098,6 +4978,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::Rebase { .. } | GitOp::InteractiveRebase(_) => "Could not rebase",
         GitOp::CheckoutCommit(_) => "Could not check out the commit",
         GitOp::Revert(_) => "Could not revert",
+        GitOp::CherryPick(_) => "Could not cherry-pick",
         GitOp::Reset { .. } => "Could not reset",
         GitOp::Continue(Operation::Merge) => "Could not continue the merge",
         GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
@@ -4117,6 +4998,18 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::AddRemote { .. } => "Could not add the remote",
         GitOp::RenameRemote { .. } => "Could not rename the remote",
         GitOp::RemoveRemote(_) => "Could not remove the remote",
+        GitOp::CreateTag { .. } => "Could not create the tag",
+        GitOp::DeleteTag { .. } => "Could not delete the tag",
+        GitOp::BisectMark { .. } => "Could not mark the commit",
+        GitOp::BisectReset => "Could not reset the bisect",
+        GitOp::Travel {
+            direction: undo::Direction::Undo,
+            ..
+        } => "Could not undo",
+        GitOp::Travel {
+            direction: undo::Direction::Redo,
+            ..
+        } => "Could not redo",
     }
 }
 
@@ -4150,6 +5043,7 @@ mod tests {
             upstream: None,
             ahead_behind: None,
             in_progress: vec![],
+            bisect: None,
         }
     }
 
@@ -4177,17 +5071,22 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
             ] => {
-                let (tag, list, remotes) = (*tag, *list, *remotes);
+                let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
                 state.update(AppIntent::BranchesLoaded {
                     tag: list,
                     result: Ok(vec![]),
                 });
                 state.update(AppIntent::RemotesLoaded {
                     tag: remotes,
+                    result: Ok(vec![]),
+                });
+                state.update(AppIntent::TagsLoaded {
+                    tag: tags,
                     result: Ok(vec![]),
                 });
                 tag
@@ -4240,12 +5139,12 @@ mod tests {
             }
         );
         // Seq 1 went to the branch list `r` reloads too, 2 to the remotes,
-        // 3 to 5 to the commits.
+        // 3 to the tags, 4 to 6 to the commits.
         assert_eq!(
             second,
             Tag {
                 generation: 7,
-                seq: 6,
+                seq: 7,
                 user: true
             }
         );
@@ -4794,10 +5693,13 @@ mod tests {
     #[test]
     fn a_bound_key_runs_its_intent() {
         let mut state = AppState::new(Context::Workspace);
-        // The status, the branch list, the remotes, then the commits, their
-        // markers and the branch tips.
-        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 6);
-        assert_eq!(state.busy, 3, "the status, the branch list and the remotes");
+        // The status, the branch list, the remotes, the tags, then the
+        // commits, their markers and the branch tips.
+        assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 7);
+        assert_eq!(
+            state.busy, 4,
+            "the status, the branch list, the remotes and the tags"
+        );
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
@@ -5370,6 +6272,7 @@ mod tests {
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
                     Effect::LoadRemotes { .. },
+                    Effect::LoadTags { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                     Effect::LoadBranchTips { .. },
@@ -5392,6 +6295,7 @@ mod tests {
                     Effect::LoadStatus { .. },
                     Effect::LoadBranches { .. },
                     Effect::LoadRemotes { .. },
+                    Effect::LoadTags { .. },
                     Effect::LoadCommits { skip: 0, .. },
                     Effect::LoadMarkers { .. },
                     Effect::LoadBranchTips { .. },
@@ -5867,12 +6771,13 @@ mod tests {
         state.update(AppIntent::OpenMenu(MenuId::Actions));
         press(&mut state, KeyCode::Char('k'));
         assert_eq!(state.popups, [menu(MenuId::Actions, 0)]);
-        for _ in 0..10 {
+        let last = menu::items(MenuId::Actions).len() - 1;
+        for _ in 0..last + 2 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.popups, [menu(MenuId::Actions, 7)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last)]);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.popups, [menu(MenuId::Actions, 6)]);
+        assert_eq!(state.popups, [menu(MenuId::Actions, last - 1)]);
         // The file selection did not move.
         assert_eq!(state.selected, Some(0));
     }
@@ -5934,7 +6839,8 @@ mod tests {
     fn the_quit_item_asks_first_and_y_quits() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..7 {
+        // Quit is the last item.
+        for _ in 1..menu::items(MenuId::Actions).len() {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
@@ -8033,6 +8939,7 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -8109,6 +9016,7 @@ mod tests {
                 Effect::LoadStatus { tag: status },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -8201,6 +9109,7 @@ mod tests {
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -8259,7 +9168,11 @@ mod tests {
     fn the_actions_menu_opens_the_recent_list() {
         let (mut state, _) = with_files(three_files(), 24);
         state.update(AppIntent::OpenMenu(MenuId::Actions));
-        for _ in 0..6 {
+        let recent = menu::items(MenuId::Actions)
+            .iter()
+            .position(|item| item.intent == AppIntent::OpenRecent)
+            .unwrap();
+        for _ in 0..recent {
             state.update(AppIntent::MenuNext);
         }
         assert!(matches!(
@@ -8356,8 +9269,8 @@ mod tests {
         });
 
         assert_eq!(
-            state.busy, 3,
-            "only the status, branch and remotes loads are left"
+            state.busy, 4,
+            "only the status, branch, remotes and tags loads are left"
         );
         assert_eq!(state.repo, Some("/w".into()));
         assert_eq!(state.popups, []);
@@ -8368,6 +9281,7 @@ mod tests {
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -8444,6 +9358,7 @@ mod tests {
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -8494,11 +9409,12 @@ mod tests {
             "{effects:?}"
         );
         assert!(matches!(
-            effects[effects.len() - 7..],
+            effects[effects.len() - 8..],
             [
                 Effect::LoadStatus { .. },
                 Effect::LoadBranches { .. },
                 Effect::LoadRemotes { .. },
+                Effect::LoadTags { .. },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
@@ -9203,10 +10119,11 @@ mod tests {
             [
                 Effect::LoadBranches { tag },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 Effect::LoadCommits { skip: 0, .. },
                 Effect::LoadMarkers { .. },
                 Effect::LoadBranchTips { .. },
-            ] => assert!(!tag.user && !remotes.user),
+            ] => assert!(!tag.user && !remotes.user && !tags.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
         assert_eq!(state.busy, 0);
@@ -9405,14 +10322,15 @@ mod tests {
     fn entering_a_submodule_makes_its_first_snapshot_a_baseline() {
         let mut state = with_submodules(vec![submodule("sub", SubmoduleState::UpToDate)]);
         state.watch.refs = Some(RefsSnapshot::of(b"parent"));
-        let (tag, list, remotes) = match press(&mut state, KeyCode::Enter).as_slice() {
+        let (tag, list, remotes, tags) = match press(&mut state, KeyCode::Enter).as_slice() {
             [
                 _,
                 Effect::LoadStatus { tag },
                 Effect::LoadBranches { tag: list },
                 Effect::LoadRemotes { tag: remotes },
+                Effect::LoadTags { tag: tags },
                 ..,
-            ] => (*tag, *list, *remotes),
+            ] => (*tag, *list, *remotes, *tags),
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
@@ -9422,6 +10340,10 @@ mod tests {
         });
         state.update(AppIntent::RemotesLoaded {
             tag: remotes,
+            result: Ok(vec![]),
+        });
+        state.update(AppIntent::TagsLoaded {
+            tag: tags,
             result: Ok(vec![]),
         });
         assert_eq!(state.busy, 0);
@@ -10836,7 +11758,7 @@ mod tests {
     fn brackets_switch_the_tab_and_j_and_k_move_over_remotes_and_branches() {
         let mut state = with_remotes();
         assert_eq!(
-            press_char(&mut state, '['),
+            press_char(&mut state, ']'),
             vec![],
             "a header row has no log"
         );
@@ -10869,7 +11791,7 @@ mod tests {
             "origin/main"
         );
 
-        let (_, refname) = log_load(&press_char(&mut state, ']')).unwrap();
+        let (_, refname) = log_load(&press_char(&mut state, '[')).unwrap();
         assert_eq!(refname, b"refs/heads/main", "the local selection's log");
         assert_eq!(state.branches.tab, BranchesTab::Local);
         assert_eq!(state.key_focus(), KeyScope::Branches);
@@ -11369,23 +12291,21 @@ mod tests {
 
     #[test]
     fn with_nothing_in_progress_the_status_keys_are_disabled() {
-        for ops in [&[][..], &[Operation::Bisect][..]] {
-            let mut state = status_focused(ops);
-            for c in ['c', 's', 'a'] {
-                state.notice = None;
-                assert_eq!(press_char(&mut state, c), vec![], "{c}");
-                assert_eq!(state.notice, Some("Nothing in progress".into()), "{c}");
-            }
-            for intent in [
-                AppIntent::ContinueOperation,
-                AppIntent::SkipOperation,
-                AppIntent::AbortOperation,
-            ] {
-                assert_eq!(state.update(intent), vec![]);
-            }
-            assert_eq!(state.popups, []);
-            assert_eq!(state.op_seq, None);
+        let mut state = status_focused(&[]);
+        for c in ['c', 's', 'a'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some("Nothing in progress".into()), "{c}");
         }
+        for intent in [
+            AppIntent::ContinueOperation,
+            AppIntent::SkipOperation,
+            AppIntent::AbortOperation,
+        ] {
+            assert_eq!(state.update(intent), vec![]);
+        }
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_seq, None);
     }
 
     #[test]
@@ -12016,6 +12936,167 @@ mod tests {
         assert_eq!(op, GitOp::Abort(Operation::Revert));
     }
 
+    // --- Copy and paste ---
+
+    const COPIED_OID: &str = "1111111111111111111111111111111111111111";
+
+    /// `on_commit`, on `main` with a clean tree, the selected row a commit
+    /// with a full id and a short one.
+    fn copy_ready() -> AppState {
+        let mut state = on_commit();
+        let row = &mut state.commits.rows[1];
+        row.oid = COPIED_OID.into();
+        // Not what the notice names: that is made from the full id.
+        row.short_oid = "111".into();
+        state.branch = Some(on_branch("main"));
+        state
+    }
+
+    /// `copy_ready`, with the selected commit copied.
+    fn one_copied() -> AppState {
+        let mut state = copy_ready();
+        press_char(&mut state, 'c');
+        assert_eq!(state.copied.len(), 1);
+        state
+    }
+
+    #[test]
+    fn c_copies_the_rows_full_id_and_c_again_takes_it_out() {
+        let mut state = copy_ready();
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
+        assert!(!state.copied.contains(&cid("1111111")));
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Copied 1111111 (1 copied)")
+        );
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert!(state.copied.is_empty());
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Removed 1111111 (0 copied)")
+        );
+        // The next key clears the notice.
+        press_char(&mut state, 'j');
+        assert_eq!(state.notice_text, None);
+    }
+
+    #[test]
+    fn copying_works_while_an_op_runs_but_never_copies_a_merge() {
+        let mut state = copy_ready();
+        state.op_seq = Some(4);
+        press_char(&mut state, 'c');
+        assert_eq!(state.copied.len(), 1);
+
+        let mut merge = one_copied();
+        merge.commits.selected = 0;
+        merge.commits.rows[0].parents = vec!["c1".into(), "d0".into()];
+        assert_eq!(press_char(&mut merge, 'c'), vec![]);
+        assert_eq!(
+            merge.notice,
+            Some("Cannot cherry-pick a merge commit".into())
+        );
+        assert_eq!(merge.update(AppIntent::CopyCommit), vec![]);
+        assert_eq!(merge.copied.ids(), [cid(COPIED_OID)]);
+    }
+
+    #[test]
+    fn shift_c_clears_the_set() {
+        let mut state = one_copied();
+        assert_eq!(press_char(&mut state, 'C'), vec![]);
+        assert!(state.copied.is_empty());
+        assert_eq!(state.notice, Some("Cleared copied commits".into()));
+    }
+
+    #[test]
+    fn v_cherry_picks_the_copied_ids_on_the_terminal() {
+        let mut state = one_copied();
+        state.commits.selected = 2;
+        state.commits.rows[2].oid = "2".repeat(40);
+        press_char(&mut state, 'c');
+        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
+        assert_eq!(
+            op,
+            GitOp::CherryPick(vec![cid(COPIED_OID), cid(&"2".repeat(40))])
+        );
+        assert_eq!(state.op_seq, Some(tag.seq));
+        // The set stays, to paste on another branch too.
+        assert_eq!(state.copied.len(), 2);
+    }
+
+    #[test]
+    fn v_says_why_it_cannot_paste_and_starts_nothing() {
+        let busy = "Finish or abort the operation in progress";
+        let changes = "Commit or stash your changes first";
+        type Setup = fn(&mut AppState);
+        let cases: [(&str, Setup, &str); 6] = [
+            ("empty set", |s| s.copied.clear(), "Nothing copied"),
+            (
+                "unborn HEAD",
+                |s| s.branch.as_mut().unwrap().head = Head::Unborn("main".into()),
+                "No commit to cherry-pick onto",
+            ),
+            (
+                "merge in progress",
+                |s| s.branch.as_mut().unwrap().in_progress = vec![Operation::Merge],
+                busy,
+            ),
+            (
+                "staged change",
+                |s| s.files = vec![changed("a.rs", 'M', '.')],
+                changes,
+            ),
+            (
+                "unstaged change",
+                |s| s.files = vec![changed("a.rs", '.', 'M')],
+                changes,
+            ),
+            ("op running", |s| s.op_seq = Some(9), keymap::OP_RUNNING),
+        ];
+        for (case, setup, reason) in cases {
+            let mut state = one_copied();
+            setup(&mut state);
+            assert_eq!(press_char(&mut state, 'v'), vec![], "{case}");
+            assert_eq!(state.notice, Some(reason.into()), "{case}");
+            assert_eq!(state.update(AppIntent::PasteCommits), vec![], "{case}");
+        }
+    }
+
+    #[test]
+    fn an_untracked_file_alone_does_not_stop_a_paste() {
+        let mut state = one_copied();
+        state.files = vec![untracked("new.txt")];
+        let (_, op) = attached_of(&press_char(&mut state, 'v'));
+        assert_eq!(op, GitOp::CherryPick(vec![cid(COPIED_OID)]));
+    }
+
+    #[test]
+    fn the_set_survives_a_checkout_and_goes_with_the_repository() {
+        let mut state = one_copied();
+        let (tag, op) = op_of(&state.start_op(Ok(Some(GitOp::Checkout("topic".into())))));
+        state.update(finished(tag, op, Ok(())));
+        assert_eq!(state.copied.ids(), [cid(COPIED_OID)]);
+        state.switch_repo();
+        assert!(state.copied.is_empty());
+    }
+
+    #[test]
+    fn a_failed_paste_says_could_not_cherry_pick_and_how_to_go_on() {
+        let mut state = one_copied();
+        let (tag, op) = attached_of(&press_char(&mut state, 'v'));
+        state.update(finished(tag, op, Err("CONFLICT in a.txt".into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not cherry-pick");
+                assert_eq!(
+                    error.next,
+                    "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
+                );
+            }
+            other => panic!("expected one error, got {other:?}"),
+        }
+    }
+
     /// A repository with `three_branches`, on `main`, nothing running.
     fn remote_ready() -> AppState {
         let mut state = with_branches().with_location(Some("/r".into()), "/r".into());
@@ -12028,7 +13109,7 @@ mod tests {
     /// The tag and op of the one `Remote` effect in `effects`.
     fn remote_of(effects: &[Effect]) -> (Tag, RemoteOp) {
         match effects {
-            [Effect::Remote { tag, op }] => (*tag, *op),
+            [Effect::Remote { tag, op }] => (*tag, op.clone()),
             other => panic!("expected one Remote effect, got {other:?}"),
         }
     }
@@ -12062,7 +13143,7 @@ mod tests {
             assert_eq!(state.op_seq, Some(tag.seq));
             assert_eq!(state.busy, 1);
             let run = state.remote.as_ref().expect("a run is recorded");
-            assert_eq!((run.op, run.seq), (op, tag.seq));
+            assert_eq!((&run.op, run.seq), (&op, tag.seq));
             assert_eq!(run.branch, Some(BranchName::from("main")));
         }
     }
@@ -12169,7 +13250,7 @@ mod tests {
             );
             assert_eq!(state.popups, []);
             // Only the reloads count as busy now.
-            assert_eq!(state.busy, 3);
+            assert_eq!(state.busy, 4);
         }
     }
 
@@ -12239,7 +13320,7 @@ mod tests {
             let seq = state.take_seq();
             state.op_seq = Some(seq);
             state.busy = 1;
-            state.remote = Some(RemoteRun::new(op, seq, None));
+            state.remote = Some(RemoteRun::new(op.clone(), seq, None));
             let tag = Tag {
                 generation: state.generation,
                 seq,
@@ -12248,7 +13329,7 @@ mod tests {
             let message = " ! [rejected]        main -> main (stale info)";
             let effects = state.update(remote_finished(
                 tag,
-                op,
+                op.clone(),
                 Err(RemoteFailure::Failed(message.into())),
             ));
             assert_eq!(effects, [], "{op:?}: nothing reloads");
@@ -12374,6 +13455,181 @@ mod tests {
         assert!(!format!("{intent:?}").contains("hunter2"));
         assert!(!format!("{effect:?}").contains("hunter2"));
         let _ = tag;
+    }
+
+    #[test]
+    fn a_credential_answer_never_reaches_the_command_log() {
+        use crate::git::command_line::display_line;
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+        use crate::git::remote::{AskpassEnv, remote_command};
+
+        let (mut state, _) = typing_password("hunter2");
+        let askpass = AskpassEnv {
+            program: "/usr/bin/kika".into(),
+            socket: "/tmp/kika-askpass-1/socket".into(),
+            git_askpass: true,
+        };
+        let line = display_line(&remote_command(&PUSH, Some(&askpass)));
+        state.update(AppIntent::CommandLogged(CommandEvent::Started {
+            id: 0,
+            line,
+            attached: false,
+        }));
+        state.update(AppIntent::CredentialAnswered(Some(Secret::new("hunter2"))));
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 0,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::from_millis(5),
+        }));
+
+        let entries = state.command_log.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].line, "git push");
+        for entry in entries {
+            for hidden in ["hunter2", "kika-askpass", "/usr/bin/kika", "KIKA_"] {
+                assert!(!entry.line.contains(hidden), "{hidden} in {entry:?}");
+            }
+        }
+        assert!(!format!("{:?}", state.command_log).contains("hunter2"));
+    }
+
+    fn log_started(state: &mut AppState, id: u64) {
+        state.update(AppIntent::CommandLogged(
+            crate::git::recording::CommandEvent::Started {
+                id,
+                line: format!("git cmd{id}"),
+                attached: false,
+            },
+        ));
+    }
+
+    fn command_log_view(state: &AppState) -> CommandLogView {
+        match state.popups.last() {
+            Some(Popup::CommandLog(view)) => *view,
+            other => panic!("expected the command log on top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_command_log_records_in_order_and_stays_bounded() {
+        use crate::git::recording::{CommandEvent, CommandOutcome};
+
+        let mut state = AppState::new(Context::Workspace);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        let effects = state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Failed(None),
+            elapsed: std::time::Duration::from_millis(3),
+        }));
+        assert_eq!(effects, []);
+        let lines: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| &e.line)
+            .collect();
+        assert_eq!(lines, ["git cmd0", "git cmd1", "git cmd2"]);
+        let outcomes: Vec<_> = state
+            .command_log
+            .entries()
+            .iter()
+            .map(|e| e.outcome.clone())
+            .collect();
+        assert_eq!(outcomes, [None, Some(CommandOutcome::Failed(None)), None]);
+
+        let total = CommandLog::CAP as u64 + 10;
+        for id in 3..total {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.command_log.len(), CommandLog::CAP);
+        assert_eq!(state.command_log.entries()[0].id, 10);
+        let before = state.command_log.clone();
+        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
+            id: 1,
+            outcome: CommandOutcome::Ok,
+            elapsed: std::time::Duration::ZERO,
+        }));
+        assert_eq!(state.command_log, before);
+    }
+
+    #[test]
+    fn the_command_log_popup_follows_new_commands_until_moved_up() {
+        let mut state = AppState::new(Context::Workspace);
+        state.size = (80, 13);
+        for id in 0..3 {
+            log_started(&mut state, id);
+        }
+        assert_eq!(state.update(AppIntent::OpenCommandLog), []);
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: true
+            }
+        );
+
+        log_started(&mut state, 3);
+        assert_eq!(command_log_view(&state).cursor, 3);
+
+        state.update(AppIntent::CommandLogPrev);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 2,
+                follow: false
+            }
+        );
+        log_started(&mut state, 4);
+        assert_eq!(command_log_view(&state).cursor, 2);
+
+        state.update(AppIntent::CommandLogNext);
+        state.update(AppIntent::CommandLogNext);
+        assert_eq!(
+            command_log_view(&state),
+            CommandLogView {
+                cursor: 4,
+                follow: true
+            }
+        );
+
+        // A page is the rows inside the popup: 13 - bar - border = 10.
+        for id in 5..30 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::CommandLogPageUp);
+        assert_eq!(command_log_view(&state).cursor, 19);
+        state.update(AppIntent::CommandLogPageDown);
+        assert_eq!(command_log_view(&state).cursor, 29);
+
+        state.update(AppIntent::PopPopup);
+        assert_eq!(state.popups, []);
+        // Recording carries on while closed.
+        log_started(&mut state, 30);
+        assert_eq!(state.command_log.len(), 31);
+    }
+
+    #[test]
+    fn at_and_the_menu_open_the_command_log() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::Key(KeyPress::new(
+            KeyCode::Char('@'),
+            KeyModifiers::SHIFT,
+        )));
+        assert!(matches!(state.popups.as_slice(), [Popup::CommandLog(_)]));
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.popups, []);
+
+        let items = menu::items(menu::MenuId::Actions);
+        let at = items
+            .iter()
+            .position(|item| item.label == "Command log…")
+            .expect("the Actions menu has the command log");
+        assert_eq!(items[at - 1].label, "Worktrees…");
+        assert_eq!(items[at].intent, AppIntent::OpenCommandLog);
+        assert_eq!((items[at].disabled)(&state), None);
     }
 
     #[test]
@@ -12559,6 +13815,1373 @@ mod tests {
         assert_eq!(
             failure_next(&op),
             "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
+        );
+    }
+
+    /// `with_commits` on branch `main`, which is loaded as a local branch.
+    fn undoable() -> AppState {
+        let mut state = with_commits(3, true);
+        state.branch = Some(on_branch("main"));
+        state.branches.branches = vec![Branch {
+            name: "main".into(),
+            head: true,
+            upstream: None,
+            track: crate::git::branches::Track::None,
+            merged: true,
+        }];
+        state
+    }
+
+    fn reflog_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::LoadReflog { tag }] => *tag,
+            other => panic!("expected one LoadReflog, got {other:?}"),
+        }
+    }
+
+    /// Two commits on `main` after the first, `HEAD` at `ccc…`.
+    fn commit_reflog(head: char) -> Reflog {
+        Reflog {
+            head: CommitId::parse(&head.to_string().repeat(40)),
+            head_ref: Some(b"refs/heads/main".to_vec()),
+            branch_entries: vec![],
+            entries: crate::git::reflog::parse_records(include_bytes!(
+                "git/fixtures/reflog/commit.bin"
+            )),
+        }
+    }
+
+    fn undo_commit_op() -> GitOp {
+        GitOp::Travel {
+            direction: undo::Direction::Undo,
+            step: undo::Step::MoveTo(cid(&"b".repeat(40))),
+            expect: undo::Expected {
+                head_ref: Some(b"refs/heads/main".to_vec()),
+                oid: cid(&"c".repeat(40)),
+            },
+        }
+    }
+
+    /// `state` after an undo whose fresh reflog read answered with
+    /// `reflog`.
+    fn undo_with(state: &mut AppState, reflog: Reflog) -> Vec<Effect> {
+        let tag = reflog_tag(&state.update(AppIntent::Undo));
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(reflog),
+        })
+    }
+
+    #[test]
+    fn undo_reads_the_reflog_afresh_then_asks_with_the_plan_and_emits_nothing_else() {
+        let mut state = undoable();
+        let busy = state.busy;
+        let effects = press_with(&mut state, 'z', KeyModifiers::CONTROL);
+        let tag = reflog_tag(&effects);
+        assert!(tag.user);
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
+        assert_eq!(state.popups, []);
+
+        let effects = state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.busy, busy);
+        assert_eq!(state.commits.reflog.planning, None);
+        assert_eq!(
+            state.popups,
+            [Popup::Travel(TravelConfirm {
+                title: "Undo",
+                preview: vec![
+                    "Undo: commit: second".into(),
+                    "Branch main moves from ccccccc to bbbbbbb.".into(),
+                    "Files change to match bbbbbbb; ignored files in the way are replaced.".into(),
+                    "Commits after bbbbbbb leave main; redo brings them back.".into(),
+                ],
+                op: undo_commit_op(),
+            })]
+        );
+        assert_eq!(state.key_focus(), KeyScope::Travel);
+        assert_eq!(state.op_seq, None);
+    }
+
+    fn press_with(state: &mut AppState, c: char, modifiers: KeyModifiers) -> Vec<Effect> {
+        state.update(AppIntent::Key(KeyPress::new(KeyCode::Char(c), modifiers)))
+    }
+
+    #[test]
+    fn redo_plans_from_its_own_fresh_read() {
+        let mut state = undoable();
+        let tag = reflog_tag(&press_with(&mut state, 'r', KeyModifiers::CONTROL));
+        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Redo));
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        assert_eq!(state.popups, []);
+        assert_eq!(state.op_error.as_deref(), Some("Nothing to redo"));
+    }
+
+    #[test]
+    fn only_y_runs_the_planned_step_and_n_or_esc_close_the_question() {
+        let mut state = undoable();
+        undo_with(&mut state, commit_reflog('c'));
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1, "Enter does not answer");
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, undo_commit_op());
+        assert_eq!(state.popups, []);
+
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = undoable();
+            undo_with(&mut state, commit_reflog('c'));
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn confirm_travel_does_nothing_without_the_question() {
+        let mut state = undoable();
+        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
+        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn undo_and_redo_wait_for_a_running_op_or_an_operation_in_progress() {
+        for intent in [AppIntent::Undo, AppIntent::Redo] {
+            let mut state = undoable();
+            state.op_seq = Some(7);
+            assert_eq!(state.update(intent.clone()), vec![]);
+            assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
+            assert_eq!(state.commits.reflog.planning, None);
+
+            for operation in [Operation::Rebase, Operation::Bisect] {
+                let mut state = undoable();
+                let mut branch = on_branch("main");
+                branch.in_progress = vec![operation];
+                state.branch = Some(branch);
+                assert_eq!(state.update(intent.clone()), vec![]);
+                assert_eq!(
+                    state.notice,
+                    Some("Finish or abort the operation in progress".into())
+                );
+            }
+
+            let mut state = AppState::new(Context::Workspace);
+            assert_eq!(state.update(intent.clone()), vec![]);
+            assert_eq!(state.notice, Some("Not in a repository".into()));
+        }
+    }
+
+    #[test]
+    fn a_refused_plan_says_why_and_asks_nothing() {
+        let mut state = undoable();
+        let effects = undo_with(&mut state, commit_reflog('d'));
+        assert_eq!(effects, vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(
+            state.op_error.as_deref(),
+            Some("HEAD has moved since commit; nothing is undone")
+        );
+
+        let mut state = undoable();
+        state.files = vec![changed("a.rs", '.', 'M')];
+        undo_with(&mut state, commit_reflog('c'));
+        assert_eq!(
+            state.op_error.as_deref(),
+            Some("Commit or stash your changes first")
+        );
+
+        // Untracked files are left to `reset --keep`.
+        let mut state = undoable();
+        state.files = vec![untracked("new.rs")];
+        undo_with(&mut state, commit_reflog('c'));
+        assert_eq!(state.popups.len(), 1);
+    }
+
+    #[test]
+    fn a_stale_or_failed_read_plans_nothing() {
+        let mut state = undoable();
+        let tag = reflog_tag(&state.update(AppIntent::Undo));
+        let stale = Tag {
+            seq: tag.seq + 100,
+            ..tag
+        };
+        state.update(AppIntent::ReflogLoaded {
+            tag: stale,
+            result: Ok(commit_reflog('c')),
+        });
+        assert_eq!(state.popups, []);
+        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
+
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Err("fatal: broken".into()),
+        });
+        assert_eq!(state.popups, []);
+        assert_eq!(state.commits.reflog.planning, None);
+        assert_eq!(
+            state.op_error.as_deref(),
+            Some("Could not read the reflog: fatal: broken")
+        );
+    }
+
+    #[test]
+    fn brackets_switch_to_the_reflog_tab_reading_it_once() {
+        let mut state = undoable();
+        let tag = reflog_tag(&press_char(&mut state, ']'));
+        assert_eq!(state.commits.tab, CommitsTab::Reflog);
+        assert_eq!(state.key_focus(), KeyScope::Reflog);
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        press_char(&mut state, 'j');
+        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.commits.reflog.selected, 2);
+        press_char(&mut state, 'k');
+        assert_eq!(state.commits.reflog.selected, 1);
+        assert_eq!(state.popups, [], "the tab acts on no row");
+
+        assert_eq!(press_char(&mut state, '['), vec![]);
+        assert_eq!(state.commits.tab, CommitsTab::Log);
+        assert_eq!(state.key_focus(), KeyScope::Commits);
+        assert_eq!(press_char(&mut state, ']'), vec![], "read once");
+    }
+
+    #[test]
+    fn a_log_reload_rereads_the_reflog_only_once_it_was_read() {
+        let mut state = undoable();
+        let effects = state.update(AppIntent::RefreshStatus);
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadReflog { .. })),
+            "{effects:?}"
+        );
+        let tag = reflog_tag(&state.update(AppIntent::SwitchCommitsTab));
+        state.update(AppIntent::ReflogLoaded {
+            tag,
+            result: Ok(commit_reflog('c')),
+        });
+        let effects = state.update(AppIntent::RefreshStatus);
+        let reloads: Vec<&Tag> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::LoadReflog { tag } => Some(tag),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reloads.len(), 1, "{effects:?}");
+        assert!(!reloads[0].user);
+    }
+
+    #[test]
+    fn with_no_commits_the_reflog_is_empty_and_there_is_nothing_to_undo() {
+        let mut state = undoable();
+        state.branch = Some(BranchStatus {
+            head: Head::Unborn("main".into()),
+            ..on_branch("main")
+        });
+        assert_eq!(state.update(AppIntent::SwitchCommitsTab), vec![]);
+        assert_eq!(state.commits.reflog.data, Some(Reflog::default()));
+        assert_eq!(state.update(AppIntent::Undo), vec![]);
+        assert_eq!(state.notice, Some("Nothing to undo".into()));
+    }
+
+    #[test]
+    fn a_travel_failure_is_titled_by_its_direction() {
+        let mut state = undoable();
+        undo_with(&mut state, commit_reflog('c'));
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        state.update(AppIntent::OpFinished {
+            tag,
+            op,
+            result: Err("error: Entry 'a.txt' not uptodate. Cannot merge.".into()),
+        });
+        match state.popups.last() {
+            Some(Popup::Error(error)) => assert_eq!(error.title, "Could not undo"),
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    // --- Tags ---
+
+    fn tag_ref(name: &str, oid: char) -> TagRef {
+        let oid = oid.to_string().repeat(40);
+        TagRef {
+            name: name.into(),
+            target: CommitId::parse(&oid).unwrap(),
+            target_short: oid[..7].into(),
+            ref_oid: oid,
+            annotated: false,
+            date: "2026-10-01".into(),
+            subject: "s".into(),
+        }
+    }
+
+    /// The tag of the one `LoadTags` in `effects`.
+    fn tags_tag(effects: &[Effect]) -> Tag {
+        let found = effects.iter().find_map(|e| match e {
+            Effect::LoadTags { tag } => Some(*tag),
+            _ => None,
+        });
+        found.unwrap_or_else(|| panic!("expected LoadTags in {effects:?}"))
+    }
+
+    /// Reload the lists, answering the tags with `tags`.
+    fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
+        let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::TagsLoaded {
+            tag,
+            result: Ok(tags),
+        })
+    }
+
+    /// `v2` then `v1`, newest first.
+    fn two_tags() -> Vec<TagRef> {
+        vec![tag_ref("v2", 'b'), tag_ref("v1", 'a')]
+    }
+
+    /// `with_branches`, with `two_tags` loaded and the Tags tab shown.
+    fn on_tags() -> AppState {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        press_char(&mut state, ']');
+        press_char(&mut state, ']');
+        assert_eq!(state.branches.tab, BranchesTab::Tags);
+        state
+    }
+
+    #[test]
+    fn brackets_cycle_local_remotes_tags_and_back() {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        let mut tabs = vec![];
+        for key in [']', ']', ']', '[', '[', '['] {
+            press_char(&mut state, key);
+            tabs.push((state.branches.tab, state.key_focus()));
+        }
+        use BranchesTab::*;
+        assert_eq!(
+            tabs,
+            [
+                (Remotes, KeyScope::Remotes),
+                (Tags, KeyScope::Tags),
+                (Local, KeyScope::Branches),
+                (Tags, KeyScope::Tags),
+                (Remotes, KeyScope::Remotes),
+                (Local, KeyScope::Branches),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_tags_tab_shows_the_selected_tags_log_and_moves_with_j_and_k() {
+        let mut state = with_branches();
+        reload_tags(&mut state, two_tags());
+        press_char(&mut state, ']');
+        let (_, refname) = log_load(&press_char(&mut state, ']')).unwrap();
+        assert_eq!(refname, b"refs/tags/v2");
+        let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
+        assert_eq!(refname, b"refs/tags/v1");
+        assert!(tag.user);
+        assert_eq!(press_char(&mut state, 'j'), vec![], "at the end");
+        log_load(&press(&mut state, KeyCode::Up)).unwrap();
+        assert_eq!(
+            state.branches.tags.selected_tag().unwrap().name,
+            "v2".into()
+        );
+        // A reload while the tab is shown reloads its log too.
+        let effects = reload_tags(&mut state, two_tags());
+        assert_eq!(log_load(&effects).unwrap().1, b"refs/tags/v2");
+    }
+
+    #[test]
+    fn a_stale_or_other_repository_tags_load_is_dropped() {
+        let mut state = with_branches();
+        let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+        let newer = tags_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(AppIntent::TagsLoaded {
+            tag,
+            result: Ok(two_tags()),
+        });
+        assert!(!state.branches.tags.loaded);
+        state.generation += 1;
+        state.update(AppIntent::TagsLoaded {
+            tag: newer,
+            result: Ok(two_tags()),
+        });
+        assert!(!state.branches.tags.loaded);
+    }
+
+    #[test]
+    fn t_then_a_name_tags_the_commit_selected_when_t_was_pressed() {
+        let mut state = on_commit();
+        assert_eq!(press_char(&mut state, 't'), vec![]);
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagName,
+                ..
+            }]
+        ));
+        assert_eq!(state.prompt_title(PromptKind::TagName), "New tag on c1");
+        // The selection moves while the user types.
+        state.commits.selected = 2;
+        type_text(&mut state, " v1.0 ");
+        let effects = press(&mut state, KeyCode::Enter);
+        let (_, op) = op_of(&effects);
+        assert_eq!(
+            op,
+            GitOp::CreateTag {
+                name: "v1.0".into(),
+                target: cid("c1"),
+                message: None,
+            }
+        );
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending_tag, None);
+    }
+
+    #[test]
+    fn shift_t_asks_a_name_then_a_message_and_refuses_an_empty_one() {
+        let mut state = on_commit();
+        shift(&mut state, 'T');
+        type_text(&mut state, "v2\n");
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                ..
+            }]
+        ));
+        assert_eq!(
+            state.prompt_title(PromptKind::TagMessage),
+            "Message of tag v2"
+        );
+        type_text(&mut state, "  ");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("An annotated tag needs a message".into())
+        );
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt {
+                kind: PromptKind::TagMessage,
+                ..
+            }]
+        ));
+        press(&mut state, KeyCode::Backspace);
+        press(&mut state, KeyCode::Backspace);
+        type_text(&mut state, "-m Release two");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::CreateTag {
+                name: "v2".into(),
+                target: cid("c1"),
+                message: Some("-m Release two".into()),
+            }
+        );
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending_tag, None);
+    }
+
+    #[test]
+    fn an_invalid_tag_name_keeps_the_prompt_open_with_the_reason() {
+        let mut state = on_commit();
+        press_char(&mut state, 't');
+        for (bad, reason) in [
+            ("-x", "A tag name cannot start with -"),
+            ("a..b", "A tag name cannot contain .. or @{"),
+            ("HEAD", "A tag cannot be called @ or HEAD"),
+        ] {
+            type_text(&mut state, bad);
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{bad}");
+            assert_eq!(state.notice, Some(reason.into()), "{bad}");
+            match state.popups.as_slice() {
+                [Popup::Prompt { kind, input }] => {
+                    assert_eq!(*kind, PromptKind::TagName);
+                    assert_eq!(input.text, bad, "the text stays to fix");
+                }
+                other => panic!("expected the prompt kept open, got {other:?}"),
+            }
+            for _ in bad.chars() {
+                press(&mut state, KeyCode::Backspace);
+            }
+        }
+        assert!(state.branches.pending_tag.is_some());
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.branches.pending_tag, None);
+        assert_eq!(state.update(AppIntent::TagNamed("v1".into())), vec![]);
+    }
+
+    #[test]
+    fn a_tag_answer_waits_for_a_running_op_and_no_commit_opens_nothing() {
+        let mut state = on_commit();
+        press_char(&mut state, 't');
+        state.op_seq = Some(99);
+        type_text(&mut state, "v1");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
+
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        assert_eq!(state.update(AppIntent::NewTag), vec![]);
+        assert_eq!(state.notice, Some("No commit".into()));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn d_asks_and_only_y_deletes_the_tag_as_listed() {
+        let mut state = on_tags();
+        press_char(&mut state, 'd');
+        assert_eq!(state.key_focus(), KeyScope::DeleteTag);
+        let expected = GitOp::DeleteTag {
+            name: "v2".into(),
+            oid: "b".repeat(40),
+        };
+        match state.popups.as_slice() {
+            [Popup::DeleteTag(confirm)] => {
+                assert_eq!(confirm.name, "v2");
+                assert_eq!(confirm.op, expected);
+            }
+            other => panic!("expected the question, got {other:?}"),
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1, "enter does not answer");
+        // A reload under the question cannot change what it deletes.
+        reload_tags(&mut state, vec![tag_ref("v9", 'c')]);
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, expected);
+        assert_eq!(state.popups, []);
+        // The lists, tags among them, reload once it is done.
+        tags_tag(&state.update(finished(tag, op, Ok(()))));
+
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = on_tags();
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.popups, [], "{key:?}");
+            assert_eq!(state.update(AppIntent::ConfirmDeleteTag), vec![]);
+        }
+    }
+
+    #[test]
+    fn shift_p_pushes_the_selected_tag_to_the_upstreams_remote() {
+        let mut state = remote_ready();
+        state.branches.branches[0].upstream = Some("origin/main".into());
+        reload_remotes(
+            &mut state,
+            vec![
+                git_remote("fork", true, &[]),
+                git_remote("origin", true, &["main"]),
+            ],
+        );
+        reload_tags(&mut state, two_tags());
+        state.busy = 0;
+        press_char(&mut state, ']');
+        press_char(&mut state, ']');
+        let (tag, op) = remote_of(&shift(&mut state, 'P'));
+        assert_eq!(
+            op,
+            RemoteOp::PushTag {
+                remote: "origin".into(),
+                tag: "v2".into(),
+            }
+        );
+        assert_eq!(state.remote.as_ref().map(|r| &r.op), Some(&op));
+        let effects = state.update(remote_finished(tag, op, Ok(())));
+        tags_tag(&effects);
+
+        // Two remotes and no upstream: nothing to choose from.
+        state.branches.branches[0].upstream = None;
+        assert_eq!(shift(&mut state, 'P'), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("Several remotes and no upstream to choose from".into())
+        );
+        assert_eq!(state.remote, None);
+    }
+
+    // --- Bisect ---
+
+    fn bisect_branch(head: Head, ops: &[Operation], bisect: Option<BisectState>) -> BranchStatus {
+        BranchStatus {
+            head,
+            in_progress: ops.to_vec(),
+            bisect,
+            ..on_branch("main")
+        }
+    }
+
+    /// `with_commits` on `main` with no bisect, `c0` selected.
+    fn ready_to_bisect() -> AppState {
+        let mut state = with_commits(3, true);
+        state.branch = Some(on_branch("main"));
+        state.files_loaded = true;
+        state
+    }
+
+    /// A bisect testing `c1`, with the Status panel focused.
+    fn testing_c1(ops: &[Operation]) -> AppState {
+        let mut state = with_commits(3, true);
+        let bisect = BisectState {
+            start: "main".into(),
+            ..BisectState::default()
+        };
+        state.branch = Some(bisect_branch(
+            Head::Detached("c1".into()),
+            ops,
+            Some(bisect),
+        ));
+        state.update(AppIntent::FocusPanel(layout::Panel::Side(
+            SidePanel::Status,
+        )));
+        assert_eq!(state.key_focus(), KeyScope::Status);
+        state
+    }
+
+    fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp {
+        GitOp::BisectMark {
+            mark,
+            commit: cid(commit),
+            start,
+        }
+    }
+
+    #[test]
+    fn shift_b_opens_the_bisect_menu_and_a_first_mark_starts_a_bisect() {
+        let mut state = ready_to_bisect();
+        assert_eq!(shift(&mut state, 'B'), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Menu {
+                id: MenuId::Bisect,
+                cursor: 0
+            }]
+        );
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", true));
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn during_a_bisect_marks_do_not_start_another() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let (_, op) = op_of(&press_char(&mut state, 'g'));
+        assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&press_char(&mut state, 'b'));
+        assert_eq!(op, bisect_mark(BisectMark::Bad, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&press_char(&mut state, 's'));
+        assert_eq!(op, bisect_mark(BisectMark::Skip, "c1", false));
+        state.op_seq = None;
+        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Good)));
+        assert_eq!(op, bisect_mark(BisectMark::Good, "c0", false));
+    }
+
+    #[test]
+    fn c_says_to_mark_while_only_a_bisect_is_in_progress() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(press_char(&mut state, 'c'), vec![]);
+        assert_eq!(state.notice, Some(bisect::MARK_INSTEAD.into()));
+        assert_eq!(state.update(AppIntent::ContinueOperation), vec![]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_start_is_refused_with_changes_no_commits_or_an_operation() {
+        let changed = |index, worktree| FileEntry {
+            path: "a.txt".into(),
+            orig_path: None,
+            index,
+            worktree,
+            kind: EntryKind::Changed,
+        };
+        let cases = [
+            (vec![changed('M', '.')], on_branch("main"), bisect::DIRTY),
+            (vec![changed('.', 'M')], on_branch("main"), bisect::DIRTY),
+            (
+                vec![],
+                bisect_branch(Head::Unborn("main".into()), &[], None),
+                "No commits yet",
+            ),
+            (
+                vec![],
+                bisect_branch(Head::Branch("main".into()), &[Operation::Merge], None),
+                "Finish or abort the operation in progress",
+            ),
+        ];
+        for (files, branch, reason) in cases {
+            let mut state = ready_to_bisect();
+            state.files = files;
+            state.branch = Some(branch);
+            assert_eq!(
+                state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+                vec![]
+            );
+            assert_eq!(state.notice, Some(reason.into()));
+            assert_eq!(state.op_seq, None);
+        }
+        let mut untracked_only = ready_to_bisect();
+        untracked_only.files = vec![untracked("new.txt")];
+        op_of(&untracked_only.update(AppIntent::BisectSelected(BisectMark::Good)));
+    }
+
+    #[test]
+    fn a_bisect_with_its_own_terms_is_not_marked() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        if let Some(bisect) = state.branch.as_mut().and_then(|b| b.bisect.as_mut()) {
+            bisect.terms = crate::git::bisect::Terms {
+                bad: "new".into(),
+                good: "old".into(),
+            };
+        }
+        for c in ['g', 'b', 's'] {
+            state.notice = None;
+            assert_eq!(press_char(&mut state, c), vec![], "{c}");
+            assert_eq!(state.notice, Some(bisect::CUSTOM_TERMS.into()), "{c}");
+        }
+        assert_eq!(
+            state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+            vec![]
+        );
+        assert_eq!(state.op_seq, None);
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+        );
+    }
+
+    #[test]
+    fn the_status_panel_marks_only_once_git_checks_out_a_commit() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        state.branch.as_mut().unwrap().head = Head::Branch("main".into());
+        assert_eq!(press_char(&mut state, 'g'), vec![]);
+        assert_eq!(state.notice, Some(bisect::NOT_TESTING.into()));
+    }
+
+    #[test]
+    fn a_while_only_bisecting_asks_then_y_resets_and_only_y_answers() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        assert_eq!(state.popups, question);
+        assert!(
+            state
+                .confirm_question(ConfirmKind::Abort(Operation::Bisect))
+                .contains("HEAD goes back to main;")
+        );
+
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups, question);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::BisectReset);
+        assert_eq!(state.popups, []);
+
+        for no in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = testing_c1(&[Operation::Bisect]);
+            press_char(&mut state, 'a');
+            assert_eq!(press(&mut state, no), vec![], "{no:?}");
+            assert_eq!(state.popups, []);
+            assert_eq!(state.op_seq, None);
+        }
+    }
+
+    #[test]
+    fn a_with_a_rebase_and_a_bisect_still_aborts_the_rebase() {
+        let mut state = testing_c1(&[Operation::Rebase, Operation::Bisect]);
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Rebase))]
+        );
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(op, GitOp::Abort(Operation::Rebase));
+    }
+
+    #[test]
+    fn the_bisect_menu_reset_asks_too() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        state.update(AppIntent::OpenMenu(MenuId::Bisect));
+        for _ in 0..3 {
+            state.update(AppIntent::MenuNext);
+        }
+        assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+        );
+
+        let mut idle = ready_to_bisect();
+        idle.update(AppIntent::OpenMenu(MenuId::Bisect));
+        for _ in 0..3 {
+            idle.update(AppIntent::MenuNext);
+        }
+        idle.update(AppIntent::MenuSelect);
+        assert_eq!(idle.notice, Some(bisect::NO_BISECT.into()));
+        assert_eq!(idle.update(AppIntent::ConfirmBisectReset), vec![]);
+    }
+
+    fn status_with(tag: Tag, branch: BranchStatus) -> AppIntent {
+        AppIntent::StatusLoaded {
+            tag,
+            result: Ok(RepoStatus {
+                branch,
+                files: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn a_load_that_brings_the_first_bad_commit_announces_it_once() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let found = BisectState {
+            bad: 2,
+            good: 1,
+            first_bad: Some(crate::git::bisect::Found {
+                commit: cid("c1"),
+                subject: "commit 1".into(),
+            }),
+            ..BisectState::default()
+        };
+        let branch = bisect_branch(
+            Head::Detached("c1".into()),
+            &[Operation::Bisect],
+            Some(found),
+        );
+
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(tag, branch.clone()));
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Bisect found c1 (a resets): commit 1")
+        );
+
+        press_char(&mut state, 'j');
+        assert_eq!(state.notice_text, None);
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(tag, branch));
+        assert_eq!(state.notice_text, None);
+    }
+
+    #[test]
+    fn a_load_that_leaves_only_skipped_commits_says_so() {
+        let mut state = testing_c1(&[Operation::Bisect]);
+        let stuck = BisectState {
+            only_skipped: true,
+            ..BisectState::default()
+        };
+        let tag = refresh_tag(&mut state);
+        state.update(status_with(
+            tag,
+            bisect_branch(
+                Head::Detached("c1".into()),
+                &[Operation::Bisect],
+                Some(stuck),
+            ),
+        ));
+        assert_eq!(state.notice, Some(bisect::ONLY_SKIPPED.into()));
+        assert_eq!(state.notice_text, None);
+    }
+
+    // --- Worktrees ---
+
+    use crate::git::worktrees::parse_list;
+
+    /// `main` at `/r/a` (on `main`), `topic` at `/r/a-topic`, a missing
+    /// detached one at `/r/gone` and one whose path git may have split.
+    fn four_worktrees() -> Vec<Worktree> {
+        let mut list = parse_list(
+            b"worktree /r/a\0branch refs/heads/main\0\0\
+              worktree /r/a-topic\0branch refs/heads/topic\0\0\
+              worktree /r/gone\0detached\0prunable\0\0\
+              worktree /r/odd\0detached\0\0",
+            0,
+        );
+        list[3].unsure = true;
+        list
+    }
+
+    fn worktrees_tag(effects: &[Effect]) -> Tag {
+        match effects {
+            [Effect::LoadWorktrees { tag }] => *tag,
+            other => panic!("expected one LoadWorktrees, got {other:?}"),
+        }
+    }
+
+    /// The branches workspace in repository `/r/a`, with `W` pressed and
+    /// `items` loaded, cursor at `cursor`.
+    fn with_worktrees(items: Vec<Worktree>, cursor: usize) -> AppState {
+        let mut state = with_branches();
+        state.repo = Some("/r/a".into());
+        let tag = worktrees_tag(&press_char(&mut state, 'W'));
+        state.update(AppIntent::WorktreesLoaded {
+            tag,
+            result: Ok(items),
+        });
+        for _ in 0..cursor {
+            press_char(&mut state, 'j');
+        }
+        state
+    }
+
+    fn the_worktree_list(state: &AppState) -> &WorktreeList {
+        state.worktree_list().expect("the Worktrees popup")
+    }
+
+    #[test]
+    fn w_opens_the_worktrees_popup_and_loads_it() {
+        let mut state = with_branches();
+        state.repo = Some("/r/a".into());
+        let busy = state.busy;
+        let tag = worktrees_tag(&press_char(&mut state, 'W'));
+        assert_eq!((tag.generation, tag.user), (state.generation, true));
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+        assert_eq!(*the_worktree_list(&state), WorktreeList::loading(tag.seq));
+        state.update(AppIntent::WorktreesLoaded {
+            tag,
+            result: Ok(four_worktrees()),
+        });
+        assert_eq!(state.busy, busy);
+        assert_eq!(the_worktree_list(&state).items, Some(four_worktrees()));
+    }
+
+    #[test]
+    fn the_worktrees_popup_is_disabled_inside_a_submodule_or_outside_a_repository() {
+        let mut state = with_branches();
+        assert_eq!(press_char(&mut state, 'W'), vec![]);
+        assert_eq!(state.notice, Some("Not in a repository".into()));
+        state.repo = Some("/r/a".into());
+        state.repo_stack.push(ParentRepo {
+            path: "sub".into(),
+            files: vec![],
+            files_loaded: true,
+            branch: None,
+            selected: None,
+        });
+        assert_eq!(press_char(&mut state, 'W'), vec![]);
+        assert_eq!(state.notice, Some("Leave the submodule first".into()));
+        assert!(state.popups.is_empty());
+    }
+
+    #[test]
+    fn the_actions_menu_opens_the_worktrees_popup() {
+        let mut state = with_branches();
+        state.repo = Some("/r/a".into());
+        state.update(AppIntent::OpenMenu(MenuId::Actions));
+        for _ in 0..6 {
+            state.update(AppIntent::MenuNext);
+        }
+        worktrees_tag(&state.update(AppIntent::MenuSelect));
+        assert!(matches!(state.popups[..], [Popup::Worktrees(_)]));
+    }
+
+    #[test]
+    fn enter_on_another_worktree_switches_to_it_as_open_repo_does() {
+        let mut state = with_worktrees(four_worktrees(), 1);
+        let mut expected = state.clone();
+        let effects = press(&mut state, KeyCode::Enter);
+        assert_eq!(
+            effects,
+            expected.update(AppIntent::OpenRepo("/r/a-topic".into()))
+        );
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::SetRepo { root, .. }) if root == Path::new("/r/a-topic")
+        ));
+        assert_eq!(state.repo.as_deref(), Some(Path::new("/r/a-topic")));
+    }
+
+    #[test]
+    fn enter_on_the_current_a_missing_or_an_unsure_worktree_says_why() {
+        for (cursor, reason) in [
+            (0, "Already here"),
+            (2, "Worktree is missing"),
+            (3, "Path cannot be read safely with this Git"),
+        ] {
+            let mut state = with_worktrees(four_worktrees(), cursor);
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{reason}");
+            assert_eq!(state.notice, Some(reason.into()));
+            assert_eq!(state.repo.as_deref(), Some(Path::new("/r/a")));
+        }
+        let mut bare = parse_list(b"worktree /r/b.git\0bare\0\0", 0);
+        bare[0].main = false;
+        let mut state = with_worktrees(bare, 0);
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Bare repository".into()));
+    }
+
+    /// `a` pressed with the Branches panel on `wip`, which no worktree has.
+    fn asking_for_wip() -> AppState {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::BranchNext);
+        state.repo = Some("/r/a".into());
+        let tag = worktrees_tag(&press_char(&mut state, 'W'));
+        state.update(AppIntent::WorktreesLoaded {
+            tag,
+            result: Ok(four_worktrees()),
+        });
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        state
+    }
+
+    #[test]
+    fn a_opens_a_prefilled_prompt_for_the_selected_local_branch() {
+        let state = asking_for_wip();
+        match state.popups.last() {
+            Some(Popup::Prompt { kind, input }) => {
+                assert_eq!(*kind, PromptKind::WorktreePath);
+                assert_eq!(input.text, "../a-wip");
+            }
+            other => panic!("expected the path prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.prompt_title(PromptKind::WorktreePath),
+            "New worktree for wip"
+        );
+        assert_eq!(
+            the_worktree_list(&state).pending_branch,
+            Some(BranchName::from("wip"))
+        );
+    }
+
+    #[test]
+    fn a_slash_in_the_branch_becomes_a_dash_and_non_utf8_leaves_it_empty() {
+        let mut state = with_branches();
+        state.repo = Some("/r/a".into());
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(
+            tag,
+            vec![
+                git_branch("main", true, true),
+                git_branch("feat/x", false, true),
+            ],
+        ));
+        state.update(AppIntent::BranchNext);
+        let tag = worktrees_tag(&press_char(&mut state, 'W'));
+        state.update(AppIntent::WorktreesLoaded {
+            tag,
+            result: Ok(vec![]),
+        });
+        press_char(&mut state, 'a');
+        assert!(matches!(
+            state.popups.last(),
+            Some(Popup::Prompt { input, .. }) if input.text == "../a-feat-x"
+        ));
+        state.update(AppIntent::PopPopup);
+        assert_eq!(the_worktree_list(&state).pending_branch, None);
+
+        state.branches.branches[1].name = BranchName::from_bytes(b"x\xff");
+        press_char(&mut state, 'a');
+        assert!(matches!(
+            state.popups.last(),
+            Some(Popup::Prompt { input, .. }) if input.text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn submitting_adds_for_the_branch_taken_when_a_was_pressed() {
+        let mut state = asking_for_wip();
+        // A reload moves the selection while the path is typed.
+        let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
+        state.update(branches_loaded(tag, three_branches()));
+        state.branches.selected = Some(0);
+        let busy = state.busy;
+        let effects = state.update(AppIntent::SubmitPrompt);
+        match &effects[..] {
+            [Effect::AddWorktree { tag, path, branch }] => {
+                assert_eq!(path, "../a-wip");
+                assert_eq!(*branch, BranchName::from("wip"));
+                assert!(tag.user);
+                assert_eq!(the_worktree_list(&state).action_seq, Some(tag.seq));
+            }
+            other => panic!("expected one AddWorktree, got {other:?}"),
+        }
+        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    #[test]
+    fn an_empty_path_keeps_the_prompt_open() {
+        let mut state = asking_for_wip();
+        if let Some(Popup::Prompt { input, .. }) = state.popups.last_mut() {
+            *input = LineInput::with_text("  ");
+        }
+        assert_eq!(state.update(AppIntent::SubmitPrompt), vec![]);
+        assert_eq!(state.notice, Some("Type a path for the worktree".into()));
+        assert_eq!(state.key_focus(), KeyScope::Prompt);
+        assert_eq!(
+            state.update(AppIntent::AddWorktreeAt("a\tb".into())),
+            vec![]
+        );
+        assert_eq!(
+            state.notice,
+            Some("The path has a control character".into())
+        );
+        assert!(the_worktree_list(&state).pending_branch.is_some());
+    }
+
+    #[test]
+    fn a_is_disabled_on_another_tab_or_for_a_branch_checked_out_elsewhere() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        state.branches.selected = Some(1);
+        assert_eq!(press_char(&mut state, 'a'), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("Branch is already checked out in a worktree".into())
+        );
+        state.branches.tab = BranchesTab::Remotes;
+        state.branches.selected = Some(2);
+        press_char(&mut state, 'a');
+        assert_eq!(
+            state.notice,
+            Some("Select a local branch in the Branches panel".into())
+        );
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    /// The add submitted from [`asking_for_wip`], and its tag.
+    fn adding() -> (AppState, Tag) {
+        let mut state = asking_for_wip();
+        let tag = match &state.update(AppIntent::SubmitPrompt)[..] {
+            [Effect::AddWorktree { tag, .. }] => *tag,
+            other => panic!("expected AddWorktree, got {other:?}"),
+        };
+        (state, tag)
+    }
+
+    #[test]
+    fn a_finished_add_says_so_and_reloads_the_list_and_branches() {
+        let (mut state, tag) = adding();
+        let effects = state.update(AppIntent::WorktreeAdded {
+            tag,
+            result: Ok("/r/a-wip".into()),
+        });
+        assert_eq!(
+            state.notice,
+            Some("Worktree added; Enter switches to it".into())
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadWorktrees { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadBranches { .. }))
+        );
+
+        let (mut state, tag) = adding();
+        state.update(AppIntent::WorktreeAdded {
+            tag,
+            result: Err("fatal: '/r/a-wip' already exists".into()),
+        });
+        match state.popups.last() {
+            Some(Popup::Error(error)) => assert_eq!(error.title, "Could not add worktree"),
+            other => panic!("expected the error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn d_on_the_main_or_current_worktree_is_disabled() {
+        let mut state = with_worktrees(four_worktrees(), 0);
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("The main worktree cannot be removed".into())
+        );
+
+        let mut state = with_worktrees(four_worktrees(), 1);
+        state.repo = Some("/r/a-topic".into());
+        press_char(&mut state, 'd');
+        assert_eq!(
+            state.notice,
+            Some("Switch to another worktree first".into())
+        );
+
+        let mut locked = four_worktrees();
+        locked[1].locked = true;
+        let mut state = with_worktrees(locked, 1);
+        press_char(&mut state, 'd');
+        assert_eq!(state.notice, Some("Worktree is locked".into()));
+
+        let mut state = with_worktrees(four_worktrees(), 3);
+        press_char(&mut state, 'd');
+        assert_eq!(
+            state.notice,
+            Some("Path cannot be read safely with this Git".into())
+        );
+
+        let mut state = with_worktrees(four_worktrees(), 1);
+        state.op_seq = Some(99);
+        press_char(&mut state, 'd');
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    #[test]
+    fn d_asks_and_only_y_removes_the_path_it_asked_about() {
+        let mut state = with_worktrees(four_worktrees(), 1);
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::RemoveWorktree);
+        match state.popups.last() {
+            Some(Popup::RemoveWorktree(confirm)) => {
+                assert_eq!(confirm.path, RepoPath::from("/r/a-topic"));
+                assert!(
+                    confirm
+                        .question()
+                        .starts_with("Remove worktree /r/a-topic?")
+                );
+            }
+            other => panic!("expected the question, got {other:?}"),
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::RemoveWorktree);
+
+        // A reload that moves the cursor does not change the answer.
+        state.update(AppIntent::WorktreeNext);
+        match &press_char(&mut state, 'y')[..] {
+            [Effect::RemoveWorktree { tag, path }] => {
+                assert_eq!(*path, RepoPath::from("/r/a-topic"));
+                assert!(tag.user);
+            }
+            other => panic!("expected one RemoveWorktree, got {other:?}"),
+        }
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    #[test]
+    fn n_or_esc_closes_the_question_and_removes_nothing() {
+        for key in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = with_worktrees(four_worktrees(), 1);
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, key), vec![]);
+            assert_eq!(state.key_focus(), KeyScope::Worktrees, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_finished_remove_reloads_and_a_failed_one_shows_gits_words() {
+        let mut state = with_worktrees(four_worktrees(), 1);
+        press_char(&mut state, 'd');
+        let tag = match &press_char(&mut state, 'y')[..] {
+            [Effect::RemoveWorktree { tag, .. }] => *tag,
+            other => panic!("expected RemoveWorktree, got {other:?}"),
+        };
+        let mut failed = state.clone();
+        let effects = state.update(AppIntent::WorktreeRemoved {
+            tag,
+            result: Ok(()),
+        });
+        assert_eq!(state.notice, Some("Worktree removed".into()));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadWorktrees { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadBranches { .. }))
+        );
+
+        failed.update(AppIntent::WorktreeRemoved {
+            tag,
+            result: Err("fatal: contains modified or untracked files".into()),
+        });
+        match failed.popups.last() {
+            Some(Popup::Error(error)) => {
+                assert_eq!(error.title, "Could not remove worktree");
+                assert!(error.message.contains("untracked"));
+            }
+            other => panic!("expected the error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stale_worktree_results_are_dropped_but_still_lower_busy() {
+        // A load for an older seq, or an older generation.
+        let mut state = with_branches();
+        state.repo = Some("/r/a".into());
+        let old = worktrees_tag(&press_char(&mut state, 'W'));
+        let new = worktrees_tag(&state.update(AppIntent::OpenWorktrees));
+        let busy = state.busy;
+        state.update(AppIntent::WorktreesLoaded {
+            tag: old,
+            result: Ok(four_worktrees()),
+        });
+        let stale = Tag {
+            generation: new.generation + 1,
+            ..new
+        };
+        state.update(AppIntent::WorktreesLoaded {
+            tag: stale,
+            result: Ok(four_worktrees()),
+        });
+        assert_eq!(the_worktree_list(&state).items, None);
+        assert_eq!(state.busy, busy - 2);
+
+        // An add whose popup was closed, and a remove from an older ask.
+        let (mut state, tag) = adding();
+        state.update(AppIntent::PopPopup);
+        let busy = state.busy;
+        assert_eq!(
+            state.update(AppIntent::WorktreeAdded {
+                tag,
+                result: Err("boom".into()),
+            }),
+            vec![]
+        );
+        assert!(state.popups.is_empty());
+        assert_eq!(state.busy, busy - 1);
+
+        let mut state = with_worktrees(four_worktrees(), 1);
+        press_char(&mut state, 'd');
+        let tag = match &press_char(&mut state, 'y')[..] {
+            [Effect::RemoveWorktree { tag, .. }] => *tag,
+            other => panic!("expected RemoveWorktree, got {other:?}"),
+        };
+        let old = Tag {
+            seq: tag.seq - 1,
+            ..tag
+        };
+        assert_eq!(
+            state.update(AppIntent::WorktreeRemoved {
+                tag: old,
+                result: Err("boom".into()),
+            }),
+            vec![]
+        );
+        assert_eq!(state.key_focus(), KeyScope::Worktrees);
+        let gone = Tag {
+            generation: tag.generation + 1,
+            ..tag
+        };
+        assert_eq!(
+            state.update(AppIntent::WorktreeRemoved {
+                tag: gone,
+                result: Ok(()),
+            }),
+            vec![]
         );
     }
 

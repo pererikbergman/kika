@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::custom_command::{CommandFailure, OutputMode};
 use crate::effect::Tag;
 use crate::git::GitRunner;
+use crate::git::cherry_pick;
 use crate::git::diff::terminal_safe;
 use crate::git::ops::{GitOp, commit_command, op_command, run_op};
 use crate::git::path::RepoPath;
@@ -92,11 +93,29 @@ pub fn execute_as(
             tag,
             op,
         },
-        HandOff::Attached { tag, op } => AppIntent::OpFinished {
-            result: attached_command(&op, exe).and_then(|cmd| run_on_terminal(cmd, runner, pause)),
-            tag,
-            op,
-        },
+        HandOff::Attached { tag, op } => {
+            // A paste picks parents first, which only git can say; asked
+            // here, just before the picks, so the order is the branch's now.
+            let op = match op {
+                GitOp::CherryPick(picks) => match cherry_pick::ordered(runner, &picks) {
+                    Ok(ordered) => GitOp::CherryPick(ordered),
+                    Err(error) => {
+                        return AppIntent::OpFinished {
+                            tag,
+                            op: GitOp::CherryPick(picks),
+                            result: Err(error),
+                        };
+                    }
+                },
+                op => op,
+            };
+            AppIntent::OpFinished {
+                result: attached_command(&op, exe)
+                    .and_then(|cmd| run_on_terminal(cmd, runner, pause)),
+                tag,
+                op,
+            }
+        }
         HandOff::OpenFile { path, line } => {
             let file = workdir.join(path.as_os_str());
             let result = editor(runner).and_then(|editor| launch(&editor, &file, line, workdir));
@@ -935,6 +954,64 @@ mod tests {
                         .into())
                 ),
                 1
+            )
+        );
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_paste_picks_in_the_order_git_gives_and_reports_the_ordered_op() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let id = |hex: &str| crate::git::commit_files::CommitId::parse(hex).unwrap();
+        let runner = FakeRunner::new()
+            .expect(
+                &[
+                    "rev-list",
+                    "--topo-order",
+                    "--reverse",
+                    &b,
+                    &a,
+                    "--not",
+                    "HEAD",
+                    "--",
+                ],
+                ok(format!("{a}\n{b}\n").as_bytes()),
+            )
+            .expect_attached(&["cherry-pick", &a, &b], true);
+        let copied = GitOp::CherryPick(vec![id(&b), id(&a)]);
+        let picked = GitOp::CherryPick(vec![id(&a), id(&b)]);
+        assert_eq!(
+            attached_with(&runner, &copied),
+            (finished(&picked, Ok(())), 0)
+        );
+        runner.assert_done();
+        assert_eq!(runner.inputs(), [None, None]);
+    }
+
+    #[test]
+    fn a_pick_already_on_the_branch_starts_nothing_and_says_which() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let id = |hex: &str| crate::git::commit_files::CommitId::parse(hex).unwrap();
+        // No attached run is expected, so the fake would panic on one.
+        let runner = FakeRunner::new().expect(
+            &[
+                "rev-list",
+                "--topo-order",
+                "--reverse",
+                &a,
+                &b,
+                "--not",
+                "HEAD",
+                "--",
+            ],
+            ok(format!("{b}\n").as_bytes()),
+        );
+        let op = GitOp::CherryPick(vec![id(&a), id(&b)]);
+        assert_eq!(
+            attached_with(&runner, &op),
+            (
+                finished(&op, Err("aaaaaaa is already on the current branch".into())),
+                0
             )
         );
         runner.assert_done();

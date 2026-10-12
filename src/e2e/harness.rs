@@ -268,7 +268,7 @@ impl Harness {
 
 /// Whether nothing more will change without input: no status load or Git
 /// operation in flight, no background or recent-list load pending, the
-/// diff settled and no commits page or markers on their way.
+/// diff settled and no commits page, markers or reflog on their way.
 /// Diff streams and background loads stay out of `busy`, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
@@ -286,6 +286,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && state.commits.markers_seq.is_none()
         && state.commits.tips_seq.is_none()
         && state.commits.todo_seq.is_none()
+        && state.commits.reflog.seq.is_none()
 }
 
 /// Kika's hidden sequence-editor mode, for the script

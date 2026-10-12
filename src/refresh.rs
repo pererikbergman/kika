@@ -73,10 +73,12 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         | GitOp::InteractiveRebase(_)
         | GitOp::CheckoutCommit(_)
         | GitOp::Revert(_)
+        | GitOp::CherryPick(_)
         | GitOp::Reset { .. }
         | GitOp::Continue(_)
         | GitOp::Skip(_)
-        | GitOp::Abort(_) => (
+        | GitOp::Abort(_)
+        | GitOp::Travel { .. } => (
             &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
             Selection::KeepPath,
         ),
@@ -89,6 +91,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         }
         // A new remote has no branches until the user fetches.
         GitOp::AddRemote { .. } => (&[Scope::Branches][..], Selection::KeepPath),
+        // Tags list with the branches; nothing else shows them.
+        GitOp::CreateTag { .. } | GitOp::DeleteTag { .. } => {
+            (&[Scope::Branches][..], Selection::KeepPath)
+        }
         // These rename or delete remote-tracking refs, which upstreams and
         // the log's markers name.
         GitOp::RenameRemote { .. } | GitOp::RemoveRemote(_) => (
@@ -102,6 +108,13 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
         GitOp::SubmoduleInit(_) | GitOp::SubmoduleUpdate(_) => {
             (&[Scope::Files, Scope::Submodules][..], Selection::KeepPath)
         }
+        // A mark can check out the next commit to test, and a reset goes
+        // back to where the bisect started; both change what the Status
+        // panel says of the bisect.
+        GitOp::BisectMark { .. } | GitOp::BisectReset => (
+            &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits][..],
+            Selection::KeepPath,
+        ),
     };
     RefreshPlan {
         scopes: expand(scopes.iter().copied().collect()),
@@ -112,10 +125,10 @@ pub fn plan(op: &GitOp) -> RefreshPlan {
 /// What a fetch, pull or push makes stale. Each moves remote refs, so
 /// ahead/behind and the log's markers; a pull also moves `HEAD` and
 /// changes the worktree.
-pub fn remote_plan(op: RemoteOp) -> RefreshPlan {
+pub fn remote_plan(op: &RemoteOp) -> RefreshPlan {
     let scopes: &[Scope] = match op {
         RemoteOp::Pull => &[Scope::Files, Scope::Branch, Scope::Branches, Scope::Commits],
-        RemoteOp::Fetch | RemoteOp::Push { .. } => {
+        RemoteOp::Fetch | RemoteOp::Push { .. } | RemoteOp::PushTag { .. } => {
             &[Scope::Branch, Scope::Branches, Scope::Commits]
         }
     };
@@ -235,11 +248,28 @@ mod tests {
         let ops = [
             GitOp::CheckoutCommit(oid()),
             GitOp::Revert(oid()),
+            GitOp::CherryPick(vec![oid()]),
             GitOp::Reset {
                 to: oid(),
                 mode: ResetMode::Hard,
             },
             GitOp::InteractiveRebase(crate::git::rebase_plan::sample()),
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Undo,
+                step: crate::git::undo::Step::MoveTo(oid()),
+                expect: crate::git::undo::Expected {
+                    head_ref: None,
+                    oid: oid(),
+                },
+            },
+            GitOp::Travel {
+                direction: crate::git::undo::Direction::Redo,
+                step: crate::git::undo::Step::CheckoutBranch("main".into()),
+                expect: crate::git::undo::Expected {
+                    head_ref: Some(b"refs/heads/side".to_vec()),
+                    oid: oid(),
+                },
+            },
         ];
         for op in ops {
             assert_eq!(
@@ -272,6 +302,36 @@ mod tests {
             GitOp::Continue(Operation::Merge),
             GitOp::Skip(Operation::Rebase),
             GitOp::Abort(Operation::CherryPick),
+        ];
+        for op in ops {
+            assert_eq!(
+                plan(&op),
+                RefreshPlan {
+                    scopes: set(&[
+                        Scope::Files,
+                        Scope::Branch,
+                        Scope::Diff,
+                        Scope::Branches,
+                        Scope::Commits
+                    ]),
+                    selection: Selection::KeepPath,
+                },
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bisect_marks_and_the_reset_reload_everything_head_touches() {
+        use crate::git::bisect::BisectMark;
+        use crate::git::commit_files::CommitId;
+        let ops = [
+            GitOp::BisectMark {
+                mark: BisectMark::Good,
+                commit: CommitId::parse("abc").unwrap(),
+                start: true,
+            },
+            GitOp::BisectReset,
         ];
         for op in ops {
             assert_eq!(
@@ -355,6 +415,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tag_ops_reload_only_the_lists_and_a_tag_push_what_a_push_does() {
+        let oid = "1".repeat(40);
+        let create = GitOp::CreateTag {
+            name: "v1".into(),
+            target: crate::git::commit_files::CommitId::parse(&oid).unwrap(),
+            message: None,
+        };
+        let delete = GitOp::DeleteTag {
+            name: "v1".into(),
+            oid,
+        };
+        for op in [create, delete] {
+            assert_eq!(plan(&op).scopes, set(&[Scope::Branches]), "{op:?}");
+        }
+        let push = RemoteOp::Push {
+            force_with_lease: false,
+        };
+        let tag = RemoteOp::PushTag {
+            remote: "origin".into(),
+            tag: "v1".into(),
+        };
+        assert_eq!(remote_plan(&tag), remote_plan(&push));
+    }
+
     fn remote_branch() -> crate::git::remotes::RemoteBranch {
         crate::git::remotes::RemoteBranch {
             remote: "origin".into(),
@@ -370,13 +455,13 @@ mod tests {
         };
         for op in [RemoteOp::Fetch, push] {
             assert_eq!(
-                remote_plan(op).scopes,
+                remote_plan(&op).scopes,
                 set(&[Scope::Branch, Scope::Branches, Scope::Commits]),
                 "{op:?}"
             );
         }
         assert_eq!(
-            remote_plan(RemoteOp::Pull).scopes,
+            remote_plan(&RemoteOp::Pull).scopes,
             set(&[
                 Scope::Files,
                 Scope::Branch,

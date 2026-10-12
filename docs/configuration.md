@@ -412,6 +412,8 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.more_context` | `+`, `=` | Show more context lines in the diff | |
 | `workspace.less_context` | `-` | Show fewer context lines in the diff | |
 | `workspace.whitespace` | `w` | Hide or show whitespace-only changes | |
+| `workspace.worktrees` | `W` | Show worktrees, to switch to, add or remove one | |
+| `workspace.command_log` | `@` | Show the git commands Kika ran | |
 | `workspace.recent` | `O` | Show recent repositories, to switch to one | |
 | `workspace.focus_status` | `1` | Focus the Status panel | |
 | `workspace.focus_files` | `2` | Focus the Files panel | |
@@ -423,6 +425,26 @@ means a repository's `.kika.toml` cannot change it.
 | `workspace.prev_panel` | `shift-tab` | Focus the previous panel | |
 | `workspace.zoom` | `z` | Zoom the focused panel: normal, half, full | |
 | `workspace.cancel_command` | `ctrl-x` | Stop the running command | |
+| `workspace.undo` | `ctrl-z` | Undo the last commit, checkout, reset or rebase, saying first what moves | locked |
+| `workspace.redo` | `ctrl-r` | Redo what the last undo reversed, saying first what moves | locked |
+
+`ctrl-z` and `ctrl-r` read `HEAD`'s reflog afresh, find the last action (a
+commit, an amend, a merge, a pull, a cherry-pick, a revert, a reset, a
+checkout or a whole rebase) and show what reversing it would do: which ref
+moves, from which commit to which, and whether the files change. Nothing moves
+until you press `y`. A branch moves with `git reset --keep`, so git itself
+refuses when a local change or an untracked file is in the way; Kika also
+refuses while tracked files have changes. Ignored files in the way are
+replaced, as git always treats them, and the question says so. A rebase is
+undone to where the rebased branch's own reflog says it was. If `HEAD` moves
+while the question is open, `y` changes nothing and says so. Undo and redo refuse while `HEAD`
+points at a ref that is not a local branch, such as a remote-tracking ref. A checkout is reversed with a
+checkout, which carries uncommitted changes over. Undo and redo wait while an
+operation (a merge, rebase, cherry-pick, revert or bisect) is in progress.
+Kika marks its own steps in the reflog as `kika undo` and `kika redo`, so
+pressing `ctrl-z` again goes one action further back, and any new action of
+your own ends what `ctrl-r` can redo. Only the newest 1000 reflog entries are
+read. A stash, a branch deletion and an aborted rebase cannot be undone.
 
 ### File list
 
@@ -455,7 +477,8 @@ means a repository's `.kika.toml` cannot change it.
 | `branches.merge` | `m` | Merge the selected branch into the current one, or rebase onto it | locked |
 | `branches.set_upstream` | `u` | Set the remote branch the selected branch tracks | |
 | `branches.unset_upstream` | `U` | Stop the selected branch tracking its upstream | |
-| `branches.switch_tab` | `[`, `]` | Show the remotes and their branches | |
+| `branches.switch_tab` | `]` | Show the remotes and their branches | |
+| `branches.prev_tab` | `[` | Show the tags | |
 
 While the Branches panel has focus, the diff pane shows the selected branch's
 commits, and `J`, `K`, `pgdn` and `pgup` scroll them.
@@ -472,7 +495,11 @@ remote branch Kika has listed; fetch first if it is new.
 
 ### Remotes
 
-`[` or `]` in the Branches panel shows the Remotes tab: each remote with its
+The Branches panel has three tabs: Local, Remotes and Tags. `]` shows the
+next one and `[` the one before, wrapping round. A `switch_tab` key you
+remapped still goes forward.
+
+`]` from the Local tab shows the Remotes tab: each remote with its
 URL (any user name and password in it left out), and its remote-tracking
 branches below it.
 
@@ -484,7 +511,8 @@ branches below it.
 | `remotes.add` | `a` | Add a remote; fetch to see its branches | |
 | `remotes.rename` | `R` | Rename the selected remote | |
 | `remotes.remove` | `d` | Remove the selected remote and its remote-tracking branches, asking first | locked |
-| `remotes.switch_tab` | `[`, `]` | Show the local branches | |
+| `remotes.switch_tab` | `]` | Show the tags | |
+| `remotes.prev_tab` | `[` | Show the local branches | |
 
 None of these reaches the network. A remote you add shows no branches until
 you fetch with `f`. Kika refuses a remote URL that uses the `ext` or `fd`
@@ -493,17 +521,49 @@ or use a file descriptor on every fetch; add such a remote with git directly. A 
 (starting with `-`), or refs left under a name no remote has, cannot be
 renamed or removed from Kika.
 
+### Tags
+
+The Tags tab lists every tag on a commit, newest first: its name, the commit
+it points at, its date and subject, with `◆` before an annotated tag. The
+diff pane shows the selected tag's commits.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `tags.next` | `j`, `down` | Select the next tag | |
+| `tags.prev` | `k`, `up` | Select the previous tag | |
+| `tags.delete` | `d` | Delete the selected tag here, not on any remote, asking first | locked |
+| `tags.push` | `P` | Push the selected tag to the upstream's remote, or the only remote | locked |
+| `tags.switch_tab` | `]` | Show the local branches | |
+| `tags.prev_tab` | `[` | Show the remotes and their branches | |
+
+`d` deletes only the local tag, and only if it still points where it did when
+it was listed. `P` pushes the one tag, never forced, to the current branch's
+upstream remote, or to the only remote there is; with several remotes and no
+upstream it does nothing and says so. On this tab `P` pushes the tag, not the
+branch. Pushing is the only key here that reaches the network.
+
 ### Status
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `status.continue` | `c` | Continue the merge, rebase, cherry-pick or revert once conflicts are resolved | locked |
-| `status.skip` | `s` | Skip the commit the rebase, cherry-pick or revert stopped on | locked |
-| `status.abort` | `a` | Abort the operation in progress, asking first | locked |
+| `status.skip` | `s` | Skip the commit the rebase, cherry-pick or revert stopped on, or the one a bisect is testing | locked |
+| `status.abort` | `a` | Abort the operation in progress, or reset the bisect, asking first | locked |
+| `status.bisect_good` | `g` | Mark the commit the bisect is testing good | locked |
+| `status.bisect_bad` | `b` | Mark the commit the bisect is testing bad | locked |
 
 These act on the merge, rebase, cherry-pick or revert the Status panel shows
 in progress. `cherry-pick --skip` and `revert --skip` need git 2.23 or newer;
 an older git refuses them and changes nothing.
+
+While only a bisect is in progress, the panel shows its good, bad and skipped
+counts, the commit being tested, where the bisect started and, once git names
+it, the first bad commit. `g`, `b` and `s` mark the commit being tested good,
+bad or skipped, and `a` asks, then resets the bisect: its marks are dropped and
+HEAD goes back to where it started. Only `y` answers that question, not Enter.
+A merge, rebase, cherry-pick or revert in progress still comes first for `s`
+and `a`. A bisect started on the command line with its own terms is shown and
+can be reset, but not marked from Kika.
 
 ### Commits
 
@@ -524,6 +584,13 @@ an older git refuses them and changes nothing.
 | `commits.edit` | `E` | Stop the rebase at the selected commit, to amend it, then continue from Status | locked |
 | `commits.break` | `b` | Stop the rebase right after the selected commit, or toggle the stop after a todo row | locked |
 | `commits.pick` | `u` | Pick the selected todo row as it is, undoing its other action | locked |
+| `commits.switch_tab` | `[`, `]` | Show HEAD's reflog: everywhere HEAD has been | |
+| `commits.tag` | `t` | Tag the selected commit with a lightweight tag | |
+| `commits.tag_annotated` | `T` | Tag the selected commit with an annotated tag and a message | |
+| `commits.copy` | `c` | Add the selected commit to the copied set, or take it out | |
+| `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
+| `commits.clear_copied` | `C` | Clear the copied set | |
+| `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -533,6 +600,18 @@ merge commit cannot be reverted. `X` opens a menu: soft keeps the index and
 the worktree, mixed keeps the worktree and resets the index, and hard throws
 away every uncommitted change, so it asks first. Revert and reset wait until
 an operation in progress is finished or aborted.
+
+`B` opens the Bisect menu: mark the selected commit bad or good, skip it, or
+reset the bisect. With no bisect in progress, the first good or bad mark
+starts one; it moves nothing until there is both a good and a bad commit, then
+git checks out a commit to test and the Status panel takes over. A bisect
+does not start while tracked files have changes, or while a merge, rebase,
+cherry-pick or revert is in progress. Kika never runs `git bisect run`.
+
+`t` asks for a tag name and tags the selected commit; `T` then asks for a
+one-line message too and makes an annotated tag. The commit is the one
+selected when you pressed the key. A name git would refuse, one starting with
+`-`, or `@` or `HEAD`, is refused before git runs, and the prompt stays open.
 
 `s`, `F`, `d` and `e` rewrite history with `git rebase -i --autostash` on the
 terminal: uncommitted changes are stashed and put back (as git's autostash
@@ -566,6 +645,33 @@ after it. Each change is checked and written to git's todo list at once,
 only if the list on disk is still the one shown; git's help comments are not
 kept. A commit never moves past another branch's update line. A todo list
 holding commands Kika does not edit, such as `exec`, is shown but not edited.
+
+`c` copies the selected commit, or takes it out of the copied set; mark each
+commit you want in turn. Copied rows show `+` before their hash, and the
+panel's title and the bottom bar count them; in the Commits panel the bar
+puts `v` and `C` first while anything is copied. Check out another branch and press `v` to
+cherry-pick the copied commits onto it with one `git cherry-pick` on the
+terminal, so hooks and signing work as on the command line. They are picked
+parents first, whatever order you copied them in. A merge commit cannot be
+copied, a commit already on the current branch is refused before git runs, and
+`v` waits for a clean worktree (untracked files may stay) and for an operation
+in progress to finish. A pick that stops on conflicts, or on a commit the
+branch already has (an empty pick), is resolved, continued, skipped or aborted
+from the Status panel. The set stays after a paste, so it
+can be pasted onto another branch too; `C` clears it, and so does switching
+to another repository. The commits a paste makes can be undone with `ctrl-z`.
+
+### Reflog (the Commits panel's Reflog tab)
+
+Each row is one place `HEAD` has been, newest first: its commit, what moved
+it, and git's message. The list is read-only; `ctrl-z` and `ctrl-r` undo and
+redo from it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `reflog.next` | `j`, `down` | Select the next reflog entry | |
+| `reflog.prev` | `k`, `up` | Select the previous reflog entry | |
+| `reflog.switch_tab` | `[`, `]` | Show the log | |
 
 ### Commit files (a commit opened from the Commits panel)
 
@@ -764,6 +870,9 @@ not answer it.
 | `remove_remote.yes` | `y` | Yes, remove the remote and its remote-tracking branches | locked |
 | `remove_remote.no` | `n`, `esc` | No, keep the remote | locked |
 | `remove_remote.quit` | `ctrl-c` | Quit Kika | locked |
+| `delete_tag.yes` | `y` | Yes, delete the tag here | locked |
+| `delete_tag.no` | `n`, `esc` | No, keep the tag | locked |
+| `delete_tag.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Reset hard?
 
@@ -776,6 +885,17 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `reset_hard.no` | `n`, `esc` | No, keep the changes | locked |
 | `reset_hard.quit` | `ctrl-c` | Quit Kika | locked |
 
+### Undo or redo?
+
+The question lists what would happen. An undo can move a branch away from
+commits, so `enter` does not answer it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `travel.yes` | `y` | Yes, do what the question says | locked |
+| `travel.no` | `n`, `esc` | No, leave everything where it is | locked |
+| `travel.quit` | `ctrl-c` | Quit Kika | locked |
+
 ### Submodule list
 
 | Binding id | Default keys | Action | Repo file |
@@ -787,6 +907,46 @@ A hard reset throws away every uncommitted change, staged and unstaged, so
 | `submodules.init` | `i` | Record the selected submodule's URL without cloning it | locked |
 | `submodules.close` | `esc`, `q` | Close the list | |
 | `submodules.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Worktree list
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `worktrees.next` | `j`, `down` | Select the next worktree | |
+| `worktrees.prev` | `k`, `up` | Select the previous worktree | |
+| `worktrees.open` | `enter` | Switch to the selected worktree | locked |
+| `worktrees.add` | `a` | Add a worktree for the local branch selected in the Branches panel | locked |
+| `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
+| `worktrees.close` | `esc`, `q` | Close the list | |
+| `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Command log
+
+Every git command Kika ran this session, oldest first, with how it ended and
+how long it took. Lines never show env, stdin, credentials in URLs, secret
+config values or message bodies. `@` opens it with any modifiers, since
+layouts type it with Shift, AltGr or Option.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `command_log.next` | `j`, `down` | Select the next command | |
+| `command_log.prev` | `k`, `up` | Select the previous command | |
+| `command_log.page_down` | `pgdn` | Move a page down | |
+| `command_log.page_up` | `pgup` | Move a page up | |
+| `command_log.close` | `esc`, `q` | Close the log | |
+| `command_log.quit` | `ctrl-c` | Quit Kika | locked |
+
+### Remove this worktree?
+
+Removing a worktree deletes its directory, so `enter` does not answer it. Git
+refuses a worktree with uncommitted or untracked changes, or a locked one, and
+Kika never forces it.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `remove_worktree.yes` | `y` | Yes, remove the worktree and its directory | locked |
+| `remove_worktree.no` | `n`, `esc` | No, keep the worktree | locked |
+| `remove_worktree.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Recent repositories
 
