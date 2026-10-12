@@ -22,6 +22,8 @@ pub enum InputTarget {
     TagsFilter,
     /// Narrows the Commits panel's Reflog tab.
     ReflogFilter,
+    /// Narrows the Stash panel's list.
+    StashFilter,
     DiffSearch,
     /// Searches the diff preview a side panel shows.
     PreviewSearch,
@@ -51,6 +53,7 @@ impl InputTarget {
             | InputTarget::RemotesFilter
             | InputTarget::TagsFilter
             | InputTarget::ReflogFilter
+            | InputTarget::StashFilter
             | InputTarget::DiffSearch
             | InputTarget::PreviewSearch
             | InputTarget::BlameSearch
