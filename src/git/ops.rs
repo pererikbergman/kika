@@ -447,9 +447,10 @@ impl GitOp {
     /// takes, once, in the order first seen, with `-u` if any of them is
     /// untracked. Nothing marked, or any conflict among them, stashes
     /// nothing, so a push never runs on a set the user did not mean. Nor
-    /// does a rename beside an untracked file: with `-u`, current git saves the
-    /// stash and then fails to clean up the rename's old path, leaving the
-    /// files in place as well as in the stash.
+    /// does a staged rename or deletion beside an untracked file: with
+    /// `-u`, current git saves the stash and then fails to clean up a path
+    /// that is in neither the index nor the worktree, leaving the files in
+    /// place as well as in the stash.
     pub fn stash_files_for(entries: &[&FileEntry]) -> Option<(StashMode, Vec<RepoPath>)> {
         if entries.is_empty() {
             return None;
@@ -467,8 +468,10 @@ impl GitOp {
                 }
             }
         }
-        let renamed = entries.iter().any(|e| e.orig_path.is_some());
-        if renamed && mode == StashMode::IncludeUntracked {
+        let gone = entries
+            .iter()
+            .any(|e| e.orig_path.is_some() || e.index == 'D');
+        if gone && mode == StashMode::IncludeUntracked {
             return None;
         }
         Some((mode, paths))
@@ -3749,6 +3752,18 @@ mod tests {
         // A rename beside an untracked file is refused rather than half
         // done.
         assert_eq!(GitOp::stash_files_for(&[&renamed, &untracked]), None);
+        // So is a staged deletion; an unstaged one is still on the index.
+        let staged_deleted = entry("gone.rs", 'D', '.', EntryKind::Changed);
+        let unstaged_deleted = entry("gone.rs", '.', 'D', EntryKind::Changed);
+        assert_eq!(GitOp::stash_files_for(&[&untracked, &staged_deleted]), None);
+        assert_eq!(
+            GitOp::stash_files_for(&[&unstaged_deleted, &untracked]),
+            Some((StashMode::IncludeUntracked, paths(&["gone.rs", "new.rs"])))
+        );
+        assert_eq!(
+            GitOp::stash_files_for(&[&staged_deleted]),
+            Some((StashMode::All, paths(&["gone.rs"])))
+        );
         // Nothing, or any conflict, stashes nothing.
         let conflicted = entry("both.rs", 'U', 'U', EntryKind::Conflicted);
         assert_eq!(GitOp::stash_files_for(&[]), None);

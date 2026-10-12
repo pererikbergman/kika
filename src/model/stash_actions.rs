@@ -295,7 +295,18 @@ impl AppState {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
+        // A range's set is checked again: a reload while the message was
+        // typed may have cleared the range or changed what its files need,
+        // and a push must never take a set other than the one shown.
         if from_range {
+            let (entries, still_range) = self.files_marked();
+            let now = still_range
+                .then(|| GitOp::stash_files_for(&entries))
+                .flatten();
+            if now.as_ref() != Some(&(mode, paths.clone())) {
+                self.notice = Some(super::STASH_SET_CHANGED.into());
+                return vec![];
+            }
             self.files_anchor = None;
         }
         let message = Some(text.trim())

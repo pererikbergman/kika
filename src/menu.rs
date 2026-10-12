@@ -265,6 +265,10 @@ pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
+/// Why a set with a staged rename or deletion and an untracked file is
+/// refused; see `GitOp::stash_files_for`.
+pub(crate) const STASH_APART: &str = "Stash renamed or deleted files apart from untracked ones";
+
 /// Stashing selected files acts on the marked set: the Files range when
 /// one is set, else the row under the cursor. A filter that hides the
 /// cursor's row refuses it, as other row actions are refused.
@@ -276,7 +280,7 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
             if entries.is_empty() {
                 Some("No file selected".into())
             } else if GitOp::stash_files_for(&entries).is_none() {
-                Some("Stash renamed files apart from untracked ones".into())
+                Some(STASH_APART.into())
             } else {
                 None
             }

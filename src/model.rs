@@ -5622,6 +5622,9 @@ impl AppState {
 
 /// Said when a changed filter drops the range made over the old rows.
 const SELECTION_CLEARED: &str = "Selection cleared";
+/// Said when a range's stash is refused because its files changed while
+/// the message was typed.
+const STASH_SET_CHANGED: &str = "Nothing stashed: the selected files changed";
 /// Said when a reload changed which files the Files range covers.
 const RANGE_FILES_CHANGED: &str = "Selection cleared: the file list changed";
 
@@ -19736,7 +19739,7 @@ mod tests {
         press_char(&mut state, 'V');
         assert_eq!(crate::menu::stash_file_disabled(&state), None);
         press_char(&mut state, 'j');
-        let reason = "Stash renamed files apart from untracked ones";
+        let reason = crate::menu::STASH_APART;
         assert_eq!(
             crate::menu::stash_file_disabled(&state),
             Some(reason.into())
@@ -19838,6 +19841,80 @@ mod tests {
                 paths: vec!["b.rs".into()],
             }
         );
+    }
+
+    #[test]
+    fn a_range_with_a_staged_deletion_and_an_untracked_file_is_refused() {
+        let files = vec![changed("gone.rs", 'D', '.'), untracked("u.txt")];
+        let (mut state, _) = with_files(files, 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        assert_eq!(stash_menu_item(&mut state, 3), vec![]);
+        assert_eq!(state.notice, Some(crate::menu::STASH_APART.into()));
+        assert_eq!(state.stash_draft, None);
+    }
+
+    #[test]
+    fn a_reload_that_clears_the_range_under_the_prompt_stashes_nothing() {
+        let files = vec![
+            changed("a.rs", '.', 'M'),
+            changed("b.rs", '.', 'M'),
+            changed("c.rs", '.', 'M'),
+        ];
+        let (mut state, _) = with_files(files.clone(), 24);
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        reload(
+            &mut state,
+            vec![
+                changed("a.rs", '.', 'M'),
+                untracked("ab.rs"),
+                changed("b.rs", '.', 'M'),
+            ],
+        );
+        assert_eq!(state.files_anchor, None);
+        type_text(&mut state, "late");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
+        assert_eq!(state.stash_draft, None);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_range_whose_files_changed_kind_under_the_prompt_stashes_nothing() {
+        let (mut state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", '.', 'M')],
+            24,
+        );
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        // Same paths, so the range stays, but b.rs is now staged as deleted.
+        reload(
+            &mut state,
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", 'D', '.')],
+        );
+        assert!(state.files_anchor.is_some());
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert!(matches!(op, GitOp::StashPush { .. }), "same set, same push");
+
+        let (mut state, _) = with_files(
+            vec![changed("a.rs", '.', 'M'), changed("b.rs", '.', 'M')],
+            24,
+        );
+        press_char(&mut state, 'V');
+        press_char(&mut state, 'j');
+        stash_menu_item(&mut state, 3);
+        // b.rs became untracked: the push would now need -u.
+        reload(
+            &mut state,
+            vec![changed("a.rs", '.', 'M'), untracked("b.rs")],
+        );
+        assert!(state.files_anchor.is_some());
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
+        assert!(state.files_anchor.is_some(), "the range stays to try again");
     }
 
     /// `files` loaded again, as a refresh would.

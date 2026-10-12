@@ -2367,6 +2367,31 @@ async fn stashing_a_range_of_files_takes_those_two_and_leaves_the_others() {
     assert_eq!(untracked, "c.txt\n");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_with_a_staged_deletion_and_an_untracked_file_stashes_nothing() {
+    let repo = on_main().write("u.txt", "new\n");
+    repo.git(["rm", "-q", "--", "a.txt"]);
+    let mut app = Harness::start_sized(&repo, 120, 30).await;
+    let before = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(before, "D  a.txt\n?? u.txt\n");
+
+    app.press(KeyCode::Char('V')).await;
+    app.press(KeyCode::Char('j')).await;
+    app.press(KeyCode::Char('s')).await;
+    for _ in 0..3 {
+        app.press(KeyCode::Char('j')).await;
+    }
+    app.press(KeyCode::Enter).await;
+    assert_eq!(
+        app.state().notice.as_deref(),
+        Some(crate::menu::STASH_APART)
+    );
+
+    assert_eq!(stash_count(&repo), 0);
+    let after = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
+    assert_eq!(after, before);
+}
+
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
     let rows = &app.state().commits.rows;
