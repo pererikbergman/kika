@@ -567,7 +567,7 @@ mod tests {
         let dir = seed(&tmp, &green);
         let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)));
         let ctx = context(Arc::clone(&gh), Some(dir.clone()));
-        let mut state = crate::model::forge_load::tests::forge_state(&branches);
+        let mut state = crate::test_support::forge_state(&branches);
         let effects = state.load_pull_requests();
         let Some(crate::effect::Effect::LoadPullRequests { tag: load_tag, .. }) = effects.first()
         else {
@@ -851,7 +851,7 @@ mod tests {
             cache_dir: Some(cache_dir.clone()),
         };
         let branches: Vec<BranchName> = vec!["main".into()];
-        let mut state = crate::model::forge_load::tests::forge_state(&branches);
+        let mut state = crate::test_support::forge_state(&branches);
         let hosts = hosts();
         for _ in 0..2 {
             state.forge.want_refresh();
@@ -895,7 +895,7 @@ mod tests {
             assert_eq!(text.matches("etag_VALUE").count(), 1, "{text}");
             assert!(text.contains(r#""etag":"W/\"etag_VALUE_9\"""#), "{text}");
         }
-        let rows = crate::branches_view::tests::draw_branches(&state, 80, 12);
+        let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
             rows.iter().all(|r| secrets.iter().all(|s| !r.contains(s))),
             "{rows:?}"

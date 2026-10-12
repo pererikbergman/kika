@@ -3,6 +3,7 @@
 
 use crate::git::commit_files::{CommitFile, CommitRange};
 use crate::list_filter;
+use crate::rows::drawn_path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitFilesList {
@@ -116,16 +117,6 @@ impl CommitFilesList {
 
     pub fn selected_file(&self) -> Option<&CommitFile> {
         self.files.get(self.selected)
-    }
-}
-
-/// A row's path as drawn, with the old name before it for a rename or
-/// copy. The filter matches this and not the status letter, so a row
-/// matches by what the user reads in it.
-pub(crate) fn drawn_path(file: &CommitFile) -> String {
-    match &file.orig_path {
-        Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
-        None => file.path.display().to_string(),
     }
 }
 

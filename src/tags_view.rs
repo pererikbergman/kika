@@ -176,7 +176,7 @@ mod tests {
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "/v 3 of 4 · 2 selected"), "{rows:#?}");
         assert!(!contains(&rows, "  x  "), "{rows:#?}");
-        let reversed = crate::branches_view::tests::reversed_at;
+        let reversed = crate::test_support::reversed_at;
         assert!(reversed(&buffer, "v3  "));
         assert!(reversed(&buffer, "v2  "));
         assert!(!reversed(&buffer, "v1  "));
