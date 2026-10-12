@@ -507,8 +507,8 @@ pub enum AppIntent {
     RemoveRemote,
     /// Remove the remote the open question names.
     ConfirmRemoveRemote,
-    /// Delete the branches or tags, or remove the remotes, the open range
-    /// question names.
+    /// Delete the branches or tags, remove the remotes, or drop the
+    /// stashes the open range question names.
     ConfirmDeleteRange,
     /// Ask which remote branch the selected local branch should track.
     SetUpstream,
@@ -644,6 +644,9 @@ pub enum AppIntent {
     Autosquash,
     /// Autosquash, as the question asked.
     ConfirmAutosquash,
+    /// Drop a log range, as the question asked: the full ids it held then,
+    /// newest first, so a range that changed since is not dropped.
+    ConfirmDropRange(Vec<CommitId>),
     /// Find which commit last touched the staged lines.
     FindFixupBase,
     /// The commits the staged lines come from, or why they are not known.

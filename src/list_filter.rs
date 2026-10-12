@@ -24,6 +24,8 @@ pub enum InputTarget {
     ReflogFilter,
     /// Narrows the files of the commit opened from the Commits panel.
     CommitFilesFilter,
+    /// Narrows the Stash panel's list.
+    StashFilter,
     DiffSearch,
     /// Searches the diff preview a side panel shows.
     PreviewSearch,
@@ -54,6 +56,7 @@ impl InputTarget {
             | InputTarget::TagsFilter
             | InputTarget::ReflogFilter
             | InputTarget::CommitFilesFilter
+            | InputTarget::StashFilter
             | InputTarget::DiffSearch
             | InputTarget::PreviewSearch
             | InputTarget::BlameSearch

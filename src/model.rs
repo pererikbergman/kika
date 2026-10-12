@@ -880,6 +880,9 @@ impl AppState {
             }
             AppIntent::ApplyStash => return self.stash_op(GitOp::StashApply),
             AppIntent::PopStash => return self.stash_op(GitOp::StashPop),
+            AppIntent::DropStash if self.stash.range_anchor.is_some() => {
+                self.ask_delete_range(RangeKind::Stashes)
+            }
             AppIntent::DropStash => self.ask_drop_stash(),
             AppIntent::ConfirmDropStash => return self.confirm_drop_stash(),
             AppIntent::RenameStash => self.ask_rename_stash(),
@@ -1202,7 +1205,13 @@ impl AppState {
                 result,
             } => return self.left_behind_checked(tag, op, head, result),
             AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
+            AppIntent::RewriteCommit(
+                edit @ (rebase_plan::Edit::Squash
+                | rebase_plan::Edit::Fixup
+                | rebase_plan::Edit::Drop),
+            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
+            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
             AppIntent::CreateFixup => return self.create_fixup(),
             AppIntent::Autosquash => self.ask_autosquash(),
@@ -1391,6 +1400,7 @@ impl AppState {
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
             Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
+            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -2169,6 +2179,11 @@ impl AppState {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
+            // Only the count: subjects and the filter are not drawn here.
+            (ConfirmKind::DropRange(ids), _) => Cow::Owned(format!(
+                "Drop {} commits and their changes from the history? (y/n)",
+                ids.len()
+            )),
             _ => Cow::Borrowed(kind.question()),
         }
     }
@@ -5601,6 +5616,7 @@ impl AppState {
                 Some(open) => (InputTarget::CommitFilesFilter, &open.filter),
                 None => return,
             },
+            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
             }
@@ -5658,6 +5674,12 @@ impl AppState {
                     .is_some_and(|open| open.set_filter(text));
                 if moved {
                     return self.commit_file_diff();
+                }
+            }
+            // A stash row drives nothing, so a moved cursor loads nothing.
+            InputTarget::StashFilter => {
+                if self.stash.set_filter(text) {
+                    self.notice = Some(SELECTION_CLEARED.into());
                 }
             }
             InputTarget::DiffSearch => {
@@ -5863,6 +5885,7 @@ impl AppState {
             KeyScope::Branches => self.branches.toggle_range(),
             KeyScope::Remotes => self.branches.remotes.toggle_range(),
             KeyScope::Tags => self.branches.tags.toggle_range(),
+            KeyScope::Stash => self.stash.toggle_range(),
             _ => {}
         }
     }
@@ -5910,6 +5933,10 @@ impl AppState {
                 &mut branches.tags.filter,
             ),
             KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
+            KeyScope::Stash => (
+                self.stash.range_anchor.take().is_some(),
+                &mut self.stash.filter,
+            ),
             _ => return self.update(AppIntent::Quit),
         };
         if cleared {
@@ -6048,7 +6075,7 @@ fn failure_next(op: &GitOp) -> &'static str {
         GitOp::StashApply(_) | GitOp::StashPop(_) => {
             "The file list was reloaded. If git stopped on conflicts, resolve them in the Files panel; the stash is kept."
         }
-        GitOp::StashDrop(_) | GitOp::StashRename { .. } => {
+        GitOp::StashDrop(_) | GitOp::StashDrops(_) | GitOp::StashRename { .. } => {
             "The stash list was reloaded. Fix the cause above, then try again."
         }
         _ => "The file list was reloaded. Fix the cause above, then try again.",
@@ -6179,6 +6206,7 @@ fn failure_title(op: &GitOp) -> &'static str {
         GitOp::StashApply(_) => "Could not apply the stash",
         GitOp::StashPop(_) => "Could not pop the stash",
         GitOp::StashDrop(_) => "Could not drop the stash",
+        GitOp::StashDrops(_) => "Could not drop the stashes",
         GitOp::StashRename { .. } => "Could not rename the stash",
         GitOp::CheckoutTracking { .. } => "Could not check out the remote branch",
         GitOp::SetUpstream { .. } => "Could not set the upstream",
@@ -6210,6 +6238,7 @@ mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
 pub(crate) mod review;
+mod rewrite_range;
 mod stash_actions;
 
 use custom_patch::NO_PATCH;
@@ -18816,6 +18845,198 @@ mod tests {
     }
 
     #[test]
+    fn slash_in_the_stash_panel_narrows_it_as_typed_and_enter_keeps_it() {
+        let mut state = on_stash_one();
+        let mut effects = press_char(&mut state, '/');
+        let input = state.input.as_ref().expect("the input opens");
+        assert_eq!(input.target, InputTarget::StashFilter);
+        assert_eq!(input.target.prompt(), "/");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        for c in "zero".chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        assert_eq!(state.stash.visible(), [0], "by subject");
+        assert_eq!(state.stash.selected, 0, "the hidden cursor follows");
+        for _ in 0..4 {
+            effects.extend(press(&mut state, KeyCode::Backspace));
+        }
+        for c in "{2}".chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        assert_eq!(state.stash.visible(), [2], "by its place");
+        assert_eq!(state.stash.selected, 2);
+        effects.extend(press(&mut state, KeyCode::Enter));
+        assert_eq!(effects, vec![], "the filter asks git nothing");
+        assert_eq!(state.input, None);
+        assert_eq!(state.stash.filter, "{2}");
+        assert_eq!(state.key_focus(), KeyScope::Stash);
+        // `/` again starts from the kept text.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "{2}");
+    }
+
+    #[test]
+    fn a_changed_stash_filter_clears_the_range_and_says_so() {
+        let mut state = on_stash_one();
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        assert_eq!(state.stash.range(), [1, 2]);
+        press_char(&mut state, '/');
+        press_char(&mut state, 'o');
+        assert_eq!(state.stash.range_anchor, None);
+        assert_eq!(state.notice.as_deref(), Some(SELECTION_CLEARED));
+    }
+
+    #[test]
+    fn esc_in_the_stash_panel_clears_the_range_then_the_filter_then_quits() {
+        let mut state = on_stash_one();
+        press_char(&mut state, '/');
+        type_text(&mut state, "main\n");
+        press(&mut state, KeyCode::Char('V'));
+        assert!(state.stash.range_anchor.is_some());
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.stash.range_anchor, None);
+        assert_eq!(state.stash.filter, "main");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(state.stash.filter, "");
+        assert!(!state.should_quit);
+        press(&mut state, KeyCode::Esc);
+        assert!(state.should_quit);
+    }
+
+    /// The Stash panel with a range over all three stashes, the cursor on
+    /// `stash@{2}`.
+    fn stash_range_of_three() -> AppState {
+        let mut state = on_stash_one();
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'j');
+        assert_eq!(state.stash.range(), [0, 1, 2]);
+        state
+    }
+
+    #[test]
+    fn d_over_a_stash_range_asks_once_and_only_y_drops_every_stash_in_it() {
+        let mut state = stash_range_of_three();
+        assert_eq!(press_char(&mut state, 'd'), vec![]);
+        let confirm = match state.popups.as_slice() {
+            [Popup::DeleteRange(confirm)] => confirm.clone(),
+            other => panic!("expected the range question, got {other:?}"),
+        };
+        assert_eq!(confirm.title(), "Drop stashes");
+        assert_eq!(
+            confirm.question(),
+            "Drop 3 stashes (stash@{0}, stash@{1}, stash@{2})? \
+             They cannot be recovered from the stash list. (y/n)"
+        );
+        assert_eq!(state.key_focus(), KeyScope::DeleteRange);
+        let refs = vec![stash_ref(0, "a0"), stash_ref(1, "a1"), stash_ref(2, "a2")];
+
+        // Enter is not an answer.
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.popups.len(), 1);
+        assert_eq!(state.op_seq, None);
+        // A reload under the question moves the list, not the answer.
+        let mut moved = three_stashes();
+        moved.insert(0, stash_entry(0, "f0", "new"));
+        load_stashes(&mut state, moved);
+
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
+        assert_eq!(op, GitOp::StashDrops(refs));
+        assert_eq!(state.popups, []);
+        assert_eq!(state.stash.range_anchor, None, "the range is done with");
+    }
+
+    #[test]
+    fn n_or_esc_keeps_a_stash_range_and_drops_nothing() {
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = stash_range_of_three();
+            press_char(&mut state, 'd');
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_stash_range_refuses_the_one_row_actions_and_a_hidden_anchor_asks_nothing() {
+        let mut state = stash_range_of_three();
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::Char('g'),
+            KeyCode::Char('R'),
+            KeyCode::Enter,
+        ] {
+            state.notice = None;
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(
+                state.notice.as_deref(),
+                Some(keymap::CLEAR_RANGE_FIRST),
+                "{code:?}"
+            );
+            assert_eq!((state.op_seq, state.popups.len()), (None, 0), "{code:?}");
+            assert_eq!(state.stash.open, None, "{code:?}");
+        }
+        // Asked of the model directly, the guard still holds.
+        state.update(AppIntent::ApplyStash);
+        assert_eq!(state.op_seq, None);
+        state.update(AppIntent::OpenStashFiles);
+        assert_eq!(state.stash.open, None);
+
+        // The anchor hidden by a filter set under the range: nothing to ask.
+        state.stash.filter = "{2}".into();
+        assert!(state.stash.range().is_empty());
+        state.update(AppIntent::DropStash);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.notice.as_deref(), Some("No stash in the selection"));
+    }
+
+    #[test]
+    fn the_stash_filter_never_reaches_git_and_a_range_drop_holds_only_listed_refs() {
+        let hostile = "-x stash@{0}";
+        let mut state = on_stash_one();
+        // Every subject matches, so the filter keeps every row.
+        let entries = ["a0", "a1", "a2"]
+            .iter()
+            .enumerate()
+            .map(|(i, oid)| stash_entry(i, oid, "On main: -x stash@{0}"))
+            .collect();
+        load_stashes(&mut state, entries);
+        let mut effects = press_char(&mut state, '/');
+        for c in hostile.chars() {
+            effects.extend(press_char(&mut state, c));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        assert_eq!(effects, vec![], "typing a filter returns no effects");
+        assert_eq!(state.stash.filter, hostile);
+        assert_eq!(state.stash.visible(), [0, 1, 2]);
+
+        press_char(&mut state, 'k');
+        press(&mut state, KeyCode::Char('V'));
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'd');
+        let ran = press_char(&mut state, 'y');
+        let debug = format!("{ran:?}");
+        assert!(!debug.contains("-x"), "{debug}");
+        let (_, op) = op_of(&ran);
+        assert_eq!(
+            op,
+            GitOp::StashDrops(vec![stash_ref(0, "a0"), stash_ref(1, "a1")])
+        );
+        for step in crate::git::ops::op_steps(&op) {
+            let argv: Vec<String> = crate::git::ops::op_command(&step)
+                .args()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(argv[..2], ["stash", "drop"]);
+            assert!(argv[2] == "stash@{1}" || argv[2] == "stash@{0}", "{argv:?}");
+            assert_eq!(argv.len(), 3);
+        }
+    }
+
+    #[test]
     fn n_or_esc_keeps_the_stash_and_confirm_needs_the_question() {
         for code in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = on_stash_one();
@@ -19549,8 +19770,14 @@ mod tests {
         // On a todo row while a range is kept.
         let mut todo = stopped(TODO, 2);
         todo.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(press_char(&mut todo, 'e'), vec![]);
         assert_eq!(todo.notice.as_deref(), range);
+        // Drop takes a range, but only one of log rows.
+        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(
+            todo.notice.as_deref(),
+            Some("Select a commit in the log first")
+        );
         // A range starts on log rows only.
         let mut todo = stopped(TODO, 2);
         press_char(&mut todo, 'V');

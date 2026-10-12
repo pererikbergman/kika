@@ -212,6 +212,7 @@ mod tests {
             GitOp::StashApply(stash()),
             GitOp::StashPop(stash()),
             GitOp::StashDrop(stash()),
+            GitOp::StashDrops(vec![stash()]),
             GitOp::StashRename {
                 stash: stash(),
                 message: "m".into(),

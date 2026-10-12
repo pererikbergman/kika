@@ -290,6 +290,8 @@ pub enum KeyScope {
     /// "Rewrite the history with the custom patch?" on top of the popup
     /// stack.
     PatchConfirm,
+    /// "Drop these commits?" over a log range, on top of the popup stack.
+    DropRangeConfirm,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -358,6 +360,7 @@ impl KeyScope {
             | KeyScope::AbortConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
+            | KeyScope::DropRangeConfirm
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -412,6 +415,7 @@ impl KeyScope {
             KeyScope::AbortConfirm => "Abort",
             KeyScope::AutosquashConfirm => "Autosquash",
             KeyScope::PatchConfirm => "Custom patch",
+            KeyScope::DropRangeConfirm => "Drop commits",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -589,6 +593,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "patch_confirm.yes",
     "patch_confirm.no",
     "patch_confirm.quit",
+    "drop_range_confirm.yes",
+    "drop_range_confirm.no",
+    "drop_range_confirm.quit",
     "worktrees.open",
     "worktrees.add",
     "worktrees.remove",
@@ -622,6 +629,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "remotes.escape",
     "tags.escape",
     "reflog.escape",
+    "stash.escape",
     "input.quit",
     "commit_files.escape",
     "stash_files.escape",
@@ -970,8 +978,27 @@ fn no_stash(state: &AppState) -> Option<Reason> {
 }
 
 /// Why the selected stash cannot be applied, popped, dropped or renamed
-/// now: git runs one operation at a time, and the list needs an entry.
+/// now: the filter hides it, a range is selected, git runs one operation
+/// at a time, or the list has no entry. The model asks this again when the
+/// key lands, so a hidden or ranged row is refused there too.
 pub(crate) fn stash_action_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| stash_busy_or_empty(state))
+}
+
+/// Why `d` cannot drop the selected stash, or the range: as
+/// [`stash_action_disabled`], but a range is what it acts on.
+pub(crate) fn drop_stash_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, true).or_else(|| stash_busy_or_empty(state))
+}
+
+/// Why the selected stash's files cannot be opened: the filter hides it,
+/// a range is selected, or the list has no entry.
+pub(crate) fn stash_files_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| no_stash(state))
+}
+
+/// Git runs one operation at a time, and the list needs an entry.
+fn stash_busy_or_empty(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING.into())
     } else {
@@ -2119,6 +2146,10 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
             branches.tags.range_anchor.is_some(),
         ),
         KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
+        KeyScope::Stash => (
+            state.stash.selected_hidden(),
+            state.stash.range_anchor.is_some(),
+        ),
         // The filter hides log rows only; a todo row above the log shows.
         KeyScope::Commits => (
             state.commits.todo_selected.is_none() && state.commits.selected_hidden(),
@@ -2201,16 +2232,59 @@ fn commits_reset_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| reset_disabled(state))
 }
 
+// Squash, fixup and drop act on a range too, in one rebase.
 fn commits_squash_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| squash_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Squash, squash_disabled)
 }
 
 fn commits_fixup_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| fixup_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Fixup, fixup_disabled)
 }
 
 fn commits_drop_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| drop_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Drop, drop_disabled)
+}
+
+/// `single`'s reason without a range, [`range_rewrite_disabled`]'s with
+/// one; the list's own reasons come first either way.
+fn commits_range_rewrite_disabled(
+    state: &AppState,
+    edit: Edit,
+    single: fn(&AppState) -> Option<Reason>,
+) -> Option<Reason> {
+    list_guard(state, true).or_else(|| {
+        if state.commits.range_anchor.is_some() {
+            range_rewrite_disabled(state, edit)
+        } else {
+            single(state)
+        }
+    })
+}
+
+/// Why `edit` cannot run over the selected log range now: the range is
+/// in the log, the log is not narrowed (the plan is made from its rows),
+/// one operation at a time with none in progress, and a plan for the
+/// whole range.
+pub(crate) fn range_rewrite_disabled(state: &AppState, edit: Edit) -> Option<Reason> {
+    commits_range_disabled(state)
+        .or_else(|| {
+            state
+                .commits
+                .query
+                .is_active()
+                .then_some(CLEAR_LOG_FILTER.into())
+        })
+        .or_else(|| commit_action_disabled(state))
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| range_log_plan(state, edit).err())
+}
+
+/// The plan for `edit` over the selected log range, as it will run,
+/// checked against stacked branches like a single-row rewrite.
+pub(crate) fn range_log_plan(state: &AppState, edit: Edit) -> Result<RebasePlan, Reason> {
+    let rows = state.commits.rows.as_slice();
+    let plan = rebase_plan::plan_range(rows, &state.commits.range(), edit)?;
+    with_stacked_branches(state, plan, &[])
 }
 
 fn commits_reword_disabled(state: &AppState) -> Option<Reason> {
@@ -3087,7 +3161,7 @@ static REGISTRY: &[Binding] = &[
         description: "Show the files the selected stash holds",
         label: "files",
         bar: true,
-        disabled: no_stash,
+        disabled: stash_files_disabled,
     },
     Binding {
         id: "stash.apply",
@@ -3114,10 +3188,10 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Stash,
         intent: AppIntent::DropStash,
-        description: "Drop the selected stash, asking first",
+        description: "Drop the selected stash, or the range, asking first",
         label: "drop",
         bar: true,
-        disabled: stash_action_disabled,
+        disabled: drop_stash_disabled,
     },
     Binding {
         id: "stash.rename",
@@ -3128,6 +3202,36 @@ static REGISTRY: &[Binding] = &[
         label: "rename",
         bar: true,
         disabled: stash_action_disabled,
+    },
+    Binding {
+        id: "stash.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::Stash,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the stashes by typed text",
+        label: "filter",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.range",
+        keys: &[KeyPattern::any(KeyCode::Char('V'))],
+        scope: KeyScope::Stash,
+        intent: AppIntent::ToggleRange,
+        description: "Select a range from here, for drop; again to clear it",
+        label: "range",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
+        id: "stash.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::Stash,
+        intent: AppIntent::ListEscape,
+        description: "Clear the selection, else the filter, else quit Kika",
+        label: "clear",
+        bar: false,
+        disabled: never,
     },
     Binding {
         id: "stash_files.next",
@@ -4983,6 +5087,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // Enter is left unbound here too: dropping a range throws away the
+    // changes of several commits at once, so only a deliberate y answers.
+    Binding {
+        id: "drop_range_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, drop the selected commits and their changes",
+        label: "drop",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_range_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, leave the history as it is",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_range_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -5521,7 +5660,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Char('V'))],
         scope: KeyScope::Commits,
         intent: AppIntent::ToggleRange,
-        description: "Select a range of commits from here, for copy; again to clear it",
+        description: "Select a range of commits from here, for copy, squash, fixup and drop; again to clear it",
         label: "range",
         bar: false,
         disabled: commits_range_disabled,
@@ -6239,6 +6378,96 @@ mod tests {
         state.op_seq = Some(1);
         assert_eq!(stash_action_disabled(&state), Some(OP_RUNNING.into()));
         assert_eq!(no_stash(&state), None);
+    }
+
+    /// The Stash panel focused, listing three stashes, the cursor on the
+    /// first.
+    fn stash_panel() -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = crate::model::Focus::Stash;
+        state.stash.begin(1);
+        let entries = ["a0", "a1", "a2"]
+            .iter()
+            .enumerate()
+            .map(|(index, oid)| crate::git::stash::StashEntry {
+                index,
+                oid: crate::git::commit_files::CommitId::parse(oid).unwrap(),
+                base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+                untracked: None,
+                subject: format!("On main: {oid}"),
+            })
+            .collect();
+        state.stash.loaded(1, Ok(entries));
+        assert_eq!(state.panel_focus(), KeyScope::Stash);
+        state
+    }
+
+    #[test]
+    fn a_stash_range_leaves_only_d_free_of_the_row_actions() {
+        let mut state = stash_panel();
+        let reason = |state: &AppState, id: &str| (binding(id).disabled)(state);
+        let actions = ["stash.files", "stash.apply", "stash.pop", "stash.rename"];
+        for id in actions.iter().chain([&"stash.drop"]) {
+            assert_eq!(reason(&state, id), None, "{id}");
+        }
+        state.stash.toggle_range();
+        for id in actions {
+            assert_eq!(
+                reason(&state, id).as_deref(),
+                Some(CLEAR_RANGE_FIRST),
+                "{id}"
+            );
+        }
+        assert_eq!(reason(&state, "stash.drop"), None, "d works on a range");
+        for id in ["stash.next", "stash.prev", "stash.filter", "stash.range"] {
+            assert_eq!(reason(&state, id), None, "{id}");
+        }
+        state.op_seq = Some(1);
+        assert_eq!(reason(&state, "stash.drop").as_deref(), Some(OP_RUNNING));
+    }
+
+    #[test]
+    fn a_stash_filter_that_hides_the_cursor_refuses_every_stash_action() {
+        let mut state = stash_panel();
+        state.stash.filter = "zzz".into();
+        assert!(state.stash.selected_hidden());
+        for id in [
+            "stash.files",
+            "stash.apply",
+            "stash.pop",
+            "stash.drop",
+            "stash.rename",
+        ] {
+            assert_eq!(
+                (binding(id).disabled)(&state).as_deref(),
+                Some(FILTER_HIDES_ROW),
+                "{id}"
+            );
+        }
+        // The model asks the same, so a key that slipped through is refused.
+        assert_eq!(
+            stash_action_disabled(&state).as_deref(),
+            Some(FILTER_HIDES_ROW)
+        );
+    }
+
+    #[test]
+    fn the_stash_filter_and_range_are_remappable_but_its_escape_is_locked() {
+        // Esc with nothing to clear quits, as tags.escape does.
+        assert!(REPO_LOCKED.contains(&"stash.escape"));
+        assert!(build(&[("stash.escape", &["Z"])], Trust::Repo).is_err());
+        for id in ["stash.filter", "stash.range"] {
+            assert!(!REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Repo).is_ok(), "{id}");
+        }
+        let none = KeyModifiers::NONE;
+        let stash = |k| from(KeyScope::Stash, k);
+        assert_eq!(stash(plain('/')), Some(AppIntent::OpenFilter));
+        assert_eq!(
+            stash(key(KeyCode::Char('V'), KeyModifiers::SHIFT)),
+            Some(AppIntent::ToggleRange)
+        );
+        assert_eq!(stash(key(KeyCode::Esc, none)), Some(AppIntent::ListEscape));
     }
 
     #[test]
@@ -8723,6 +8952,122 @@ mod tests {
         );
     }
 
+    /// A linear log `a`..`d` on `e`, the Commits panel focused, with the
+    /// range from `b` (row 1) to `c` (row 2) selected.
+    fn range_state() -> AppState {
+        let ids = ['a', 'b', 'c', 'd', 'e'].map(|d| d.to_string().repeat(40));
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        state.commits.rows = (0..4)
+            .map(|i| crate::git::log::CommitRow {
+                oid: ids[i].clone(),
+                short_oid: ids[i][..7].into(),
+                parents: vec![ids[i + 1].clone()],
+                author: "Ann".into(),
+                time: 0,
+                subject: "keep".into(),
+                subject_altered: false,
+            })
+            .collect();
+        state.commits.tips = Some(vec![]);
+        state.commits.range_anchor = Some(ids[1].clone());
+        state.commits.selected = 2;
+        state
+    }
+
+    const RANGE_KEYS: [&str; 3] = ["commits.squash", "commits.fixup", "commits.drop"];
+
+    fn range_reasons(state: &AppState) -> Vec<Option<Reason>> {
+        RANGE_KEYS
+            .iter()
+            .map(|id| (binding(id).disabled)(state))
+            .collect()
+    }
+
+    #[test]
+    fn squash_fixup_and_drop_take_a_range_and_say_why_not() {
+        let state = range_state();
+        assert_eq!(range_reasons(&state), [None, None, None]);
+        assert_eq!(
+            (binding("commits.reword").disabled)(&state).as_deref(),
+            Some(CLEAR_RANGE_FIRST)
+        );
+        let plan = range_log_plan(&state, Edit::Squash).unwrap();
+        assert_eq!(plan.base.as_str(), "e".repeat(40));
+
+        // A filter that hides `b`, between `a` and `c`.
+        let mut gap = range_state();
+        gap.commits.rows[1].subject = "hide".into();
+        gap.commits.filter = "keep".into();
+        gap.commits.range_anchor = Some("a".repeat(40));
+        assert_eq!(gap.commits.range(), [0, 2]);
+        let mut todo = range_state();
+        todo.commits.todo_selected = Some(0);
+        let mut narrowed = range_state();
+        narrowed.commits.query.author = Some("ann".into());
+        let mut running = range_state();
+        running.op_seq = Some(1);
+        let mut rebasing = range_state();
+        in_rebase(&mut rebasing);
+        let mut stacked = range_state();
+        stacked.commits.tips = Some(vec![tip("c", "stack")]);
+        let left_behind = branch_tips::left_behind(b"refs/heads/stack");
+        let cases = [
+            (&gap, rebase_plan::RANGE_GAP),
+            (&todo, "Select a commit in the log first"),
+            (&narrowed, CLEAR_LOG_FILTER),
+            (&running, OP_RUNNING),
+            (&rebasing, "Finish or abort the operation in progress"),
+            (&stacked, left_behind.as_str()),
+        ];
+        for (state, why) in cases {
+            for (id, reason) in RANGE_KEYS.iter().zip(range_reasons(state)) {
+                assert_eq!(reason.as_deref(), Some(why), "{id}");
+            }
+        }
+
+        // With `--update-refs` the stacked branch moves along.
+        stacked.git_version = Some(version::UPDATE_REFS);
+        assert_eq!(range_reasons(&stacked), [None, None, None]);
+    }
+
+    #[test]
+    fn only_y_answers_the_drop_range_question_and_a_repository_cannot_move_it() {
+        let state = range_state();
+        let ask = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::DropRangeConfirm,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(ask(key(KeyCode::Enter, none)), None);
+        assert_eq!(ask(plain('q')), None);
+        assert_eq!(ask(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(ask(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(ask(key(KeyCode::Esc, none)), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            ask(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::DropRangeConfirm.parent(), None);
+        assert_eq!(KeyScope::DropRangeConfirm.title(), "Drop commits");
+        for id in [
+            "drop_range_confirm.yes",
+            "drop_range_confirm.no",
+            "drop_range_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
+        }
+    }
+
     #[test]
     fn the_command_log_key_is_typed_into_the_input_and_needs_none_of_the_new_keys() {
         let state = AppState::new(crate::model::Context::Workspace);
@@ -9352,6 +9697,7 @@ mod tests {
             KeyScope::AbortConfirm => "abort_confirm",
             KeyScope::AutosquashConfirm => "autosquash_confirm",
             KeyScope::PatchConfirm => "patch_confirm",
+            KeyScope::DropRangeConfirm => "drop_range_confirm",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",

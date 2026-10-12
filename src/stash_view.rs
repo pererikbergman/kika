@@ -9,10 +9,13 @@ use ratatui::widgets::{Paragraph, Wrap};
 use crate::commits_view::commit_file_line;
 use crate::git::stash::StashEntry;
 use crate::stash::{StashFilesList, StashList};
-use crate::view::{PanelLook, elide_right, reversed, width_of};
+use crate::view::{
+    PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled, width_of,
+};
 
-/// The panel: a placeholder until the list loads, then one row per entry,
-/// scrolled so the cursor shows. Collapsed, the newest entry's row.
+/// The panel: a placeholder until the list loads, then one row per entry
+/// the filter shows, scrolled so the cursor shows, the cursor and the
+/// range reversed. Collapsed, the newest entry's row.
 pub(crate) fn render_stash_panel(
     stash: &StashList,
     look: &PanelLook,
@@ -23,7 +26,20 @@ pub(crate) fn render_stash_panel(
     if let Some(open) = stash.open.as_ref().filter(|_| expanded) {
         return render_stash_files(open, look, frame, area);
     }
-    let block = look.block(look.title("Stash"));
+    let title = if expanded {
+        let range = stash.range();
+        list_title(
+            look,
+            "Stash",
+            &stash.filter,
+            stash.visible().len(),
+            stash.entries.len(),
+            stash.range_anchor.is_some().then_some(range.len()),
+        )
+    } else {
+        "Stash".to_string()
+    };
+    let block = look.block(look.title(&title));
     let inner = block.inner(area);
     let (height, width) = (usize::from(inner.height), usize::from(inner.width));
     let paragraph = match &stash.error {
@@ -34,26 +50,28 @@ pub(crate) fn render_stash_panel(
         }
         None if !expanded => Paragraph::new(entry_line(&stash.entries[0], width)),
         None => {
-            let start = (stash.selected + 1).saturating_sub(height.max(1));
-            let end = (start + height).min(stash.entries.len());
-            Paragraph::new(
-                (start..end)
-                    .map(|i| {
-                        let line = entry_line(&stash.entries[i], width);
-                        if i == stash.selected {
-                            reversed(line, width)
-                        } else {
-                            line
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            let shown = stash.visible();
+            if shown.is_empty() {
+                Paragraph::new(no_matches())
+            } else {
+                let range = stash.range();
+                let selected = Some(stash.selected);
+                Paragraph::new(
+                    scrolled(&shown, selected, height.max(1))
+                        .iter()
+                        .map(|&i| {
+                            let line = entry_line(&stash.entries[i], width);
+                            range_row(line, i, selected, &range, width)
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            }
         }
     };
     frame.render_widget(paragraph.block(block), area);
 }
 
-/// `stash@{N}  <subject>`, the subject cut to `width`.
+/// `stash@{N}  <subject>`, as the filter matches it, the subject cut to `width`.
 fn entry_line(entry: &StashEntry, width: usize) -> Line<'static> {
     let name = entry.stash_ref().arg();
     let room = width.saturating_sub(width_of(&name) + 2);
@@ -178,6 +196,76 @@ mod tests {
         };
         assert!(reversed(second));
         assert!(!reversed(first));
+    }
+
+    fn three() -> AppState {
+        showing(vec![
+            entry(0, "a0", "WIP on main: zero"),
+            entry(1, "a1", "On main: one"),
+            entry(2, "a2", "On main: two"),
+        ])
+    }
+
+    #[test]
+    fn a_filter_shows_only_matching_rows_and_names_itself_in_the_title() {
+        let mut state = three();
+        state.stash.set_filter("zero".into());
+        let (_, rows) = rows(&state, 80, 12);
+        row_of(&rows, "Stash · /zero 1 of 3");
+        row_of(&rows, "stash@{0}  WIP on main: zero");
+        assert!(!rows.iter().any(|r| r.contains("one")), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_hostile_filter_matches_nothing_and_draws_made_safe() {
+        let mut state = three();
+        state.stash.set_filter("x\x1b[2J\u{202E}\r\0".into());
+        let (_, rows) = rows(&state, 80, 12);
+        row_of(&rows, "No matches");
+        row_of(&rows, "Stash · /");
+        row_of(&rows, " 0 of 3");
+        for row in &rows {
+            assert!(
+                !row.chars().any(|c| c.is_control() || c == '\u{202E}'),
+                "{row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn range_rows_are_drawn_reversed_and_counted_in_the_title() {
+        let mut state = three();
+        state.stash.toggle_range();
+        state.stash.move_by(1);
+        let (buffer, rows) = rows(&state, 80, 12);
+        row_of(&rows, "Stash · 2 selected");
+        let reversed = |needle: &str| {
+            let y = row_of(&rows, needle);
+            let x = rows[y].find(needle).unwrap() as u16;
+            buffer[(x, y as u16)]
+                .style()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(reversed("WIP on main: zero"), "the anchor");
+        assert!(reversed("On main: one"), "the cursor");
+        assert!(!reversed("On main: two"));
+    }
+
+    #[test]
+    fn tiny_terminals_do_not_panic_with_a_filter_or_a_range() {
+        let mut filtered = three();
+        filtered.stash.set_filter("on\u{202E}".into());
+        let mut ranged = three();
+        ranged.stash.toggle_range();
+        ranged.stash.move_by(2);
+        let mut hidden = three();
+        hidden.stash.set_filter("zzz".into());
+        for state in [&filtered, &ranged, &hidden] {
+            for (w, h) in [(0, 0), (1, 1), (20, 5), (5, 20), (80, 2)] {
+                rows(state, w, h);
+            }
+        }
     }
 
     #[test]
