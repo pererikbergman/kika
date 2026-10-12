@@ -37,6 +37,7 @@
 //!    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
 
 pub(crate) mod command_log;
+pub(crate) mod custom_commands;
 pub(crate) mod repos;
 pub(crate) mod submodules;
 pub(crate) mod worktrees;

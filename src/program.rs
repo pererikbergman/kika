@@ -295,9 +295,9 @@ mod tests {
         /// [`no_spawn_site_runs_a_decoy_from_the_working_directory`].
         #[tokio::test]
         async fn decoy_child_public_sites() {
-            use crate::captured_command::run_captured;
-            use crate::custom_command::CommandFailure;
             use crate::external_diff::{ExternalRenderer, LIMITS, RendererKind};
+            use crate::features::custom_commands::CommandFailure;
+            use crate::features::custom_commands::run_captured;
             use crate::forge::github::{CliGh, GhCall, GhCommand, GhRunner};
             use crate::git::runner::{CliRunner, GitCommand, GitRunner};
 
