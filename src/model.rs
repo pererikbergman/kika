@@ -57,6 +57,7 @@ use crate::keymap::{self, KeyPattern, KeyScope, Keymap, Reason, Resolution};
 use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
 use crate::menu;
+use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
     DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RemoveRemoteConfirm,
@@ -80,8 +81,9 @@ use crate::worktree_list::{self, WorktreeList};
 pub enum Context {
     /// The local working tree and index.
     Workspace,
-    /// A remote pull/merge request.
-    Review { number: u64 },
+    /// GitHub pull requests to review; `number` is the one the session
+    /// was started on, if any.
+    Review { number: Option<u64> },
 }
 
 /// The commit popup. One popup at a time, so a state machine rather than a stack.
@@ -333,6 +335,14 @@ pub struct AppState {
     pub diff_mark: Option<DiffMark>,
     /// The comparison whose ends are being read; any other answer is stale.
     pub pending_diff: Option<PendingDiff>,
+    /// Review mode's queues and pull request.
+    pub review: review::ReviewState,
+    /// Seconds since the epoch, set by the loop before each update, so
+    /// rate limits can be judged without a clock in the model.
+    pub now: i64,
+    /// The workspace has had its first load; a session started in review
+    /// mode starts it on the way out.
+    pub workspace_started: bool,
 }
 
 /// A comparison asked for, kept until its ends are read as commits.
@@ -348,6 +358,7 @@ pub struct PendingDiff {
 impl AppState {
     pub fn new(context: Context) -> Self {
         Self {
+            review: review::ReviewState::for_context(&context),
             context,
             size: (0, 0),
             should_quit: false,
@@ -412,6 +423,8 @@ impl AppState {
             pr_create: None,
             pending_copy: None,
             ignore_draft: None,
+            now: 0,
+            workspace_started: false,
         }
     }
 
@@ -517,6 +530,7 @@ impl AppState {
             AppIntent::Resize { width, height } => {
                 let cols = self.pane_cols();
                 self.size = (width, height);
+                self.render_review_body();
                 let mut effects = self.diff.demand(self.pane_rows());
                 if self.pane_cols() != cols {
                     effects.extend(self.render_shown());
@@ -788,6 +802,10 @@ impl AppState {
                     ..
                 }) => self.ignore_draft = None,
                 // Closing a step of a pull request stops it.
+                Some(Popup::PickList(PickList {
+                    purpose: PickPurpose::CheckDetails,
+                    ..
+                })) => self.review.check_urls.clear(),
                 Some(
                     Popup::PickList(_)
                     | Popup::Prompt {
@@ -1003,12 +1021,30 @@ impl AppState {
             AppIntent::CreatePrStart => self.create_pr_start(),
             AppIntent::PickNext => self.move_pick_cursor(1),
             AppIntent::PickPrev => self.move_pick_cursor(-1),
-            AppIntent::PickSelect => self.pick_select(),
+            AppIntent::PickSelect => return self.pick_select(),
             AppIntent::PullRequestTitled(text) => self.pull_request_titled(&text),
             AppIntent::ConfirmCreatePullRequest => return self.confirm_create_pull_request(),
             AppIntent::PullRequestCreated { tag, result } => {
                 return self.pull_request_created(tag, result);
             }
+            AppIntent::EnterReview => return self.enter_review(),
+            AppIntent::NextQueue => self.step_review_queue(false),
+            AppIntent::PrevQueue => self.step_review_queue(true),
+            AppIntent::OpenPr => return self.open_pr(),
+            AppIntent::CloseReviewDetail => return self.close_review(),
+            AppIntent::RefreshReview => return self.refresh_review(),
+            AppIntent::OpenCheckDetails => return self.open_check_details(),
+            AppIntent::ReviewNext => self.review_move(1),
+            AppIntent::ReviewPrev => self.review_move(-1),
+            AppIntent::ReviewQueuesLoaded { tag, repo, result } => {
+                self.review_queues_loaded(tag, repo, result)
+            }
+            AppIntent::PrDetailLoaded {
+                tag,
+                number,
+                repo,
+                result,
+            } => self.pr_detail_loaded(tag, number, repo, result),
             AppIntent::BranchLogLoaded {
                 tag,
                 refname,
@@ -3405,6 +3441,10 @@ impl AppState {
     /// Record the repository Kika started in and load it, or welcome the
     /// user with the recent list and the offer to make one here.
     fn start(&mut self) -> Vec<Effect> {
+        if let Context::Review { number } = self.context {
+            return self.start_review(number);
+        }
+        self.workspace_started = true;
         match self.repo.clone() {
             Some(path) => {
                 let mut effects = vec![self.record_recent(path)];
@@ -5426,6 +5466,9 @@ impl AppState {
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
+            KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
+                (InputTarget::ReviewFilter, &self.review.filter)
+            }
             _ => return,
         };
         self.input = Some(ListInput {
@@ -5469,6 +5512,10 @@ impl AppState {
                 if let Focus::Diff(view) = &mut self.focus {
                     view.set_search(&text, self.emoji_zwj);
                 }
+            }
+            InputTarget::ReviewFilter => {
+                self.review.filter = text;
+                self.review.reconcile();
             }
             // Git runs the query on Enter, not on every key.
             InputTarget::LogPath | InputTarget::LogAuthor => {}
@@ -5823,6 +5870,7 @@ mod fixup;
 mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
+pub(crate) mod review;
 mod stash_actions;
 
 use log_query::MARK_CLEARED;
@@ -5969,7 +6017,7 @@ mod tests {
 
     #[test]
     fn refresh_in_review_does_nothing() {
-        let mut state = AppState::new(Context::Review { number: 3 });
+        let mut state = AppState::new(Context::Review { number: Some(3) });
         assert_eq!(state.update(AppIntent::RefreshStatus), vec![]);
         assert_eq!(state.busy, 0);
     }
@@ -6699,7 +6747,7 @@ mod tests {
 
     #[test]
     fn toggles_do_nothing_in_review_or_without_files() {
-        let mut review = AppState::new(Context::Review { number: 1 });
+        let mut review = AppState::new(Context::Review { number: Some(1) });
         review.files = three_files();
         review.selected = Some(0);
         let (mut clean, _) = with_files(vec![], 24);
@@ -7667,7 +7715,7 @@ mod tests {
 
     #[test]
     fn menus_and_prompts_only_open_on_the_workspace() {
-        let mut state = AppState::new(Context::Review { number: 1 });
+        let mut state = AppState::new(Context::Review { number: Some(1) });
         state.update(AppIntent::OpenMenu(MenuId::Actions));
         state.update(AppIntent::OpenPrompt(PromptKind::GoToFile));
         assert_eq!(state.popups, []);
@@ -8450,7 +8498,7 @@ mod tests {
 
     #[test]
     fn discard_does_nothing_in_review_or_while_an_op_runs() {
-        let mut review = AppState::new(Context::Review { number: 1 });
+        let mut review = AppState::new(Context::Review { number: Some(1) });
         review.files = three_files();
         review.selected = Some(0);
         let (mut running, _) = with_files(three_files(), 24);
@@ -8835,7 +8883,7 @@ mod tests {
 
     #[test]
     fn editor_intents_do_nothing_outside_the_workspace() {
-        let mut review = AppState::new(Context::Review { number: 1 });
+        let mut review = AppState::new(Context::Review { number: Some(1) });
         review.files = three_files();
         review.selected = Some(0);
         for intent in [
@@ -11243,7 +11291,7 @@ mod tests {
 
     #[test]
     fn watch_events_only_reload_the_config_in_review() {
-        let mut state = AppState::new(Context::Review { number: 1 });
+        let mut state = AppState::new(Context::Review { number: Some(1) });
         for event in [
             WatchEvent::PollRefs,
             WatchEvent::PollFiles,
@@ -15106,7 +15154,7 @@ mod tests {
     #[test]
     fn the_intent_outside_the_workspace_starts_nothing() {
         let mut state = on_linear_log();
-        state.context = Context::Review { number: 1 };
+        state.context = Context::Review { number: Some(1) };
         assert_eq!(
             state.update(AppIntent::RewriteCommit(rebase_plan::Edit::Drop)),
             vec![]
