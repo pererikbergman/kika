@@ -1205,7 +1205,13 @@ impl AppState {
                 result,
             } => return self.left_behind_checked(tag, op, head, result),
             AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
+            AppIntent::RewriteCommit(
+                edit @ (rebase_plan::Edit::Squash
+                | rebase_plan::Edit::Fixup
+                | rebase_plan::Edit::Drop),
+            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
+            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
             AppIntent::CreateFixup => return self.create_fixup(),
             AppIntent::Autosquash => self.ask_autosquash(),
@@ -1375,6 +1381,15 @@ impl AppState {
         {
             return KeyScope::Input;
         }
+        // So does the Command log's.
+        if matches!(self.popups.last(), Some(Popup::CommandLog(_)))
+            && self
+                .input
+                .as_ref()
+                .is_some_and(|i| i.target == InputTarget::CommandLogFilter)
+        {
+            return KeyScope::Input;
+        }
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
@@ -1385,6 +1400,7 @@ impl AppState {
             Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
             Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
+            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -2163,6 +2179,11 @@ impl AppState {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
+            // Only the count: subjects and the filter are not drawn here.
+            (ConfirmKind::DropRange(ids), _) => Cow::Owned(format!(
+                "Drop {} commits and their changes from the history? (y/n)",
+                ids.len()
+            )),
             _ => Cow::Borrowed(kind.question()),
         }
     }
@@ -5281,10 +5302,10 @@ impl AppState {
     /// or on the newest one.
     fn command_logged(&mut self, event: CommandEvent) {
         let evicted = self.command_log.apply(event);
-        let len = self.command_log.len();
+        let log = &self.command_log;
         for popup in &mut self.popups {
             if let Popup::CommandLog(view) = popup {
-                view.logged(len, evicted);
+                view.logged(log, evicted);
             }
         }
     }
@@ -5295,9 +5316,8 @@ impl AppState {
     }
 
     fn move_command_log(&mut self, delta: isize) {
-        let len = self.command_log.len();
         if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
-            view.move_by(delta, len);
+            view.move_by(delta, &self.command_log);
         }
     }
 
@@ -5576,6 +5596,15 @@ impl AppState {
             }
             return;
         }
+        if self.key_focus() == KeyScope::CommandLog {
+            if let Some(Popup::CommandLog(view)) = self.popups.last() {
+                self.input = Some(ListInput {
+                    target: InputTarget::CommandLogFilter,
+                    line: LineInput::with_text(&view.filter),
+                });
+            }
+            return;
+        }
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
@@ -5665,6 +5694,12 @@ impl AppState {
                 if let Some(list) = self.worktree_list_mut() {
                     list.filter = text;
                     list.reconcile();
+                }
+            }
+            InputTarget::CommandLogFilter => {
+                if let Some(Popup::CommandLog(view)) = self.popups.last_mut() {
+                    view.filter = text;
+                    view.reconcile(&self.command_log);
                 }
             }
             // Git runs the query on Enter, not on every key.
@@ -5832,10 +5867,20 @@ impl AppState {
 
     /// Esc in a list: clear the range, else the filter, else (in Files)
     /// the preview's search, else (in Commits) the diff mark, else the log
-    /// query, else quit as Esc always has. In the Worktrees popup: clear
-    /// the filter, else close the popup. The Reflog tab has no range: clear
-    /// the filter, else quit.
+    /// query, else quit as Esc always has. In the Worktrees and Command log
+    /// popups: clear the filter, else close the popup. The Reflog tab has
+    /// no range: clear the filter, else quit.
     fn list_escape(&mut self) -> Vec<Effect> {
+        if self.key_focus() == KeyScope::CommandLog {
+            if let Some(Popup::CommandLog(view)) = self.popups.last_mut()
+                && !view.filter.is_empty()
+            {
+                view.filter.clear();
+                view.reconcile(&self.command_log);
+                return vec![];
+            }
+            return self.update(AppIntent::PopPopup);
+        }
         if self.key_focus() == KeyScope::Worktrees {
             if let Some(list) = self.worktree_list_mut()
                 && !list.filter.is_empty()
@@ -6168,6 +6213,7 @@ mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
 pub(crate) mod review;
+mod rewrite_range;
 mod stash_actions;
 
 use custom_patch::NO_PATCH;
@@ -15173,7 +15219,7 @@ mod tests {
 
     fn command_log_view(state: &AppState) -> CommandLogView {
         match state.popups.last() {
-            Some(Popup::CommandLog(view)) => *view,
+            Some(Popup::CommandLog(view)) => view.clone(),
             other => panic!("expected the command log on top, got {other:?}"),
         }
     }
@@ -15235,7 +15281,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 2,
-                follow: true
+                follow: true,
+                filter: String::new()
             }
         );
 
@@ -15247,7 +15294,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 2,
-                follow: false
+                follow: false,
+                filter: String::new()
             }
         );
         log_started(&mut state, 4);
@@ -15259,7 +15307,8 @@ mod tests {
             command_log_view(&state),
             CommandLogView {
                 cursor: 4,
-                follow: true
+                follow: true,
+                filter: String::new()
             }
         );
 
@@ -15277,6 +15326,156 @@ mod tests {
         // Recording carries on while closed.
         log_started(&mut state, 30);
         assert_eq!(state.command_log.len(), 31);
+    }
+
+    /// The Command log open on `git cmd0`..`git cmd11`, all running.
+    fn open_log_of_twelve() -> AppState {
+        let mut state = AppState::new(Context::Workspace);
+        state.size = (80, 24);
+        for id in 0..12 {
+            log_started(&mut state, id);
+        }
+        state.update(AppIntent::OpenCommandLog);
+        state
+    }
+
+    fn command_log_rows(state: &AppState) -> Vec<usize> {
+        command_log_view(state).visible(&state.command_log)
+    }
+
+    #[test]
+    fn slash_in_the_command_log_filters_it_as_typed() {
+        let mut state = open_log_of_twelve();
+        assert_eq!(press_char(&mut state, '/'), vec![]);
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        let input = state.input.as_ref().expect("the input is open");
+        assert_eq!(input.target, InputTarget::CommandLogFilter);
+        assert_eq!(input.target.prompt(), "/");
+        type_text(&mut state, "cmd1");
+        assert_eq!(command_log_view(&state).filter, "cmd1");
+        assert_eq!(command_log_rows(&state), [1, 10, 11]);
+        type_text(&mut state, "0");
+        assert_eq!(command_log_rows(&state), [10]);
+        assert_eq!(command_log_view(&state).cursor, 10, "moved to a shown row");
+
+        // `q` and `?` are typed, not run.
+        type_text(&mut state, "q?");
+        assert_eq!(command_log_view(&state).filter, "cmd10q?");
+        assert_eq!(state.key_focus(), KeyScope::Input);
+        assert!(matches!(state.popups.as_slice(), [Popup::CommandLog(_)]));
+    }
+
+    #[test]
+    fn the_command_log_filter_stops_at_its_limit() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        for _ in 0..300 {
+            press_char(&mut state, 'z');
+        }
+        assert_eq!(
+            command_log_view(&state).filter.chars().count(),
+            list_filter::MAX_INPUT
+        );
+        assert_eq!(state.notice, Some(list_filter::INPUT_FULL.into()));
+    }
+
+    #[test]
+    fn enter_keeps_the_command_log_filter_and_esc_in_the_input_clears_it() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.input, None);
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+        assert_eq!(command_log_rows(&state), [1, 10, 11]);
+
+        // `/` again starts from the kept text; Esc there clears it.
+        press_char(&mut state, '/');
+        assert_eq!(state.input.as_ref().unwrap().line.text, "cmd1");
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.input, None);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::CommandLog);
+    }
+
+    #[test]
+    fn esc_in_the_command_log_clears_the_filter_then_closes_it() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(state.key_focus(), KeyScope::CommandLog, "still open");
+        assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
+        assert!(state.popups.is_empty());
+        assert!(!state.should_quit);
+
+        // `q` closes at once, filter or not.
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        press_char(&mut state, 'q');
+        assert!(state.popups.is_empty());
+        assert!(!state.should_quit);
+
+        // Opened again, the log starts unfiltered.
+        state.update(AppIntent::OpenCommandLog);
+        assert_eq!(command_log_view(&state).filter, "");
+        assert_eq!(command_log_rows(&state).len(), 12);
+    }
+
+    #[test]
+    fn moving_in_a_filtered_command_log_skips_hidden_rows() {
+        let mut state = open_log_of_twelve();
+        press_char(&mut state, '/');
+        type_text(&mut state, "cmd1");
+        press(&mut state, KeyCode::Enter);
+        assert_eq!(command_log_view(&state).cursor, 11, "still on the newest");
+        press_char(&mut state, 'k');
+        assert_eq!(command_log_view(&state).cursor, 10);
+        press_char(&mut state, 'k');
+        assert_eq!(command_log_view(&state).cursor, 1);
+        assert!(!command_log_view(&state).follow);
+        press(&mut state, KeyCode::PageDown);
+        assert_eq!(command_log_view(&state).cursor, 11);
+        assert!(command_log_view(&state).follow);
+
+        // Following, a new matching command takes the cursor; others not.
+        log_started(&mut state, 20);
+        assert_eq!(command_log_view(&state).cursor, 11);
+        log_started(&mut state, 21);
+        assert_eq!(command_log_view(&state).cursor, 13);
+    }
+
+    #[test]
+    fn the_command_log_filter_never_reaches_an_effect() {
+        let mut state = open_log_of_twelve();
+        let filter = "--force \x1b[31m";
+        let mut effects = press_char(&mut state, '/');
+        for c in filter.chars() {
+            effects.extend(press(&mut state, KeyCode::Char(c)));
+        }
+        effects.extend(press(&mut state, KeyCode::Enter));
+        // The input drops the control char; the rest is kept.
+        assert_eq!(command_log_view(&state).filter, "--force [31m");
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Char('q'),
+        ] {
+            effects.extend(press(&mut state, code));
+        }
+        assert!(state.popups.is_empty());
+        let shown = format!("{effects:?}");
+        for part in [filter, "--force [31m", "--force", "force"] {
+            assert!(!shown.contains(part), "{part:?} in {shown}");
+        }
     }
 
     #[test]
@@ -19342,8 +19541,14 @@ mod tests {
         // On a todo row while a range is kept.
         let mut todo = stopped(TODO, 2);
         todo.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(press_char(&mut todo, 'e'), vec![]);
         assert_eq!(todo.notice.as_deref(), range);
+        // Drop takes a range, but only one of log rows.
+        assert_eq!(press_char(&mut todo, 'd'), vec![]);
+        assert_eq!(
+            todo.notice.as_deref(),
+            Some("Select a commit in the log first")
+        );
         // A range starts on log rows only.
         let mut todo = stopped(TODO, 2);
         press_char(&mut todo, 'V');

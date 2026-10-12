@@ -290,6 +290,8 @@ pub enum KeyScope {
     /// "Rewrite the history with the custom patch?" on top of the popup
     /// stack.
     PatchConfirm,
+    /// "Drop these commits?" over a log range, on top of the popup stack.
+    DropRangeConfirm,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -358,6 +360,7 @@ impl KeyScope {
             | KeyScope::AbortConfirm
             | KeyScope::AutosquashConfirm
             | KeyScope::PatchConfirm
+            | KeyScope::DropRangeConfirm
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -412,6 +415,7 @@ impl KeyScope {
             KeyScope::AbortConfirm => "Abort",
             KeyScope::AutosquashConfirm => "Autosquash",
             KeyScope::PatchConfirm => "Custom patch",
+            KeyScope::DropRangeConfirm => "Drop commits",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -589,6 +593,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "patch_confirm.yes",
     "patch_confirm.no",
     "patch_confirm.quit",
+    "drop_range_confirm.yes",
+    "drop_range_confirm.no",
+    "drop_range_confirm.quit",
     "worktrees.open",
     "worktrees.add",
     "worktrees.remove",
@@ -614,6 +621,7 @@ pub const REPO_LOCKED: &[&str] = &[
     "create_pull_request.no",
     "create_pull_request.quit",
     "command_log.quit",
+    "command_log.escape",
     "commits.paste",
     "files.escape",
     "commits.escape",
@@ -2214,16 +2222,59 @@ fn commits_reset_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| reset_disabled(state))
 }
 
+// Squash, fixup and drop act on a range too, in one rebase.
 fn commits_squash_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| squash_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Squash, squash_disabled)
 }
 
 fn commits_fixup_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| fixup_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Fixup, fixup_disabled)
 }
 
 fn commits_drop_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| drop_disabled(state))
+    commits_range_rewrite_disabled(state, Edit::Drop, drop_disabled)
+}
+
+/// `single`'s reason without a range, [`range_rewrite_disabled`]'s with
+/// one; the list's own reasons come first either way.
+fn commits_range_rewrite_disabled(
+    state: &AppState,
+    edit: Edit,
+    single: fn(&AppState) -> Option<Reason>,
+) -> Option<Reason> {
+    list_guard(state, true).or_else(|| {
+        if state.commits.range_anchor.is_some() {
+            range_rewrite_disabled(state, edit)
+        } else {
+            single(state)
+        }
+    })
+}
+
+/// Why `edit` cannot run over the selected log range now: the range is
+/// in the log, the log is not narrowed (the plan is made from its rows),
+/// one operation at a time with none in progress, and a plan for the
+/// whole range.
+pub(crate) fn range_rewrite_disabled(state: &AppState, edit: Edit) -> Option<Reason> {
+    commits_range_disabled(state)
+        .or_else(|| {
+            state
+                .commits
+                .query
+                .is_active()
+                .then_some(CLEAR_LOG_FILTER.into())
+        })
+        .or_else(|| commit_action_disabled(state))
+        .or_else(|| in_progress_disabled(state))
+        .or_else(|| range_log_plan(state, edit).err())
+}
+
+/// The plan for `edit` over the selected log range, as it will run,
+/// checked against stacked branches like a single-row rewrite.
+pub(crate) fn range_log_plan(state: &AppState, edit: Edit) -> Result<RebasePlan, Reason> {
+    let rows = state.commits.rows.as_slice();
+    let plan = rebase_plan::plan_range(rows, &state.commits.range(), edit)?;
+    with_stacked_branches(state, plan, &[])
 }
 
 fn commits_reword_disabled(state: &AppState) -> Option<Reason> {
@@ -5026,6 +5077,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // Enter is left unbound here too: dropping a range throws away the
+    // changes of several commits at once, so only a deliberate y answers.
+    Binding {
+        id: "drop_range_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, drop the selected commits and their changes",
+        label: "drop",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_range_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, leave the history as it is",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "drop_range_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DropRangeConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -5283,11 +5369,28 @@ static REGISTRY: &[Binding] = &[
         disabled: never,
     },
     Binding {
+        id: "command_log.filter",
+        keys: &[KeyPattern::any(KeyCode::Char('/'))],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::OpenFilter,
+        description: "Filter the commands shown",
+        label: "filter",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "command_log.escape",
+        keys: &[KeyPattern::any(KeyCode::Esc)],
+        scope: KeyScope::CommandLog,
+        intent: AppIntent::ListEscape,
+        description: "Clear the filter, else close the log",
+        label: "clear",
+        bar: false,
+        disabled: never,
+    },
+    Binding {
         id: "command_log.close",
-        keys: &[
-            KeyPattern::any(KeyCode::Esc),
-            KeyPattern::exact(KeyCode::Char('q'), NONE),
-        ],
+        keys: &[KeyPattern::exact(KeyCode::Char('q'), NONE)],
         scope: KeyScope::CommandLog,
         intent: AppIntent::PopPopup,
         description: "Close the log",
@@ -5547,7 +5650,7 @@ static REGISTRY: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Char('V'))],
         scope: KeyScope::Commits,
         intent: AppIntent::ToggleRange,
-        description: "Select a range of commits from here, for copy; again to clear it",
+        description: "Select a range of commits from here, for copy, squash, fixup and drop; again to clear it",
         label: "range",
         bar: false,
         disabled: commits_range_disabled,
@@ -7062,7 +7165,8 @@ mod tests {
         assert_eq!(run(key(KeyCode::Up, none)), Some(CommandLogPrev));
         assert_eq!(run(key(KeyCode::PageDown, none)), Some(CommandLogPageDown));
         assert_eq!(run(key(KeyCode::PageUp, none)), Some(CommandLogPageUp));
-        assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
+        assert_eq!(run(plain('/')), Some(OpenFilter));
+        assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));
         assert_eq!(
             run(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -7186,6 +7290,33 @@ mod tests {
             crate::worktree_list::add_worktree_disabled(&state),
             Some("Select a local branch in the Branches panel".into())
         );
+    }
+
+    #[test]
+    fn the_command_log_filter_keys_clash_with_nothing_the_log_reaches() {
+        // The log has no parent scope, so only its own keys are reachable.
+        assert_eq!(KeyScope::CommandLog.parent(), None);
+        for id in ["command_log.filter", "command_log.escape"] {
+            let new = binding(id);
+            for other in registry()
+                .iter()
+                .filter(|b| b.id != id && b.scope == KeyScope::CommandLog)
+            {
+                for a in new.keys {
+                    for b in other.keys {
+                        assert!(!a.overlaps(b), "{id} {a:?} clashes with {}", other.id);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_log_escape_is_locked_and_its_filter_is_not() {
+        assert!(REPO_LOCKED.contains(&"command_log.escape"));
+        assert!(build(&[("command_log.escape", &["Z"])], Trust::Repo).is_err());
+        assert!(!REPO_LOCKED.contains(&"command_log.filter"));
+        assert!(build(&[("command_log.filter", &["Z"])], Trust::Repo).is_ok());
     }
 
     #[test]
@@ -8800,6 +8931,122 @@ mod tests {
         );
     }
 
+    /// A linear log `a`..`d` on `e`, the Commits panel focused, with the
+    /// range from `b` (row 1) to `c` (row 2) selected.
+    fn range_state() -> AppState {
+        let ids = ['a', 'b', 'c', 'd', 'e'].map(|d| d.to_string().repeat(40));
+        let mut state = AppState::new(Context::Workspace);
+        state.focus = Focus::Commits;
+        state.commits.rows = (0..4)
+            .map(|i| crate::git::log::CommitRow {
+                oid: ids[i].clone(),
+                short_oid: ids[i][..7].into(),
+                parents: vec![ids[i + 1].clone()],
+                author: "Ann".into(),
+                time: 0,
+                subject: "keep".into(),
+                subject_altered: false,
+            })
+            .collect();
+        state.commits.tips = Some(vec![]);
+        state.commits.range_anchor = Some(ids[1].clone());
+        state.commits.selected = 2;
+        state
+    }
+
+    const RANGE_KEYS: [&str; 3] = ["commits.squash", "commits.fixup", "commits.drop"];
+
+    fn range_reasons(state: &AppState) -> Vec<Option<Reason>> {
+        RANGE_KEYS
+            .iter()
+            .map(|id| (binding(id).disabled)(state))
+            .collect()
+    }
+
+    #[test]
+    fn squash_fixup_and_drop_take_a_range_and_say_why_not() {
+        let state = range_state();
+        assert_eq!(range_reasons(&state), [None, None, None]);
+        assert_eq!(
+            (binding("commits.reword").disabled)(&state).as_deref(),
+            Some(CLEAR_RANGE_FIRST)
+        );
+        let plan = range_log_plan(&state, Edit::Squash).unwrap();
+        assert_eq!(plan.base.as_str(), "e".repeat(40));
+
+        // A filter that hides `b`, between `a` and `c`.
+        let mut gap = range_state();
+        gap.commits.rows[1].subject = "hide".into();
+        gap.commits.filter = "keep".into();
+        gap.commits.range_anchor = Some("a".repeat(40));
+        assert_eq!(gap.commits.range(), [0, 2]);
+        let mut todo = range_state();
+        todo.commits.todo_selected = Some(0);
+        let mut narrowed = range_state();
+        narrowed.commits.query.author = Some("ann".into());
+        let mut running = range_state();
+        running.op_seq = Some(1);
+        let mut rebasing = range_state();
+        in_rebase(&mut rebasing);
+        let mut stacked = range_state();
+        stacked.commits.tips = Some(vec![tip("c", "stack")]);
+        let left_behind = branch_tips::left_behind(b"refs/heads/stack");
+        let cases = [
+            (&gap, rebase_plan::RANGE_GAP),
+            (&todo, "Select a commit in the log first"),
+            (&narrowed, CLEAR_LOG_FILTER),
+            (&running, OP_RUNNING),
+            (&rebasing, "Finish or abort the operation in progress"),
+            (&stacked, left_behind.as_str()),
+        ];
+        for (state, why) in cases {
+            for (id, reason) in RANGE_KEYS.iter().zip(range_reasons(state)) {
+                assert_eq!(reason.as_deref(), Some(why), "{id}");
+            }
+        }
+
+        // With `--update-refs` the stacked branch moves along.
+        stacked.git_version = Some(version::UPDATE_REFS);
+        assert_eq!(range_reasons(&stacked), [None, None, None]);
+    }
+
+    #[test]
+    fn only_y_answers_the_drop_range_question_and_a_repository_cannot_move_it() {
+        let state = range_state();
+        let ask = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::DropRangeConfirm,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(ask(key(KeyCode::Enter, none)), None);
+        assert_eq!(ask(plain('q')), None);
+        assert_eq!(ask(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(ask(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(ask(key(KeyCode::Esc, none)), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            ask(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::DropRangeConfirm.parent(), None);
+        assert_eq!(KeyScope::DropRangeConfirm.title(), "Drop commits");
+        for id in [
+            "drop_range_confirm.yes",
+            "drop_range_confirm.no",
+            "drop_range_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+            assert!(build(&[(id, &["enter"])], Trust::Repo).is_err(), "{id}");
+            assert!(build(&[(id, &["Z"])], Trust::Global).is_ok(), "{id}");
+        }
+    }
+
     #[test]
     fn the_command_log_key_is_typed_into_the_input_and_needs_none_of_the_new_keys() {
         let state = AppState::new(crate::model::Context::Workspace);
@@ -8822,6 +9069,10 @@ mod tests {
             .iter()
             .filter(|b| b.scope == KeyScope::CommandLog);
         for b in log {
+            // `/` filters the log; there is no range or separate search.
+            if b.id == "command_log.filter" {
+                continue;
+            }
             for c in ['/', 'V', 'n', 'N'] {
                 assert!(
                     !b.keys.iter().any(|k| k.matches(plain(c))),
@@ -9368,6 +9619,7 @@ mod tests {
             KeyScope::AbortConfirm => "abort_confirm",
             KeyScope::AutosquashConfirm => "autosquash_confirm",
             KeyScope::PatchConfirm => "patch_confirm",
+            KeyScope::DropRangeConfirm => "drop_range_confirm",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
