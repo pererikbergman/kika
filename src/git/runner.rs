@@ -281,23 +281,35 @@ pub fn isolation_env() -> Vec<(OsString, OsString)> {
     ]
 }
 
+/// Whether `pid` may be signalled as a group: a real process (not 0, init or
+/// "every process") that leads its own group, and that group is not ours.
+#[cfg(unix)]
+fn own_child_group(pid: libc::pid_t, its_pgid: libc::pid_t, our_pgid: libc::pid_t) -> bool {
+    pid > 1 && its_pgid == pid && pid != our_pgid
+}
+
 /// Ask `child` and everything it started to stop. On unix git leads its own
 /// process group, so hooks it runs are stopped too; SIGTERM lets git remove
-/// its lock files on the way out.
+/// its lock files on the way out. The group is also continued: a background
+/// read of `/dev/tty` stops it with SIGTTIN, and a stopped process only acts
+/// on SIGTERM once it runs again. Off unix only `child` itself is killed.
+///
+/// The caller must hold `child` unreaped, so its pid, which is also its
+/// group id, cannot have been reused by another process.
 fn terminate(child: &mut Child) {
+    // A direct signal, not a `kill` program, so nothing is looked up on `PATH`.
     #[cfg(unix)]
-    {
-        let stopped = Command::new("kill")
-            .arg("-TERM")
-            .arg("--")
-            .arg(format!("-{}", child.id()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if stopped {
-            return;
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `getpgid` and `getpgrp` only read process group ids.
+        let (its_pgid, our_pgid) = unsafe { (libc::getpgid(pid), libc::getpgrp()) };
+        if own_child_group(pid, its_pgid, our_pgid) {
+            // SAFETY: `killpg` only sends a signal, to the group the guard
+            // above checked is led by our own unreaped child and is not ours.
+            if unsafe { libc::killpg(pid, libc::SIGTERM) } == 0 {
+                // SAFETY: as above. ESRCH (group already gone) is ignored.
+                let _ = unsafe { libc::killpg(pid, libc::SIGCONT) };
+                return;
+            }
         }
     }
     let _ = child.kill();
@@ -718,6 +730,139 @@ mod tests {
         assert!(!dir.join(".git/index.lock").exists());
         // Nothing is left to interrupt, so a second call is harmless.
         runner.interrupt();
+    }
+
+    /// SIGKILLs what is left of a stopped group if the test fails before the
+    /// interrupt ends it. Each pid is signalled only while it is still in
+    /// git's group, and never if that group is ours, so a reused pid or an
+    /// unrelated process is never touched.
+    #[cfg(unix)]
+    struct StoppedGroup {
+        pids: Vec<String>,
+        group: String,
+    }
+
+    #[cfg(unix)]
+    impl Drop for StoppedGroup {
+        fn drop(&mut self) {
+            // SAFETY: `getpgrp` only reads this process's group id.
+            let ours = unsafe { libc::getpgrp() }.to_string();
+            if self.group.is_empty() || self.group == ours {
+                return;
+            }
+            for pid in &self.pids {
+                if pgid_of(pid) == self.group
+                    && let Ok(pid) = pid.parse::<libc::pid_t>()
+                    && pid > 1
+                {
+                    // SAFETY: only sends a signal, to a pid checked just above
+                    // to still be in git's own group.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
+    /// Regression: a background read of `/dev/tty` stops git's whole group
+    /// with SIGTTIN, and stopped members ignored the SIGTERM until Kika quit.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_ends_a_commit_whose_group_is_stopped() {
+        use crate::git::fake::{TempDir, git};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = TempDir::new("interrupt-stopped");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        git(dir, &["config", "core.hooksPath", ".git/hooks"]);
+        std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+        let hook = dir.join(".git/hooks/pre-commit");
+        // With a terminal, the read stops git's background group with
+        // SIGTTIN; without one the hook stops the group itself. It refuses
+        // to if it shares the test's group.
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\n\
+             group=$(ps -o pgid= -p $$ | tr -d ' ')\n\
+             [ -n \"$group\" ] && [ \"$group\" != \"$OUTER_GROUP\" ] || exit 1\n\
+             echo \"$$ $PPID $group\" > started.tmp && mv started.tmp started\n\
+             if (exec 3</dev/tty) 2>/dev/null; then read x </dev/tty; fi\n\
+             kill -STOP 0\n\
+             sleep 30\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(dir.join("a"), "a\n").unwrap();
+        git(dir, &["add", "a"]);
+
+        let runner = Arc::new(CliRunner::new(dir));
+        // SAFETY: `getpgrp` only reads this process's group id.
+        let ours = unsafe { libc::getpgrp() };
+        let cmd = GitCommand::new("-c")
+            .arg("user.name=t")
+            .arg("-c")
+            .arg("user.email=t@t")
+            .arg("commit")
+            .arg("-F")
+            .arg("-")
+            .env("OUTER_GROUP", ours.to_string())
+            .stdin(b"msg\n".to_vec());
+        let (tx, rx) = mpsc::channel();
+        {
+            let runner = Arc::clone(&runner);
+            std::thread::spawn(move || {
+                let _ = tx.send(runner.run(&cmd));
+            });
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !dir.join("started").exists() {
+            assert!(Instant::now() < deadline, "the hook never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let started = std::fs::read_to_string(dir.join("started")).unwrap();
+        let mut ids: Vec<String> = started.split_whitespace().map(String::from).collect();
+        let group = ids.pop().unwrap();
+        // The hook, its git, and the group's leader.
+        ids.push(group.clone());
+        let stopped = StoppedGroup { pids: ids, group };
+        loop {
+            let stat = Command::new("ps")
+                .args(["-o", "stat=", "-p", &stopped.pids[0]])
+                .output()
+                .unwrap();
+            if String::from_utf8_lossy(&stat.stdout)
+                .trim()
+                .starts_with('T')
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the hook never stopped");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        runner.interrupt();
+        let output = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the stopped group kept the commit running")
+            .unwrap();
+
+        assert!(!output.success);
+        assert!(!dir.join(".git/index.lock").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_child_leading_a_group_other_than_ours_is_signalled() {
+        let ours = 500;
+        assert!(own_child_group(4321, 4321, ours));
+        assert!(!own_child_group(0, 0, ours), "0 means our own group");
+        assert!(!own_child_group(1, 1, ours), "1 is init");
+        assert!(!own_child_group(-1, -1, ours), "-1 means every process");
+        assert!(!own_child_group(-4321, -4321, ours));
+        assert!(!own_child_group(4321, 4000, ours), "not a group leader");
+        assert!(!own_child_group(ours, ours, ours), "our own group");
     }
 
     /// The pgid of process `pid`, as `ps` prints it.
