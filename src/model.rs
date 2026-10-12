@@ -59,7 +59,7 @@ use crate::menu;
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DeleteBranchConfirm, DeleteTagConfirm, DiscardConfirm,
     DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RemoveRemoteConfirm,
-    RemoveWorktreeConfirm, ResetHardConfirm, TravelConfirm,
+    RemoveWorktreeConfirm, TravelConfirm,
 };
 use crate::rebase_todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
 use crate::recent_list::{RecentList, RecentRow};
@@ -1066,7 +1066,7 @@ impl AppState {
             AppIntent::ConfirmAbort(operation) => {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
             }
-            AppIntent::CheckoutCommit => self.ask_checkout_commit(),
+            AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
             AppIntent::ConfirmCheckoutCommit => {
                 let op = self.commits.pending.take().map(GitOp::CheckoutCommit);
                 return self.start_op(Ok(op));
@@ -1096,6 +1096,13 @@ impl AppState {
             AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
+            AppIntent::LeftBehindChecked {
+                tag,
+                op,
+                head,
+                result,
+            } => return self.left_behind_checked(tag, op, head, result),
+            AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
             AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
             AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
             AppIntent::InsertBreak => return self.rewrite(Rewrite::Break),
@@ -1251,6 +1258,7 @@ impl AppState {
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
             Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
             Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
+            Some(Popup::LeaveCommits(_)) => return KeyScope::LeaveCommits,
             Some(Popup::DropStash(_)) => return KeyScope::DropStash,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
@@ -1534,13 +1542,15 @@ impl AppState {
             }
             Some(Popup::Discard(_)) => vec![],
             // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
-            // resets, only `ConfirmRemoveRemote` removes, only
-            // `ConfirmDeleteTag` deletes a tag, only `ConfirmTravel` undoes or
-            // redoes and only `ConfirmDropStash` drops a stash; yes here
-            // keeps the question, no closes it.
+            // resets, only `ConfirmLeaveCommits` leaves commits behind, only
+            // `ConfirmRemoveRemote` removes, only `ConfirmDeleteTag` deletes
+            // a tag, only `ConfirmTravel` undoes or redoes and only
+            // `ConfirmDropStash` drops a stash; yes here keeps the question,
+            // no closes it.
             Some(
                 Popup::DeleteBranch(_)
                 | Popup::ResetHard(_)
+                | Popup::LeaveCommits(_)
                 | Popup::RemoveRemote(_)
                 | Popup::DeleteTag(_)
                 | Popup::Travel(_)
@@ -4164,12 +4174,12 @@ impl AppState {
     }
 
     /// Ask before leaving the branch: commits made on a detached `HEAD`
-    /// belong to no branch.
-    fn ask_checkout_commit(&mut self) {
-        if let Some((id, _)) = self.commit_for_action(keymap::checkout_commit_disabled) {
-            self.commits.pending = Some(id);
-            self.popups
-                .push(Popup::Confirm(ConfirmKind::DetachedCheckout));
+    /// belong to no branch. From a detached `HEAD`, look first for the
+    /// commits the move would leave behind.
+    fn ask_checkout_commit(&mut self) -> Vec<Effect> {
+        match self.commit_for_action(keymap::checkout_commit_disabled) {
+            Some((id, _)) => self.move_head(GitOp::CheckoutCommit(id.clone()), id),
+            None => vec![],
         }
     }
 
@@ -4366,18 +4376,19 @@ impl AppState {
     }
 
     /// Reset to the selected commit. Soft and mixed keep the work; hard
-    /// throws it away, so it asks first.
+    /// throws it away, so it asks first. From a detached `HEAD`, look
+    /// first for the commits the reset would leave behind.
     fn reset_to(&mut self, mode: ResetMode) -> Vec<Effect> {
-        let Some((to, short_oid)) = self.commit_for_action(keymap::reset_disabled) else {
+        let Some((to, _)) = self.commit_for_action(keymap::reset_disabled) else {
             return vec![];
         };
-        let op = GitOp::Reset { to, mode };
-        if mode == ResetMode::Hard {
-            self.popups
-                .push(Popup::ResetHard(ResetHardConfirm { short_oid, op }));
-            return vec![];
-        }
-        self.start_op(Ok(Some(op)))
+        self.move_head(
+            GitOp::Reset {
+                to: to.clone(),
+                mode,
+            },
+            to,
+        )
     }
 
     /// Rewrite the selected commit on the terminal: squash and reword open
@@ -5719,6 +5730,7 @@ fn failure_title(op: &GitOp) -> &'static str {
     }
 }
 
+mod leave_commits;
 mod log_query;
 mod stash_actions;
 
@@ -5735,7 +5747,9 @@ mod tests {
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
-    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
+    use crate::popup::{
+        DiscardConfirm, DiscardWhat, LeaveCommitsConfirm, PromptKind, ResetHardConfirm,
+    };
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn untracked(path: &str) -> FileEntry {
@@ -13786,6 +13800,260 @@ mod tests {
         }
         assert_eq!(state.popups, []);
         assert_eq!(state.op_seq, None);
+    }
+
+    // --- Leaving commits behind from a detached HEAD ---
+
+    /// `on_commit`, with `HEAD` detached on `c0`.
+    fn detached_on_commit() -> AppState {
+        let mut state = on_commit();
+        state.branch = Some(BranchStatus {
+            head: Head::Detached("c0".into()),
+            upstream: None,
+            ahead_behind: None,
+            in_progress: vec![],
+            bisect: None,
+        });
+        state
+    }
+
+    /// The one left-behind check in `effects`: its tag and planned op,
+    /// after checking it reads from `c0` to `c1`.
+    fn check_of(effects: &[Effect]) -> (Tag, GitOp) {
+        match effects {
+            [
+                Effect::CheckLeftBehind {
+                    tag,
+                    op,
+                    head,
+                    target,
+                },
+            ] => {
+                assert_eq!((head, target), (&cid("c0"), &cid("c1")));
+                (*tag, op.clone())
+            }
+            other => panic!("expected one CheckLeftBehind, got {other:?}"),
+        }
+    }
+
+    fn reset_op(mode: ResetMode) -> GitOp {
+        GitOp::Reset {
+            to: cid("c1"),
+            mode,
+        }
+    }
+
+    /// Each move a detached `HEAD` checks first, as its intent and op.
+    fn moves() -> [(AppIntent, GitOp); 4] {
+        [
+            (AppIntent::CheckoutCommit, GitOp::CheckoutCommit(cid("c1"))),
+            (
+                AppIntent::ResetTo(ResetMode::Soft),
+                reset_op(ResetMode::Soft),
+            ),
+            (
+                AppIntent::ResetTo(ResetMode::Mixed),
+                reset_op(ResetMode::Mixed),
+            ),
+            (
+                AppIntent::ResetTo(ResetMode::Hard),
+                reset_op(ResetMode::Hard),
+            ),
+        ]
+    }
+
+    /// `detached_on_commit` after `intent`'s check came back with `result`.
+    fn checked(
+        intent: AppIntent,
+        result: Result<Vec<CommitId>, String>,
+    ) -> (AppState, Vec<Effect>) {
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(intent));
+        let effects = state.update(AppIntent::LeftBehindChecked {
+            tag,
+            op,
+            head: cid("c0"),
+            result,
+        });
+        (state, effects)
+    }
+
+    fn ids(n: usize) -> Vec<CommitId> {
+        (0..n).map(|i| cid(&format!("a{i}"))).collect()
+    }
+
+    #[test]
+    fn a_detached_head_checks_for_commits_left_behind_before_anything_else() {
+        for (intent, planned) in moves() {
+            let mut state = detached_on_commit();
+            let busy = state.busy;
+            let (tag, op) = check_of(&state.update(intent.clone()));
+            assert_eq!(op, planned, "{intent:?}");
+            assert!(tag.user, "{intent:?}");
+            assert_eq!(state.busy, busy + 1, "{intent:?}");
+            assert_eq!(state.popups, [], "{intent:?}");
+            assert_eq!(state.commits.pending, None, "{intent:?}");
+            assert_eq!(state.op_seq, None, "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn on_a_branch_nothing_is_checked_first() {
+        let mut state = on_commit();
+        state.branch = Some(on_branch("main"));
+        assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
+        );
+
+        let mut state = on_commit();
+        state.branch = Some(on_branch("main"));
+        let (_, op) = op_of(&state.update(AppIntent::ResetTo(ResetMode::Mixed)));
+        assert_eq!(op, reset_op(ResetMode::Mixed));
+    }
+
+    #[test]
+    fn with_nothing_left_behind_each_move_goes_on_as_before() {
+        let (state, effects) = checked(AppIntent::CheckoutCommit, Ok(vec![]));
+        assert_eq!(effects, vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
+        );
+        assert_eq!(state.commits.pending, Some(cid("c1")));
+
+        for mode in [ResetMode::Soft, ResetMode::Mixed] {
+            let (state, effects) = checked(AppIntent::ResetTo(mode), Ok(vec![]));
+            let (tag, op) = op_of(&effects);
+            assert_eq!(op, reset_op(mode));
+            assert_eq!(state.op_seq, Some(tag.seq));
+        }
+
+        let (state, effects) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
+        assert_eq!(effects, vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::ResetHard(ResetHardConfirm {
+                short_oid: "c1".into(),
+                op: reset_op(ResetMode::Hard),
+            })]
+        );
+    }
+
+    #[test]
+    fn commits_left_behind_open_the_question_and_run_nothing() {
+        for (intent, planned) in moves() {
+            let (state, effects) = checked(intent.clone(), Ok(ids(3)));
+            assert_eq!(effects, vec![], "{intent:?}");
+            assert_eq!(state.busy, detached_on_commit().busy, "{intent:?}");
+            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(
+                state.popups,
+                [Popup::LeaveCommits(LeaveCommitsConfirm {
+                    op: planned,
+                    short_oid: "c1".into(),
+                    left: vec!["a0".into(), "a1".into(), "a2".into()],
+                })],
+                "{intent:?}"
+            );
+            assert_eq!(state.key_focus(), KeyScope::LeaveCommits);
+            let Some(Popup::LeaveCommits(ask)) = state.popups.last() else {
+                unreachable!()
+            };
+            let question = ask.question();
+            assert!(question.contains("3 commits"), "{question}");
+            assert!(question.contains("(a0, a1, a2)"), "{question}");
+        }
+
+        let (state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(7)));
+        let Some(Popup::LeaveCommits(ask)) = state.popups.last() else {
+            panic!("{:?}", state.popups)
+        };
+        let question = ask.question();
+        assert!(
+            question.contains("(a0, a1, a2, a3, a4 and 2 more)"),
+            "{question}"
+        );
+        assert!(!question.contains("a5"), "{question}");
+    }
+
+    #[test]
+    fn only_y_leaves_the_commits_behind_and_enter_is_no_answer() {
+        for (intent, planned) in moves() {
+            let (mut state, _) = checked(intent.clone(), Ok(ids(2)));
+            assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{intent:?}");
+            assert_eq!(state.update(AppIntent::ConfirmYes), vec![], "{intent:?}");
+            assert_eq!(state.popups.len(), 1, "{intent:?}");
+            assert_eq!(state.op_seq, None, "{intent:?}");
+
+            let (tag, op) = op_of(&press_char(&mut state, 'y'));
+            assert_eq!(op, planned, "{intent:?}");
+            assert_eq!(state.op_seq, Some(tag.seq), "{intent:?}");
+            assert_eq!(state.popups, [], "{intent:?}");
+        }
+
+        for code in [KeyCode::Char('n'), KeyCode::Esc] {
+            let (mut state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(2)));
+            assert_eq!(press(&mut state, code), vec![], "{code:?}");
+            assert_eq!(state.popups, [], "{code:?}");
+            assert_eq!(state.op_seq, None, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn confirm_leave_commits_does_nothing_without_the_question() {
+        let mut state = detached_on_commit();
+        assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn a_check_for_a_head_that_moved_runs_nothing() {
+        let mut state = detached_on_commit();
+        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+        state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
+        for result in [Ok(vec![]), Ok(ids(2))] {
+            state.notice = None;
+            let effects = state.update(AppIntent::LeftBehindChecked {
+                tag,
+                op: op.clone(),
+                head: cid("c0"),
+                result,
+            });
+            assert_eq!(effects, vec![]);
+            assert_eq!(state.popups, []);
+            assert_eq!(state.notice, Some("HEAD moved; try again".into()));
+        }
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.commits.pending, None);
+
+        // Back on a branch is a move too.
+        state.branch = Some(on_branch("main"));
+        state.update(AppIntent::LeftBehindChecked {
+            tag,
+            op,
+            head: cid("c0"),
+            result: Ok(vec![]),
+        });
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn a_failed_check_shows_why_and_runs_nothing() {
+        for (intent, _) in moves() {
+            let (state, effects) = checked(intent.clone(), Err("fatal: bad".into()));
+            assert_eq!(effects, vec![], "{intent:?}");
+            assert_eq!(state.op_seq, None, "{intent:?}");
+            let [Popup::Error(error)] = state.popups.as_slice() else {
+                panic!("{intent:?}: {:?}", state.popups)
+            };
+            assert_eq!(error.title, "Could not check for commits left behind");
+            assert!(error.message.contains("fatal: bad"));
+        }
     }
 
     #[test]

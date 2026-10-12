@@ -79,6 +79,12 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
+            Popup::LeaveCommits(confirm) => render_question(
+                &format!(" {} ", confirm.title()),
+                &confirm.question(),
+                frame,
+                area,
+            ),
             Popup::DropStash(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
@@ -757,6 +763,28 @@ mod tests {
         );
         assert!(
             rows[11].starts_with(" y reset  n keep  ctrl-c quit"),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn the_leave_commits_question_names_the_count_and_ids_and_offers_no_enter() {
+        use crate::git::commit_files::CommitId;
+        use crate::popup::LeaveCommitsConfirm;
+        let mut state = workspace(&["a.rs"]);
+        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
+            op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
+            short_oid: "abc1234".into(),
+            left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
+        })];
+        let (_, rows) = draw(&state, 100, 12);
+        assert!(contains(&rows, " Leave commits behind "), "{rows:#?}");
+        assert!(contains(&rows, "leave 3 commits"), "{rows:#?}");
+        for id in ["c1a2b3c", "d4e5f6a", "0b1c2d3"] {
+            assert!(contains(&rows, id), "{id}: {rows:#?}");
+        }
+        assert!(
+            rows[11].starts_with(" y leave  n stay  ctrl-c quit"),
             "{rows:#?}"
         );
     }
