@@ -2038,7 +2038,8 @@ mod tests {
                 .expect(
                     &["config", "-z", "--get", "remote.origin.url"],
                     ok(b"git@github.com:acme/widgets.git\0"),
-                ),
+                )
+                .expect(&crate::git::forge_remote::UPSTREAMS_ARGV, ok(b"")),
         );
         let git = Arc::new(RecordingRunner::new(fake.clone(), sink.clone()));
         let gh = Arc::new(
@@ -2091,6 +2092,8 @@ mod tests {
             [
                 "git remote",
                 "git config -z --get remote.origin.url",
+                "git for-each-ref \
+                 --format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref) refs/heads",
                 probe_line,
                 gh_line,
                 gh_line
@@ -2098,7 +2101,7 @@ mod tests {
         );
         let mut ids: Vec<u64> = started.iter().map(|(id, _)| *id).collect();
         ids.dedup();
-        assert_eq!(ids.len(), 5, "{events:?}");
+        assert_eq!(ids.len(), 6, "{events:?}");
         // One finish per start, with the same id.
         for (id, _) in &started {
             let finished = events

@@ -95,9 +95,11 @@ const FORMAT: &str = "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s";
 /// skipping `skip`. Later pages pass the first page's newest commit as
 /// `tip`, so a page never mixes two histories when `HEAD` moves in
 /// between; under a query that commit is the newest match, so the set is
-/// the same. A path query asks git for every commit up to the page's end,
-/// since `--follow` cannot skip. An unborn `HEAD` is an empty, finished
-/// log, not an error.
+/// the same. A path query cannot skip, since `--follow` would lose a
+/// rename it skipped: it reads from the top and reads ahead as far as is
+/// already loaded, so its page can hold more than `limit` rows and the
+/// git work over a long history grows linearly, not quadratically. An
+/// unborn `HEAD` is an empty, finished log, not an error.
 pub fn log_page(
     runner: &dyn GitRunner,
     tip: Option<&str>,
@@ -117,9 +119,11 @@ pub fn log_page(
     }
     // `--follow` finds a rename only in a commit it shows, so a rename
     // inside the skipped commits would lose the file: a path query reads
-    // from the top every time and drops what earlier pages had.
+    // from the top every time and drops what earlier pages had. Reading
+    // `max(limit, skip)` past them doubles each request (200, 400, 800,
+    // ...), so git is asked for at most about 3x what ends up loaded.
     let (drop, skip, limit) = match &query.path {
-        Some(_) => (skip, 0, skip + limit),
+        Some(_) => (skip, 0, skip + limit.max(skip)),
         None => (0, skip, limit),
     };
     let output = run(runner, log_command(tip, skip, limit, query))?;
@@ -455,7 +459,7 @@ mod tests {
             git(dir, &["add", "-A"]);
             commit(dir, &format!("{file} {text}"), author, time);
         };
-        for i in 0..4 {
+        for i in 0..8 {
             touch("a.txt", &format!("a{i}\n").repeat(9), "Ann", 1_000 + i);
             touch("b.txt", &format!("b{i}"), "Bob", 2_000 + i);
         }
@@ -474,12 +478,14 @@ mod tests {
 
         for query in &queries {
             let all = log_page(&runner, None, 0, 100, query).unwrap().rows;
-            assert!(all.len() >= 5, "{query:?}: {all:?}");
+            assert!(all.len() >= 9, "{query:?}: {all:?}");
             let tip = all[0].oid.clone();
             let mut paged = Vec::new();
             let mut skip = 0;
+            let mut calls = 0u32;
             loop {
                 let page = log_page(&runner, Some(&tip), skip, 2, query).unwrap();
+                calls += 1;
                 skip += page.rows.len();
                 paged.extend(page.rows);
                 if page.done {
@@ -487,6 +493,12 @@ mod tests {
                 }
             }
             assert_eq!(paged, all, "{query:?}");
+            if query.path.is_some() {
+                // ceil(log2(n / 2)) + 2: path pages grow instead of
+                // staying at the limit.
+                let bound = (all.len() / 2).next_power_of_two().trailing_zeros() + 2;
+                assert!(calls <= bound, "{calls} pages for {} rows", all.len());
+            }
         }
     }
 
@@ -746,6 +758,58 @@ mod tests {
         assert_eq!(subjects, ["three"]);
         assert!(page.done);
         fake.assert_done();
+    }
+
+    #[test]
+    fn path_query_pages_read_ahead_as_far_as_already_loaded_and_drop_what_was_shown() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let record = |i: usize| format!("{i:02x}\x1f{i:02x}\x1f\x1f1\x1fA\x1fs{i}\0");
+        let history = |n: usize| (0..n).map(record).collect::<String>().into_bytes();
+        let argv = |n: &'static str| {
+            let mut argv = query_argv(&["--follow"], &["a.rs"]);
+            argv[7] = n;
+            argv[9] = "abc";
+            argv
+        };
+        // Seven matching commits: git returns at most what `-n` asks for.
+        let fake = FakeRunner::new()
+            .expect(&argv("2"), ok(&history(2)))
+            .expect(&argv("4"), ok(&history(4)))
+            .expect(&argv("8"), ok(&history(7)));
+        let query = LogQuery {
+            path: Some(RepoPath::from("a.rs")),
+            author: None,
+        };
+
+        let mut loaded = Vec::new();
+        let mut pages = Vec::new();
+        loop {
+            let page = log_page(&fake, Some("abc"), loaded.len(), 2, &query).unwrap();
+            let subjects: Vec<String> = page.rows.iter().map(|r| r.subject.clone()).collect();
+            pages.push((subjects, page.done));
+            loaded.extend(page.rows);
+            if page.done {
+                break;
+            }
+        }
+
+        let page = |s: &[&str], done: bool| (s.iter().map(|s| s.to_string()).collect(), done);
+        assert_eq!(
+            pages,
+            vec![
+                page(&["s0", "s1"], false),
+                page(&["s2", "s3"], false),
+                page(&["s4", "s5", "s6"], true),
+            ]
+        );
+        fake.assert_done();
+        for env in fake.envs() {
+            assert!(
+                env.contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
+                "{env:?}"
+            );
+        }
     }
 
     #[test]
