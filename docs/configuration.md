@@ -1073,13 +1073,18 @@ to another repository. The commits a paste makes can be undone with `ctrl-z`.
 
 Each row is one place `HEAD` has been, newest first: its commit, what moved
 it, and git's message. The list is read-only; `ctrl-z` and `ctrl-r` undo and
-redo from it.
+redo from it, whatever the filter hides. `/` narrows the rows as you type,
+matching each row's short id and message as drawn; `enter` keeps the filter
+and `esc` clears it, then quits as everywhere else. The filter only narrows
+what is shown and never reaches git.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
 | `reflog.next` | `j`, `down` | Select the next reflog entry | |
 | `reflog.prev` | `k`, `up` | Select the previous reflog entry | |
 | `reflog.switch_tab` | `[`, `]` | Show the log | |
+| `reflog.filter` | `/` | Filter the reflog by typed text | |
+| `reflog.escape` | `esc` | Clear the filter, else quit Kika | locked |
 | `reflog.filter_path` | `L` | Show only the commits that changed a typed path, across renames | |
 | `reflog.filter_author` | `A` | Show only the commits by a typed author | |
 
