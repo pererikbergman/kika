@@ -22,7 +22,9 @@ use crate::git::submodule::{Submodule, SubmoduleState};
 use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
-use crate::keymap::{Binding, KeyPress, KeyScope, Keymap, KeysTable, Trust, registry};
+use crate::keymap::{
+    Binding, KeyPress, KeyScope, Keymap, KeysTable, Resolution, Trust, registry, resolve,
+};
 use crate::layout::{self, SidePanel};
 use crate::model::*;
 use crate::op::{GitOp, ResetMode};
@@ -938,4 +940,39 @@ pub(crate) fn build(
 
 pub(crate) fn binding(id: &str) -> &'static Binding {
     registry().iter().find(|b| b.id == id).expect("known id")
+}
+
+pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
+    // Every binding is enabled on a workspace with a stageable file
+    // selected, a commit in the log and a stash in the list.
+    let mut state = AppState::new(Context::Workspace);
+    state.stash.entries = vec![crate::git::stash::StashEntry {
+        index: 0,
+        oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+        base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+        untracked: None,
+        subject: "On main: wip".into(),
+    }];
+    state.files = vec![crate::git::FileEntry {
+        path: "a.rs".into(),
+        orig_path: None,
+        index: '.',
+        worktree: 'M',
+        kind: EntryKind::Changed,
+    }];
+    state.selected = Some(0);
+    state.commits.rows = vec![crate::git::log::CommitRow {
+        oid: "abc".into(),
+        short_oid: "abc".into(),
+        parents: vec![],
+        author: "Ann".into(),
+        time: 0,
+        subject: "s".into(),
+        subject_altered: false,
+    }];
+    match resolve(registry(), &Keymap::default(), focus, &state, key) {
+        Resolution::Run(binding) => Some(binding.intent.clone()),
+        Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
+        Resolution::Unbound | Resolution::Command(_) => None,
+    }
 }
