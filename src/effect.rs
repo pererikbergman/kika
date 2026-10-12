@@ -9,17 +9,17 @@ use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
-use crate::diff_stream::DiffStreamer;
 use crate::features::branches::{self, remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::commits::rewrite;
 use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
+use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
 use crate::features::{
-    blame, conflicts, custom_commands, pull_requests, repos, review, stash, submodules, sync,
-    worktrees,
+    blame, commit, conflicts, custom_commands, pull_requests, repos, review, stash, submodules,
+    sync, worktrees,
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::task::ForgeContext;
@@ -30,7 +30,6 @@ use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, load_patch, sanitize, terminal_safe};
-use crate::git::head::read_head_message;
 use crate::git::log::{LogQuery, log_page, markers};
 use crate::git::path::RepoPath;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
@@ -42,7 +41,6 @@ use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
-use crate::prompts::read_prompt_facts;
 use crate::worktree_file;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
@@ -874,18 +872,7 @@ impl Runtime {
                     let _ = tx.send(AppIntent::StatusLoaded { tag, result });
                 });
             }
-            Effect::LoadHeadMessage { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_head_message(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
-                            });
-                    let _ = tx.send(AppIntent::HeadMessageLoaded { tag, result });
-                });
-            }
+            Effect::LoadHeadMessage { tag } => commit::effects::load_head_message(runner, tx, tag),
             Effect::LoadSubmodules { tag } => submodules::effects::load(runner, tx, tag),
             Effect::LoadWorktrees { tag } => worktrees::effects::load(runner, tx, tag),
             Effect::AddWorktree { tag, path, branch } => {
@@ -962,12 +949,7 @@ impl Runtime {
             Effect::LoadDiff { tag, request, want } => self.diff.start(tag, request, want),
             Effect::DiffDemand { seq, want } => self.diff.demand(seq, want),
             Effect::CancelDiff => self.diff.cancel(),
-            Effect::DiffLoadingDelay { tag } => {
-                tokio::spawn(async move {
-                    tokio::time::sleep(DIFF_LOADING_DELAY).await;
-                    let _ = tx.send(AppIntent::DiffSlow { tag });
-                });
-            }
+            Effect::DiffLoadingDelay { tag } => diff::effects::loading_delay(tx, tag),
             // Synchronous: the loop exits right after, and the runtime's
             // shutdown must not wait on git.
             Effect::InterruptGit => self.runner.interrupt(),
@@ -985,17 +967,7 @@ impl Runtime {
                     let _ = tx.send(AppIntent::OpFinished { tag, op, result });
                 });
             }
-            Effect::ProbeCommit { tag, op } => {
-                tokio::spawn(async move {
-                    // Errors and panics both report `None`, which hands over.
-                    let facts =
-                        tokio::task::spawn_blocking(move || read_prompt_facts(runner.as_ref()))
-                            .await
-                            .ok()
-                            .and_then(Result::ok);
-                    let _ = tx.send(AppIntent::CommitProbed { tag, op, facts });
-                });
-            }
+            Effect::ProbeCommit { tag, op } => commit::effects::probe(runner, tx, tag, op),
             Effect::SnapshotRefs { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the watch would never poll again.
@@ -1369,7 +1341,7 @@ mod tests {
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::git::remote::RemoteFailure;
-    use crate::test_support::{HostilePanic, forge_tag};
+    use crate::test_support::{HostilePanic, commit_op, forge_tag};
 
     #[tokio::test]
     async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
@@ -1704,16 +1676,6 @@ mod tests {
         }
     }
 
-    fn commit_op() -> GitOp {
-        GitOp::Commit {
-            message: Some("m\n".into()),
-            stage_all: false,
-            amend: false,
-            no_verify: false,
-            fixup: None,
-        }
-    }
-
     /// A commit run as an effect stays detached: the fake has no attached
     /// run expected, so it would panic on one.
     #[tokio::test]
@@ -1744,73 +1706,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn probe_commit_reports_the_facts_with_the_same_tag_and_op() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &["config", "--type=bool", "--get", "commit.gpgsign"],
-                    ok(b"true\n"),
-                )
-                .expect(&["rev-parse", "--git-path", "hooks"], ok(b"/nowhere\n")),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 6,
-            user: true,
-        };
-
-        runtime.spawn(Effect::ProbeCommit {
-            tag,
-            op: commit_op(),
-        });
-
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::CommitProbed {
-                tag,
-                op: commit_op(),
-                facts: Some(crate::prompts::PromptFacts {
-                    signs: true,
-                    hooks: vec![],
-                }),
-            })
-        );
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_failed_or_panicking_probe_reports_no_facts() {
-        let tag = Tag {
-            generation: 0,
-            seq: 1,
-            user: true,
-        };
-        let failing = FakeRunner::new().expect(
-            &["config", "--type=bool", "--get", "commit.gpgsign"],
-            fail("fatal: bad config\n"),
-        );
-        // No expectations at all: the fake panics on the first read.
-        for runner in [failing, FakeRunner::new()] {
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let runtime = Runtime::new(Arc::new(runner), tx);
-            runtime.spawn(Effect::ProbeCommit {
-                tag,
-                op: commit_op(),
-            });
-            assert_eq!(
-                rx.recv().await,
-                Some(AppIntent::CommitProbed {
-                    tag,
-                    op: commit_op(),
-                    facts: None,
-                })
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn the_panic_text_of_an_op_carries_no_control_characters() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
@@ -1835,57 +1730,6 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed OpFinished, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn load_head_message_reports_back_with_the_same_tag() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &["log", "-1", "--format=%B", "HEAD", "--"],
-            ok(b"subj\n\nbody\n\n"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 1,
-            seq: 4,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadHeadMessage { tag });
-
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::HeadMessageLoaded {
-                tag,
-                result: Ok("subj\n\nbody".into()),
-            })
-        );
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn a_panicking_head_message_load_still_reports_back() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-        let tag = Tag {
-            generation: 0,
-            seq: 5,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadHeadMessage { tag });
-
-        match rx.recv().await {
-            Some(AppIntent::HeadMessageLoaded {
-                tag: got,
-                result: Err(message),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(message.starts_with("git log crashed: "), "{message:?}");
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed HeadMessageLoaded, got {other:?}"),
         }
     }
 

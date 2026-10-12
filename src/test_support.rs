@@ -13,7 +13,7 @@ use crate::git::GitRunner;
 use crate::git::bisect::{BisectMark, BisectState};
 use crate::git::branches::{Branch, BranchName, Track};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::{DiffLine, DiffRequest, LineKind};
+use crate::git::diff::{DiffChunk, DiffLine, DiffRequest, LineKind};
 use crate::git::log::{CommitRow, LogPage, LogQuery};
 use crate::git::patch::{self, FilePatch};
 use crate::git::path::RepoPath;
@@ -185,6 +185,17 @@ pub(crate) fn line(text: &str) -> DiffLine {
     }
 }
 
+/// A `DiffLoaded` chunk of `n` lines for `tag`, each naming its seq.
+pub(crate) fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
+    AppIntent::DiffLoaded {
+        tag,
+        result: Ok(DiffChunk {
+            lines: (0..n).map(|i| line(&format!("{}:{i}", tag.seq))).collect(),
+            done,
+        }),
+    }
+}
+
 pub(crate) fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
     state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))
 }
@@ -201,6 +212,23 @@ pub(crate) fn probe_of(effects: &[Effect]) -> (Tag, GitOp) {
     match effects {
         [Effect::ProbeCommit { tag, op }] => (*tag, op.clone()),
         other => panic!("expected one ProbeCommit, got {other:?}"),
+    }
+}
+
+pub(crate) fn head_load(effects: &[Effect]) -> Tag {
+    match effects {
+        [Effect::LoadHeadMessage { tag }] => *tag,
+        other => panic!("expected one LoadHeadMessage, got {other:?}"),
+    }
+}
+
+pub(crate) fn commit_op() -> GitOp {
+    GitOp::Commit {
+        message: Some("m\n".into()),
+        stage_all: false,
+        amend: false,
+        no_verify: false,
+        fixup: None,
     }
 }
 
