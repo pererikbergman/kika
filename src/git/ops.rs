@@ -888,6 +888,26 @@ fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, S
     Ok((found.stdout.split(|&b| b == 0)).any(|name| dirs.iter().any(|d| d.as_bytes() == name)))
 }
 
+/// Whether the worktree at `top` holds anything a restore of `restore`
+/// would overwrite or unlink: anything at an old path, or a leading
+/// directory that is not a real directory (a file or a symlink). The
+/// filesystem answers, so a name that differs only in case or Unicode form
+/// counts where the filesystem folds them, as git's byte-wise checks
+/// cannot. Anything unreadable counts as taken.
+fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> bool {
+    let found = |path: &RepoPath| match std::fs::symlink_metadata(top.join(path.as_os_str())) {
+        Ok(meta) => Some(Ok(meta.is_dir())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(Err(e)),
+    };
+    restore.iter().any(|old| {
+        let bad_dir = leading_dirs(old)
+            .iter()
+            .any(|dir| matches!(found(dir), Some(Ok(false) | Err(_))));
+        bad_dir || found(old).is_some()
+    })
+}
+
 /// `HEAD` as a commit id, for a restore that must use the tree the push
 /// was made on.
 fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
@@ -912,6 +932,11 @@ fn push_with_restore(
 ) -> Result<(), String> {
     let head = head_commit(runner)?;
     if restore_taken(runner, restore)? {
+        return Err(STASH_RENAME_TAKEN.into());
+    }
+    let top = super::repo_root::find_toplevel(runner)
+        .ok_or_else(|| "Could not find the worktree's top level".to_string())?;
+    if restore_blocked_on_disk(&top, restore) {
         return Err(STASH_RENAME_TAKEN.into());
     }
     run_checked(runner, &op_command(op))?;
@@ -3950,6 +3975,7 @@ mod tests {
     #[test]
     fn a_rename_is_pushed_without_its_old_path_then_restored_from_head() {
         let head = "ab".repeat(20);
+        let empty_top = EmptyTop::new();
         let op = set_push(
             set(
                 StashMode::IncludeUntracked,
@@ -3978,6 +4004,7 @@ mod tests {
                 &["ls-files", "-z", "--cached", "--others", "--", "-old.rs"],
                 ok(b""),
             )
+            .expect(&["rev-parse", "--show-toplevel"], empty_top.stdout())
             .expect(
                 &["stash", "push", "-u", "-m", "m", "--", "new.rs", "u.rs"],
                 ok(b""),
@@ -4007,6 +4034,7 @@ mod tests {
     #[test]
     fn a_failed_restore_says_the_stash_was_saved_and_how_to_restore() {
         let head = "ab".repeat(20);
+        let empty_top = EmptyTop::new();
         let op = set_push(set(StashMode::All, &["new.rs"], &["old.rs"]), None);
         let runner = FakeRunner::new()
             .expect(
@@ -4017,6 +4045,7 @@ mod tests {
                 &["ls-files", "-z", "--cached", "--others", "--", "old.rs"],
                 ok(b""),
             )
+            .expect(&["rev-parse", "--show-toplevel"], empty_top.stdout())
             .expect(&["stash", "push", "--", "new.rs"], ok(b""))
             .expect(
                 &["checkout", "-q", &head, "--", "old.rs"],
@@ -4037,6 +4066,117 @@ mod tests {
         runner.assert_done();
     }
 
+    /// An empty directory standing in for the worktree's top level, so the
+    /// filesystem check finds nothing there.
+    struct EmptyTop(crate::git::fake::TempDir);
+
+    impl EmptyTop {
+        fn new() -> Self {
+            Self(crate::git::fake::TempDir::new("top"))
+        }
+
+        fn stdout(&self) -> GitOutput {
+            let mut line = self.0.path().as_os_str().as_encoded_bytes().to_vec();
+            line.push(b'\n');
+            ok(&line)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_disk_check_refuses_anything_at_the_old_path_or_a_non_directory_above_it() {
+        let tmp = crate::git::fake::TempDir::new("disk");
+        let top = tmp.path();
+        let blocked = |old: &str| restore_blocked_on_disk(top, &[old.into()]);
+        assert!(!blocked("old.txt"), "nothing there");
+        assert!(!blocked("a/b/old.txt"), "no directories either");
+
+        std::fs::create_dir_all(top.join("a/b")).unwrap();
+        std::fs::write(top.join("a/b/other.txt"), "x").unwrap();
+        assert!(!blocked("a/b/old.txt"), "real directories are fine");
+        std::fs::write(top.join("a/b/old.txt"), "mine").unwrap();
+        assert!(blocked("a/b/old.txt"), "a file at the old path");
+
+        std::fs::write(top.join("f"), "mine").unwrap();
+        assert!(blocked("f/old.txt"), "a file where a directory goes");
+        assert!(blocked("f/g/old.txt"), "and below it");
+
+        let elsewhere = crate::git::fake::TempDir::new("elsewhere");
+        std::os::unix::fs::symlink(elsewhere.path(), top.join("s")).unwrap();
+        assert!(blocked("s/old.txt"), "a symlinked directory is not real");
+        std::os::unix::fs::symlink("missing", top.join("dangling")).unwrap();
+        assert!(blocked("dangling"), "a dangling symlink at the old path");
+    }
+
+    /// Whether git took the repo at `dir` to be on a case-insensitive
+    /// filesystem; the tests that need one skip otherwise.
+    fn ignores_case(dir: &Path) -> bool {
+        crate::git::fake::git(dir, &["config", "--get", "core.ignorecase"]) == b"true\n"
+    }
+
+    /// A repo whose last commit adds `old`, then stages `old` renamed to
+    /// `new.txt`. Git may leave an emptied directory behind; it is removed.
+    fn renamed_away(old: &str) -> crate::git::fake::TempDir {
+        use crate::git::fake::git;
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        if let Some(parent) = Path::new(old).parent() {
+            std::fs::create_dir_all(dir.join(parent)).unwrap();
+        }
+        std::fs::write(dir.join(old), "orig\n").unwrap();
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "old"]);
+        git(dir, &["mv", "--", old, "new.txt"]);
+        if let Some(parent) = Path::new(old)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+        {
+            let _ = std::fs::remove_dir(dir.join(parent));
+        }
+        tmp
+    }
+
+    #[test]
+    fn a_file_at_the_old_path_in_another_case_stops_the_stash_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = renamed_away("Old.txt");
+        let dir = tmp.path();
+        if !ignores_case(dir) {
+            return;
+        }
+        std::fs::write(dir.join("old.txt"), "MINE\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+
+        let op = set_push(set(StashMode::All, &["new.txt"], &["Old.txt"]), None);
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("old.txt")).unwrap(),
+            "MINE\n"
+        );
+    }
+
+    #[test]
+    fn a_file_at_the_old_directory_in_another_case_stops_the_stash_in_real_git() {
+        use crate::git::fake::git;
+        let tmp = renamed_away("D/old.txt");
+        let dir = tmp.path();
+        if !ignores_case(dir) {
+            return;
+        }
+        std::fs::write(dir.join("d"), "MINE\n").unwrap();
+        let before = git(dir, &["status", "--porcelain"]);
+
+        let op = set_push(set(StashMode::All, &["new.txt"], &["D/old.txt"]), None);
+        let runner = crate::git::CliRunner::isolated(dir);
+        assert_eq!(run_op(&runner, &op), Err(STASH_RENAME_TAKEN.into()));
+        assert_eq!(stash_count(dir), 0);
+        assert_eq!(git(dir, &["status", "--porcelain"]), before);
+        assert_eq!(std::fs::read_to_string(dir.join("d")).unwrap(), "MINE\n");
+    }
+
     #[test]
     fn leading_dirs_are_every_directory_a_path_sits_in() {
         let dirs = |p: &str| leading_dirs(&p.into());
@@ -4047,6 +4187,7 @@ mod tests {
     #[test]
     fn a_file_at_a_directory_the_restore_needs_runs_no_push() {
         let head = "ab".repeat(20);
+        let empty_top = EmptyTop::new();
         let op = set_push(set(StashMode::All, &["new.rs"], &["a/b/old.rs"]), None);
         let at_old = ["ls-files", "-z", "--cached", "--others", "--", "a/b/old.rs"];
         let at_dirs = ["ls-files", "-z", "--cached", "--others", "--", "a", "a/b"];
@@ -4063,6 +4204,7 @@ mod tests {
             .expect(&verify, ok(head.as_bytes()))
             .expect(&at_old, ok(b""))
             .expect(&at_dirs, ok(b"a/other.rs\0a/bc\0"))
+            .expect(&["rev-parse", "--show-toplevel"], empty_top.stdout())
             .expect(&["stash", "push", "--", "new.rs"], ok(b""))
             .expect(&["checkout", "-q", &head, "--", "a/b/old.rs"], ok(b""));
         assert_eq!(run_op(&runner, &op), Ok(()));

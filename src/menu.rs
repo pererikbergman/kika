@@ -277,7 +277,9 @@ pub(crate) use crate::git::ops::STASH_RENAME_TAKEN;
 /// cursor's row refuses it, as other row actions are refused. A staged
 /// rename is refused when any listed entry sits at its old path or at a
 /// directory that path needs: the restore after the push would overwrite
-/// or unlink that file.
+/// or unlink that file. Names are compared ignoring ASCII case, since a
+/// case-insensitive filesystem folds them; on another one this only
+/// refuses more.
 pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true)
         .or_else(|| stash_blocked(state))
@@ -287,7 +289,10 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
                 .filter_map(|e| GitOp::stash_file_for(e))
                 .flat_map(|set| set.restore)
                 .flat_map(|old| leading_dirs(&old).into_iter().chain([old]))
-                .any(|taken| state.files.iter().any(|f| f.path == taken));
+                .any(|taken| {
+                    (state.files.iter())
+                        .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
+                });
             if entries.is_empty() {
                 Some("No file selected".into())
             } else if taken {

@@ -19937,6 +19937,13 @@ mod tests {
             let (state, _) = with_files(files, 24);
             assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
         }
+        // A case-insensitive filesystem would fold these onto the old path
+        // or its directory, so they are refused too.
+        for (old, taken) in [("Old.rs", "old.rs"), ("D/old.rs", "d")] {
+            let files = vec![renamed("new.rs", old), untracked(taken)];
+            let (state, _) = with_files(files, 24);
+            assert_eq!(crate::menu::stash_file_disabled(&state), reason, "{taken}");
+        }
         // A file beside the old path, inside its directory, is fine.
         let files = vec![renamed("new.rs", "d/e/old.rs"), untracked("d/e/other.rs")];
         let (state, _) = with_files(files, 24);
