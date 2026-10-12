@@ -249,6 +249,39 @@ fn drop_removes_the_commit_s_change_and_keeps_the_others() {
 }
 
 #[test]
+fn a_branch_and_tag_named_like_a_short_id_do_not_change_which_commit_is_picked() {
+    let tmp = four_commits();
+    let dir = &tmp.0;
+    let [first, second, third, fourth] = ids(dir);
+    // The abbreviation git writes in the todo for `second`, as a branch
+    // and a tag on `fourth`.
+    let short = git(dir, &["rev-parse", "--short", &second])
+        .trim()
+        .to_string();
+    git(dir, &["branch", &short, &fourth]);
+    git(dir, &["tag", &short, &fourth]);
+    assert_eq!(
+        rev(dir, &short),
+        fourth,
+        "{short} must name the branch, not the commit"
+    );
+
+    // A move picks `second` by its id; a `drop` line would not show which
+    // commit git read, since a dropped commit is never looked up.
+    let plan = format!("pick {third}\npick {second}\npick {fourth}\n");
+    assert_ok(&rebase(dir, &first, &plan, &"false".into()));
+
+    let messages: Vec<String> = history(dir).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(messages, ["fourth", "second", "third", "first"]);
+    assert_eq!(tree_files(dir, "HEAD~2"), "a\nc\n");
+    assert_eq!(tree_files(dir, "HEAD~1"), "a\nb\nc\n");
+    assert_eq!(tree_files(dir, "HEAD"), "a\nb\nc\nd\n");
+    assert_eq!(rev(dir, "HEAD~3"), first);
+    assert_eq!(rev(dir, &format!("refs/heads/{short}")), fourth);
+    assert_eq!(rev(dir, &format!("refs/tags/{short}")), fourth);
+}
+
+#[test]
 fn reword_changes_only_that_message() {
     let tmp = four_commits();
     let dir = &tmp.0;
