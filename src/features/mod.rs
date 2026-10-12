@@ -41,6 +41,7 @@ pub(crate) mod branches;
 pub(crate) mod command_log;
 pub(crate) mod conflicts;
 pub(crate) mod custom_commands;
+pub(crate) mod operation;
 pub(crate) mod repos;
 pub(crate) mod submodules;
 pub(crate) mod sync;
