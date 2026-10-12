@@ -21,6 +21,12 @@ pub enum InputTarget {
     RemotesFilter,
     TagsFilter,
     DiffSearch,
+    /// Searches the diff preview a side panel shows.
+    PreviewSearch,
+    /// Searches the blame's line text.
+    BlameSearch,
+    /// Searches the commit opened from a blame line.
+    BlameCommitSearch,
     /// The path git narrows the log to; read on Enter, not as typed.
     LogPath,
     /// The author git narrows the log to; read on Enter, not as typed.
@@ -41,6 +47,9 @@ impl InputTarget {
             | InputTarget::RemotesFilter
             | InputTarget::TagsFilter
             | InputTarget::DiffSearch
+            | InputTarget::PreviewSearch
+            | InputTarget::BlameSearch
+            | InputTarget::BlameCommitSearch
             | InputTarget::ReviewFilter
             | InputTarget::WorktreesFilter => "/",
             InputTarget::LogPath => "path: ",
