@@ -441,10 +441,7 @@ mod tests {
         assert!(state.popups.is_empty());
     }
 
-    pub(crate) fn command_finished(
-        output: OutputMode,
-        result: Result<&str, CommandFailure>,
-    ) -> AppIntent {
+    fn command_finished(output: OutputMode, result: Result<&str, CommandFailure>) -> AppIntent {
         AppIntent::CommandFinished {
             title: "Show it".into(),
             output,
