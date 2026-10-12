@@ -12,7 +12,7 @@ Kika uses a strict Model-View-Intent (MVI) architecture to isolate terminal rend
 ### UI and Rendering
 * **`ratatui`**: Immediate-mode UI framework handling layouts, widgets, and buffer rendering.
 * **`crossterm`**: Terminal backend for cross-platform raw mode management and input event capturing.
-* **`syntect`**: High-performance syntax highlighting for the diff viewer, parsing large hunks in real time.
+* **`syntect`**: The planned syntax highlighter for the diff viewer, parsing large hunks in real time. It is not a dependency yet; it gets added when highlighting is built.
 
 #### Displaying repository text
 * **Strict by default:** names, paths, refs, authors, headers and git's messages are drawn through `sanitize`. Control characters become `U+FFFD`, and bidi controls and invisible characters become a visible `<U+XXXX>` escape.
@@ -31,7 +31,7 @@ Kika uses a hybrid model: `git2` for fast reads, the `git` executable for everyt
 
 **The `git` CLI is the default.** All git access goes through one interface, implemented first with the CLI. A read moves to `git2` only when profiling shows a measured need (likely candidates: commit-graph paging and blob reads for PR review). `git status` always stays on the CLI, because `libgit2` status can disagree with git (untracked cache, fsmonitor, sparse checkout).
 
-* **`git2`**: Rust bindings for `libgit2`. Used for read-only queries where avoiding process spawns pays off: commit graph traversal with lazy pagination, refs and reflog, blob/tree reads, merge-base and ahead/behind counts, and cheap ref snapshots for detecting external changes. `git2` objects are `!Send`, so each blocking task opens its own `Repository`.
+* **`git2`**: Rust bindings for `libgit2`. Used for read-only queries where avoiding process spawns pays off: commit graph traversal with lazy pagination, refs and reflog, blob/tree reads, merge-base and ahead/behind counts, and cheap ref snapshots for detecting external changes. `git2` objects are `!Send`, so each blocking task opens its own `Repository`. `git2` is not a dependency yet; it gets added together with the first read that profiling justifies.
 * **`git` CLI (via `tokio::process`)**: Used for all mutations and network operations: commit, stage/unstage, partial (hunk/line) staging, checkout, merge, rebase, stash, fetch, pull and push. The real `git` binary runs the user's hooks, commit signing (GPG/SSH), credential helpers, `.gitattributes` filters (LFS, CRLF) and pagers, none of which `libgit2` fully supports.
 
 #### Git command conventions
@@ -68,18 +68,24 @@ edition = "2024"
 # UI & Terminal
 ratatui = "0.30"
 crossterm = "0.29"
-syntect = "5.3"
 
-# Git Operations
-git2 = "0.21"
-
-# Async & Networking
+# Async & Serialization
 tokio = { version = "1.53", features = ["full"] }
-reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # CLI & Errors
 clap = { version = "4.6", features = ["derive"] }
 color-eyre = "0.6"
+
+# Config
+toml = "1.1"
+
+[target.'cfg(unix)'.dependencies]
+# Swap the SIGINT action around a hand-off and put the previous one back.
+libc = "0.2"
+
+[dev-dependencies]
+# Paused virtual time, so timer tests never wait for real.
+tokio = { version = "1.53", features = ["full", "test-util"] }
 ```
