@@ -1164,8 +1164,20 @@ the patch is dropped.
 | `stash.files` | `enter` | Show the files the selected stash holds | locked |
 | `stash.apply` | `space` | Apply the selected stash to the worktree and keep it | locked |
 | `stash.pop` | `g` | Apply the selected stash and drop it; a conflict keeps it | locked |
-| `stash.drop` | `d` | Drop the selected stash, asking first | locked |
+| `stash.drop` | `d` | Drop the selected stash, or the range, asking first | locked |
 | `stash.rename` | `R` | Give the selected stash a new message; it moves to stash@{0} | locked |
+| `stash.filter` | `/` | Filter the stashes by typed text | |
+| `stash.range` | `V` | Select a range from here, for drop; again to clear it | |
+| `stash.escape` | `esc` | Clear the selection, else the filter, else quit Kika | locked |
+
+`/` narrows the list as you type, matching each row as drawn:
+`stash@{N}` and the message. The filter only picks rows; it never reaches
+git. `V` starts a range; `d` over it asks once, naming how many stashes go
+and which, and only `y` answers. Kika checks every entry in the range is
+still where it was listed before it drops any, then drops them from the
+deepest up, so no drop renumbers one still to go. If the list changed, none
+is dropped and the list reloads. While a range is set, `enter`, `space`, `g`
+and `R` wait until `esc` clears it.
 
 Git has no rename for a stash, so `R` stores the entry again with the new
 message, as `stash@{0}`, and drops it from its old place. Git adds no entry
@@ -1410,8 +1422,8 @@ not answer it.
 
 ### Delete the selection?
 
-`d` over a range in the Branches panel asks once, naming how many go and the
-first few names. Only `y` answers it; `enter` does not.
+`d` over a range in the Branches or Stash panel asks once, naming how many go
+and the first few names. Only `y` answers it; `enter` does not.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|

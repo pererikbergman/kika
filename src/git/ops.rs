@@ -177,6 +177,9 @@ pub enum GitOp {
     StashPop(StashRef),
     /// Drop the entry from the list. Nothing in the worktree changes.
     StashDrop(StashRef),
+    /// Drop these entries, deepest first, so no drop renumbers one still
+    /// to go. Every entry is checked before any is dropped.
+    StashDrops(Vec<StashRef>),
     /// Give the entry a new message. Git has no rename, so it is stored
     /// again as `stash@{0}` and the old place dropped.
     StashRename {
@@ -614,9 +617,9 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::RemoveRemote(name) => GitCommand::new("remote")
             .arg("remove")
             .arg(name.as_os_string()),
-        // The first of the steps `run_op` takes, one per remote or tag;
+        // The first of the steps `run_op` takes, one per remote, tag or stash;
         // `refusal` keeps an empty list from running.
-        GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) => {
+        GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) | GitOp::StashDrops(_) => {
             return op_steps(op)
                 .first()
                 .map_or_else(|| GitCommand::new("remote"), op_command);
@@ -840,6 +843,12 @@ pub fn op_steps(op: &GitOp) -> Vec<GitOp> {
                 oid: oid.clone(),
             })
             .collect(),
+        // Deepest first: dropping `stash@{N}` renumbers only those below it.
+        GitOp::StashDrops(stashes) => {
+            let mut stashes = stashes.clone();
+            stashes.sort_by_key(|s| std::cmp::Reverse(s.index));
+            stashes.into_iter().map(GitOp::StashDrop).collect()
+        }
         other => vec![other.clone()],
     }
 }
@@ -879,6 +888,13 @@ fn run_op_with(
         | GitOp::StashPop(stash)
         | GitOp::StashDrop(stash)
         | GitOp::StashRename { stash, .. } => verify_stash(runner, stash)?,
+        // Fail closed: one entry that moved means the list changed, so
+        // nothing is dropped. Each step checks its own entry again.
+        GitOp::StashDrops(stashes) => {
+            for stash in stashes {
+                verify_stash(runner, stash)?;
+            }
+        }
         GitOp::StashPush {
             mode: StashMode::Staged,
             ..
@@ -894,7 +910,7 @@ fn run_op_with(
     if let Some(reason) = refusal(op) {
         return Err(reason.into());
     }
-    if let GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) = op {
+    if let GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) | GitOp::StashDrops(_) = op {
         return op_steps(op)
             .iter()
             .try_for_each(|step| run_op_with(runner, step, env_set));
@@ -1071,6 +1087,7 @@ pub fn refusal(op: &GitOp) -> Option<&'static str> {
         GitOp::CreateTag { name, .. } => validate_tag_name(name).err(),
         GitOp::DeleteBranches(names) if names.is_empty() => Some("No branch to delete"),
         GitOp::DeleteTags(tags) if tags.is_empty() => Some("No tag to delete"),
+        GitOp::StashDrops(stashes) if stashes.is_empty() => Some("No stash to drop"),
         GitOp::RemoveRemotes(names) if names.is_empty() => Some("No remote to remove"),
         // `remote remove` takes no `--` in older git; see `RemoveRemote`.
         GitOp::RemoveRemotes(names) if names.iter().any(|n| n.0.starts_with(b"-")) => {
@@ -3874,6 +3891,72 @@ mod tests {
         }
     }
 
+    fn at_oid(index: usize, oid_hex: &str) -> StashRef {
+        StashRef {
+            index,
+            oid: oid(oid_hex),
+        }
+    }
+
+    #[test]
+    fn a_range_of_stashes_drops_the_deepest_first_after_checking_every_one() {
+        let (a, b, c) = ("a1".repeat(20), "b2".repeat(20), "c3".repeat(20));
+        // Chosen in list order; dropped from the bottom up.
+        let op = GitOp::StashDrops(vec![at_oid(1, &a), at_oid(3, &c), at_oid(2, &b)]);
+        let steps = op_steps(&op);
+        let argvs: Vec<_> = steps.iter().map(|s| argv(&op_command(s))).collect();
+        assert_eq!(
+            argvs,
+            [
+                ["stash", "drop", "stash@{3}"],
+                ["stash", "drop", "stash@{2}"],
+                ["stash", "drop", "stash@{1}"],
+            ]
+        );
+        assert_eq!(argv(&op_command(&op)), ["stash", "drop", "stash@{3}"]);
+
+        // Every entry is checked first; then each step checks its own
+        // again just before git drops it.
+        let mut runner = FakeRunner::new();
+        for (index, found) in [(1, &a), (3, &c), (2, &b)] {
+            runner = expect_verify(runner, index, found);
+        }
+        for (index, found) in [(3, &c), (2, &b), (1, &a)] {
+            let drop = format!("stash@{{{index}}}");
+            runner = expect_verify(runner, index, found).expect(&["stash", "drop", &drop], ok(b""));
+        }
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_range_of_stashes_drops_nothing_when_any_entry_moved() {
+        let (a, b, c) = ("a1".repeat(20), "b2".repeat(20), "c3".repeat(20));
+        let op = GitOp::StashDrops(vec![at_oid(1, &a), at_oid(2, &b), at_oid(3, &c)]);
+        // The last one checked moved, or is gone: no drop runs at all, and
+        // a call to `stash drop` would find nothing expected and panic.
+        for found in ["f00", ""] {
+            let runner = expect_verify(FakeRunner::new(), 1, &a);
+            let runner = expect_verify(runner, 2, &b);
+            let runner = expect_verify(runner, 3, found);
+            assert_eq!(run_op(&runner, &op), Err(STASH_LIST_CHANGED.into()));
+            runner.assert_done();
+        }
+        // The first checked moved: nothing after it runs.
+        let runner = expect_verify(FakeRunner::new(), 1, "f00");
+        assert_eq!(run_op(&runner, &op), Err(STASH_LIST_CHANGED.into()));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn an_empty_range_of_stashes_is_refused_without_running_git() {
+        let op = GitOp::StashDrops(vec![]);
+        assert_eq!(refusal(&op), Some("No stash to drop"));
+        let runner = FakeRunner::new();
+        assert_eq!(run_op(&runner, &op), Err("No stash to drop".into()));
+        runner.assert_done();
+    }
+
     #[test]
     fn stashing_only_staged_changes_needs_git_2_35() {
         let op = push(StashMode::Staged, None, &[]);
@@ -4075,6 +4158,28 @@ mod tests {
         run_op(&runner, &GitOp::StashDrop(real_ref(dir, 0))).unwrap();
         assert_eq!(real_entries(dir).len(), 0);
         assert_eq!(read(dir, "a.txt"), "a\n");
+    }
+
+    #[test]
+    fn a_range_of_stashes_drops_exactly_those_entries_in_real_git() {
+        let tmp = stash_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        for n in 0..4 {
+            std::fs::write(dir.join("a.txt"), format!("change {n}\n")).unwrap();
+            run_op(
+                &runner,
+                &push(StashMode::All, Some(&format!("wip {n}")), &[]),
+            )
+            .unwrap();
+        }
+        // Newest first: wip 3, wip 2, wip 1, wip 0. Drop the middle two.
+        let op = GitOp::StashDrops(vec![real_ref(dir, 1), real_ref(dir, 2)]);
+        run_op(&runner, &op).unwrap();
+        let left: Vec<String> = real_entries(dir).into_iter().map(|e| e.subject).collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        assert!(left[0].ends_with(": wip 3"), "{left:?}");
+        assert!(left[1].ends_with(": wip 0"), "{left:?}");
     }
 
     #[test]

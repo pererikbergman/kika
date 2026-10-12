@@ -44,7 +44,8 @@ pub enum Popup {
     DropStash(DropStashConfirm),
     RemoveRemote(RemoveRemoteConfirm),
     DeleteTag(DeleteTagConfirm),
-    /// Delete the branches or tags of a range, or remove its remotes.
+    /// Delete the branches or tags of a range, remove its remotes, or drop
+    /// its stashes.
     DeleteRange(DeleteRangeConfirm),
     Submodules(SubmoduleList),
     Worktrees(WorktreeList),
@@ -387,6 +388,7 @@ pub enum RangeKind {
     Branches,
     Tags,
     Remotes,
+    Stashes,
 }
 
 /// "Delete these?" over a range. Like [`DeleteBranchConfirm`], it carries
@@ -411,6 +413,7 @@ impl DeleteRangeConfirm {
             RangeKind::Branches => "Delete branches",
             RangeKind::Tags => "Delete tags",
             RangeKind::Remotes => "Remove remotes",
+            RangeKind::Stashes => "Drop stashes",
         }
     }
 
@@ -424,6 +427,8 @@ impl DeleteRangeConfirm {
             (RangeKind::Tags, false) => ("Delete", "tags"),
             (RangeKind::Remotes, true) => ("Remove", "remote"),
             (RangeKind::Remotes, false) => ("Remove", "remotes"),
+            (RangeKind::Stashes, true) => ("Drop", "stash"),
+            (RangeKind::Stashes, false) => ("Drop", "stashes"),
         };
         let mut names = self.names[..count.min(Self::LISTED)].join(", ");
         if count > Self::LISTED {
@@ -439,6 +444,8 @@ impl DeleteRangeConfirm {
             (RangeKind::Remotes, false) => " Their remote-tracking branches are deleted, and \
                 branches tracking them lose their upstream."
                 .into(),
+            (RangeKind::Stashes, true) => " It cannot be recovered from the stash list.".into(),
+            (RangeKind::Stashes, false) => " They cannot be recovered from the stash list.".into(),
         };
         let kept: Vec<String> = self
             .skipped
@@ -1134,6 +1141,25 @@ mod tests {
             range(RangeKind::Remotes, &["a"], &[("not configured", 2)]).question(),
             "Remove 1 remote (a)? Its remote-tracking branches are deleted, \
              and branches tracking it lose their upstream. Kept: 2 not configured. (y/n)"
+        );
+    }
+
+    #[test]
+    fn a_stash_range_question_names_the_count_and_each_place() {
+        let ask = range(
+            RangeKind::Stashes,
+            &["stash@{1}", "stash@{2}", "stash@{3}"],
+            &[],
+        );
+        assert_eq!(ask.title(), "Drop stashes");
+        assert_eq!(
+            ask.question(),
+            "Drop 3 stashes (stash@{1}, stash@{2}, stash@{3})? \
+             They cannot be recovered from the stash list. (y/n)"
+        );
+        assert_eq!(
+            range(RangeKind::Stashes, &["stash@{0}"], &[]).question(),
+            "Drop 1 stash (stash@{0})? It cannot be recovered from the stash list. (y/n)"
         );
     }
 

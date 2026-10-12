@@ -1069,6 +1069,15 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             };
             (leading, vec!["reflog.filter"])
         }
+        KeyScope::Stash => {
+            let list = &state.stash;
+            let leading = if list.range_anchor.is_some() || !list.filter.is_empty() {
+                vec!["stash.escape"]
+            } else {
+                vec![]
+            };
+            (leading, vec!["stash.filter", "stash.range"])
+        }
         KeyScope::Diff
         | KeyScope::CommitFiles
         | KeyScope::StashFiles
@@ -6048,6 +6057,35 @@ mod tests {
             "{:?}",
             rows[19]
         );
+    }
+
+    #[test]
+    fn esc_clear_leads_the_stash_bar_while_it_has_a_filter_or_a_range() {
+        let mut state = AppState::new(Context::Workspace);
+        state.files_loaded = true;
+        state.focus = Focus::Stash;
+        state.stash.begin(1);
+        state.stash.loaded(
+            1,
+            Ok(vec![crate::git::stash::StashEntry {
+                index: 0,
+                oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
+                base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
+                untracked: None,
+                subject: "On main: first".into(),
+            }]),
+        );
+        let rows = draw(&state, 160, 10);
+        assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
+        assert!(rows[9].contains("V range"), "{:?}", rows[9]);
+        assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
+        state.stash.set_filter("first".into());
+        let rows = draw(&state, 160, 10);
+        assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
+        state.stash.set_filter(String::new());
+        state.stash.toggle_range();
+        let rows = draw(&state, 160, 10);
+        assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
     }
 
     #[test]
