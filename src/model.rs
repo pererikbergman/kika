@@ -438,9 +438,6 @@ impl AppState {
             AppIntent::Key(key) => {
                 self.notice = None;
                 self.notice_text = None;
-                if key.code == crossterm::event::KeyCode::Enter && self.enter_refused() {
-                    return vec![];
-                }
                 let focus = self.key_focus();
                 match keymap::resolve(keymap::registry(), &self.keymap, focus, self, key) {
                     Resolution::Run(binding) => return self.update(binding.intent.clone()),
@@ -1245,6 +1242,7 @@ impl AppState {
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
+            Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
@@ -5652,15 +5650,6 @@ impl AppState {
         } else if now.only_skipped && !was_only_skipped {
             self.notice = Some(bisect::ONLY_SKIPPED.into());
         }
-    }
-
-    /// Whether the question on top must be answered with `y`: Enter, the
-    /// key for going on elsewhere, is too easy to press by habit.
-    fn enter_refused(&self) -> bool {
-        matches!(
-            self.popups.last(),
-            Some(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect)))
-        )
     }
 }
 
@@ -13184,6 +13173,63 @@ mod tests {
     }
 
     #[test]
+    fn enter_does_not_answer_the_abort_question() {
+        let mut state = status_focused(&[Operation::Merge]);
+        press_char(&mut state, 'a');
+        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))];
+        assert_eq!(state.popups, question);
+        assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
+
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.op_seq, None);
+        assert_eq!(state.popups, question);
+    }
+
+    #[test]
+    fn y_aborts_every_operation_that_can_be_aborted() {
+        for op in [
+            Operation::Merge,
+            Operation::Rebase,
+            Operation::CherryPick,
+            Operation::Revert,
+        ] {
+            let mut state = status_focused(&[op]);
+            assert_eq!(press_char(&mut state, 'a'), vec![], "{op:?}");
+            assert_eq!(state.key_focus(), KeyScope::AbortConfirm, "{op:?}");
+            let (_, git_op) = op_of(&press_char(&mut state, 'y'));
+            assert_eq!(git_op, GitOp::Abort(op));
+            assert_eq!(state.popups, [], "{op:?}");
+        }
+    }
+
+    #[test]
+    fn n_or_esc_keeps_the_operation_and_ctrl_c_quits_from_the_abort_question() {
+        for no in [KeyCode::Char('n'), KeyCode::Esc] {
+            let mut state = status_focused(&[Operation::Rebase]);
+            press_char(&mut state, 'a');
+            assert_eq!(press(&mut state, no), vec![], "{no:?}");
+            assert_eq!(state.popups, [], "{no:?}");
+            assert_eq!(state.op_seq, None, "{no:?}");
+        }
+
+        let mut state = status_focused(&[Operation::Rebase]);
+        press_char(&mut state, 'a');
+        press_with(&mut state, 'c', KeyModifiers::CONTROL);
+        assert!(state.should_quit);
+        assert_eq!(state.op_seq, None);
+    }
+
+    #[test]
+    fn enter_still_answers_the_other_questions() {
+        let mut state = AppState::new(Context::Workspace);
+        state.update(AppIntent::Ask(ConfirmKind::Quit));
+        assert_eq!(state.key_focus(), KeyScope::Confirm);
+        press(&mut state, KeyCode::Enter);
+        assert!(state.should_quit);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
     fn with_nothing_in_progress_the_status_keys_are_disabled() {
         let mut state = status_focused(&[]);
         for c in ['c', 's', 'a'] {
@@ -15475,6 +15521,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 'a'), vec![]);
         let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
         assert_eq!(state.popups, question);
+        assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
         assert!(
             state
                 .confirm_question(ConfirmKind::Abort(Operation::Bisect))
@@ -15483,6 +15530,7 @@ mod tests {
 
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups, question);
+        assert_eq!(state.op_seq, None);
 
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::BisectReset);
@@ -15505,7 +15553,8 @@ mod tests {
             state.popups,
             [Popup::Confirm(ConfirmKind::Abort(Operation::Rebase))]
         );
-        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Abort(Operation::Rebase));
     }
 

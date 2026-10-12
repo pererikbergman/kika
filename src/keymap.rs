@@ -276,6 +276,8 @@ pub enum KeyScope {
     ResetHard,
     /// "Drop this stash?" on top of the popup stack.
     DropStash,
+    /// "Abort the operation in progress?" on top of the popup stack.
+    AbortConfirm,
     /// The submodule list on top of the popup stack.
     Submodules,
     /// The worktree list on top of the popup stack.
@@ -335,6 +337,7 @@ impl KeyScope {
             | KeyScope::DeleteTag
             | KeyScope::ResetHard
             | KeyScope::DropStash
+            | KeyScope::AbortConfirm
             | KeyScope::Submodules
             | KeyScope::Worktrees
             | KeyScope::RemoveWorktree
@@ -382,6 +385,7 @@ impl KeyScope {
             KeyScope::DeleteTag => "Delete tag",
             KeyScope::ResetHard => "Reset hard",
             KeyScope::DropStash => "Drop stash",
+            KeyScope::AbortConfirm => "Abort",
             KeyScope::Submodules => "Submodules",
             KeyScope::Worktrees => "Worktrees",
             KeyScope::RemoveWorktree => "Remove worktree",
@@ -521,6 +525,9 @@ pub const REPO_LOCKED: &[&str] = &[
     "drop_stash.yes",
     "drop_stash.no",
     "drop_stash.quit",
+    "abort_confirm.yes",
+    "abort_confirm.no",
+    "abort_confirm.quit",
     "remotes.remove",
     "remove_remote.yes",
     "remove_remote.no",
@@ -4151,6 +4158,41 @@ static REGISTRY: &[Binding] = &[
         bar: true,
         disabled: never,
     },
+    // As with discarding, Enter is left unbound: aborting loses resolved
+    // conflicts.
+    Binding {
+        id: "abort_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, abort the operation",
+        label: "abort",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "abort_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep the operation going",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "abort_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::AbortConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
     // Enter is left unbound here too: an undo can move a branch away from
     // commits, so only a deliberate y answers.
     Binding {
@@ -5020,6 +5062,64 @@ mod tests {
         );
         assert_eq!(KeyScope::DropStash.parent(), None);
         assert_eq!(KeyScope::DropStash.title(), "Drop stash");
+    }
+
+    #[test]
+    fn the_abort_question_has_no_enter_and_n_or_esc_keeps_the_operation() {
+        let state = AppState::new(Context::Workspace);
+        let resolve_in = |key| match resolve(
+            registry(),
+            &Keymap::default(),
+            KeyScope::AbortConfirm,
+            &state,
+            key,
+        ) {
+            Resolution::Run(binding) => Some(binding.intent.clone()),
+            Resolution::Unbound => None,
+            other => panic!("{key:?}: {other:?}"),
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
+        assert_eq!(resolve_in(plain('q')), None);
+        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmYes));
+        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
+        assert_eq!(
+            resolve_in(key(KeyCode::Esc, none)),
+            Some(AppIntent::ConfirmNo)
+        );
+        assert_eq!(
+            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(AppIntent::Quit)
+        );
+        assert_eq!(KeyScope::AbortConfirm.parent(), None);
+        assert_eq!(KeyScope::AbortConfirm.title(), "Abort");
+
+        let enter = key(KeyCode::Enter, none);
+        for b in registry()
+            .iter()
+            .filter(|b| b.scope == KeyScope::AbortConfirm)
+        {
+            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
+        }
+    }
+
+    #[test]
+    fn a_repository_layer_cannot_put_enter_back_on_the_abort_question() {
+        for id in [
+            "abort_confirm.yes",
+            "abort_confirm.no",
+            "abort_confirm.quit",
+        ] {
+            assert!(REPO_LOCKED.contains(&id), "{id}");
+        }
+        assert_eq!(
+            build(&[("abort_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""abort_confirm.yes" can only be changed in the global config file"#
+        );
+        assert_eq!(
+            build(&[("discard_confirm.yes", &["enter"])], Trust::Repo).unwrap_err(),
+            r#""discard_confirm.yes" can only be changed in the global config file"#
+        );
     }
 
     #[test]
@@ -7483,6 +7583,7 @@ mod tests {
             KeyScope::DeleteTag => "delete_tag",
             KeyScope::ResetHard => "reset_hard",
             KeyScope::DropStash => "drop_stash",
+            KeyScope::AbortConfirm => "abort_confirm",
             KeyScope::Submodules => "submodules",
             KeyScope::Worktrees => "worktrees",
             KeyScope::RemoveWorktree => "remove_worktree",
