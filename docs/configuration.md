@@ -1483,7 +1483,9 @@ reaches GitHub, so `enter` does not answer it.
 | `worktrees.open` | `enter` | Switch to the selected worktree | locked |
 | `worktrees.add` | `a` | Add a worktree for the local branch selected in the Branches panel | locked |
 | `worktrees.remove` | `d` | Remove the selected linked worktree | locked |
-| `worktrees.close` | `esc`, `q` | Close the list | |
+| `worktrees.filter` | `/` | Filter the worktrees by branch or path | |
+| `worktrees.escape` | `esc` | Clear the filter, else close the list | locked |
+| `worktrees.close` | `q` | Close the list | |
 | `worktrees.quit` | `ctrl-c` | Quit Kika | locked |
 
 ### Command log
