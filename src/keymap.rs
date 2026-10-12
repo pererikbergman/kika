@@ -13,7 +13,7 @@ use crate::diff_mark::DiffMark;
 use crate::external_diff::NO_RENDERER;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::{
-    blame, command_log, conflicts, custom_commands, repos, submodules, worktrees,
+    blame, command_log, conflicts, custom_commands, operation, repos, submodules, worktrees,
 };
 use crate::git::bisect::BisectMark;
 use crate::git::commit_files::{CommitId, CommitRange};
@@ -1725,20 +1725,6 @@ pub(crate) fn resumable_operation(state: &AppState) -> Option<Operation> {
         .branch
         .as_ref()
         .and_then(|b| resumable(&b.in_progress))
-}
-
-/// Why the selected branch cannot be merged or rebased onto now: not into
-/// itself, and not while another operation waits to be finished.
-pub(crate) fn merge_disabled(state: &AppState) -> Option<Reason> {
-    branch_action_disabled(state).or_else(|| {
-        if state.branches.selected_branch().is_some_and(|b| b.head) {
-            Some("Already on this branch".into())
-        } else if resumable_operation(state).is_some() {
-            Some("Finish or abort the operation in progress".into())
-        } else {
-            crate::bisect::head_move_disabled(state)
-        }
-    })
 }
 
 /// Why continue or abort cannot run: one at a time, and only with a
@@ -4550,21 +4536,6 @@ static BRANCHES_KEYS: &[Binding] = &[
     },
 ];
 
-// Chunk 46: operation
-#[rustfmt::skip]
-static OPERATION_BRANCHES: &[Binding] = &[
-    Binding {
-        id: "branches.merge",
-        keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::OpenMenu(MenuId::Merge),
-        description: "Merge the selected branch into the current one, or rebase onto it",
-        label: "merge",
-        bar: true,
-        disabled: merge_disabled,
-    },
-];
-
 // Chunk 47: pull_requests
 static PULL_REQUESTS_BRANCHES: &[Binding] = &[
     Binding {
@@ -4827,40 +4798,6 @@ static BISECT_COMMITS: &[Binding] = &[
         label: "bisect",
         bar: true,
         disabled: commits_bisect_disabled,
-    },
-];
-
-// Chunk 52: operation
-static OPERATION_STATUS: &[Binding] = &[
-    Binding {
-        id: "status.continue",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
-        scope: KeyScope::Status,
-        intent: AppIntent::ContinueOperation,
-        description: "Continue the merge, rebase, cherry-pick or revert once conflicts are resolved",
-        label: "continue",
-        bar: true,
-        disabled: bisect::continue_disabled,
-    },
-    Binding {
-        id: "status.skip",
-        keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
-        scope: KeyScope::Status,
-        intent: AppIntent::SkipOperation,
-        description: "Skip the commit the rebase, cherry-pick or revert stopped on, or the one a bisect is testing",
-        label: "skip",
-        bar: true,
-        disabled: bisect::skip_disabled,
-    },
-    Binding {
-        id: "status.abort",
-        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
-        scope: KeyScope::Status,
-        intent: AppIntent::AbortOperation,
-        description: "Abort the operation in progress, or reset the bisect, asking first",
-        label: "abort",
-        bar: true,
-        disabled: bisect::abort_disabled,
     },
 ];
 
@@ -5161,45 +5098,6 @@ static STASH_DROP_CONFIRM: &[Binding] = &[
         id: "drop_stash.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DropStash,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 61: operation
-static OPERATION_ABORT_CONFIRM: &[Binding] = &[
-    // As with discarding, Enter is left unbound: aborting loses resolved
-    // conflicts.
-    Binding {
-        id: "abort_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::AbortConfirm,
-        intent: AppIntent::ConfirmYes,
-        description: "Yes, abort the operation",
-        label: "abort",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "abort_confirm.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::AbortConfirm,
-        intent: AppIntent::ConfirmNo,
-        description: "No, keep the operation going",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "abort_confirm.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::AbortConfirm,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -6082,13 +5980,13 @@ static CHUNKS: &[&[Binding]] = &[
     CORE_ERROR,
     FILES_DISCARD_CONFIRM,
     BRANCHES_KEYS,
-    OPERATION_BRANCHES,
+    operation::keys::OPERATION_BRANCHES,
     PULL_REQUESTS_BRANCHES,
     BRANCHES_UPSTREAM_TABS,
     REMOTES_KEYS,
     TAGS_KEYS,
     BISECT_COMMITS,
-    OPERATION_STATUS,
+    operation::keys::OPERATION_STATUS,
     BISECT_STATUS,
     BRANCHES_DELETE_CONFIRM,
     TAGS_DELETE_CONFIRM,
@@ -6097,7 +5995,7 @@ static CHUNKS: &[&[Binding]] = &[
     COMMITS_RESET_HARD_CONFIRM,
     REWRITE_LEAVE_COMMITS_CONFIRM,
     STASH_DROP_CONFIRM,
-    OPERATION_ABORT_CONFIRM,
+    operation::keys::OPERATION_ABORT_CONFIRM,
     REWRITE_AUTOSQUASH_CONFIRM,
     CUSTOM_PATCH_CONFIRM,
     REWRITE_DROP_RANGE_CONFIRM,
@@ -6467,45 +6365,6 @@ mod tests {
     }
 
     #[test]
-    fn the_abort_question_has_no_enter_and_n_or_esc_keeps_the_operation() {
-        let state = AppState::new(Context::Workspace);
-        let resolve_in = |key| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::AbortConfirm,
-            &state,
-            key,
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            Resolution::Unbound => None,
-            other => panic!("{key:?}: {other:?}"),
-        };
-        let none = KeyModifiers::NONE;
-        assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
-        assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmYes));
-        assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
-        assert_eq!(
-            resolve_in(key(KeyCode::Esc, none)),
-            Some(AppIntent::ConfirmNo)
-        );
-        assert_eq!(
-            resolve_in(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            Some(AppIntent::Quit)
-        );
-        assert_eq!(KeyScope::AbortConfirm.parent(), None);
-        assert_eq!(KeyScope::AbortConfirm.title(), "Abort");
-
-        let enter = key(KeyCode::Enter, none);
-        for b in registry()
-            .iter()
-            .filter(|b| b.scope == KeyScope::AbortConfirm)
-        {
-            assert!(!b.keys.iter().any(|k| k.matches(enter)), "{}", b.id);
-        }
-    }
-
-    #[test]
     fn a_repository_layer_cannot_put_enter_back_on_the_abort_question() {
         for id in [
             "abort_confirm.yes",
@@ -6589,38 +6448,6 @@ mod tests {
         assert_eq!(files(key(KeyCode::Up, none)), Some(CommitFilePrev));
         assert_eq!(files(plain('q')), Some(Quit));
         assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
-    }
-
-    #[test]
-    fn the_status_panel_controls_the_operation_and_falls_back_to_the_workspace() {
-        use AppIntent::*;
-        assert_eq!(KeyScope::Status.parent(), Some(KeyScope::Workspace));
-        assert_eq!(KeyScope::Status.title(), "Status");
-        // A rebase is in progress, so all three keys are enabled.
-        let mut state = AppState::new(Context::Workspace);
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![Operation::Rebase],
-            bisect: None,
-        });
-        let status = |c| match resolve(
-            registry(),
-            &Keymap::default(),
-            KeyScope::Status,
-            &state,
-            plain(c),
-        ) {
-            Resolution::Run(binding) => Some(binding.intent.clone()),
-            _ => None,
-        };
-        assert_eq!(status('c'), Some(ContinueOperation));
-        assert_eq!(status('s'), Some(SkipOperation));
-        assert_eq!(status('a'), Some(AbortOperation));
-        assert_eq!(status('r'), Some(RefreshStatus));
-        let merge = registry().iter().find(|b| b.id == "branches.merge");
-        assert_eq!(merge.map(|b| &b.intent), Some(&OpenMenu(MenuId::Merge)));
     }
 
     #[test]
