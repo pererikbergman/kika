@@ -219,9 +219,9 @@ mod tests {
         state.expanded = SidePanel::Files;
         let (_, rows) = rows(&state, 80, 24);
         let title = row_of(&rows, "[5] Stash");
-        assert!(rows[title].starts_with(" [5] Stash ─"), "{rows:#?}");
+        assert!(rows[title].starts_with("┌ [5] Stash ─"), "{rows:#?}");
         assert!(
-            rows[title + 1].starts_with("stash@{0}  newest"),
+            rows[title + 1].starts_with("│stash@{0}  newest"),
             "{rows:#?}"
         );
         assert!(!rows.iter().any(|r| r.contains("older")), "{rows:#?}");

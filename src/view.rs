@@ -16,7 +16,7 @@ use crate::git::repo_state::Operation;
 use crate::git::status::{EntryKind, Head};
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
-use crate::layout::{Panel, SidePanel, workspace_layout};
+use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, CommitFlow, Context, Focus};
 use crate::popup_view;
 use crate::remote_run::RemoteRun;
@@ -173,7 +173,7 @@ pub(crate) struct PanelLook {
     mode: String,
     /// Columns of title between the corners.
     title_width: usize,
-    /// Only the top border: no room for a bottom one.
+    /// No bottom border: no room for one.
     top_only: bool,
     /// One row: the title is all there is, so it carries the summary.
     pub(crate) title_only: bool,
@@ -243,11 +243,12 @@ impl PanelLook {
     }
 
     /// The panel's frame with `title`. A panel too short for both borders
-    /// keeps only its top one, so the title still shows.
+    /// drops its bottom one, so the title still shows; the corners and
+    /// sides stay so it lines up with the panels around it.
     pub(crate) fn block(&self, title: String) -> Block<'static> {
         let block = panel_block(title, self.focused);
         if self.top_only {
-            block.borders(Borders::TOP)
+            block.borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
         } else {
             block
         }
@@ -1155,7 +1156,7 @@ fn render_help(state: &AppState, frame: &mut Frame, area: Rect) {
         u16::try_from(content_width + 2).unwrap_or(u16::MAX),
         u16::try_from(lines.len() + 2).unwrap_or(u16::MAX),
     );
-    let rows = usize::from(popup.height.saturating_sub(2));
+    let rows = help_rows(frame.area());
     let total = lines.len();
     let first = state.help_scroll.min(total.saturating_sub(rows));
     let mut block = Block::bordered().title(title);
@@ -2162,7 +2163,7 @@ mod tests {
     fn the_launch_repository_has_a_plain_status_title() {
         let state = on(branch(Head::Branch("main".into())));
         let rows = draw(&state, 80, 24);
-        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
     }
 
     /// The Files panel's title row and the row below it.
@@ -2182,8 +2183,8 @@ mod tests {
         // 80x24: the others drop to a title and a line each, so Files
         // keeps 13 rows inside its border.
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
-        assert!(rows[1].starts_with("main "), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
         assert_eq!(title, 2, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
@@ -2192,25 +2193,25 @@ mod tests {
         }
         assert!(rows[16].starts_with('└'), "{rows:#?}");
         for (row, name) in [(17, "[3] Branches"), (19, "[4] Commits"), (21, "[5] Stash")] {
-            assert!(rows[row].starts_with(&format!(" {name} ─")), "{rows:#?}");
-            assert!(!rows[row + 1].starts_with('│'), "{rows:#?}");
+            assert!(rows[row].starts_with(&format!("┌ {name} ─")), "{rows:#?}");
+            assert!(rows[row + 1].starts_with('│'), "{rows:#?}");
         }
 
-        // 80x12: only their titles, on a top border.
+        // 80x12: only their titles, on a top border with corners.
         // A title row carries the branch, the panel's one line.
         let rows = thin(draw(&state, 80, 12));
-        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status · main ─"), "{rows:#?}");
         let (title, first) = files_rows(&rows);
         assert_eq!(title, 1, "{rows:#?}");
         assert!(first.starts_with("│ M f0 "), "{rows:#?}");
         assert!(contains(&rows, "│ M f3 "), "{rows:#?}");
         for (row, name) in [(8, "[3] Branches"), (9, "[4] Commits"), (10, "[5] Stash")] {
-            assert!(rows[row].starts_with(&format!(" {name} ─")), "{rows:#?}");
+            assert!(rows[row].starts_with(&format!("┌ {name} ─")), "{rows:#?}");
         }
 
         // 80x7: the farthest go first; Files keeps its rows.
         let rows = thin(draw(&state, 80, 7));
-        assert!(rows[0].starts_with(" [1] Status · main ─"), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status · main ─"), "{rows:#?}");
         assert!(!contains(&rows, "[3] Branches"), "{rows:#?}");
         assert!(!contains(&rows, "[5] Stash"), "{rows:#?}");
         let (title, first) = files_rows(&rows);
@@ -2226,7 +2227,7 @@ mod tests {
         let mut state = on(main);
         state.files = vec![file("a.rs")];
         let rows = thin(draw(&state, 80, 24));
-        assert!(rows[1].starts_with("main "), "{rows:#?}");
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
         assert!(!contains(&rows, "origin/main"), "{rows:#?}");
 
         // Height 10: 9 rows over the bar; four title rows leave Status five.
@@ -2235,21 +2236,21 @@ mod tests {
         assert!(rows[2].starts_with("│origin/main ↑0 ↓3 "), "{rows:#?}");
         let (title, first) = files_rows(&rows);
         assert_eq!(title, 5, "{rows:#?}");
-        assert!(first.starts_with(" [3] Branches"), "{rows:#?}");
+        assert!(first.starts_with("┌ [3] Branches"), "{rows:#?}");
     }
 
     #[test]
     fn a_collapsed_files_panel_counts_the_files() {
         let mut state = status_focused(&loaded(vec![file("a.rs"), file("b.rs")]));
         let rows = draw(&state, 80, 24);
-        assert!(files_rows(&rows).1.starts_with("2 files "), "{rows:#?}");
+        assert!(files_rows(&rows).1.starts_with("│2 files "), "{rows:#?}");
         assert!(!contains(&rows, " M a.rs"), "{rows:#?}");
         state.files.pop();
         let rows = draw(&state, 80, 24);
-        assert!(files_rows(&rows).1.starts_with("1 file "), "{rows:#?}");
+        assert!(files_rows(&rows).1.starts_with("│1 file "), "{rows:#?}");
         state.files.clear();
         let rows = draw(&state, 80, 24);
-        assert!(files_rows(&rows).1.starts_with("No changes "), "{rows:#?}");
+        assert!(files_rows(&rows).1.starts_with("│No changes "), "{rows:#?}");
     }
 
     #[test]
@@ -4094,7 +4095,7 @@ mod tests {
         // Without colour too: the focused frame is thick, the others thin.
         let rows = buffer_rows(&buffer);
         assert!(contains(&rows, "┏ [2] Files ━"), "{rows:#?}");
-        assert!(rows[0].starts_with(" [1] Status ─"), "{rows:#?}");
+        assert!(rows[0].starts_with("┌ [1] Status ─"), "{rows:#?}");
         assert!(contains(&rows, "┌ [0] Diff "), "{rows:#?}");
         for other in ["[1] Status", "[3] Branches", "[5] Stash", "[0] Diff"] {
             let (border, title) = frame_style(&buffer, other);
@@ -4471,13 +4472,13 @@ mod tests {
         state.expanded = SidePanel::Files;
         let rows = draw(&state, 100, 12);
         assert!(
-            rows[0].starts_with(" [1] Status · topic · merging ─"),
+            rows[0].starts_with("┌ [1] Status · topic · merging ─"),
             "{rows:#?}"
         );
         // Narrower, the branch name gives way first.
         let rows = draw(&state, 80, 12);
         assert!(
-            rows[0].starts_with("[1] Status · …c · merging"),
+            rows[0].starts_with("┌[1] Status · …c · merging┐"),
             "{rows:#?}"
         );
     }
@@ -4489,9 +4490,87 @@ mod tests {
         let state = on(main);
         let buffer = draw_buffer(&state, 80, 24);
         let rows = buffer_rows(&buffer);
-        assert!(rows[1].starts_with("main rebasing "), "{rows:#?}");
+        assert!(rows[1].starts_with("│main rebasing "), "{rows:#?}");
         let (x, y) = find(&buffer, "rebasing");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Yellow));
+    }
+
+    /// The side panels other than Files, each with its rect, on a
+    /// `width` x `height` screen with Files focused and expanded.
+    fn collapsed_rects(state: &AppState, width: u16, height: u16) -> Vec<(SidePanel, Rect)> {
+        let [main, _] = screen_layout(Rect::new(0, 0, width, height));
+        let layout = workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode);
+        SidePanel::ALL
+            .into_iter()
+            .filter(|&side| side != SidePanel::Files)
+            .filter_map(|side| Some((side, layout.rect(Panel::Side(side))?)))
+            .collect()
+    }
+
+    #[test]
+    fn a_two_row_collapsed_panel_has_corners_and_sides_at_80_by_16() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let buffer = draw_buffer(&state, 80, 16);
+        let rows = buffer_rows(&buffer);
+        let panels = collapsed_rects(&state, 80, 16);
+        assert_eq!(panels.len(), 4, "{rows:#?}");
+        for (side, area) in panels {
+            assert_eq!(area.height, 2, "{side:?}: {rows:#?}");
+            let right = area.right() - 1;
+            let (top, line) = (area.y, area.y + 1);
+            assert_eq!(buffer[(0, top)].symbol(), "┌", "{side:?}: {rows:#?}");
+            assert_eq!(buffer[(right, top)].symbol(), "┐", "{side:?}: {rows:#?}");
+            assert_eq!(buffer[(0, line)].symbol(), "│", "{side:?}: {rows:#?}");
+            assert_eq!(buffer[(right, line)].symbol(), "│", "{side:?}: {rows:#?}");
+        }
+        // The Diff pane's corner meets the Status panel's, not a bare rule.
+        let status = collapsed_rects(&state, 80, 16)[0].1;
+        assert_eq!(buffer[(status.right(), 0)].symbol(), "┌", "{rows:#?}");
+        // The summary still shows, inside the side borders.
+        assert!(rows[1].starts_with("│main "), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_title_only_collapsed_panel_starts_with_a_corner() {
+        let mut state = loaded(vec![file("a.rs")]);
+        state.focus = Focus::Files;
+        state.expanded = SidePanel::Files;
+        let buffer = draw_buffer(&state, 80, 12);
+        let rows = buffer_rows(&buffer);
+        let panels = collapsed_rects(&state, 80, 12);
+        assert!(!panels.is_empty(), "{rows:#?}");
+        for (side, area) in panels {
+            assert_eq!(area.height, 1, "{side:?}: {rows:#?}");
+            assert_eq!(buffer[(0, area.y)].symbol(), "┌", "{side:?}: {rows:#?}");
+            assert_eq!(
+                buffer[(area.right() - 1, area.y)].symbol(),
+                "┐",
+                "{side:?}: {rows:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_scrolls_to_its_last_entry_at_80_by_8() {
+        use crate::intent::{AppIntent, Scroll};
+        let mut state = loaded(vec![file("a.rs")]);
+        state.selected = Some(0);
+        state.update(AppIntent::Resize {
+            width: 80,
+            height: 8,
+        });
+        state.update(AppIntent::OpenHelp);
+        let mut last = usize::MAX;
+        while state.help_scroll != last {
+            last = state.help_scroll;
+            state.update(AppIntent::ScrollHelp(Scroll::PageDown));
+        }
+        let rows = draw(&state, 80, 8);
+        assert!(contains(&rows, "Quit Kika"), "{rows:#?}");
+        assert!(contains(&rows, "▲"), "{rows:#?}");
+        assert!(!contains(&rows, "more ▼"), "{rows:#?}");
     }
 
     const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";

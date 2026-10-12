@@ -1160,9 +1160,10 @@ impl AppState {
     }
 
     /// Move the help list by a line or a page, never past its last screenful.
-    /// The popup's inside is as tall as the diff pane's.
+    /// A page is the popup's inside at its tallest, counted by the same
+    /// function the view clamps with, so the last rows stay reachable.
     fn scroll_help(&mut self, by: Scroll) {
-        let rows = self.pane_rows();
+        let rows = layout::help_rows(ratatui::layout::Rect::new(0, 0, self.size.0, self.size.1));
         let focus = self.panel_focus();
         // As help lists them: the built-in keys, then a rule and the
         // user's commands, if there are any.
@@ -8984,11 +8985,30 @@ mod tests {
         for _ in 0..10 {
             press(&mut state, KeyCode::PageDown);
         }
-        assert_eq!(state.help_scroll, total - state.pane_rows());
+        let screen = ratatui::layout::Rect::new(0, 0, 80, 24);
+        assert_eq!(state.help_scroll, total - layout::help_rows(screen));
         press(&mut state, KeyCode::Esc);
         press(&mut state, KeyCode::Char('?'));
         assert_eq!(state.help_scroll, 0);
         assert!(!state.should_quit);
+    }
+
+    #[test]
+    fn help_scrolls_to_its_last_rows_at_a_short_height() {
+        let (mut state, _) = with_files(three_files(), 8);
+        press(&mut state, KeyCode::Char('?'));
+        let focus = state.panel_focus();
+        let commands = keymap::available_commands(&state.keymap, focus).len();
+        let total = keymap::available(keymap::registry(), &state.keymap, focus, &state).len()
+            + usize::from(commands > 0)
+            + commands;
+        let mut last = usize::MAX;
+        while state.help_scroll != last {
+            last = state.help_scroll;
+            press(&mut state, KeyCode::PageDown);
+        }
+        let screen = ratatui::layout::Rect::new(0, 0, 80, 8);
+        assert_eq!(state.help_scroll, total - layout::help_rows(screen));
     }
 
     #[test]
