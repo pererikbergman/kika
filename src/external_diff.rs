@@ -365,16 +365,14 @@ fn drain(
 /// Stop the renderer and everything it started, then reap it. `child.kill`
 /// alone would leave the renderer's own children holding the pipes.
 fn kill(child: &mut Child) {
+    // A direct signal, not a `kill` program, so nothing is looked up on
+    // `PATH`. The renderer is unreaped until `wait` below, so its pid, which
+    // is also its group id, cannot have been reused by another process.
     #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg("--")
-            .arg(format!("-{}", child.id()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    if let Ok(pid) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `killpg` only sends a signal; `pid` leads the group the
+        // renderer was started in. ESRCH (group already gone) is ignored.
+        let _ = unsafe { libc::killpg(pid, libc::SIGKILL) };
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -636,6 +634,40 @@ mod tests {
         let result = run(&r, Path::new("/"), &[], b"", 80, limits);
         assert_eq!(result, Err("sh timed out".into()));
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_renderer_takes_what_it_started_with_it() {
+        let tmp = crate::git::fake::TempDir::new("external-diff-kill");
+        let pidfile = tmp.path().join("pid");
+        let script = format!("sleep 30 & echo $! >'{}'; wait", pidfile.display());
+        let r = renderer(&["sh", "-c", &script]);
+        let limits = Limits {
+            timeout: Duration::from_millis(500),
+            max_output: 100,
+        };
+        assert_eq!(
+            run(&r, Path::new("/"), &[], b"", 80, limits),
+            Err("sh timed out".into())
+        );
+
+        let pid: libc::pid_t = std::fs::read_to_string(&pidfile)
+            .expect("the renderer wrote its child's pid")
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: signal 0 only checks whether the process exists.
+            let gone = unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if gone {
+                break;
+            }
+            assert!(Instant::now() < deadline, "grandchild {pid} still alive");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(unix)]

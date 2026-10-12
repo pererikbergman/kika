@@ -88,7 +88,20 @@ fn sides(
 #[derive(Debug, PartialEq, Eq)]
 struct Entry {
     mode: Vec<u8>,
-    oid: String,
+    oid: ObjectId,
+}
+
+/// A full object id, checked to be 40 (SHA-1) or 64 (SHA-256) ASCII hex
+/// digits, so the git output it came from can never put an option or other
+/// text in a `cat-file` argv.
+#[derive(Debug, PartialEq, Eq)]
+struct ObjectId(String);
+
+impl ObjectId {
+    fn parse(bytes: &[u8]) -> Option<Self> {
+        let full = matches!(bytes.len(), 40 | 64) && bytes.iter().all(u8::is_ascii_hexdigit);
+        full.then(|| Self(String::from_utf8_lossy(bytes).into_owned()))
+    }
 }
 
 /// A git read of a repo file name: the name is literal, never pathspec
@@ -121,11 +134,14 @@ fn records_of<'a>(stdout: &'a [u8], path: &'a RepoPath) -> impl Iterator<Item = 
 }
 
 impl Entry {
-    fn new(mode: &[u8], oid: &[u8]) -> Self {
-        Self {
+    /// The entry `source` listed. A bad id fails the whole read: skipping
+    /// the record would show the file as absent and give a wrong diff.
+    fn new(mode: &[u8], oid: &[u8], source: &str) -> Result<Self, String> {
+        let oid = ObjectId::parse(oid).ok_or_else(|| format!("{source} gave a bad object id"))?;
+        Ok(Self {
             mode: mode.to_vec(),
-            oid: String::from_utf8_lossy(oid).into_owned(),
-        }
+            oid,
+        })
     }
 }
 
@@ -154,7 +170,7 @@ fn index_entry(
         if stage != b"0" {
             return Err(format!("{label} cannot show a conflicted file"));
         }
-        found = Some(Entry::new(mode, oid));
+        found = Some(Entry::new(mode, oid, "git ls-files")?);
     }
     Ok(found)
 }
@@ -176,12 +192,12 @@ fn head_entry(runner: &dyn GitRunner, path: &RepoPath) -> Result<Option<Entry>, 
         };
     }
     // `<mode> <type> <oid>\t<path>`
-    Ok(
-        records_of(&output.stdout, path).find_map(|fields| match fields[..] {
-            [mode, _, oid] => Some(Entry::new(mode, oid)),
+    records_of(&output.stdout, path)
+        .find_map(|fields| match fields[..] {
+            [mode, _, oid] => Some(Entry::new(mode, oid, "git ls-tree")),
             _ => None,
-        }),
-    )
+        })
+        .transpose()
 }
 
 /// Whether `HEAD` names no commit, as on a branch with none yet.
@@ -208,7 +224,7 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
     if !matches!(entry.mode.as_slice(), b"100644" | b"100755") {
         return Err(not_regular(label));
     }
-    let size = GitCommand::new("cat-file").arg("-s").arg(&entry.oid);
+    let size = GitCommand::new("cat-file").arg("-s").arg(&entry.oid.0);
     let output = runner.run(&size).map_err(|e| e.to_string())?;
     if !output.success {
         return Err(failure(&output.stderr, "git cat-file"));
@@ -220,7 +236,7 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
     if size > MAX_BYTES as u64 {
         return Err(too_large(label));
     }
-    let read = GitCommand::new("cat-file").arg("blob").arg(entry.oid);
+    let read = GitCommand::new("cat-file").arg("blob").arg(entry.oid.0);
     let output = runner.run(&read).map_err(|e| e.to_string())?;
     if !output.success {
         return Err(failure(&output.stderr, "git cat-file"));
@@ -593,6 +609,92 @@ mod tests {
             &base,
         );
         assert_eq!(out, Err("File too large for cat".into()));
+        runner.assert_done();
+    }
+
+    /// Ids that are not a full hex object id: an option, non-hex, too
+    /// short, too long, between the two lengths, and non-ASCII.
+    fn bad_ids() -> Vec<String> {
+        vec![
+            "-p".into(),
+            "z".repeat(40),
+            "1".repeat(39),
+            "1".repeat(41),
+            "1".repeat(63),
+            "1".repeat(65),
+            format!("{}é", "1".repeat(38)),
+        ]
+    }
+
+    #[test]
+    fn a_bad_index_id_fails_the_read_before_any_cat_file() {
+        let base = TempDir::new("tool-base");
+        for bad in bad_ids() {
+            // No cat-file expectation: any call would panic the fake.
+            let runner =
+                FakeRunner::new().expect(&ls_files("a"), ok(&entry("100644", &bad, 0, "a")));
+            let out = run_in(
+                &runner,
+                Path::new("/"),
+                &request("a", DiffSide::Worktree),
+                &tool(&["cat"]),
+                LIMITS,
+                &base,
+            );
+            assert_eq!(
+                out,
+                Err("git ls-files gave a bad object id".into()),
+                "{bad:?}"
+            );
+            runner.assert_done();
+        }
+    }
+
+    #[test]
+    fn a_bad_head_id_fails_the_staged_read_before_any_cat_file() {
+        let base = TempDir::new("tool-base");
+        for bad in bad_ids() {
+            let runner = FakeRunner::new().expect(
+                &["ls-tree", "-z", "HEAD", "--", "a"],
+                ok(format!("100644 blob {bad}\ta\0").as_bytes()),
+            );
+            let out = run_in(
+                &runner,
+                Path::new("/"),
+                &request("a", DiffSide::Index),
+                &tool(&["cat"]),
+                LIMITS,
+                &base,
+            );
+            assert_eq!(
+                out,
+                Err("git ls-tree gave a bad object id".into()),
+                "{bad:?}"
+            );
+            runner.assert_done();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sha256_id_reaches_cat_file_unchanged() {
+        let oid = "ab".repeat(32);
+        let runner = FakeRunner::new()
+            .expect(&ls_files("a"), ok(&entry("100644", &oid, 0, "a")))
+            .expect(&["cat-file", "-s", &oid], ok(b"4\n"))
+            .expect(&["cat-file", "blob", &oid], ok(b"old\n"));
+        let work = TempDir::new("tool-work");
+        fs::write(work.path().join("a"), "new\n").unwrap();
+        let base = TempDir::new("tool-base");
+        let out = run_in(
+            &runner,
+            work.path(),
+            &request("a", DiffSide::Worktree),
+            &tool(&["cat"]),
+            LIMITS,
+            &base,
+        );
+        assert_eq!(out, Ok(b"old\nnew\n".to_vec()));
         runner.assert_done();
     }
 
