@@ -4,8 +4,8 @@
 
 use super::PendingTag;
 use super::keys;
-use crate::branches::BranchesTab;
 use crate::effect::{Effect, Tag};
+use crate::features::branches::BranchesTab;
 use crate::git::commit_files::CommitId;
 use crate::git::remote::RemoteOp;
 use crate::git::tags::{TagRef, validate_tag_name};
@@ -201,7 +201,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::branches::BranchesTab;
+    use crate::features::branches::BranchesTab;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::model::{AppState, Context, Focus};
