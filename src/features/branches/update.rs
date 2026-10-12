@@ -1,16 +1,20 @@
 //! The Branches feature's `update` handlers: loading the branch list and
-//! the selected branch's log, moving between rows and tabs, and checking
-//! out the selected branch.
+//! the selected branch's log, moving between rows and tabs, checking out
+//! the selected branch, creating, renaming and deleting one, and setting
+//! or unsetting its upstream.
 
 use super::BranchesTab;
 use super::keys;
 use crate::effect::{Effect, Tag};
-use crate::git::branches::{Branch, LogRow};
+use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::keymap;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
+use crate::popup::{DeleteBranchConfirm, LineInput, Popup, PromptKind};
 
 /// The Branches panel: loading the list and the selected branch's log,
-/// moving the selection, and checking out the selected branch.
+/// moving the selection, checking out the selected branch, and changing
+/// branches and their upstreams.
 impl AppState {
     /// [`Self::reload_branches`], for a change noticed outside Kika: out
     /// of the busy count, and only one at a time.
@@ -171,6 +175,153 @@ impl AppState {
             Some(name) => self.start_op(Ok(Some(GitOp::Checkout(name)))),
             None => vec![],
         }
+    }
+
+    /// Ask for a branch name, keeping the selected branch for the answer.
+    /// Renaming starts from the old name.
+    pub(crate) fn ask_branch_name(&mut self, kind: PromptKind) {
+        let disabled = match kind {
+            // Creating a branch checks it out, which moves `HEAD`.
+            PromptKind::NewBranch => keys::new_branch_disabled,
+            _ => keymap::branch_action_disabled,
+        };
+        let Some(name) = self.branch_for_action(disabled) else {
+            return;
+        };
+        let input = match kind {
+            PromptKind::RenameBranch => LineInput::with_text(&name.display()),
+            _ => LineInput::default(),
+        };
+        self.branches.pending = Some(name);
+        self.popups.push(Popup::Prompt { kind, input });
+    }
+
+    /// Run the op a branch prompt's answer makes, on the branch kept when
+    /// the prompt opened.
+    fn named_branch_op(&mut self, text: &str, op: fn(BranchName, String) -> GitOp) -> Vec<Effect> {
+        let Some(branch) = self.branches.pending.take() else {
+            return vec![];
+        };
+        let name = text.trim();
+        if name.is_empty() {
+            self.notice = Some("A branch needs a name".into());
+            return vec![];
+        }
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING.into());
+            return vec![];
+        }
+        self.start_op(Ok(Some(op(branch, name.to_string()))))
+    }
+
+    /// Create the branch the prompt named, unless a bisect began while it
+    /// was open.
+    pub(crate) fn create_branch_named(&mut self, text: &str) -> Vec<Effect> {
+        // A bisect may have begun while the prompt was open.
+        if self.bisect_refuses() {
+            self.branches.pending = None;
+            return vec![];
+        }
+        self.named_branch_op(text, |from, name| GitOp::CreateBranch { name, from })
+    }
+
+    /// Rename the branch kept when the prompt opened.
+    pub(crate) fn rename_branch_to(&mut self, text: &str) -> Vec<Effect> {
+        self.named_branch_op(text, |from, to| GitOp::RenameBranch { from, to })
+    }
+
+    /// Ask before deleting the selected branch: plainly when `git branch
+    /// -d` would take it, else warning that its commits may be lost.
+    pub(crate) fn ask_delete_branch(&mut self) {
+        if self
+            .branch_for_action(keys::delete_branch_disabled)
+            .is_none()
+        {
+            return;
+        }
+        let Some(branch) = self.branches.selected_branch() else {
+            return;
+        };
+        let confirm = DeleteBranchConfirm {
+            name: branch.name.display(),
+            op: GitOp::DeleteBranch {
+                name: branch.name.clone(),
+                force: !branch.merged,
+            },
+        };
+        self.popups.push(Popup::DeleteBranch(confirm));
+    }
+
+    /// Delete as the open question asked: `force` must match it, so `y`
+    /// never deletes unmerged commits.
+    pub(crate) fn confirm_delete_branch(&mut self, force: bool) -> Vec<Effect> {
+        match self.popups.last() {
+            Some(Popup::DeleteBranch(confirm)) if confirm.force() == force => {}
+            _ => return vec![],
+        }
+        let Some(Popup::DeleteBranch(confirm)) = self.popups.pop() else {
+            return vec![];
+        };
+        self.start_op(Ok(Some(confirm.op)))
+    }
+
+    /// Ask which remote branch the selected branch should track, starting
+    /// from its upstream, or else the same name on `origin` or the first
+    /// remote.
+    pub(crate) fn ask_upstream(&mut self) {
+        let Some(name) = self.branch_for_action(keymap::branch_action_disabled) else {
+            return;
+        };
+        let upstream = self
+            .branches
+            .selected_branch()
+            .and_then(|b| b.upstream.clone());
+        let text = upstream.unwrap_or_else(|| {
+            let configured = || {
+                self.branches
+                    .remotes
+                    .remotes
+                    .iter()
+                    .filter(|r| r.configured)
+            };
+            let remote = configured()
+                .find(|r| r.name.0 == b"origin")
+                .or_else(|| configured().next());
+            match remote {
+                Some(remote) => format!("{}/{}", remote.name.display(), name.display()),
+                None => name.display(),
+            }
+        });
+        self.branches.pending = Some(name);
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::SetUpstream,
+            input: LineInput::with_text(&text),
+        });
+    }
+
+    /// Set the upstream of the branch kept when the prompt opened, to the
+    /// loaded remote branch written exactly as typed.
+    pub(crate) fn set_upstream_to(&mut self, text: &str) -> Vec<Effect> {
+        let Some(branch) = self.branches.pending.take() else {
+            return vec![];
+        };
+        let Some(upstream) = self.branches.remotes.branch_named(text.trim()).cloned() else {
+            self.notice = Some("No such remote branch; fetch, or check the name".into());
+            return vec![];
+        };
+        if self.op_seq.is_some() {
+            self.notice = Some(keymap::OP_RUNNING.into());
+            return vec![];
+        }
+        self.start_op(Ok(Some(GitOp::SetUpstream { branch, upstream })))
+    }
+
+    /// Stop the selected branch tracking its upstream.
+    pub(crate) fn unset_upstream(&mut self) -> Vec<Effect> {
+        let op = self
+            .branch_for_action(keys::unset_upstream_disabled)
+            .map(GitOp::UnsetUpstream);
+        self.start_op(Ok(op))
     }
 }
 
@@ -500,5 +651,96 @@ mod tests {
             ),
             "{effects:?}"
         );
+    }
+
+    #[test]
+    fn set_upstream_starts_from_the_upstream_or_origin_and_needs_a_listed_branch() {
+        let mut state = with_remotes();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'u');
+        match state.popups.as_slice() {
+            [Popup::Prompt { kind, input }] => {
+                assert_eq!(*kind, PromptKind::SetUpstream);
+                assert_eq!(input.text, "origin/topic");
+            }
+            other => panic!("expected the upstream prompt, got {other:?}"),
+        }
+        assert_eq!(
+            state.prompt_title(PromptKind::SetUpstream),
+            "Upstream of topic"
+        );
+        // A name no fetch has listed only says so.
+        type_text(&mut state, "x");
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(
+            state.notice,
+            Some("No such remote branch; fetch, or check the name".into())
+        );
+        assert_eq!(state.branches.pending, None);
+
+        press_char(&mut state, 'u');
+        for _ in 0.."origin/topic".len() {
+            press(&mut state, KeyCode::Backspace);
+        }
+        type_text(&mut state, "origin/main");
+        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
+        assert_eq!(
+            op,
+            GitOp::SetUpstream {
+                branch: "topic".into(),
+                upstream: three_remotes()[1].branches[0].clone(),
+            }
+        );
+
+        // An upstream already set is where the prompt starts.
+        let mut state = with_remotes();
+        state.branches.branches[0].upstream = Some("fork/x".into());
+        press_char(&mut state, 'u');
+        assert!(matches!(
+            state.popups.as_slice(),
+            [Popup::Prompt { input, .. }] if input.text == "fork/x"
+        ));
+    }
+
+    #[test]
+    fn unset_upstream_needs_an_upstream() {
+        let mut state = with_remotes();
+        assert_eq!(shift(&mut state, 'U'), vec![]);
+        assert_eq!(state.notice, Some("No upstream to unset".into()));
+        state.branches.branches[0].upstream = Some("origin/main".into());
+        let (_, op) = op_of(&shift(&mut state, 'U'));
+        assert_eq!(op, GitOp::UnsetUpstream("main".into()));
+    }
+
+    #[test]
+    fn a_failed_delete_says_the_branch_list_was_reloaded() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        state.update(finished(tag, op, Err("error: not fully merged".into())));
+        match state.popups.as_slice() {
+            [Popup::Error(error)] => {
+                assert_eq!(error.title, "Could not delete the branch");
+                assert!(error.next.starts_with("The branch list was reloaded"));
+            }
+            other => panic!("expected an error popup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_finished_delete_reloads_only_the_list() {
+        let mut state = with_branches();
+        state.update(AppIntent::BranchNext);
+        press_char(&mut state, 'd');
+        let (tag, op) = op_of(&press_char(&mut state, 'y'));
+        let effects = state.update(finished(tag, op, Ok(())));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "a delete changes no files: {effects:?}"
+        );
+        branches_tag(&effects);
     }
 }

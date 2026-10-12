@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::commit_files::CommitFilesList;
-use crate::features::branches::keys::new_branch_disabled;
 use crate::features::branches::{self, remotes, tags};
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::diff::{self, renderers};
@@ -26,7 +25,6 @@ use crate::layout::{Panel, SidePanel};
 use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
 use crate::model::{AppState, CommitFlow, Focus};
-use crate::popup::{DeleteBranchConfirm, Popup};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
 /// fixed text; some name a branch or a commit.
@@ -1426,7 +1424,7 @@ pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// [`branch_action_disabled`] without the filter and range guard.
-fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
+pub(crate) fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         Some(OP_RUNNING.into())
     } else if state.branches.selected_branch().is_none() {
@@ -1436,36 +1434,9 @@ fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
     }
 }
 
-/// Over a range, `d` asks about the range, which skips the current
-/// branch itself; only the one-at-a-time rule is left to check.
-pub(crate) fn delete_branch_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, true).or_else(|| {
-        if state.branches.range_anchor.is_some() {
-            return op_running(state);
-        }
-        branch_selected_disabled(state).or_else(|| {
-            let selected = state.branches.selected_branch();
-            selected
-                .is_some_and(|b| b.head)
-                .then_some("Cannot delete the current branch".into())
-        })
-    })
-}
-
 /// Why nothing can start now: git one operation at a time.
 pub(crate) fn op_running(state: &AppState) -> Option<Reason> {
     state.op_seq.is_some().then_some(OP_RUNNING.into())
-}
-
-/// Why the selected local branch's upstream cannot be removed: it needs
-/// one.
-pub(crate) fn unset_upstream_disabled(state: &AppState) -> Option<Reason> {
-    branch_action_disabled(state).or_else(|| {
-        let selected = state.branches.selected_branch();
-        selected
-            .is_some_and(|b| b.upstream.is_none())
-            .then_some("No upstream to unset".into())
-    })
 }
 
 /// Why the Tags tab has nothing to act on.
@@ -1606,28 +1577,6 @@ pub(crate) fn tips_failed(error: &str) -> String {
 
 pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state).or_else(|| in_progress_disabled(state))
-}
-
-/// The delete question on top, if one is.
-fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
-    match state.popups.last() {
-        Some(Popup::DeleteBranch(confirm)) => Some(confirm),
-        _ => None,
-    }
-}
-
-/// `y` deletes only a merged branch; an unmerged one needs `D`.
-fn plain_delete_disabled(state: &AppState) -> Option<Reason> {
-    delete_question(state)
-        .is_some_and(DeleteBranchConfirm::force)
-        .then_some("Not fully merged: press D to force delete".into())
-}
-
-/// `D` answers only the stronger question, about an unmerged branch.
-fn force_delete_disabled(state: &AppState) -> Option<Reason> {
-    delete_question(state)
-        .is_some_and(|c| !c.force())
-        .then_some("Fully merged: press y to delete".into())
 }
 
 /// Why no fetch, pull or push may start: one needs a repository, and git
@@ -2908,113 +2857,6 @@ static FILES_DISCARD_CONFIRM: &[Binding] = &[
     },
 ];
 
-// Chunk 45 (new, rename, delete): branches
-static BRANCHES_CHANGE: &[Binding] = &[
-    Binding {
-        id: "branches.new",
-        keys: &[KeyPattern::exact(KeyCode::Char('n'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::NewBranch,
-        description: "Create a branch at the selected one and check it out",
-        label: "new",
-        bar: true,
-        disabled: new_branch_disabled,
-    },
-    // Not `r`, which reloads everywhere in the workspace.
-    Binding {
-        id: "branches.rename",
-        keys: &[KeyPattern::any(KeyCode::Char('R'))],
-        scope: KeyScope::Branches,
-        intent: AppIntent::RenameBranch,
-        description: "Rename the selected branch",
-        label: "rename",
-        bar: true,
-        disabled: branch_action_disabled,
-    },
-    Binding {
-        id: "branches.delete",
-        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::DeleteBranch,
-        description: "Delete the selected branch, asking first",
-        label: "delete",
-        bar: true,
-        disabled: delete_branch_disabled,
-    },
-];
-
-// Chunk 48 (upstream): branches
-static BRANCHES_UPSTREAM: &[Binding] = &[
-    Binding {
-        id: "branches.set_upstream",
-        keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
-        scope: KeyScope::Branches,
-        intent: AppIntent::SetUpstream,
-        description: "Set the remote branch the selected branch tracks",
-        label: "upstream",
-        bar: true,
-        disabled: branch_action_disabled,
-    },
-    Binding {
-        id: "branches.unset_upstream",
-        keys: &[KeyPattern::any(KeyCode::Char('U'))],
-        scope: KeyScope::Branches,
-        intent: AppIntent::UnsetUpstream,
-        description: "Stop the selected branch tracking its upstream",
-        label: "unset upstream",
-        bar: false,
-        disabled: unset_upstream_disabled,
-    },
-];
-
-// Chunk 54: branches
-static BRANCHES_DELETE_CONFIRM: &[Binding] = &[
-    // As with discarding, Enter is left unbound: a delete cannot be undone.
-    Binding {
-        id: "delete_branch.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::DeleteBranch,
-        intent: AppIntent::ConfirmDeleteBranch { force: false },
-        description: "Yes, delete the merged branch",
-        label: "delete",
-        bar: true,
-        disabled: plain_delete_disabled,
-    },
-    Binding {
-        id: "delete_branch.force",
-        keys: &[KeyPattern::any(KeyCode::Char('D'))],
-        scope: KeyScope::DeleteBranch,
-        intent: AppIntent::ConfirmDeleteBranch { force: true },
-        description: "Yes, delete the branch and its unmerged commits",
-        label: "force delete",
-        bar: true,
-        disabled: force_delete_disabled,
-    },
-    Binding {
-        id: "delete_branch.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::DeleteBranch,
-        intent: AppIntent::ConfirmNo,
-        description: "No, keep the branch",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "delete_branch.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::DeleteBranch,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
 // Chunk 56: branches
 static BRANCHES_DELETE_RANGE_CONFIRM: &[Binding] = &[
     // Only `y` deletes a range: Enter is left unbound, as for one branch.
@@ -3612,17 +3454,17 @@ static CHUNKS: &[&[Binding]] = &[
     CORE_ERROR,
     FILES_DISCARD_CONFIRM,
     branches::keys::BRANCHES_KEYS,
-    BRANCHES_CHANGE,
+    branches::keys::BRANCHES_CHANGE,
     operation::keys::OPERATION_BRANCHES,
     pull_requests::keys::PULL_REQUESTS_BRANCHES,
-    BRANCHES_UPSTREAM,
+    branches::keys::BRANCHES_UPSTREAM,
     branches::keys::BRANCHES_TABS,
     remotes::keys::REMOTES_KEYS,
     tags::keys::TAGS_KEYS,
     commits::bisect::keys::BISECT_COMMITS,
     operation::keys::OPERATION_STATUS,
     commits::bisect::keys::BISECT_STATUS,
-    BRANCHES_DELETE_CONFIRM,
+    branches::keys::BRANCHES_DELETE_CONFIRM,
     tags::keys::TAGS_DELETE_CONFIRM,
     BRANCHES_DELETE_RANGE_CONFIRM,
     remotes::keys::REMOTES_REMOVE_CONFIRM,
@@ -4494,49 +4336,6 @@ mod tests {
                 Resolution::Disabled(_)
             ));
         }
-    }
-
-    #[test]
-    fn the_delete_question_lets_only_the_matching_key_answer() {
-        use crate::popup::DeleteBranchConfirm;
-        let mut state = AppState::new(Context::Workspace);
-        let ask = |force| {
-            Popup::DeleteBranch(DeleteBranchConfirm {
-                name: "t".into(),
-                op: crate::op::GitOp::DeleteBranch {
-                    name: "t".into(),
-                    force,
-                },
-            })
-        };
-        let resolve_in = |state: &AppState, key| {
-            resolve(
-                registry(),
-                &Keymap::default(),
-                KeyScope::DeleteBranch,
-                state,
-                key,
-            )
-        };
-        let shift_d = key(KeyCode::Char('D'), KeyModifiers::SHIFT);
-        state.popups = vec![ask(false)];
-        assert!(matches!(resolve_in(&state, plain('y')), Resolution::Run(_)));
-        assert!(matches!(
-            resolve_in(&state, shift_d),
-            Resolution::Disabled(_)
-        ));
-        state.popups = vec![ask(true)];
-        assert!(matches!(
-            resolve_in(&state, plain('y')),
-            Resolution::Disabled(_)
-        ));
-        assert!(matches!(resolve_in(&state, shift_d), Resolution::Run(_)));
-        assert!(matches!(
-            resolve_in(&state, plain('q')),
-            Resolution::Unbound
-        ));
-        assert_eq!(KeyScope::DeleteBranch.parent(), None);
-        assert_eq!(KeyScope::Branches.parent(), Some(KeyScope::Workspace));
     }
 
     #[test]
