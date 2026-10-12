@@ -206,6 +206,10 @@ mod tests {
             format!("pick {}\nreword {}\n", id('b'), id('b')),
             format!("pick {}\nbreak\nbreak\npick {}\n", id('b'), id('a')),
             format!("pick {}\npick {}\n", id('b'), id('c')),
+            // Short ids, though they are the todo's own abbreviations.
+            format!("pick {}\npick {}\n", &id('b')[..7], &id('a')[..7]),
+            format!("pick {}\npick {}\n", id('b'), id('A')),
+            format!("pick {}\npick {}\n", id('b'), "a".repeat(64)),
             "nonsense".into(),
             String::new(),
         ] {

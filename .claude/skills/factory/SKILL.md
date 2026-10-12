@@ -115,6 +115,9 @@ factory/
   project.md              repo context every agent reads first
   board.json              durable state (you write it), drives dashboard.html
   dashboard.html          `cd factory && python3 -m http.server`, open http://localhost:8000/dashboard.html
+  runner_status.py        `cd factory && python3 runner_status.py` writes runner.json every 20 s:
+                          CI runner status, latest runs, launchd service, runner log tail
+  runner.json             runtime state from runner_status.py, drives the dashboard's CI runner panel
   jobs/<job-id>/
     issue.md              written by you from the GitHub issue
     spec.md               spec-writer
@@ -236,6 +239,7 @@ Rework does not count toward the 2-resume limit.
 - Jobs run in parallel only through separate worktrees (see Parallel jobs); nothing
   switches branches in the main checkout.
 - Nothing goes to `main` except through a merged PR.
-- The factory definition (`.claude/`, `factory/project.md`, `factory/dashboard.html`) is
-  committed; change it through a PR like any code. Runtime state (`factory/board.json`,
-  `factory/jobs/`) is gitignored. Never commit it.
+- The factory definition (`.claude/`, `factory/project.md`, `factory/dashboard.html`,
+  `factory/runner_status.py`) is committed; change it through a PR like any code. Runtime
+  state (`factory/board.json`, `factory/runner.json`, `factory/jobs/`) is gitignored. Never
+  commit it.
