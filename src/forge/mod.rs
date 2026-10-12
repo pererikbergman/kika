@@ -8,6 +8,7 @@
 
 pub mod cache;
 pub mod github;
+pub mod head;
 pub mod remote;
 pub mod review;
 pub mod task;
