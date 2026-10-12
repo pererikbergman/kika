@@ -197,13 +197,7 @@ fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Fra
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
 pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
-    let colour = match file.status {
-        'A' => Color::Green,
-        'D' => Color::Red,
-        'M' => Color::Yellow,
-        'R' | 'C' => Color::Cyan,
-        _ => Color::Reset,
-    };
+    let colour = status_colour(file.status);
     let path = match &file.orig_path {
         Some(orig) => format!("{} → {}", orig.display(), file.path.display()),
         None => file.path.display().to_string(),
@@ -213,6 +207,17 @@ pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static>
         Span::raw(" "),
         Span::raw(elide_right(&path, width.saturating_sub(2))),
     ])
+}
+
+/// The colour of a changed file's status letter.
+pub(crate) fn status_colour(status: char) -> Color {
+    match status {
+        'A' => Color::Green,
+        'D' => Color::Red,
+        'M' => Color::Yellow,
+        'R' | 'C' => Color::Cyan,
+        _ => Color::Reset,
+    }
 }
 
 /// The rows that fit in `area`, scrolled so the cursor shows, plus a last

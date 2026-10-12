@@ -6,6 +6,7 @@ use crate::commits_view;
 use crate::conflict_view;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
+use crate::diff_search::DiffSearch;
 use crate::git::FileEntry;
 use crate::git::bisect::BisectState;
 use crate::git::blame::BlameLine;
@@ -264,7 +265,7 @@ impl PanelLook {
 /// A panel's frame: focused, a thick coloured border and a bold title, so
 /// the panel with the keys stands out without colour too; else a thin dim
 /// border.
-fn panel_block(title: String, focused: bool) -> Block<'static> {
+pub(crate) fn panel_block(title: String, focused: bool) -> Block<'static> {
     let block = Block::bordered().title(title);
     if focused {
         block
@@ -1442,39 +1443,64 @@ fn render_diff_pane(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let position = if diff.lines.is_empty() || diff.error.is_some() {
-        String::new()
-    } else {
-        let first = (diff.scroll + 1).min(diff.lines.len());
-        let more = if diff.done { "" } else { "+" };
-        format!(" · {first}/{}{more}", diff.lines.len())
-    };
-    let tail = format!("{position}{}", options_note(options));
+    let tail = format!("{}{}", diff_position(diff), options_note(options));
     let title = match &diff.path {
         Some(path) => look.path_title("Diff", path.display(), &tail),
         None => look.title(&format!("Diff{tail}")),
     };
     let block = look.block(title);
     let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    let pane = if let Some(error) = &diff.error {
-        Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
-    } else if diff.show_loading {
-        Paragraph::new("Loading…")
-    } else if diff.done && diff.lines.is_empty() {
-        Paragraph::new("No diff")
-    } else {
-        // Only the visible slice: a 50,000-line diff costs a screenful per frame.
-        let start = diff.scroll.min(diff.lines.len());
-        let end = start.saturating_add(rows).min(diff.lines.len());
-        Paragraph::new(
-            diff.lines[start..end]
-                .iter()
-                .map(|line| styled_diff_line(line, width))
-                .collect::<Vec<_>>(),
-        )
-    };
+    let pane = diff_pane_body(diff, None, inner);
     frame.render_widget(pane.block(block), area);
+}
+
+/// Where in the streamed diff the pane is: ` · <first shown>/<loaded>`,
+/// `+` while more are coming; empty with nothing to show.
+pub(crate) fn diff_position(diff: &DiffPane) -> String {
+    if diff.lines.is_empty() || diff.error.is_some() {
+        return String::new();
+    }
+    let first = (diff.scroll + 1).min(diff.lines.len());
+    let more = if diff.done { "" } else { "+" };
+    format!(" · {first}/{}{more}", diff.lines.len())
+}
+
+/// The inside of a streamed Diff pane at `inner`'s size: an error, a
+/// delayed "Loading…", "No diff", or the visible lines, with `search`'s
+/// matches marked on them.
+pub(crate) fn diff_pane_body(
+    diff: &DiffPane,
+    search: Option<&DiffSearch>,
+    inner: Rect,
+) -> Paragraph<'static> {
+    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
+    if let Some(error) = &diff.error {
+        let lines = error.lines().map(|l| Line::from(l.to_string()));
+        return Paragraph::new(lines.collect::<Vec<_>>()).wrap(Wrap { trim: false });
+    }
+    if diff.show_loading {
+        return Paragraph::new("Loading…");
+    }
+    if diff.done && diff.lines.is_empty() {
+        return Paragraph::new("No diff");
+    }
+    // Only the visible slice: a 50,000-line diff costs a screenful per frame.
+    let start = diff.scroll.min(diff.lines.len());
+    let end = start.saturating_add(rows).min(diff.lines.len());
+    Paragraph::new(
+        diff.lines[start..end]
+            .iter()
+            .zip(start..)
+            .map(|(line, at)| {
+                let marks = search_marks(search, at);
+                if marks.is_empty() {
+                    return styled_diff_line(line, width);
+                }
+                let text = clip(&line.text, 0, width);
+                Line::from(marked_spans(text, diff_line_style(line.kind), &marks))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// The focused Diff pane: one side of the file as hunks, the selected one
@@ -1530,7 +1556,11 @@ fn render_hunk_view(
                     };
                     let text = clip(&drawn_text(&row, emoji), 0, width.saturating_sub(1));
                     let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
-                    spans.extend(marked_spans(text, style, &search_marks(view, at)));
+                    spans.extend(marked_spans(
+                        text,
+                        style,
+                        &search_marks(view.search.as_ref(), at),
+                    ));
                     let line = Line::from(spans);
                     let mark = match view.lines {
                         Some(_) => row.line.is_some(),
@@ -1553,8 +1583,8 @@ fn render_hunk_view(
 /// and `suffix` after a `·`, the path giving way to fit.
 /// Matches of the search on row `at`: char ranges and their style, the
 /// current match standing out from the rest.
-fn search_marks(view: &HunkView, at: usize) -> Vec<(usize, usize, Style)> {
-    let Some(search) = &view.search else {
+fn search_marks(search: Option<&DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
+    let Some(search) = search else {
         return Vec::new();
     };
     // Matches are in row order, so this row's are found by bisection.
@@ -1848,14 +1878,17 @@ fn render_commit_view(view: &CommitView, look: &PanelLook, frame: &mut Frame, ar
 /// Colour by kind; `---`/`+++` arrive as headers, so they are never red or
 /// green. A line wider than `width` ends in `…`, so a cut is never silent.
 fn styled_diff_line(line: &DiffLine, width: usize) -> Line<'static> {
-    let style = match line.kind {
+    Line::styled(clip(&line.text, 0, width), diff_line_style(line.kind))
+}
+
+fn diff_line_style(kind: LineKind) -> Style {
+    match kind {
         LineKind::Added => Style::new().fg(Color::Green),
         LineKind::Removed => Style::new().fg(Color::Red),
         LineKind::Hunk => Style::new().fg(Color::Cyan),
         LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
         LineKind::Context => Style::new(),
-    };
-    Line::styled(clip(&line.text, 0, width), style)
+    }
 }
 
 /// `XY path`, or `XY orig → path` for renames and copies, fitted to `width`

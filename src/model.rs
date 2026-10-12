@@ -531,7 +531,7 @@ impl AppState {
                 let cols = self.pane_cols();
                 self.size = (width, height);
                 self.render_review_body();
-                let mut effects = self.diff.demand(self.pane_rows());
+                let mut effects = self.diff.demand(self.diff_rows());
                 if self.pane_cols() != cols {
                     effects.extend(self.render_shown());
                 }
@@ -548,6 +548,9 @@ impl AppState {
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
             AppIntent::SelectNext => return self.move_selection(1),
             AppIntent::SelectPrev => return self.move_selection(-1),
+            AppIntent::ScrollDiff(by) if self.review_files_shown() => {
+                return self.scroll_review_diff(by);
+            }
             AppIntent::ScrollDiff(by) => {
                 let rows = self.pane_rows();
                 if self.focus == Focus::Branches {
@@ -564,7 +567,10 @@ impl AppState {
                     return self.diff.scroll(by, rows);
                 }
             }
-            AppIntent::DiffLoaded { tag, result } => self.diff_loaded(tag, result),
+            AppIntent::DiffLoaded { tag, result } => {
+                self.diff_loaded(tag, result);
+                self.refresh_review_search();
+            }
             AppIntent::DiffSlow { tag } => {
                 if tag.generation == self.generation {
                     self.diff.slow(tag.seq);
@@ -1034,8 +1040,19 @@ impl AppState {
             AppIntent::CloseReviewDetail => return self.close_review(),
             AppIntent::RefreshReview => return self.refresh_review(),
             AppIntent::OpenCheckDetails => return self.open_check_details(),
-            AppIntent::ReviewNext => self.review_move(1),
-            AppIntent::ReviewPrev => self.review_move(-1),
+            AppIntent::ReviewNext => return self.review_move(1),
+            AppIntent::ReviewPrev => return self.review_move(-1),
+            AppIntent::OpenReviewFiles => return self.open_review_files(),
+            AppIntent::ToggleReviewFilesFocus => self.toggle_review_files_focus(),
+            AppIntent::ReviewObjectsChecked { tag, result } => {
+                return self.review_objects_checked(tag, result);
+            }
+            AppIntent::ReviewHeadFetched { tag, result } => {
+                return self.review_head_fetched(tag, result);
+            }
+            AppIntent::ReviewFilesLoaded { tag, result } => {
+                return self.review_files_loaded(tag, result);
+            }
             AppIntent::ReviewQueuesLoaded { tag, repo, result } => {
                 self.review_queues_loaded(tag, repo, result)
             }
@@ -1214,6 +1231,14 @@ impl AppState {
             AppIntent::Redo => return self.travel(undo::Direction::Redo),
             AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
+            AppIntent::OpenSearch if self.review_files_shown() => {
+                if let Some(text) = self.review_search_text() {
+                    self.input = Some(ListInput {
+                        target: InputTarget::DiffSearch,
+                        line: LineInput::with_text(&text),
+                    });
+                }
+            }
             AppIntent::OpenSearch => {
                 if let Focus::Diff(view) = &self.focus {
                     let text = view.search.as_ref().map_or("", |s| s.query.as_str());
@@ -1234,6 +1259,13 @@ impl AppState {
             }
             AppIntent::ToggleRange => self.toggle_range(),
             AppIntent::ListEscape => return self.list_escape(),
+            AppIntent::DiffEscape if self.review_files_shown() => self.review_diff_escape(),
+            AppIntent::SearchNext if self.review_files_shown() => {
+                return self.step_review_search(false);
+            }
+            AppIntent::SearchPrev if self.review_files_shown() => {
+                return self.step_review_search(true);
+            }
             AppIntent::DiffEscape => match &mut self.focus {
                 Focus::Diff(view) if view.search.is_some() => view.search = None,
                 _ => return self.update(AppIntent::FocusLeft),
@@ -1327,7 +1359,13 @@ impl AppState {
             }
             (Context::Workspace, Focus::Blame(_)) => KeyScope::Blame,
             (Context::Workspace, Focus::Conflict(_)) => KeyScope::Conflict,
-            (Context::Review { .. }, _) => KeyScope::Review,
+            (Context::Review { .. }, _) => match &self.review.files {
+                Some(_) if review_files::review_diff_focused(self) => KeyScope::ReviewDiff,
+                Some(_) if matches!(self.review.screen, review::ReviewScreen::Files(_)) => {
+                    KeyScope::ReviewFiles
+                }
+                _ => KeyScope::Review,
+            },
         }
     }
 
@@ -2145,7 +2183,8 @@ impl AppState {
     /// the selection moves, but nothing loads.
     fn select(&mut self, index: usize) -> Vec<Effect> {
         self.selected = Some(index);
-        if self.files_open() {
+        // The pane shows another diff; leaving it streams this one.
+        if self.files_open() || self.review_files_shown() {
             return vec![];
         }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
@@ -2167,7 +2206,7 @@ impl AppState {
     /// Start streaming `request` into the Diff pane.
     fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
         let seq = self.take_seq();
-        let want = self.diff.begin(seq, &request.path, self.pane_rows());
+        let want = self.diff.begin(seq, &request.path, self.diff_rows());
         // Diff streams report many times, so they stay out of the busy count.
         let tag = Tag {
             generation: self.generation,
@@ -2414,7 +2453,7 @@ impl AppState {
     fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
         if self.files.is_empty() {
             self.selected = None;
-            if self.files_open() {
+            if self.files_open() || self.review_files_shown() {
                 return vec![];
             }
             self.diff = DiffPane::default();
@@ -3862,6 +3901,20 @@ impl AppState {
         }
     }
 
+    /// Stream the open commit's or stash's file again, as when it was
+    /// picked; nothing when neither is open.
+    pub(super) fn reload_open_file_diff(&mut self) -> Vec<Effect> {
+        if self.commits.open.is_some() {
+            self.diff.path = None;
+            self.commit_file_diff()
+        } else if self.stash.open.is_some() {
+            self.diff.path = None;
+            self.stash_file_diff()
+        } else {
+            vec![]
+        }
+    }
+
     /// Back to the log, still on the same commit, with the pane showing the
     /// selected working-tree file again.
     fn close_commit_files(&mut self) -> Vec<Effect> {
@@ -5108,7 +5161,7 @@ impl AppState {
 
     /// Show the question, or say no at once to one nobody is waiting for.
     fn credential_asked(&mut self, tag: Tag, prompt: String, confirm: bool) -> Vec<Effect> {
-        if self.current_remote(tag).is_none() {
+        if self.current_remote(tag).is_none() && !self.review_fetch_running(tag) {
             return vec![Effect::AnswerCredential(None)];
         }
         self.popups
@@ -5508,6 +5561,7 @@ impl AppState {
                 }
                 self.commits.reconcile();
             }
+            InputTarget::DiffSearch if self.review_files_shown() => self.set_review_search(&text),
             InputTarget::DiffSearch => {
                 if let Focus::Diff(view) = &mut self.focus {
                     view.set_search(&text, self.emoji_zwj);
@@ -5532,6 +5586,9 @@ impl AppState {
         };
         if input.target.is_log_query() {
             return self.accept_log_query(input);
+        }
+        if input.target == InputTarget::DiffSearch && self.review_files_shown() {
+            return self.accept_review_search();
         }
         let rows = self.pane_rows();
         if input.target == InputTarget::DiffSearch
@@ -5871,6 +5928,7 @@ mod leave_commits;
 mod log_query;
 pub(crate) mod pull_request;
 pub(crate) mod review;
+pub(crate) mod review_files;
 mod stash_actions;
 
 use log_query::MARK_CLEARED;

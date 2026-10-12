@@ -12,9 +12,11 @@ use super::remote::{matches, parse_remote, segment_ok};
 use super::task::ForgeContext;
 use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use crate::git::GitRunner;
+use crate::git::commit_files::CommitId;
 use crate::git::diff::{EmojiZwj, sanitize, sanitize_body};
-use crate::git::forge_remote::read_remote_url;
+use crate::git::forge_remote::{read_remote, read_remote_url};
 use crate::git::recording::CommandOutcome;
+use crate::git::remotes::RemoteName;
 
 /// Pull requests asked for per queue; there is no paging past it.
 pub const QUEUE_SIZE: usize = 50;
@@ -26,6 +28,11 @@ pub const MAX_REVIEWERS: usize = 20;
 pub const MAX_BODY: usize = 64 * 1024;
 /// The most of a one-line field kept, in characters.
 const MAX_FIELD: usize = 512;
+/// The files whose viewed state a detail asks for; past it, unknown.
+pub const MAX_FILES: usize = 100;
+/// The longest file path kept from GitHub, in bytes. Longer ones are
+/// dropped: no file Git can check out has one.
+pub const MAX_PATH: usize = 4096;
 
 /// The four lists of pull requests review mode shows, all limited to the
 /// repository of the remote.
@@ -137,6 +144,15 @@ pub struct Check {
     pub details_url: Option<String>,
 }
 
+/// Whether the reviewer marked a file viewed on GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewedState {
+    Viewed,
+    Unviewed,
+    /// Marked viewed, then changed since.
+    Dismissed,
+}
+
 /// One pull request as review mode shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrDetail {
@@ -155,6 +171,14 @@ pub struct PrDetail {
     pub head: String,
     pub mergeable: Mergeability,
     pub checks: Vec<Check>,
+    /// The head and base commits; `None` when GitHub sent no hex id.
+    pub head_oid: Option<CommitId>,
+    pub base_oid: Option<CommitId>,
+    /// The viewed state of up to [`MAX_FILES`] files, by path. The paths
+    /// are only ever compared with local ones, never drawn.
+    pub viewed: Vec<(String, ViewedState)>,
+    /// How many files GitHub says the pull request changes.
+    pub files_total: u64,
 }
 
 /// Why review mode has nothing to show. A fixed set: nothing `gh` or
@@ -283,7 +307,8 @@ fn queues_body(repo: &ForgeRepo) -> Vec<u8> {
 /// The detail query: fixed text; owner, name and number are variables.
 const DETAIL_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!)\
 {repository(owner:$owner,name:$name){pullRequest(number:$number)\
-{number title body state isDraft mergeable baseRefName headRefName author{login} \
+{number title body state isDraft mergeable baseRefName headRefName headRefOid baseRefOid \
+author{login} files(first:100){totalCount nodes{path viewerViewedState}} \
 labels(first:20){nodes{name}} \
 reviewRequests(first:20){nodes{requestedReviewer{...on User{login} ...on Bot{login} \
 ...on Mannequin{login} ...on Team{slug}}}} \
@@ -399,11 +424,29 @@ struct PrNode {
     mergeable: Option<String>,
     base_ref_name: Option<String>,
     head_ref_name: Option<String>,
+    head_ref_oid: Option<String>,
+    base_ref_oid: Option<String>,
+    files: Option<FilesNode>,
     author: Option<Login>,
     labels: Option<Nodes<Named>>,
     review_requests: Option<Nodes<ReviewRequest>>,
     latest_reviews: Option<Nodes<ReviewNode>>,
     commits: Option<Nodes<CommitNode>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FilesNode {
+    total_count: Option<u64>,
+    #[serde(default = "Vec::new")]
+    nodes: Vec<Option<FileNode>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileNode {
+    path: Option<String>,
+    viewer_viewed_state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -538,6 +581,28 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         .filter_map(check_of)
         .take(MAX_CHECKS)
         .collect();
+    let files_total = pr.files.as_ref().and_then(|f| f.total_count).unwrap_or(0);
+    let viewed = pr
+        .files
+        .into_iter()
+        .flat_map(|f| f.nodes.into_iter().flatten())
+        .filter_map(|file| {
+            let path = file.path.filter(|p| p.len() <= MAX_PATH)?;
+            let viewed = match file.viewer_viewed_state.as_deref() {
+                Some("VIEWED") => ViewedState::Viewed,
+                Some("DISMISSED") => ViewedState::Dismissed,
+                _ => ViewedState::Unviewed,
+            };
+            Some((path, viewed))
+        })
+        .take(MAX_FILES)
+        .collect();
+    // A full SHA-1 or SHA-256 id; nothing shorter can name one commit.
+    let oid = |text: Option<String>| {
+        text.filter(|t| matches!(t.len(), 40 | 64))
+            .as_deref()
+            .and_then(CommitId::parse)
+    };
     Ok(Some(PrDetail {
         number: pr.number,
         title: line(pr.title.as_deref().unwrap_or_default()),
@@ -552,6 +617,10 @@ fn read_detail(body: &[u8]) -> Result<Option<PrDetail>, ForgeStatus> {
         head: line(pr.head_ref_name.as_deref().unwrap_or_default()),
         mergeable,
         checks,
+        head_oid: oid(pr.head_ref_oid),
+        base_oid: oid(pr.base_ref_oid),
+        viewed,
+        files_total,
     }))
 }
 
@@ -649,6 +718,24 @@ pub fn resolve(
     Some((host, repo))
 }
 
+/// The remote a pull request's commits may be fetched from: the one
+/// whose URL names `repo` itself, on one of `hosts`. `None` when the
+/// remote names another repository or host, or has a name git could read
+/// as an option; then nothing may be fetched.
+pub fn fetch_remote(
+    git: &dyn GitRunner,
+    hosts: &[ForgeHost],
+    repo: &ForgeRepo,
+) -> Option<RemoteName> {
+    matches(repo, hosts)?;
+    let (name, url) = read_remote(git)?;
+    let named = parse_remote(&url)?;
+    let same = named.host.eq_ignore_ascii_case(&repo.host)
+        && named.owner == repo.owner
+        && named.name == repo.name;
+    (same && matches(&named, hosts).is_some() && !name.0.starts_with(b"-")).then_some(name)
+}
+
 /// One review load's inputs, as the effect gave them.
 pub struct ReviewLoad<'a> {
     pub hosts: &'a [ForgeHost],
@@ -710,6 +797,7 @@ pub mod fixtures {
     pub const QUEUES: &str = include_str!("fixtures/review_queues.http");
     pub const DETAIL: &str = include_str!("fixtures/review_detail.http");
     pub const DETAIL_MISSING: &str = include_str!("fixtures/review_detail_missing.http");
+    pub const DETAIL_BAD_OID: &str = include_str!("fixtures/review_detail_bad_oid.http");
 }
 
 #[cfg(test)]
@@ -881,6 +969,73 @@ pub(crate) mod tests {
         );
         assert!(pr.body.starts_with("## Summary\n\n"), "{:?}", pr.body);
         assert!(!pr.body.contains('\r'));
+    }
+
+    #[test]
+    fn the_detail_reads_its_commits_and_the_viewed_state_of_its_files() {
+        let runner = FakeGh::new().reply(answer(DETAIL));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        let query = sent(&runner.calls()[0])["query"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let cap = format!("files(first:{MAX_FILES})");
+        for field in ["headRefOid", "baseRefOid", "viewerViewedState", &cap] {
+            assert!(query.contains(field), "{field} not asked: {query}");
+        }
+        assert_eq!(pr.head_oid, CommitId::parse(&"1".repeat(40)));
+        assert_eq!(pr.base_oid, CommitId::parse(&"2".repeat(40)));
+        assert_eq!(pr.files_total, 3);
+        assert_eq!(
+            pr.viewed,
+            [
+                ("src/cache.rs".to_string(), ViewedState::Viewed),
+                ("src/lib.rs".to_string(), ViewedState::Dismissed),
+                ("docs/café.md".to_string(), ViewedState::Unviewed),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oid_that_is_not_hex_is_none() {
+        let runner = FakeGh::new().reply(answer(DETAIL_BAD_OID));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        assert_eq!(pr.head_oid, None);
+        assert_eq!(pr.base_oid, CommitId::parse(&"2".repeat(40)));
+        // Hex, but too short to name one commit.
+        let short = DETAIL.replace(&"1".repeat(40), "1111");
+        let runner = FakeGh::new().reply(answer(&short));
+        assert_eq!(detail(&runner, 42).unwrap().unwrap().head_oid, None);
+    }
+
+    #[test]
+    fn the_viewed_list_keeps_at_most_its_cap_and_no_overlong_path() {
+        let nodes: Vec<String> = (0..MAX_FILES + 20)
+            .map(|i| format!("{{\"path\":\"f{i}\",\"viewerViewedState\":\"ODD\"}}"))
+            .chain([format!(
+                "{{\"path\":\"{}\",\"viewerViewedState\":\"VIEWED\"}}",
+                "p".repeat(MAX_PATH + 1)
+            )])
+            .collect();
+        let files = format!(
+            "\"files\":{{\"totalCount\":500,\"nodes\":[{}]}}",
+            nodes.join(",")
+        );
+        let start = DETAIL.find("\"files\":").unwrap();
+        let end = start + DETAIL[start..].find("]},").unwrap() + 2;
+        let big = format!("{}{files}{}", &DETAIL[..start], &DETAIL[end..]);
+        let runner = FakeGh::new().reply(answer(&big));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        assert_eq!(pr.viewed.len(), MAX_FILES);
+        assert_eq!(pr.files_total, 500);
+        // An unknown state counts as not viewed.
+        assert!(pr.viewed.iter().all(|(_, v)| *v == ViewedState::Unviewed));
+
+        let long = DETAIL.replace("src/cache.rs", &"p".repeat(MAX_PATH + 1));
+        let runner = FakeGh::new().reply(answer(&long));
+        let pr = detail(&runner, 42).unwrap().unwrap();
+        assert_eq!(pr.viewed.len(), 2);
+        assert_eq!(pr.viewed[0].0, "src/lib.rs");
     }
 
     #[test]
@@ -1134,6 +1289,48 @@ pub(crate) mod tests {
         });
         assert_eq!(result, Err(ReviewError::Limited { until: NOW + 30 }));
         assert_eq!(gh.calls().len(), 1);
+    }
+
+    fn remote_named(name: &str, url: &[u8]) -> crate::git::fake::FakeRunner {
+        let mut out = url.to_vec();
+        out.push(0);
+        crate::git::fake::FakeRunner::new()
+            .expect(
+                &["remote"],
+                crate::git::fake::ok(format!("{name}\n").as_bytes()),
+            )
+            .expect(
+                &["config", "-z", "--get", &format!("remote.{name}.url")],
+                crate::git::fake::ok(&out),
+            )
+    }
+
+    #[test]
+    fn commits_are_fetched_only_from_the_remote_of_the_reviewed_repository() {
+        let hosts = [host()];
+        let git = remote_named("upstream", b"git@github.com:acme/widgets.git");
+        assert_eq!(
+            fetch_remote(&git, &hosts, &repo()),
+            Some(RemoteName::from("upstream"))
+        );
+        git.assert_done();
+        for url in [
+            &b"https://github.com/acme/other"[..],
+            b"https://github.com.evil.io/acme/widgets",
+            b"/srv/git/widgets.git",
+        ] {
+            let git = remote_named("origin", url);
+            assert_eq!(fetch_remote(&git, &hosts, &repo()), None, "{url:?}");
+        }
+        // A host no longer configured is asked nothing, not even git.
+        let git = crate::git::fake::FakeRunner::new();
+        assert_eq!(fetch_remote(&git, &[], &repo()), None);
+        let other = [ForgeHost::parse("github.example.com").unwrap()];
+        assert_eq!(fetch_remote(&git, &other, &repo()), None);
+        git.assert_done();
+        // A name git would read as an option is never handed to it.
+        let git = remote_named("-x", b"https://github.com/acme/widgets");
+        assert_eq!(fetch_remote(&git, &hosts, &repo()), None);
     }
 
     #[test]

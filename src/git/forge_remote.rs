@@ -2,10 +2,17 @@
 //! `origin`, or the only remote when there is no `origin`.
 
 use super::path::os_string;
+use super::remotes::RemoteName;
 use super::runner::{GitCommand, GitRunner};
 
 /// The raw URL bytes, or `None` when no remote qualifies or git fails.
 pub fn read_remote_url(runner: &dyn GitRunner) -> Option<Vec<u8>> {
+    read_remote(runner).map(|(_, url)| url)
+}
+
+/// The remote's name and raw URL bytes: the name is what a fetch from
+/// the repository the URL names must go to.
+pub fn read_remote(runner: &dyn GitRunner) -> Option<(RemoteName, Vec<u8>)> {
     let listed = runner.run(&GitCommand::new("remote")).ok()?;
     if !listed.success {
         return None;
@@ -32,7 +39,7 @@ pub fn read_remote_url(runner: &dyn GitRunner) -> Option<Vec<u8>> {
         return None;
     }
     let url = output.stdout.strip_suffix(b"\0").unwrap_or(&output.stdout);
-    (!url.is_empty()).then(|| url.to_vec())
+    (!url.is_empty()).then(|| (RemoteName::from_bytes(name), url.to_vec()))
 }
 
 #[cfg(test)]
@@ -53,6 +60,23 @@ mod tests {
             Some(b"git@github.com:o/r.git".to_vec())
         );
         fake.assert_done();
+    }
+
+    #[test]
+    fn the_name_comes_with_the_url() {
+        let fake = FakeRunner::new()
+            .expect(&["remote"], ok(b"upstream\n"))
+            .expect(
+                &["config", "-z", "--get", "remote.upstream.url"],
+                ok(b"https://github.com/o/r\0"),
+            );
+        assert_eq!(
+            read_remote(&fake),
+            Some((
+                RemoteName::from("upstream"),
+                b"https://github.com/o/r".to_vec()
+            ))
+        );
     }
 
     #[test]

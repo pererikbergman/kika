@@ -98,6 +98,87 @@ pub fn commit_files(
     parse(&output.stdout)
 }
 
+/// `git diff-tree` counting the lines `range` added and removed in each
+/// file, renames found, NUL-separated so any name survives. `range` has a
+/// parent: a pull request is compared with its merge base.
+pub fn numstat_command(range: &CommitRange) -> GitCommand {
+    let cmd = GitCommand::new("diff-tree")
+        .arg("-r")
+        .arg("-z")
+        .arg("--numstat")
+        .arg("-M")
+        .arg("--no-commit-id");
+    range
+        .args()
+        .fold(cmd, |cmd, arg| cmd.arg(arg))
+        .arg("--")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("LC_ALL", "C")
+}
+
+/// Lines added and removed per file, by its (new) name; `None` for a
+/// binary file, which has no lines.
+pub type LineCounts = Option<(u32, u32)>;
+
+/// Each file `range` changed with its counts, in git's order.
+pub fn numstat(
+    runner: &dyn GitRunner,
+    range: &CommitRange,
+) -> Result<Vec<(RepoPath, LineCounts)>, String> {
+    let output = runner
+        .run(&numstat_command(range))
+        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    if !output.success {
+        return Err(failure(&output));
+    }
+    parse_numstat(&output.stdout)
+}
+
+/// `-z --numstat` records: `added TAB removed TAB name NUL`, or for a
+/// rename or copy an empty name and then the old and new names, each
+/// ending in NUL. A binary file counts `-` both ways.
+fn parse_numstat(stdout: &[u8]) -> Result<Vec<(RepoPath, LineCounts)>, String> {
+    let bad = || "git diff-tree gave a record Kika could not read".to_string();
+    let mut fields = stdout.split(|&b| b == 0);
+    let mut stats = Vec::new();
+    while let Some(record) = fields.next().filter(|r| !r.is_empty()) {
+        let mut parts = record.splitn(3, |&b| b == b'\t');
+        let (Some(added), Some(removed), Some(name)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(bad());
+        };
+        let counts = match (added, removed) {
+            (b"-", b"-") => None,
+            _ => Some((
+                count(added).ok_or_else(bad)?,
+                count(removed).ok_or_else(bad)?,
+            )),
+        };
+        let path = if name.is_empty() {
+            // The old name, then the new one, which the row is known by.
+            fields.next().filter(|n| !n.is_empty()).ok_or_else(bad)?;
+            fields.next().filter(|n| !n.is_empty()).ok_or_else(bad)?
+        } else {
+            name
+        };
+        stats.push((RepoPath::from_bytes(path), counts));
+    }
+    Ok(stats)
+}
+
+/// A count of lines in ASCII digits, held at `u32::MAX`.
+fn count(digits: &[u8]) -> Option<u32> {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(
+        std::str::from_utf8(digits)
+            .ok()?
+            .parse::<u64>()
+            .map_or(u32::MAX, |n| u32::try_from(n).unwrap_or(u32::MAX)),
+    )
+}
+
 /// `-z --name-status` records: a status field, then one name, or two for
 /// a rename or copy (the old one first). Only the status's letter is kept,
 /// not its score (`R100` → `R`).
@@ -291,6 +372,61 @@ mod tests {
             commit_files(&fake, &range(None)),
             Err("git diff-tree failed".into())
         );
+    }
+
+    const NUMSTAT: [&str; 6] = ["diff-tree", "-r", "-z", "--numstat", "-M", "--no-commit-id"];
+
+    #[test]
+    fn numstat_compares_two_fixed_trees_with_no_room_for_an_option() {
+        let fake =
+            FakeRunner::new().expect(&[&NUMSTAT[..], &[PARENT, OID, "--"]].concat(), ok(b""));
+        assert_eq!(numstat(&fake, &range(Some(PARENT))), Ok(vec![]));
+        fake.assert_done();
+        let env: Vec<(OsString, OsString)> = vec![
+            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+            ("LC_ALL".into(), "C".into()),
+        ];
+        assert_eq!(fake.envs(), [env]);
+    }
+
+    #[test]
+    fn numstat_reads_counts_renames_and_binary_files() {
+        let out = b"3\t1\tsrc/a.rs\0-\t-\tlogo.png\0\
+                    0\t0\t\0old name\0new name\0\
+                    12\t0\tdir/two\nlines\0";
+        let fake =
+            FakeRunner::new().expect(&[&NUMSTAT[..], &[PARENT, OID, "--"]].concat(), ok(out));
+        assert_eq!(
+            numstat(&fake, &range(Some(PARENT))).unwrap(),
+            [
+                (RepoPath::from("src/a.rs"), Some((3, 1))),
+                (RepoPath::from("logo.png"), None),
+                (RepoPath::from("new name"), Some((0, 0))),
+                (RepoPath::from_bytes(b"dir/two\nlines"), Some((12, 0))),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn numstat_keeps_a_name_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let fake = FakeRunner::new().expect(
+            &[&NUMSTAT[..], &[PARENT, OID, "--"]].concat(),
+            ok(b"1\t2\tx\xff\0"),
+        );
+        let stats = numstat(&fake, &range(Some(PARENT))).unwrap();
+        assert_eq!(stats[0].0.as_os_str().as_bytes(), b"x\xff");
+        assert_eq!(stats[0].1, Some((1, 2)));
+    }
+
+    #[test]
+    fn a_numstat_record_cut_short_or_garbled_is_an_error() {
+        for out in [&b"3\t1\t\0only-one\0"[..], b"x\ty\tpath\0", b"3\t1\0"] {
+            let fake =
+                FakeRunner::new().expect(&[&NUMSTAT[..], &[PARENT, OID, "--"]].concat(), ok(out));
+            assert!(numstat(&fake, &range(Some(PARENT))).is_err(), "{out:?}");
+        }
     }
 
     #[test]

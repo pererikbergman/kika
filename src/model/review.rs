@@ -3,11 +3,13 @@
 //! enters review mode, opens a pull request or refreshes, and only on a
 //! host the global config lists.
 
+use super::review_files::PrFiles;
 use super::{AppState, Context};
 use crate::effect::{Effect, Tag};
 use crate::forge::remote::matches;
 use crate::forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
 use crate::forge::{ForgeHost, ForgeRepo, ForgeStatus};
+use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::Reason;
 use crate::list_filter;
@@ -29,6 +31,8 @@ pub enum ReviewScreen {
     Queue,
     /// Pull request `number`, loaded or loading.
     Detail(u64),
+    /// Pull request `number`'s changed files and their diff.
+    Files(u64),
 }
 
 /// Why a screen has nothing to show.
@@ -86,6 +90,11 @@ pub struct ReviewState {
     /// The open pull request's description, rendered once for the
     /// panel's width rather than on every frame and key.
     pub body: Option<RenderedBody>,
+    /// The files screen, while it is shown.
+    pub files: Option<PrFiles>,
+    /// Each pull request head fetched this session, so none is fetched
+    /// twice. Kept when review mode is left and entered again.
+    pub fetched_heads: Vec<(u64, CommitId)>,
 }
 
 /// A description as drawn at `width`.
@@ -110,6 +119,8 @@ impl Default for ReviewState {
             repo: None,
             check_urls: Vec::new(),
             body: None,
+            files: None,
+            fetched_heads: Vec::new(),
         }
     }
 }
@@ -138,6 +149,23 @@ impl ReviewState {
     pub fn visible(&self) -> Vec<usize> {
         let texts: Vec<String> = self.rows().iter().map(row_text).collect();
         list_filter::visible(&self.filter, texts.iter().map(String::as_str))
+    }
+
+    /// Started afresh, but still knowing which heads were fetched.
+    pub(super) fn restart(&mut self) {
+        let fetched_heads = std::mem::take(&mut self.fetched_heads);
+        *self = Self {
+            fetched_heads,
+            ..Self::default()
+        };
+    }
+
+    /// A load is in flight on any screen.
+    #[cfg(test)]
+    pub fn loading(&self) -> bool {
+        self.queues_fetch.loading
+            || self.detail_fetch.loading
+            || self.files.as_ref().is_some_and(PrFiles::loading)
     }
 
     /// The pull request under the cursor, if the filter shows it.
@@ -176,8 +204,12 @@ fn row_text(pr: &PrSummary) -> String {
     format!("#{} {} {}", pr.number, pr.title, pr.author)
 }
 
+/// A pull request is open, on its detail or its files.
 fn detail_shown(state: &AppState) -> bool {
-    matches!(state.review.screen, ReviewScreen::Detail(_))
+    matches!(
+        state.review.screen,
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_)
+    )
 }
 
 /// Why Enter cannot open a pull request.
@@ -199,9 +231,12 @@ pub(crate) fn queue_keys_disabled(state: &AppState) -> Option<Reason> {
 
 /// A refresh waits for the load it would repeat.
 pub(crate) fn refresh_review_disabled(state: &AppState) -> Option<Reason> {
+    if let Some(reason) = super::review_files::refresh_in_files(state) {
+        return Some(reason);
+    }
     let fetch = match state.review.screen {
         ReviewScreen::Queue => &state.review.queues_fetch,
-        ReviewScreen::Detail(_) => &state.review.detail_fetch,
+        ReviewScreen::Detail(_) | ReviewScreen::Files(_) => &state.review.detail_fetch,
     };
     fetch.loading.then_some(LOADING.into())
 }
@@ -230,7 +265,7 @@ impl AppState {
             return vec![];
         }
         self.context = Context::Review { number: None };
-        self.review = ReviewState::default();
+        self.review.restart();
         self.input = None;
         self.load_review_queues()
     }
@@ -425,8 +460,8 @@ impl AppState {
         }
     }
 
-    /// `j`/`k`: the queue's cursor, or the detail's scroll.
-    pub(super) fn review_move(&mut self, delta: isize) {
+    /// `j`/`k`: the queue's cursor, the detail's scroll, or the file.
+    pub(super) fn review_move(&mut self, delta: isize) -> Vec<Effect> {
         match self.review.screen {
             ReviewScreen::Queue => {
                 let visible = self.review.visible();
@@ -442,7 +477,9 @@ impl AppState {
                     .saturating_add_signed(delta)
                     .min(max);
             }
+            ReviewScreen::Files(_) => return self.move_review_file(delta),
         }
+        vec![]
     }
 
     /// Where the detail is drawn, at the current screen size.
@@ -499,6 +536,7 @@ impl AppState {
     /// queue, clear the filter, else go back to the workspace.
     pub(super) fn close_review(&mut self) -> Vec<Effect> {
         match self.review.screen {
+            ReviewScreen::Files(_) => self.close_review_files(),
             ReviewScreen::Detail(_) => {
                 self.review.screen = ReviewScreen::Queue;
                 self.review.detail = None;
@@ -518,9 +556,13 @@ impl AppState {
             }
             ReviewScreen::Queue => {
                 self.context = Context::Workspace;
-                self.review = ReviewState::default();
+                self.review.restart();
                 if self.workspace_started {
-                    self.update(AppIntent::RefreshStatus)
+                    let mut effects = self.update(AppIntent::RefreshStatus);
+                    // The review may have streamed its own diff into the
+                    // pane; a commit's or stash's open file gets it back.
+                    effects.extend(self.reload_open_file_diff());
+                    effects
                 } else {
                     self.start()
                 }
@@ -535,7 +577,9 @@ impl AppState {
         }
         match self.review.screen {
             ReviewScreen::Queue => self.load_review_queues(),
-            ReviewScreen::Detail(number) => self.load_review_detail(number),
+            ReviewScreen::Detail(number) | ReviewScreen::Files(number) => {
+                self.load_review_detail(number)
+            }
         }
     }
 
@@ -595,7 +639,7 @@ pub(crate) mod tests {
 
     const NOW: i64 = 1_700_000_000;
 
-    fn github() -> Vec<ForgeHost> {
+    pub(crate) fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
     }
 
@@ -612,7 +656,7 @@ pub(crate) mod tests {
     }
 
     /// A workspace on github.com, its repository known from the badges.
-    fn workspace() -> AppState {
+    pub(crate) fn workspace() -> AppState {
         let mut state = AppState::new(Context::Workspace)
             .with_location(Some("/r".into()), "/r".into())
             .with_forge_hosts(github())
@@ -624,11 +668,11 @@ pub(crate) mod tests {
         state
     }
 
-    fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
+    pub(crate) fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::NONE)))
     }
 
-    fn type_char(state: &mut AppState, c: char) -> Vec<Effect> {
+    pub(crate) fn type_char(state: &mut AppState, c: char) -> Vec<Effect> {
         press(state, KeyCode::Char(c))
     }
 
@@ -639,7 +683,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn detail_load(effects: &[Effect]) -> (Tag, u64) {
+    pub(crate) fn detail_load(effects: &[Effect]) -> (Tag, u64) {
         match effects {
             [Effect::LoadPrDetail { tag, number, .. }] => (*tag, *number),
             other => panic!("expected one detail load, got {other:?}"),
@@ -684,7 +728,7 @@ pub(crate) mod tests {
     }
 
     /// In review mode with the fixture's queues shown.
-    fn in_queues() -> AppState {
+    pub(crate) fn in_queues() -> AppState {
         let mut state = workspace();
         let tag = queue_tag(&state.update(AppIntent::EnterReview));
         state.update(AppIntent::ReviewQueuesLoaded {
@@ -696,7 +740,7 @@ pub(crate) mod tests {
     }
 
     /// The fixture's detail open, with `checks` in place of its own.
-    fn in_detail(checks: Vec<Check>) -> AppState {
+    pub(crate) fn in_detail(checks: Vec<Check>) -> AppState {
         let mut state = in_queues();
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let mut detail = fixture_detail();

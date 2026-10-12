@@ -24,6 +24,7 @@ use crate::git::log::{LogPage, Markers};
 use crate::git::ops::{GitOp, MergeStrategy, ResetMode};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
+use crate::git::pr_objects::{CommitsHere, PrFileRow};
 use crate::git::prompts::PromptFacts;
 use crate::git::rebase_plan::{Direction, Edit};
 use crate::git::recording::CommandEvent;
@@ -804,6 +805,26 @@ pub enum AppIntent {
         number: u64,
         repo: Option<ForgeRepo>,
         result: Result<Option<PrDetail>, ReviewError>,
+    },
+    /// Show the open pull request's changed files and their diff.
+    OpenReviewFiles,
+    /// Move the keys between the file list and the diff on the files screen.
+    ToggleReviewFilesFocus,
+    /// Whether the pull request's head and base commits are here, or why
+    /// git could not say.
+    ReviewObjectsChecked {
+        tag: Tag,
+        result: Result<CommitsHere, String>,
+    },
+    /// The fetch of the missing commits ended, or why it failed.
+    ReviewHeadFetched {
+        tag: Tag,
+        result: Result<(), String>,
+    },
+    /// The merge base to head range and its changed files, or why not.
+    ReviewFilesLoaded {
+        tag: Tag,
+        result: Result<(CommitRange, Vec<PrFileRow>), String>,
     },
 }
 

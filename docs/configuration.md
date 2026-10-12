@@ -365,7 +365,27 @@ assigned to you, review requested from you, authored by you, and all open
 author). `enter` opens one: its title, author, state, `base ← head`,
 whether it can be merged, labels, reviewers, CI checks and description.
 `o` opens a failing check's page with `browser`, asking which when several
-fail. `esc` goes back to the queue, then to the workspace.
+fail. `f` shows the pull request's changed files: each with its status,
+whether you marked it viewed on GitHub (`✓` viewed, `~` changed since you
+viewed it, blank not viewed, `?` unknown) and its added and removed lines,
+and the selected file's diff from the merge base of base and head, with
+`/` search once `tab` moves the keys to the diff. `esc` goes back to the
+pull request, then to the queue, then to the workspace.
+
+- The files and diff come from local git: `git merge-base`, then
+  `git diff-tree` from the merge base to the head. GitHub's diff is never
+  read.
+- When the head or base commit is not in the repository, `f` fetches the
+  missing ones once, by commit id only:
+  `git -c fetch.writeFetchHEAD=false fetch --quiet --no-tags --no-recurse-submodules <remote> <id>…`.
+  No ref and no tag is written. It goes only to the remote (`origin`, or
+  the only remote) whose URL names the reviewed repository on a
+  `github` host; with none, Kika says so and fetches nothing. A head is
+  fetched at most once a session, so if it is still missing after that,
+  Kika says so and leaves it to you. A password or passphrase is asked as
+  for a fetch from the workspace.
+- Viewed marks are read for the first 100 files; the rest, and a file
+  whose name is not UTF-8, show `?`. Marking files viewed is not done here.
 
 - GitHub is asked only when you enter review mode, open a pull request or
   press `r`; nothing refreshes by itself, and nothing is cached on disk.
@@ -1400,15 +1420,33 @@ reaches GitHub, so `enter` does not answer it.
 
 | Binding id | Default keys | Action | Repo file |
 |---|---|---|---|
-| `review.next` | `j`, `down` | Select the next pull request, or scroll the open one down | |
-| `review.prev` | `k`, `up` | Select the previous pull request, or scroll the open one up | |
+| `review.next` | `j`, `down` | Select the next pull request or file, or scroll the open one down | |
+| `review.prev` | `k`, `up` | Select the previous pull request or file, or scroll the open one up | |
 | `review.open` | `enter` | Open the selected pull request | locked |
 | `review.next_queue` | `tab` | Show the next queue | |
 | `review.prev_queue` | `shift-tab` | Show the previous queue | |
 | `review.filter` | `/` | Filter the queue by number, title or author | |
 | `review.refresh` | `r` | Ask GitHub again for the queues or the open pull request | locked |
 | `review.open_check` | `o` | Open a failing check's page in the browser | locked |
-| `review.back` | `esc` | Back to the queue; in the queue, clear the filter, else back to the workspace | locked |
+| `review.back` | `esc` | Back to the pull request from its files, else to the queue; in the queue, clear the filter, else back to the workspace | locked |
+| `review.files` | `f` | Show the pull request's changed files and diff, fetching its commits once if they are not here | locked |
+
+### Review files (one pull request's changed files and diff)
+
+The file list has the Review keys too: `j`/`k` pick a file and show its
+diff, `esc` goes back to the pull request.
+
+| Binding id | Default keys | Action | Repo file |
+|---|---|---|---|
+| `review_files.focus` | `tab` | Move the keys between the file list and the diff | |
+| `review_diff.down` | `j`, `down` | Scroll the diff down a line | |
+| `review_diff.up` | `k`, `up` | Scroll the diff up a line | |
+| `review_diff.page_down` | `pgdn` | Scroll the diff down a page | |
+| `review_diff.page_up` | `pgup` | Scroll the diff up a page | |
+| `review_diff.search` | `/` | Search the lines of the diff loaded so far for typed text | |
+| `review_diff.search_next` | `n` | Go to the next match of the search | |
+| `review_diff.search_prev` | `N` | Go to the previous match of the search | |
+| `review_diff.escape` | `esc` | Clear the search, else go back to the file list | |
 
 ### Submodule list
 

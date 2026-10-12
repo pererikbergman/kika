@@ -3,20 +3,22 @@
 //! was made terminal-safe when GitHub's answer was parsed.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::branches_view::clock;
 use crate::forge::review::{
-    CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict,
+    CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
 };
 use crate::forge::{ForgeStatus, PrState};
+use crate::git::pr_objects::FileCounts;
 use crate::markdown;
 use crate::model::AppState;
 use crate::model::review::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
-use crate::view::elide_right;
+use crate::model::review_files::{FilesFocus, FilesStage, PrFile, PrFiles};
+use crate::view::{self, elide_right};
 
 pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let review = &state.review;
@@ -26,7 +28,7 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
         .map(|r| format!(" · {}/{}", r.owner, r.name))
         .unwrap_or_default();
     let number = match review.screen {
-        ReviewScreen::Detail(number) => format!(" #{number}"),
+        ReviewScreen::Detail(number) | ReviewScreen::Files(number) => format!(" #{number}"),
         ReviewScreen::Queue => String::new(),
     };
     let title = format!(" Review{repo}{number} ");
@@ -36,6 +38,10 @@ pub fn render(state: &AppState, frame: &mut Frame, area: Rect) {
     let lines = match review.screen {
         ReviewScreen::Queue => queue_lines(review, inner),
         ReviewScreen::Detail(number) => detail_screen(review, number, inner),
+        ReviewScreen::Files(_) => match &review.files {
+            Some(files) => return files_screen(state, files, frame, inner),
+            None => Vec::new(),
+        },
     };
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -224,6 +230,134 @@ fn detail_screen(review: &ReviewState, number: u64, inner: Rect) -> Vec<Line<'st
                 .collect()
         }
         None => vec![Line::raw(format!("Loading pull request #{number}…"))],
+    }
+}
+
+/// The files screen's two panes inside the review panel: the list, then
+/// the diff, each with its own border.
+fn files_areas(inner: Rect) -> [Rect; 2] {
+    let list = (inner.width / 3).clamp(inner.width.min(24), inner.width.min(60));
+    Layout::horizontal([Constraint::Length(list), Constraint::Min(0)]).areas(inner)
+}
+
+/// Text rows of the files screen's diff in `main`, which the stream's
+/// demand is measured in.
+pub fn files_diff_rows(main: Rect) -> usize {
+    let [_, diff] = files_areas(detail_area(main));
+    usize::from(Block::bordered().inner(diff).height)
+}
+
+/// The file list and the selected file's diff, the focused one framed
+/// as the workspace frames its focused panel.
+fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rect) {
+    let [list, diff] = files_areas(inner);
+    let title = format!(
+        " PR #{} · files ({}/{}) ",
+        files.number,
+        files.viewed_count(),
+        files.rows.len()
+    );
+    let block = view::panel_block(title, files.focus == FilesFocus::List);
+    let list_inner = block.inner(list);
+    frame.render_widget(block, list);
+    frame.render_widget(Paragraph::new(file_lines(files, list_inner)), list_inner);
+
+    let mut tail = view::diff_position(&state.diff);
+    if let Some(search) = &files.search {
+        match search.current {
+            Some(i) => tail.push_str(&format!(" · match {} of {}", i + 1, search.matches.len())),
+            None => tail.push_str(" · no matches"),
+        }
+    }
+    let path = files
+        .selected()
+        .filter(|_| files.stage == FilesStage::Ready)
+        .map(|row| row.file.path.display())
+        .unwrap_or_default();
+    let room = usize::from(diff.width.saturating_sub(4));
+    let head = format!(
+        "Diff {}",
+        view::elide_left(path, room.saturating_sub(width_of(&tail) + 5))
+    );
+    let title = format!(" {} ", elide_right(&format!("{head}{tail}"), room));
+    let block = view::panel_block(title, files.focus == FilesFocus::Diff);
+    let diff_inner = block.inner(diff);
+    let body = if files.stage == FilesStage::Ready {
+        view::diff_pane_body(&state.diff, files.search.as_ref(), diff_inner)
+    } else {
+        Paragraph::new("")
+    };
+    frame.render_widget(body.block(block), diff);
+}
+
+/// The list's rows, scrolled so the cursor shows, or what it waits for.
+fn file_lines(files: &PrFiles, inner: Rect) -> Vec<Line<'static>> {
+    let width = usize::from(inner.width);
+    let waiting = match &files.stage {
+        FilesStage::Checking | FilesStage::Listing => Some("Loading files…"),
+        FilesStage::Fetching => Some("Fetching PR head…"),
+        FilesStage::Failed(message) => {
+            // Git's words were made safe when they were read.
+            return markdown::wrap_text(message, Style::new().fg(Color::Red), width);
+        }
+        FilesStage::Ready if files.rows.is_empty() => Some("No files changed"),
+        FilesStage::Ready => None,
+    };
+    if let Some(text) = waiting {
+        return vec![Line::raw(text)];
+    }
+    let height = usize::from(inner.height).max(1);
+    let start = (files.cursor + 1).saturating_sub(height);
+    files
+        .rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(height)
+        .map(|(i, row)| file_row(row, i == files.cursor, width))
+        .collect()
+}
+
+/// `<status> <viewed> <path>  +A −D`, exactly `width` wide: the counts
+/// always show and the path loses its start to fit.
+fn file_row(row: &PrFile, cursor: bool, width: usize) -> Line<'static> {
+    let colour = crate::commits_view::status_colour(row.file.status);
+    let (mark, mark_style) = match row.viewed {
+        Some(ViewedState::Viewed) => ("✓", Style::new().fg(Color::Green)),
+        Some(ViewedState::Dismissed) => ("~", Style::new().fg(Color::Yellow)),
+        Some(ViewedState::Unviewed) => (" ", Style::new()),
+        None => ("?", dim()),
+    };
+    let counts: Vec<Span<'static>> = match row.counts {
+        FileCounts::Lines { added, removed } => vec![
+            Span::styled(format!("  +{added}"), Style::new().fg(Color::Green)),
+            Span::styled(format!(" −{removed}"), Style::new().fg(Color::Red)),
+        ],
+        FileCounts::Binary => vec![Span::styled("  bin", dim())],
+        FileCounts::Unknown => Vec::new(),
+    };
+    let counts_width: usize = counts.iter().map(Span::width).sum();
+    let path = match &row.file.orig_path {
+        Some(orig) => format!("{} → {}", orig.display(), row.file.path.display()),
+        None => row.file.path.display().to_string(),
+    };
+    let room = width.saturating_sub(4 + counts_width);
+    let path = view::elide_left(&path, room);
+    let pad = room.saturating_sub(width_of(&path));
+    let mut spans = vec![
+        Span::styled(row.file.status.to_string(), Style::new().fg(colour)),
+        Span::raw(" "),
+        Span::styled(mark, mark_style),
+        Span::raw(" "),
+        Span::raw(path),
+        Span::raw(" ".repeat(pad)),
+    ];
+    spans.extend(counts);
+    let line = Line::from(spans);
+    if cursor {
+        view::reversed(line, width)
+    } else {
+        line
     }
 }
 
@@ -625,5 +759,147 @@ mod tests {
             contains(&rows, "Check the network, then press r."),
             "{rows:#?}"
         );
+    }
+
+    fn pr_file(
+        status: char,
+        path: &[u8],
+        counts: FileCounts,
+        viewed: Option<ViewedState>,
+    ) -> PrFile {
+        PrFile {
+            file: crate::git::commit_files::CommitFile {
+                status,
+                path: crate::git::path::RepoPath::from_bytes(path),
+                orig_path: None,
+            },
+            counts,
+            viewed,
+        }
+    }
+
+    /// Pull request 12's files screen, ready, with every kind of row.
+    fn files_state() -> AppState {
+        use crate::git::commit_files::CommitId;
+        let mut state = reviewing(ReviewScreen::Files(12));
+        let id = |c: char| CommitId::parse(&c.to_string().repeat(40)).unwrap();
+        let lines = |added, removed| FileCounts::Lines { added, removed };
+        state.review.files = Some(PrFiles {
+            number: 12,
+            head: id('1'),
+            base: id('2'),
+            range: None,
+            rows: vec![
+                pr_file('M', b"src/cache.rs", lines(3, 1), Some(ViewedState::Viewed)),
+                pr_file(
+                    'M',
+                    b"src/lib.rs",
+                    lines(1, 2),
+                    Some(ViewedState::Dismissed),
+                ),
+                pr_file(
+                    'A',
+                    b"docs/new.md",
+                    lines(9, 0),
+                    Some(ViewedState::Unviewed),
+                ),
+                pr_file('A', b"logo.png", FileCounts::Binary, None),
+                pr_file('D', b"evil\x1b]52;c;eA==\x07\x1b[2Jname", lines(0, 4), None),
+            ],
+            cursor: 0,
+            focus: FilesFocus::List,
+            stage: FilesStage::Ready,
+            fetched: false,
+            seq: None,
+            search: None,
+        });
+        state
+    }
+
+    #[test]
+    fn each_file_row_shows_status_viewed_mark_path_and_counts() {
+        let state = files_state();
+        let rows = draw(&state, 120, 20);
+        assert!(contains(&rows, "PR #12 · files (1/5)"), "{rows:#?}");
+        for (status, mark, path, counts) in [
+            ("M", "✓", "src/cache.rs", "+3 −1"),
+            ("M", "~", "src/lib.rs", "+1 −2"),
+            ("A", " ", "docs/new.md", "+9 −0"),
+            ("A", "?", "logo.png", "bin"),
+        ] {
+            let want = format!("{status} {mark} {path}");
+            let row = rows
+                .iter()
+                .find(|r| r.contains(&want))
+                .unwrap_or_else(|| panic!("{want:?} missing in {rows:#?}"));
+            assert!(row.contains(counts), "{row:?}");
+        }
+        // A control character in a local name never reaches the terminal.
+        let evil = rows.iter().find(|r| r.contains("evil")).unwrap();
+        assert!(!evil.chars().any(char::is_control), "{evil:?}");
+        assert!(evil.contains("name") && evil.contains("−4"), "{evil:?}");
+    }
+
+    #[test]
+    fn the_files_screen_says_what_it_waits_for_or_why_it_failed() {
+        let mut state = files_state();
+        for (stage, text) in [
+            (FilesStage::Checking, "Loading files…"),
+            (FilesStage::Listing, "Loading files…"),
+            (FilesStage::Fetching, "Fetching PR head…"),
+            (
+                FilesStage::Failed(crate::model::review_files::NO_FETCH_REMOTE.into()),
+                "PR head is not here",
+            ),
+        ] {
+            state.review.files.as_mut().unwrap().stage = stage;
+            let rows = draw(&state, 120, 20);
+            assert!(contains(&rows, text), "{text:?} missing in {rows:#?}");
+        }
+    }
+
+    #[test]
+    fn the_review_diff_marks_search_matches_like_the_workspace_diff() {
+        use crate::diff_search::DiffSearch;
+        use crate::git::diff::{DiffLine, LineKind};
+        let mut state = files_state();
+        state.diff.path = Some("src/cache.rs".into());
+        state.diff.done = true;
+        state.diff.lines = ["@@ -1 +1 @@", "-old cache", "+new cache"]
+            .iter()
+            .map(|t| DiffLine {
+                kind: match t.as_bytes()[0] {
+                    b'-' => LineKind::Removed,
+                    b'+' => LineKind::Added,
+                    _ => LineKind::Hunk,
+                },
+                text: t.to_string(),
+            })
+            .collect();
+        let texts: Vec<String> = state.diff.lines.iter().map(|l| l.text.clone()).collect();
+        let files = state.review.files.as_mut().unwrap();
+        files.focus = FilesFocus::Diff;
+        files.search = Some(DiffSearch::new("cache", &texts, 0));
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal
+            .draw(|frame| crate::view::render(&state, frame))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows = buffer_rows(buffer);
+        assert!(
+            contains(&rows, "Diff src/cache.rs · 1/3 · match 1 of 2"),
+            "{rows:#?}"
+        );
+        // The cell where "cache" starts on the row showing `needle`.
+        let style_of = |needle: &str| {
+            let y = rows.iter().position(|r| r.contains(needle)).unwrap();
+            let at = rows[y].find(needle).unwrap() + needle.find("cache").unwrap();
+            let col = rows[y][..at].chars().count();
+            buffer[(col as u16, y as u16)].style()
+        };
+        let current = style_of("-old cache");
+        let other = style_of("+new cache");
+        assert_eq!(current.bg, crate::view::CURRENT_MATCH.bg);
+        assert_eq!(other.bg, crate::view::MATCH.bg);
     }
 }
