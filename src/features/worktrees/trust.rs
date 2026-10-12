@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::path::os_string;
-use super::worktrees::{Worktree, canonical};
+use super::git::{Worktree, canonical};
+use crate::git::path::os_string;
 use crate::worktree_file::read_file;
 
 /// A gitfile is one short line; anything larger is not one.
@@ -67,8 +67,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::features::worktrees::git::parse_list;
     use crate::git::fake::TempDir;
-    use crate::git::worktrees::parse_list;
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 

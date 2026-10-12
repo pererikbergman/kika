@@ -6,11 +6,11 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use super::git::Worktree;
+use super::list::{WorktreeList, is_current, label};
 use crate::git::diff::sanitize;
-use crate::git::worktrees::Worktree;
 use crate::model::AppState;
 use crate::view::{centered, clip, elide_left, elide_right, width_of, wrap};
-use crate::worktree_list::{WorktreeList, is_current, label};
 
 /// One row per worktree the filter shows: `*` for the one Kika is in, the
 /// branch (or what stands for one), the path and its tags. A long path
@@ -169,7 +169,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
-    use crate::git::worktrees::parse_list;
+    use crate::features::worktrees::git::parse_list;
     use crate::list_filter::{InputTarget, ListInput};
     use crate::model::Context;
     use crate::popup::{LineInput, Popup};

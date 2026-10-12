@@ -105,7 +105,7 @@ static ACTIONS: &[MenuItem] = &[
     MenuItem {
         label: "Worktrees…",
         intent: AppIntent::OpenWorktrees,
-        disabled: crate::worktree_list::worktrees_disabled,
+        disabled: crate::features::worktrees::worktrees_disabled,
     },
     MenuItem {
         label: "Command log…",
