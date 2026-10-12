@@ -21,6 +21,7 @@ use crate::git::runner::GitCommand;
 use crate::git::stash::{StashEntry, StashFile};
 use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 use crate::git::submodule::{Submodule, SubmoduleState};
+use crate::git::tags::TagRef;
 use crate::handoff::HandOff;
 use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
@@ -874,13 +875,6 @@ pub(crate) fn bisect_mark(mark: BisectMark, commit: &str, start: bool) -> GitOp 
     }
 }
 
-pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
-    cmd.args()
-        .iter()
-        .map(|a| a.to_string_lossy().into_owned())
-        .collect()
-}
-
 pub(crate) fn rev_parse(dir: &Path, rev: &str) -> CommitId {
     let out = crate::git::fake::git(dir, &["rev-parse", rev]);
     cid(String::from_utf8(out).unwrap().trim())
@@ -1073,6 +1067,52 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         Resolution::Disabled(reason) => panic!("{key:?} disabled: {reason}"),
         Resolution::Unbound | Resolution::Command(_) => None,
     }
+}
+
+/// The arguments of `cmd`, as strings, to compare with an expected argv.
+pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
+    cmd.args()
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+}
+
+// --- Tags ---
+
+pub(crate) fn tag_ref(name: &str, oid: char) -> TagRef {
+    let oid = oid.to_string().repeat(40);
+    TagRef {
+        name: name.into(),
+        target: CommitId::parse(&oid).unwrap(),
+        target_short: oid[..7].into(),
+        ref_oid: oid,
+        annotated: false,
+        date: "2026-10-01".into(),
+        subject: "s".into(),
+    }
+}
+
+/// The tag of the one `LoadTags` in `effects`.
+pub(crate) fn tags_tag(effects: &[Effect]) -> Tag {
+    let found = effects.iter().find_map(|e| match e {
+        Effect::LoadTags { tag } => Some(*tag),
+        _ => None,
+    });
+    found.unwrap_or_else(|| panic!("expected LoadTags in {effects:?}"))
+}
+
+/// Reload the lists, answering the tags with `tags`.
+pub(crate) fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
+    let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
+    state.update(AppIntent::TagsLoaded {
+        tag,
+        result: Ok(tags),
+    })
+}
+
+/// `v2` then `v1`, newest first.
+pub(crate) fn two_tags() -> Vec<TagRef> {
+    vec![tag_ref("v2", 'b'), tag_ref("v1", 'a')]
 }
 
 /// Screen helpers for view tests: draw a state into a test terminal and
