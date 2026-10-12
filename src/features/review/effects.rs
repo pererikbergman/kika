@@ -1,0 +1,395 @@
+//! The I/O behind the review effects: reading the queues and a pull
+//! request through `gh`, checking for and fetching its commits, listing
+//! its files, and merging it. Each answers with exactly one intent; none
+//! blocks the event loop.
+
+use std::sync::Arc;
+
+use tokio::sync::mpsc::UnboundedSender;
+
+use super::git::{self as pr_objects, CommitsHere};
+use crate::effect::{AnswerSlot, Bridge, Tag, gh_cwd, unix_now};
+use crate::forge::merge::MergeMethod;
+use crate::forge::review::{self, ReviewError, ReviewLoad};
+use crate::forge::task::ForgeContext;
+use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+use crate::git::GitRunner;
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::remotes::RemoteName;
+use crate::intent::AppIntent;
+
+/// Read the review queues; always answered by one `ReviewQueuesLoaded`.
+pub(crate) fn load_queues(
+    forge: Option<ForgeContext>,
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    hosts: Vec<ForgeHost>,
+    repo: Option<ForgeRepo>,
+    limited: Vec<(ForgeHost, i64)>,
+) {
+    tokio::spawn(async move {
+        let answer = tokio::task::spawn_blocking(move || {
+            let Some(forge) = forge else {
+                // No forge client: nothing may reach the network.
+                return (None, Err(ReviewError::NoForgeHost));
+            };
+            let load = ReviewLoad {
+                hosts: &hosts,
+                known: repo.as_ref(),
+                limited: &limited,
+                now: unix_now(),
+            };
+            review::run(runner.as_ref(), &forge, &load, |gh, repo| {
+                gh.fetch_queues(repo)
+            })
+        })
+        .await
+        // A panic still answers, or the load would stay in flight.
+        .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
+        let (repo, result) = answer;
+        let _ = tx.send(AppIntent::ReviewQueuesLoaded { tag, repo, result });
+    });
+}
+
+/// Read pull request `number`; always answered by one `PrDetailLoaded`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn load_detail(
+    forge: Option<ForgeContext>,
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    hosts: Vec<ForgeHost>,
+    repo: Option<ForgeRepo>,
+    number: u64,
+    limited: Vec<(ForgeHost, i64)>,
+) {
+    tokio::spawn(async move {
+        let answer = tokio::task::spawn_blocking(move || {
+            let Some(forge) = forge else {
+                return (None, Err(ReviewError::NoForgeHost));
+            };
+            let load = ReviewLoad {
+                hosts: &hosts,
+                known: repo.as_ref(),
+                limited: &limited,
+                now: unix_now(),
+            };
+            review::run(runner.as_ref(), &forge, &load, |gh, repo| {
+                gh.fetch_detail(repo, number)
+            })
+        })
+        .await
+        .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
+        let (repo, result) = answer;
+        let _ = tx.send(AppIntent::PrDetailLoaded {
+            tag,
+            number,
+            repo,
+            result,
+        });
+    });
+}
+
+/// See whether `head` and `base` are here, and where to fetch the missing
+/// ones from. Local only; always answered by one `ReviewObjectsChecked`.
+pub(crate) fn check_commits(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    head: CommitId,
+    base: CommitId,
+    hosts: Vec<ForgeHost>,
+    repo: ForgeRepo,
+) {
+    tokio::spawn(async move {
+        // A panic still answers, or the files screen would wait forever.
+        let result = tokio::task::spawn_blocking(move || {
+            let missing = pr_objects::missing_commits(runner.as_ref(), &[&head, &base])?;
+            if missing.is_empty() {
+                return Ok(CommitsHere::All);
+            }
+            Ok(CommitsHere::Missing {
+                oids: missing,
+                remote: review::fetch_remote(runner.as_ref(), &hosts, &repo),
+            })
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(terminal_safe(
+                format!("git cat-file crashed: {e}").as_bytes(),
+            ))
+        });
+        let _ = tx.send(AppIntent::ReviewObjectsChecked { tag, result });
+    });
+}
+
+/// Fetch `oids` from `remote`, with git's questions asked through the
+/// core credential `slot`; always answered by one `ReviewHeadFetched`.
+pub(crate) fn fetch_commits(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    remote: RemoteName,
+    oids: Vec<CommitId>,
+    slot: AnswerSlot,
+) {
+    tokio::spawn(async move {
+        let bridge_tx = tx.clone();
+        // A panic still answers, or `op_seq` would block every later op.
+        let result = tokio::task::spawn_blocking(move || {
+            let bridge = Bridge::open(tag, bridge_tx, slot);
+            pr_objects::fetch_commits(runner.as_ref(), &remote, &oids, bridge.env.as_ref())
+        })
+        .await
+        .unwrap_or_else(|e| Err(terminal_safe(format!("git crashed: {e}").as_bytes())));
+        let _ = tx.send(AppIntent::ReviewHeadFetched { tag, result });
+    });
+}
+
+/// List the files the pull request changes; always answered by one
+/// `ReviewFilesLoaded`.
+pub(crate) fn load_files(
+    runner: Arc<dyn GitRunner>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    head: CommitId,
+    base: CommitId,
+) {
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            pr_objects::pr_files(runner.as_ref(), &base, &head)
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(terminal_safe(
+                format!("git diff-tree crashed: {e}").as_bytes(),
+            ))
+        });
+        let _ = tx.send(AppIntent::ReviewFilesLoaded { tag, result });
+    });
+}
+
+/// Merge pull request `number` through `gh`; always answered by one
+/// `PullRequestMerged`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn merge(
+    forge: Option<ForgeContext>,
+    tx: UnboundedSender<AppIntent>,
+    tag: Tag,
+    host: ForgeHost,
+    repo: ForgeRepo,
+    number: u64,
+    method: MergeMethod,
+    head_oid: CommitId,
+) {
+    // No forge client, or a repository `[forge.allow]` leaves
+    // out (the model never asks for one): nothing may reach
+    // the network.
+    let Some(forge) = forge.filter(|_| host.allows(&repo)) else {
+        let _ = tx.send(AppIntent::PullRequestMerged {
+            tag,
+            number,
+            result: Err(CreateError::Status(ForgeStatus::Failed)),
+        });
+        return;
+    };
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            let cwd = gh_cwd(&forge);
+            let gh = crate::forge::github::Gh {
+                runner: forge.gh.as_ref(),
+                sink: &forge.sink,
+                host: &host,
+                cwd,
+                now: unix_now(),
+            };
+            gh.merge_pull(&repo, number, method, &head_oid)
+        })
+        .await
+        // A panic still answers, or the merge would stay in flight.
+        .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
+        let _ = tx.send(AppIntent::PullRequestMerged {
+            tag,
+            number,
+            result,
+        });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use crate::effect::{Effect, Runtime};
+    use crate::forge::merge::MergeMethod;
+    use crate::forge::review::ReviewError;
+    use crate::forge::task::ForgeContext;
+    use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
+    use crate::git::commit_files::CommitId;
+    use crate::git::fake::FakeRunner;
+    use crate::git::recording::CommandSink;
+    use crate::intent::AppIntent;
+    use crate::test_support::forge_tag;
+
+    #[tokio::test]
+    async fn review_loads_answer_once_and_reach_nobody_without_a_forge_client() {
+        use crate::forge::github::{FakeGh, answer};
+        use crate::forge::review::fixtures::DETAIL;
+        use crate::git::recording::CommandSink;
+
+        let github = vec![ForgeHost::parse("github.com").unwrap()];
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let git = Arc::new(FakeRunner::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let bare = Runtime::new(git.clone(), tx);
+        bare.spawn(Effect::LoadReviewQueues {
+            tag: forge_tag(),
+            hosts: github.clone(),
+            repo: Some(repo.clone()),
+            limited: vec![],
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::ReviewQueuesLoaded {
+                tag: forge_tag(),
+                repo: None,
+                result: Err(ReviewError::NoForgeHost),
+            })
+        );
+
+        let gh = Arc::new(FakeGh::new().reply(answer(DETAIL)));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        runtime.spawn(Effect::LoadPrDetail {
+            tag: forge_tag(),
+            hosts: github,
+            repo: Some(repo.clone()),
+            number: 42,
+            limited: vec![],
+        });
+        match rx.recv().await {
+            Some(AppIntent::PrDetailLoaded {
+                number: 42,
+                repo: Some(found),
+                result: Ok(Some(detail)),
+                ..
+            }) => {
+                assert_eq!(found, repo);
+                assert_eq!(detail.number, 42);
+            }
+            other => panic!("{other:?}"),
+        }
+        git.assert_done();
+        assert_eq!(gh.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_merge_runs_gh_in_the_cache_dir_and_answers_once() {
+        use crate::forge::github::{FakeGh, GhCall, answer};
+
+        let tmp = crate::git::fake::TempDir::new("forge-effect-merge");
+        let cache_dir = tmp.path().join("forge");
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new().reply(answer(
+            "HTTP/2.0 200 OK\r\n\r\n{\"merged\":true,\"message\":\"Pull Request successfully merged\"}",
+        )));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: Some(cache_dir.clone()),
+        }));
+        let merge = Effect::MergePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com").unwrap(),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            number: 42,
+            method: MergeMethod::Rebase,
+            head_oid: CommitId::parse(&"1".repeat(40)).unwrap(),
+        };
+        runtime.spawn(merge.clone());
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestMerged {
+                tag: forge_tag(),
+                number: 42,
+                result: Ok(()),
+            })
+        );
+        git.assert_done();
+        let [call] = gh.calls().try_into().unwrap();
+        assert_eq!(call.cwd, cache_dir);
+        assert!(matches!(
+            &call.kind,
+            GhCall::Merge { path, .. } if path == "repos/acme/widgets/pulls/42/merge"
+        ));
+
+        // Without a forge client, nothing is asked.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        Runtime::new(git, tx).spawn(merge);
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestMerged {
+                tag: forge_tag(),
+                number: 42,
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        assert_eq!(gh.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_merge_on_a_repository_the_allow_list_leaves_out_runs_no_gh() {
+        use crate::forge::allow::AllowRule;
+        use crate::forge::github::FakeGh;
+
+        let git = Arc::new(FakeRunner::new());
+        let gh = Arc::new(FakeGh::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(git.clone(), tx).with_forge(Some(ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: None,
+        }));
+        runtime.spawn(Effect::MergePullRequest {
+            tag: forge_tag(),
+            host: ForgeHost::parse("github.com")
+                .unwrap()
+                .with_allow(vec![AllowRule::parse("other").unwrap()]),
+            repo: ForgeRepo {
+                host: "github.com".into(),
+                owner: "acme".into(),
+                name: "widgets".into(),
+            },
+            number: 42,
+            method: MergeMethod::Merge,
+            head_oid: CommitId::parse(&"1".repeat(40)).unwrap(),
+        });
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::PullRequestMerged {
+                tag: forge_tag(),
+                number: 42,
+                result: Err(CreateError::Status(ForgeStatus::Failed)),
+            })
+        );
+        git.assert_done();
+        assert_eq!(gh.calls(), []);
+    }
+}
