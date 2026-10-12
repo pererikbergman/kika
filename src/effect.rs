@@ -34,6 +34,7 @@ use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteFailure, RemoteOp, run_remote};
 use crate::git::remotes::list_remotes;
 use crate::git::repo_root::init_repo;
+use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
 use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
@@ -224,6 +225,16 @@ pub enum Effect {
     LoadCommitFiles {
         tag: Tag,
         range: CommitRange,
+    },
+    /// Read the stash list; always answered by one `StashesLoaded`.
+    LoadStashes {
+        tag: Tag,
+    },
+    /// List the files `entry` holds; always answered by one
+    /// `StashFilesLoaded`.
+    LoadStashFiles {
+        tag: Tag,
+        entry: StashEntry,
     },
     /// Read which commits are unpushed or unmerged; always answered by
     /// one `MarkersLoaded`.
@@ -738,6 +749,33 @@ impl Runtime {
                                 ))
                             });
                     let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
+                });
+            }
+            Effect::LoadStashes { tag } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the panel would wait forever.
+                    let result = tokio::task::spawn_blocking(move || list_stashes(runner.as_ref()))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(terminal_safe(
+                                format!("git stash list crashed: {e}").as_bytes(),
+                            ))
+                        });
+                    let _ = tx.send(AppIntent::StashesLoaded { tag, result });
+                });
+            }
+            Effect::LoadStashFiles { tag, entry } => {
+                tokio::spawn(async move {
+                    // A panic still reports back, or the busy counter would stay raised.
+                    let result =
+                        tokio::task::spawn_blocking(move || stash_files(runner.as_ref(), &entry))
+                            .await
+                            .unwrap_or_else(|e| {
+                                Err(terminal_safe(
+                                    format!("git diff-tree crashed: {e}").as_bytes(),
+                                ))
+                            });
+                    let _ = tx.send(AppIntent::StashFilesLoaded { tag, result });
                 });
             }
             Effect::LoadMarkers { tag } => {
@@ -2302,6 +2340,97 @@ mod tests {
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
             other => panic!("expected a failed MarkersLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stash_loads_report_back_with_the_same_tag_even_on_a_panic() {
+        use crate::git::commit_files::CommitId;
+        let tag = Tag {
+            generation: 3,
+            seq: 9,
+            user: true,
+        };
+        let runner = Arc::new(
+            FakeRunner::new()
+                .expect(
+                    &["stash", "list", "-z", "--format=%H%x1f%P%x1f%gs"],
+                    ok(b"aa\x1fbb cc\x1fOn main: wip\0"),
+                )
+                .expect(
+                    &[
+                        "diff-tree",
+                        "-r",
+                        "-z",
+                        "--no-commit-id",
+                        "--name-status",
+                        "-M",
+                        "--root",
+                        "bb",
+                        "aa",
+                        "--",
+                    ],
+                    ok(b"M\0a.rs\0"),
+                ),
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(runner.clone(), tx);
+
+        runtime.spawn(Effect::LoadStashes { tag });
+        let Some(AppIntent::StashesLoaded {
+            tag: got,
+            result: Ok(entries),
+        }) = rx.recv().await
+        else {
+            panic!("expected StashesLoaded");
+        };
+        assert_eq!(got, tag);
+        assert_eq!(entries[0].oid, CommitId::parse("aa").unwrap());
+
+        runtime.spawn(Effect::LoadStashFiles {
+            tag,
+            entry: entries[0].clone(),
+        });
+        let Some(AppIntent::StashFilesLoaded {
+            tag: got,
+            result: Ok(files),
+        }) = rx.recv().await
+        else {
+            panic!("expected StashFilesLoaded");
+        };
+        assert_eq!(got, tag);
+        assert_eq!(files[0].file.path, "a.rs".into());
+        runner.assert_done();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
+        runtime.spawn(Effect::LoadStashes { tag });
+        match rx.recv().await {
+            Some(AppIntent::StashesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(
+                    message.starts_with("git stash list crashed: "),
+                    "{message:?}"
+                );
+            }
+            other => panic!("expected a failed StashesLoaded, got {other:?}"),
+        }
+        runtime.spawn(Effect::LoadStashFiles {
+            tag,
+            entry: entries[0].clone(),
+        });
+        match rx.recv().await {
+            Some(AppIntent::StashFilesLoaded {
+                tag: got,
+                result: Err(message),
+            }) => {
+                assert_eq!(got, tag);
+                assert!(!message.contains(char::is_control), "{message:?}");
+            }
+            other => panic!("expected a failed StashFilesLoaded, got {other:?}"),
         }
     }
 

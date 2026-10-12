@@ -138,7 +138,7 @@ fn render_commit_files(open: &CommitFilesList, look: &PanelLook, frame: &mut Fra
 
 /// `<status> <path>`, or `<status> <old> → <new>` for a rename or copy,
 /// cut to `width`.
-fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
+pub(crate) fn commit_file_line(file: &CommitFile, width: usize) -> Line<'static> {
     let colour = match file.status {
         'A' => Color::Green,
         'D' => Color::Red,
