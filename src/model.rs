@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::blame_view::{BlameView, CommitView};
 use crate::branches::{BranchesPanel, BranchesTab};
+use crate::clipboard::{self, CopyWhat};
 use crate::command_log::{CommandLog, CommandLogView};
 use crate::commit_editor::CommitEditor;
 use crate::commit_files::CommitFilesList;
@@ -42,6 +43,7 @@ use crate::git::submodule::Submodule;
 use crate::git::tags::{TagRef, validate_tag_name};
 use crate::git::undo;
 use crate::git::worktrees::Worktree;
+use crate::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
 use crate::intent::{AppIntent, Scroll};
@@ -281,6 +283,10 @@ pub struct AppState {
     /// A notice whose words are made at run time, such as a count. Shown
     /// and cleared like `notice`, which wins when both are set.
     pub notice_text: Option<String>,
+    /// The message read to copy it; any other answer is stale.
+    pub pending_copy: Option<(Tag, CommitId)>,
+    /// The pattern the open `.gitignore` prompt was filled with.
+    pub ignore_draft: Option<IgnoreDraft>,
 }
 
 impl AppState {
@@ -333,6 +339,8 @@ impl AppState {
             command_log: CommandLog::default(),
             copied: CopiedCommits::default(),
             notice_text: None,
+            pending_copy: None,
+            ignore_draft: None,
         }
     }
 
@@ -646,6 +654,10 @@ impl AppState {
                     kind: PromptKind::TagName | PromptKind::TagMessage,
                     ..
                 }) => self.branches.pending_tag = None,
+                Some(Popup::Prompt {
+                    kind: PromptKind::IgnorePattern,
+                    ..
+                }) => self.ignore_draft = None,
                 _ => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
@@ -915,6 +927,21 @@ impl AppState {
                 self.notice = Some("Cleared copied commits");
             }
             AppIntent::PasteCommits => return self.paste_commits(),
+            AppIntent::CopyCommitText(what) => return self.copy_commit_text(what),
+            AppIntent::CommitMessageLoaded { tag, oid, result } => {
+                return self.commit_message_loaded(tag, oid, result);
+            }
+            AppIntent::CopyFailed(why) => {
+                self.notice_text = None;
+                self.push_error(ErrorPopup::new(
+                    "Could not copy",
+                    &why,
+                    "Close this; nothing was copied.",
+                ));
+            }
+            AppIntent::OpenIgnore => self.open_ignore(),
+            AppIntent::IgnorePatternAnswered(text) => return self.ignore_answered(text),
+            AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
             AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
             AppIntent::RewriteCommit(edit) => return self.rewrite_commit(edit),
@@ -3852,6 +3879,159 @@ impl AppState {
         let verb = if added { "Copied" } else { "Removed" };
         let n = self.copied.len();
         self.notice_text = Some(format!("{verb} {short} ({n} copied)"));
+    }
+
+    /// Copy the selected commit's hash, short hash or subject now, or
+    /// read its full message first. Pure, so it works while an operation
+    /// runs.
+    fn copy_commit_text(&mut self, what: CopyWhat) -> Vec<Effect> {
+        let Some((id, short)) = self.commit_for_action(keymap::no_commit_selected) else {
+            return vec![];
+        };
+        let text = match what {
+            CopyWhat::Hash => id.as_str().to_string(),
+            CopyWhat::ShortHash => match CommitId::parse(&short) {
+                Some(short) => short.as_str().to_string(),
+                None => {
+                    self.notice = Some("Not a commit id git can use");
+                    return vec![];
+                }
+            },
+            CopyWhat::Subject => self.commits.rows[self.commits.selected].subject.clone(),
+            CopyWhat::Message => {
+                let seq = self.take_seq();
+                let tag = self.user_tag(seq);
+                self.pending_copy = Some((tag, id.clone()));
+                return vec![Effect::LoadCommitMessage { tag, oid: id }];
+            }
+        };
+        self.copy_text(what, text)
+    }
+
+    /// Send `text` to the clipboard and say so; a failure replaces the
+    /// notice with an error.
+    fn copy_text(&mut self, what: CopyWhat, text: String) -> Vec<Effect> {
+        self.notice_text = Some(format!(
+            "Copied {}: {}",
+            what.label(),
+            clipboard::preview(&text)
+        ));
+        vec![Effect::Clipboard(text)]
+    }
+
+    /// Copy the message read for the last request; an older one is dropped.
+    fn commit_message_loaded(
+        &mut self,
+        tag: Tag,
+        oid: CommitId,
+        result: Result<String, String>,
+    ) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if self.pending_copy.as_ref() != Some(&(tag, oid)) {
+            return vec![];
+        }
+        self.pending_copy = None;
+        match result {
+            Ok(message) => self.copy_text(CopyWhat::Message, message),
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not read the commit message",
+                    &message,
+                    "Close this, then try again.",
+                ));
+                vec![]
+            }
+        }
+    }
+
+    /// Ask for the pattern to ignore the selected untracked file by,
+    /// filled with the one that matches exactly that file.
+    fn open_ignore(&mut self) {
+        if self.context != Context::Workspace {
+            return;
+        }
+        if let Some(reason) = keymap::ignore_disabled(self) {
+            self.notice = Some(reason);
+            return;
+        }
+        let Some(file) = self.selected.and_then(|i| self.files.get(i)) else {
+            return;
+        };
+        let bytes = match gitignore::escape(&file.path) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                self.notice = Some(why);
+                return;
+            }
+        };
+        let shown = sanitize(&bytes);
+        self.popups.push(Popup::Prompt {
+            kind: PromptKind::IgnorePattern,
+            input: LineInput::with_text(&shown),
+        });
+        self.ignore_draft = Some(IgnoreDraft { shown, bytes });
+    }
+
+    /// Add the accepted pattern: the offered one's exact bytes when it is
+    /// unchanged, else the typed text as the user's own pattern. Empty
+    /// text or a control character keeps the prompt open with a notice.
+    fn ignore_answered(&mut self, text: String) -> Vec<Effect> {
+        let Some(draft) = self.ignore_draft.take() else {
+            return vec![];
+        };
+        let line = if text == draft.shown {
+            draft.bytes.clone()
+        } else if text.trim().is_empty() || text.contains(char::is_control) {
+            self.notice = Some(if text.trim().is_empty() {
+                "Type a pattern to ignore"
+            } else {
+                "The pattern has a control character"
+            });
+            self.popups.push(Popup::Prompt {
+                kind: PromptKind::IgnorePattern,
+                input: LineInput::with_text(&text),
+            });
+            self.ignore_draft = Some(draft);
+            return vec![];
+        } else {
+            text.into_bytes()
+        };
+        let seq = self.take_seq();
+        vec![Effect::AppendIgnore {
+            tag: self.user_tag(seq),
+            line,
+        }]
+    }
+
+    /// Say what the add did and reload the status, so an ignored file
+    /// leaves the list.
+    fn ignore_written(&mut self, tag: Tag, result: Result<IgnoreAdded, String>) -> Vec<Effect> {
+        if tag.user {
+            self.busy = self.busy.saturating_sub(1);
+        }
+        if tag.generation != self.generation {
+            return vec![];
+        }
+        match result {
+            Ok(IgnoreAdded { pattern, added }) => {
+                self.notice_text = Some(if added {
+                    format!("Added {pattern} to .gitignore")
+                } else {
+                    format!("{pattern} is already in .gitignore")
+                });
+                self.refresh_status()
+            }
+            Err(message) => {
+                self.push_error(ErrorPopup::new(
+                    "Could not add to .gitignore",
+                    &message,
+                    "Close this, fix the cause, then try again.",
+                ));
+                vec![]
+            }
+        }
     }
 
     /// Cherry-pick the copied commits on the terminal, so hooks and
@@ -14996,5 +15176,260 @@ mod tests {
             }),
             vec![]
         );
+    }
+
+    /// The one menu open over `state`, and its title.
+    fn open_menu(state: &AppState) -> MenuId {
+        match state.popups.as_slice() {
+            [Popup::Menu { id, .. }] => *id,
+            other => panic!("expected one menu, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn y_opens_the_copy_menu_and_each_item_copies_its_part_of_the_selected_commit() {
+        let mut state = copy_ready();
+        state.commits.rows[1].short_oid = "1111111".into();
+        assert_eq!(press_char(&mut state, 'y'), vec![]);
+        assert_eq!(open_menu(&state), MenuId::Copy);
+
+        let cases = [
+            (CopyWhat::Hash, COPIED_OID, "hash"),
+            (CopyWhat::ShortHash, "1111111", "short hash"),
+            (CopyWhat::Subject, "commit 1", "subject"),
+        ];
+        for (what, text, label) in cases {
+            let effects = state.update(AppIntent::CopyCommitText(what));
+            assert_eq!(effects, [Effect::Clipboard(text.into())], "{what:?}");
+            assert_eq!(
+                state.notice_text,
+                Some(format!("Copied {label}: {text}")),
+                "{what:?}"
+            );
+        }
+        // The notice keeps the first 40 characters; the copy has them all.
+        state.commits.rows[1].subject = "s".repeat(41);
+        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Subject));
+        assert_eq!(effects, [Effect::Clipboard("s".repeat(41))]);
+        assert_eq!(
+            state.notice_text,
+            Some(format!("Copied subject: {}…", "s".repeat(40)))
+        );
+    }
+
+    #[test]
+    fn a_short_hash_that_is_not_hex_is_not_copied() {
+        let mut state = copy_ready();
+        state.commits.rows[1].short_oid = "-x".into();
+        assert_eq!(
+            state.update(AppIntent::CopyCommitText(CopyWhat::ShortHash)),
+            vec![]
+        );
+        assert_eq!(state.notice, Some("Not a commit id git can use"));
+    }
+
+    #[test]
+    fn with_no_commit_selected_nothing_is_copied() {
+        let mut state = AppState::new(Context::Workspace);
+        for what in [CopyWhat::Hash, CopyWhat::Message] {
+            assert_eq!(state.update(AppIntent::CopyCommitText(what)), vec![]);
+            assert_eq!(state.notice, Some("No commit selected"));
+        }
+        for item in menu::items(MenuId::Copy) {
+            assert_eq!((item.disabled)(&state), Some("No commit selected"));
+            assert_eq!((item.disabled)(&copy_ready()), None);
+        }
+    }
+
+    #[test]
+    fn the_full_message_is_read_first_and_only_the_latest_read_is_copied() {
+        let mut state = copy_ready();
+        let busy = state.busy;
+        let first = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let [Effect::LoadCommitMessage { tag: old, oid }] = first.as_slice() else {
+            panic!("expected a message load, got {first:?}");
+        };
+        assert_eq!(oid, &cid(COPIED_OID));
+        assert!(old.user);
+        assert_eq!(state.busy, busy + 1);
+        let second = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let [Effect::LoadCommitMessage { tag: new, .. }] = second.as_slice() else {
+            panic!("expected a message load, got {second:?}");
+        };
+        assert_eq!(state.busy, busy + 2);
+
+        let stale = state.update(AppIntent::CommitMessageLoaded {
+            tag: *old,
+            oid: cid(COPIED_OID),
+            result: Ok("old".into()),
+        });
+        assert_eq!(stale, vec![]);
+        assert_eq!(state.busy, busy + 1);
+        let effects = state.update(AppIntent::CommitMessageLoaded {
+            tag: *new,
+            oid: cid(COPIED_OID),
+            result: Ok("subj\n\nbody".into()),
+        });
+        assert_eq!(effects, [Effect::Clipboard("subj\n\nbody".into())]);
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Copied message: subj  body")
+        );
+        assert_eq!((state.busy, state.pending_copy.clone()), (busy, None));
+    }
+
+    #[test]
+    fn a_failed_read_or_copy_shows_an_error() {
+        let mut state = copy_ready();
+        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let [Effect::LoadCommitMessage { tag, oid }] = effects.as_slice() else {
+            panic!("expected a message load, got {effects:?}");
+        };
+        let failed = AppIntent::CommitMessageLoaded {
+            tag: *tag,
+            oid: oid.clone(),
+            result: Err("bad object".into()),
+        };
+        assert_eq!(state.update(failed), vec![]);
+        assert!(matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == "bad object"));
+
+        let mut state = copy_ready();
+        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        state.update(AppIntent::CopyFailed(clipboard::TOO_LONG.into()));
+        assert_eq!(state.notice_text, None);
+        assert!(
+            matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == clipboard::TOO_LONG)
+        );
+    }
+
+    /// The text and kind of the prompt on top.
+    fn top_prompt(state: &AppState) -> (PromptKind, String) {
+        match state.popups.last() {
+            Some(Popup::Prompt { kind, input }) => (*kind, input.text.clone()),
+            other => panic!("expected a prompt, got {other:?}"),
+        }
+    }
+
+    /// Files listing a modified `a.rs` and an untracked file named by
+    /// `name`'s bytes, with `a.rs` selected.
+    fn ignorable(name: &[u8]) -> AppState {
+        let mut file = untracked("x");
+        file.path = RepoPath::from_bytes(name);
+        let (state, _) = with_files(vec![changed("a.rs", '.', 'M'), file], 24);
+        assert_eq!(state.selected, Some(0));
+        state
+    }
+
+    #[test]
+    fn i_on_a_tracked_file_says_why_it_cannot_be_ignored() {
+        let mut state = ignorable(b"build.log");
+        assert_eq!(press_char(&mut state, 'i'), vec![]);
+        assert_eq!(state.notice, Some("Only untracked files can be ignored"));
+        assert!(state.popups.is_empty());
+
+        let (mut empty, _) = with_files(vec![], 24);
+        press_char(&mut empty, 'i');
+        assert_eq!(empty.notice, Some("No files"));
+    }
+
+    #[test]
+    fn i_on_an_untracked_file_offers_its_exact_pattern_and_enter_adds_it() {
+        let mut state = ignorable(b"build[1].log");
+        press_char(&mut state, 'j');
+        assert_eq!(press_char(&mut state, 'i'), vec![]);
+        assert_eq!(
+            top_prompt(&state),
+            (PromptKind::IgnorePattern, "/build\\[1].log".into())
+        );
+        let effects = press(&mut state, KeyCode::Enter);
+        let [Effect::AppendIgnore { tag, line }] = effects.as_slice() else {
+            panic!("expected an append, got {effects:?}");
+        };
+        assert_eq!(line, b"/build\\[1].log");
+        assert!(state.popups.is_empty());
+        assert_eq!(state.ignore_draft, None);
+
+        let effects = state.update(AppIntent::IgnoreWritten {
+            tag: *tag,
+            result: Ok(IgnoreAdded {
+                pattern: "/build\\[1].log".into(),
+                added: true,
+            }),
+        });
+        assert_eq!(
+            state.notice_text.as_deref(),
+            Some("Added /build\\[1].log to .gitignore")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::LoadStatus { .. })),
+            "{effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::RunOp { .. })),
+            "no git command runs: {effects:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_added_by_its_exact_bytes() {
+        let mut state = ignorable(b"x\xff");
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'i');
+        assert_eq!(
+            top_prompt(&state),
+            (PromptKind::IgnorePattern, "/x\u{FFFD}".into())
+        );
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(
+            matches!(effects.as_slice(), [Effect::AppendIgnore { line, .. }] if line == b"/x\xff"),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn an_edited_pattern_is_added_as_typed_and_a_blank_one_is_refused() {
+        let mut state = ignorable(b"build.log");
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'i');
+        if let Some(Popup::Prompt { input, .. }) = state.popups.last_mut() {
+            *input = LineInput::with_text("  ");
+        }
+        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
+        assert_eq!(state.notice, Some("Type a pattern to ignore"));
+        assert_eq!(top_prompt(&state).0, PromptKind::IgnorePattern);
+
+        if let Some(Popup::Prompt { input, .. }) = state.popups.last_mut() {
+            *input = LineInput::with_text("*.log");
+        }
+        let effects = press(&mut state, KeyCode::Enter);
+        assert!(
+            matches!(effects.as_slice(), [Effect::AppendIgnore { line, .. }] if line == b"*.log"),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn esc_drops_the_draft_and_a_failed_write_shows_an_error() {
+        let mut state = ignorable(b"build.log");
+        press_char(&mut state, 'j');
+        press_char(&mut state, 'i');
+        press(&mut state, KeyCode::Esc);
+        assert!(state.popups.is_empty());
+        assert_eq!(state.ignore_draft, None);
+
+        press_char(&mut state, 'i');
+        let effects = press(&mut state, KeyCode::Enter);
+        let [Effect::AppendIgnore { tag, .. }] = effects.as_slice() else {
+            panic!("expected an append, got {effects:?}");
+        };
+        let effects = state.update(AppIntent::IgnoreWritten {
+            tag: *tag,
+            result: Err(crate::worktree_file::CHANGED_ON_DISK.into()),
+        });
+        assert_eq!(effects, vec![]);
+        assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
     }
 }

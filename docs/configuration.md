@@ -460,7 +460,17 @@ read. A stash, a branch deletion and an aborted rebase cannot be undone.
 | `files.blame` | `b` | Blame the selected file | |
 | `files.hunks` | `enter` | Work on the hunks of the selected file, or resolve its conflicts | |
 | `files.mergetool` | `M` | Resolve the selected conflicted file in your merge tool | locked |
+| `files.ignore` | `i` | Add to .gitignore | |
 | `files.menu` | `m` | Open the actions menu | |
+
+`i` asks for a pattern to add to the `.gitignore` at the top of the worktree
+(or of the entered submodule), filled with one that matches exactly the
+selected untracked file: anchored with `/`, with glob characters escaped.
+Accept it as it is, or edit it into any pattern. The file is created if there
+is none, and a line already there is not added twice. Only `.gitignore`
+changes: no git command runs and nothing is staged. Kika will not write
+through a `.gitignore` that is a symlink, and tracked files cannot be ignored
+this way.
 
 ### Branches
 
@@ -584,6 +594,7 @@ can be reset, but not marked from Kika.
 | `commits.paste` | `v` | Cherry-pick the copied commits onto the current branch, oldest first | locked |
 | `commits.clear_copied` | `C` | Clear the copied set | |
 | `commits.bisect` | `B` | Mark the selected commit good, bad or skipped for a bisect, or reset it | locked |
+| `commits.copy_menu` | `y` | Copy hash or message (the terminal must allow OSC 52; in tmux, set-clipboard on) | |
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it
@@ -600,6 +611,14 @@ starts one; it moves nothing until there is both a good and a bad commit, then
 git checks out a commit to test and the Status panel takes over. A bisect
 does not start while tracked files have changes, or while a merge, rebase,
 cherry-pick or revert is in progress. Kika never runs `git bisect run`.
+
+`y` opens the Copy menu: the selected commit's full hash, short hash, subject
+or full message. Kika copies with the OSC 52 terminal escape, so it needs no
+clipboard program and works over SSH. Some terminals do not support OSC 52 or
+turn it off by default, and none says whether a copy worked, so "Copied" means
+it was sent. Inside tmux it needs `set -g set-clipboard on`; GNU screen is not
+supported. Text is cleaned of control characters first, and more than 64 KB
+is refused.
 
 `t` asks for a tag name and tags the selected commit; `T` then asks for a
 one-line message too and makes an annotated tag. The commit is the one
