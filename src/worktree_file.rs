@@ -1,6 +1,6 @@
 //! Reading, replacing and creating one file in the worktree by its repo
-//! path, for the conflict view and `.gitignore`. Blocking; called from
-//! tasks.
+//! path, for the conflict view and `.gitignore`, or one file by its full
+//! path, for git's own files. Blocking; called from tasks.
 //!
 //! The path comes from the repository, which may be hostile, so no call
 //! follows a symlink anywhere along it or leaves the worktree. A replace
@@ -23,18 +23,14 @@ pub const CHANGED_ON_DISK: &str = "The file changed on disk; reopen it";
 /// `max`: they are read into memory and drawn row by row.
 pub fn read(root: &Path, path: &RepoPath, max: u64) -> Result<Vec<u8>, String> {
     let file = checked(root, path)?;
-    let fail = |e: std::io::Error| format!("Could not read {}: {e}", path.display());
-    let mut bytes = Vec::new();
-    File::open(&file)
-        .and_then(|f| f.take(max.saturating_add(1)).read_to_end(&mut bytes))
-        .map_err(fail)?;
-    if bytes.len() as u64 > max {
-        return Err(format!(
+    match read_capped(&file, max) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(format!(
             "The file is larger than {} MB, too large to resolve here.",
             max / (1024 * 1024)
-        ));
+        )),
+        Err(e) => Err(format!("Could not read {}: {e}", path.display())),
     }
-    Ok(bytes)
 }
 
 /// Write `content` over `path` under `root`, only if it still holds
@@ -45,25 +41,79 @@ pub fn replace(
     expected: &[u8],
     content: &[u8],
 ) -> Result<(), String> {
-    let file = checked(root, path)?;
-    let fail = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
-    if fs::read(&file).map_err(fail)? != expected {
+    replace_file(&checked(root, path)?, expected, content)
+}
+
+/// The bytes of `file`, a regular file in a real directory, refused when
+/// there are more than `max`. For a file outside the worktree, such as
+/// git's own todo list, which no repo path reaches.
+pub fn read_file(file: &Path, max: u64) -> Result<Vec<u8>, String> {
+    plain_file(file)?;
+    match read_capped(file, max) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(format!(
+            "{} is larger than {} KB",
+            file.display(),
+            max / 1024
+        )),
+        Err(e) => Err(format!("Could not read {}: {e}", file.display())),
+    }
+}
+
+/// Write `content` over `file`, a regular file in a real directory, only
+/// if it still holds `expected`. Atomic: a temp file beside it is
+/// written, synced and renamed over it, keeping its permissions.
+pub fn replace_file(file: &Path, expected: &[u8], content: &[u8]) -> Result<(), String> {
+    plain_file(file)?;
+    let fail = |e: std::io::Error| format!("Could not write {}: {e}", file.display());
+    if fs::read(file).map_err(fail)? != expected {
         return Err(CHANGED_ON_DISK.to_string());
     }
-    let permissions = fs::symlink_metadata(&file).map_err(fail)?.permissions();
-    let (temp, mut handle) = create_temp(&file).map_err(fail)?;
+    let permissions = fs::symlink_metadata(file).map_err(fail)?.permissions();
+    let (temp, mut handle) = create_temp(file).map_err(fail)?;
     let written = (|| {
         handle.set_permissions(permissions)?;
         handle.write_all(content)?;
         handle.sync_all()?;
         drop(handle);
-        fs::rename(&temp, &file)
+        fs::rename(&temp, file)
     })();
     if let Err(e) = written {
         remove_temp(&temp);
         return Err(fail(e));
     }
     Ok(())
+}
+
+/// Refuse `file` unless it is a regular file, not a symlink, in a
+/// directory that is not a symlink either, so no write lands elsewhere.
+fn plain_file(file: &Path) -> Result<(), String> {
+    let refuse = |why: &str| format!("Kika will not touch {}: {why}", file.display());
+    let meta = fs::symlink_metadata(file).map_err(|e| refuse(&e.to_string()))?;
+    if meta.file_type().is_symlink() {
+        return Err(refuse("it is a symlink"));
+    }
+    if !meta.is_file() {
+        return Err(refuse("it is not a regular file"));
+    }
+    let parent = match file.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let dir = fs::symlink_metadata(parent).map_err(|e| refuse(&e.to_string()))?;
+    if dir.file_type().is_symlink() || !dir.is_dir() {
+        return Err(refuse("its directory is a symlink"));
+    }
+    Ok(())
+}
+
+/// The bytes of `file`, or `None` when there are more than `max`.
+fn read_capped(file: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    File::open(file)?
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
 /// Write `content` to `path` under `root`, which must not exist yet;
@@ -400,6 +450,85 @@ mod tests {
         assert_eq!(fs::read(tmp.path().join("x")).unwrap(), b"secret\n");
         assert_eq!(temps(&root), Vec::<String>::new());
         assert_eq!(temps(&outside), Vec::<String>::new());
+    }
+
+    #[test]
+    fn replace_file_writes_atomically_and_keeps_the_mode() {
+        let tmp = TempDir::new("worktree-file");
+        let file = tmp.path().join("todo");
+        fs::write(&file, "old\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(read_file(&file, 1024), Ok(b"old\n".to_vec()));
+        assert_eq!(replace_file(&file, b"old\n", b"new\n"), Ok(()));
+
+        assert_eq!(fs::read(&file).unwrap(), b"new\n");
+        let mode = fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(temps(tmp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn replace_file_refuses_a_file_that_changed_and_leaves_it() {
+        let tmp = TempDir::new("worktree-file");
+        let file = tmp.path().join("todo");
+        fs::write(&file, "edited elsewhere\n").unwrap();
+        assert_eq!(
+            replace_file(&file, b"as read\n", b"new\n"),
+            Err(CHANGED_ON_DISK.to_string())
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"edited elsewhere\n");
+        assert_eq!(temps(tmp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn replace_file_and_read_file_refuse_symlinks_and_their_dirs() {
+        let tmp = TempDir::new("worktree-file");
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("todo"), "secret\n").unwrap();
+        symlink(real.join("todo"), tmp.path().join("link")).unwrap();
+        symlink(&real, tmp.path().join("dir")).unwrap();
+
+        for file in [
+            tmp.path().join("link"),
+            tmp.path().join("dir/todo"),
+            real.clone(),
+        ] {
+            assert!(read_file(&file, 1024).is_err(), "{}", file.display());
+            let result = replace_file(&file, b"secret\n", b"pwned\n");
+            assert!(result.is_err(), "{}", file.display());
+        }
+        assert_eq!(fs::read(real.join("todo")).unwrap(), b"secret\n");
+        assert_eq!(temps(&real), Vec::<String>::new());
+        assert_eq!(temps(tmp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn read_file_refuses_a_file_over_the_limit() {
+        let tmp = TempDir::new("worktree-file");
+        let file = tmp.path().join("big");
+        fs::write(&file, vec![b'x'; 2049]).unwrap();
+        assert!(read_file(&file, 2048).is_err());
+        assert_eq!(read_file(&file, 4096).map(|b| b.len()), Ok(2049));
+    }
+
+    #[test]
+    fn a_failed_replace_file_leaves_no_temp_file() {
+        let tmp = TempDir::new("worktree-file");
+        let dir = tmp.path().join("ro");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("todo"), "old\n").unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = replace_file(&dir.join("todo"), b"old\n", b"new\n");
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        // Root can write anywhere; the point is only that nothing is left.
+        if result.is_err() {
+            assert_eq!(fs::read(dir.join("todo")).unwrap(), b"old\n");
+        }
+        assert_eq!(temps(&dir), Vec::<String>::new());
     }
 
     #[test]

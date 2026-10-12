@@ -74,6 +74,19 @@ pub fn execute_with(
     workdir: &Path,
     pause: &dyn Fn(),
 ) -> AppIntent {
+    execute_as(job, runner, workdir, pause, &std::env::current_exe)
+}
+
+/// [`execute_with`], with `exe` saying which program git runs as the
+/// sequence editor of an interactive rebase: Kika itself, except in tests
+/// that cannot run the built binary.
+pub fn execute_as(
+    job: HandOff,
+    runner: &dyn GitRunner,
+    workdir: &Path,
+    pause: &dyn Fn(),
+    exe: &dyn Fn() -> io::Result<PathBuf>,
+) -> AppIntent {
     match job {
         HandOff::Commit { tag, op } => AppIntent::OpFinished {
             result: commit_on_terminal(&op, runner, pause),
@@ -97,7 +110,7 @@ pub fn execute_with(
                 op => op,
             };
             AppIntent::OpFinished {
-                result: attached_command(&op, std::env::current_exe)
+                result: attached_command(&op, exe)
                     .and_then(|cmd| run_on_terminal(cmd, runner, pause)),
                 tag,
                 op,
@@ -740,6 +753,8 @@ mod tests {
                     "rebase.updateRefs=false",
                     "-c",
                     "rebase.rebaseMerges=false",
+                    "-c",
+                    "core.commentChar=#",
                     "rebase",
                     "-i",
                     "--autostash",
