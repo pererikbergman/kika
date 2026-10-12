@@ -38,3 +38,4 @@
 
 pub(crate) mod command_log;
 pub(crate) mod repos;
+pub(crate) mod submodules;

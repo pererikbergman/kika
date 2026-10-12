@@ -11,6 +11,7 @@ use crate::commit_editor::{byte_at, char_len};
 use crate::custom_patch::PatchAction;
 use crate::features::command_log::CommandLogView;
 use crate::features::repos::RecentList;
+use crate::features::submodules::SubmoduleList;
 use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
@@ -23,7 +24,6 @@ use crate::keymap::KeyPress;
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::pick_list::PickList;
-use crate::submodule_list::SubmoduleList;
 use crate::worktree_list::WorktreeList;
 
 /// One entry on the popup stack. The top one takes the keys.

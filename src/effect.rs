@@ -16,7 +16,7 @@ use crate::diff_mark::DiffEnd;
 use crate::diff_stream::DiffStreamer;
 use crate::diff_tool;
 use crate::external_diff::{ExternalRenderer, RendererKind, discover, read_diff, run_renderer};
-use crate::features::repos;
+use crate::features::{repos, submodules};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::{ForgeContext, Load, run_load};
@@ -48,7 +48,6 @@ use crate::git::remotes::{RemoteName, list_remotes};
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::git::status::read_status;
-use crate::git::submodule::read_submodules;
 use crate::git::tags::list_tags;
 use crate::git::worktrees::{add_worktree, read_worktrees, remove_worktree};
 use crate::gitignore::{self, IgnoreAdded};
@@ -1013,20 +1012,7 @@ impl Runtime {
                     let _ = tx.send(AppIntent::HeadMessageLoaded { tag, result });
                 });
             }
-            Effect::LoadSubmodules { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || read_submodules(runner.as_ref()))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("git submodule crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::SubmodulesLoaded { tag, result });
-                });
-            }
+            Effect::LoadSubmodules { tag } => submodules::effects::load(runner, tx, tag),
             Effect::LoadWorktrees { tag } => {
                 tokio::spawn(async move {
                     // A panic still reports back, or the busy counter would stay raised.
