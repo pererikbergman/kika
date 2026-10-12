@@ -606,7 +606,7 @@ pub(crate) mod tests {
         assert_eq!(press_refresh(&mut unknown), []);
         assert_eq!(
             unknown.notice.as_deref(),
-            Some("The remote is on no forge host in the global config")
+            Some("The remote is on no forge host in the global config, or not in [forge.allow]")
         );
 
         let mut unmatched = loaded();
@@ -618,7 +618,7 @@ pub(crate) mod tests {
         assert_eq!(unmatched.update(AppIntent::RefreshPullRequests), []);
         assert_eq!(
             unmatched.notice.as_deref(),
-            Some("The remote is on no forge host in the global config")
+            Some("The remote is on no forge host in the global config, or not in [forge.allow]")
         );
     }
 

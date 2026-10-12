@@ -704,7 +704,8 @@ fn body_text(text: &str) -> String {
 
 /// The configured host and repository the remote is on: `known` when an
 /// earlier load found it, else read from the remote as the badge load
-/// does. `None` when it is on no configured host.
+/// does. `None` when it is on no configured host, or that host's
+/// allow-list leaves it out.
 pub fn resolve(
     git: &dyn GitRunner,
     hosts: &[ForgeHost],
@@ -715,7 +716,7 @@ pub fn resolve(
         None => read_remote_url(git).and_then(|url| parse_remote(&url))?,
     };
     let host = matches(&repo, hosts)?.clone();
-    Some((host, repo))
+    host.allows(&repo).then_some((host, repo))
 }
 
 /// The remote a pull request's commits may be fetched from: the one
@@ -727,7 +728,7 @@ pub fn fetch_remote(
     hosts: &[ForgeHost],
     repo: &ForgeRepo,
 ) -> Option<RemoteName> {
-    matches(repo, hosts)?;
+    matches(repo, hosts)?.allows(repo).then_some(())?;
     let (name, url) = read_fetch_remote(git)?;
     let named = parse_remote(&url)?;
     let same = named.host.eq_ignore_ascii_case(&repo.host)
@@ -787,7 +788,7 @@ pub fn run<T>(
 pub fn limited_until(limited: &[(ForgeHost, i64)], host: &ForgeHost, now: i64) -> Option<i64> {
     limited
         .iter()
-        .find(|(h, _)| h == host)
+        .find(|(h, _)| h.as_str() == host.as_str())
         .map(|(_, until)| *until)
         .filter(|until| *until > now)
 }
@@ -1289,6 +1290,66 @@ pub(crate) mod tests {
         });
         assert_eq!(result, Err(ReviewError::Limited { until: NOW + 30 }));
         assert_eq!(gh.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_repository_the_allow_list_leaves_out_asks_nobody() {
+        let rule = |text: &str| crate::forge::allow::AllowRule::parse(text).unwrap();
+        let other_only = [host().with_allow(vec![rule("other")])];
+        let gh = Arc::new(FakeGh::new().reply(answer(QUEUES)));
+        let load = ReviewLoad {
+            hosts: &other_only,
+            known: None,
+            limited: &[],
+            now: NOW,
+        };
+        let git = origin(b"git@github.com:acme/widgets.git");
+        let (repo, result) = run(&git, &context(Arc::clone(&gh)), &load, |gh, repo| {
+            gh.fetch_queues(repo)
+        });
+        git.assert_done();
+        assert_eq!((repo, result), (None, Err(ReviewError::NoForgeHost)));
+        // Known from an earlier load makes no difference.
+        let known = self::repo();
+        let (repo, result) = run(
+            &crate::git::fake::FakeRunner::new(),
+            &context(Arc::clone(&gh)),
+            &ReviewLoad {
+                known: Some(&known),
+                ..load
+            },
+            |gh, repo| gh.fetch_queues(repo),
+        );
+        assert_eq!((repo, result), (None, Err(ReviewError::NoForgeHost)));
+        assert_eq!(gh.calls(), []);
+        // Nor may its commits be fetched.
+        assert_eq!(
+            fetch_remote(&crate::git::fake::FakeRunner::new(), &other_only, &known),
+            None
+        );
+
+        // A listed repository is fetched as without a list.
+        let listed = [host().with_allow(vec![rule("other"), rule("ACME/Widgets")])];
+        let (repo, result) = run(
+            &crate::git::fake::FakeRunner::new(),
+            &context(Arc::clone(&gh)),
+            &ReviewLoad {
+                hosts: &listed,
+                known: Some(&known),
+                ..load
+            },
+            |gh, repo| gh.fetch_queues(repo),
+        );
+        assert_eq!(repo, Some(known));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(gh.calls().len(), 1);
+    }
+
+    #[test]
+    fn a_rate_limit_is_found_by_host_name_whatever_its_allow_list() {
+        let narrowed = host().with_allow(vec![]);
+        let limited = [(host(), NOW + 10)];
+        assert_eq!(limited_until(&limited, &narrowed, NOW), Some(NOW + 10));
     }
 
     fn remote_named(name: &str, url: &[u8]) -> crate::git::fake::FakeRunner {
