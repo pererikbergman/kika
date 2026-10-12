@@ -1,9 +1,9 @@
 //! The stash list and the files of one entry, so the Stash panel can show
 //! work put aside the way the Commits panel shows a commit.
 
-use super::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
-use super::diff::{sanitize, terminal_safe};
-use super::runner::{GitCommand, GitRunner};
+use crate::git::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
+use crate::git::diff::{sanitize, terminal_safe};
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// One entry of `git stash list`. A stash is a commit whose first parent
 /// is `HEAD` when it was made and whose third, if any, holds the untracked

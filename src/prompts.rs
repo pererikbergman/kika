@@ -167,7 +167,7 @@ mod tests {
         use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
         let oid = || CommitId::parse("abc").unwrap();
-        let stash = || crate::git::stash::StashRef {
+        let stash = || crate::features::stash::StashRef {
             index: 0,
             oid: oid(),
         };

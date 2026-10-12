@@ -415,7 +415,7 @@ mod tests {
             stash_menu_disabled(&state),
             Some("No changes to stash".into())
         );
-        state.stash.entries = vec![crate::git::stash::StashEntry {
+        state.stash.entries = vec![crate::features::stash::StashEntry {
             index: 0,
             oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
             base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
@@ -437,7 +437,7 @@ mod tests {
         let entries = ["a0", "a1", "a2"]
             .iter()
             .enumerate()
-            .map(|(index, oid)| crate::git::stash::StashEntry {
+            .map(|(index, oid)| crate::features::stash::StashEntry {
                 index,
                 oid: crate::git::commit_files::CommitId::parse(oid).unwrap(),
                 base: crate::git::commit_files::CommitId::parse("b0").unwrap(),

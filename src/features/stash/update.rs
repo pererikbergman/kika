@@ -2,12 +2,12 @@
 //! entry to its files, the actions on the selected entry, and stashing
 //! from the Files panel's menu.
 
+use super::git::{StashEntry, StashFile, StashRef};
 use super::keys;
 use super::list::{StashDraft, StashFilesList};
 use crate::diff_pane::DiffPane;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
-use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::keymap;
 use crate::model::{AppState, Context, Focus};
 use crate::op::{GitOp, StashMode, StashSet};

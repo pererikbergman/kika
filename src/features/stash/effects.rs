@@ -6,10 +6,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::git::{StashEntry, list_stashes, stash_files};
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::diff::terminal_safe;
-use crate::git::stash::{StashEntry, list_stashes, stash_files};
 use crate::intent::AppIntent;
 
 /// Read the stash list and report it as `StashesLoaded`.

@@ -2,9 +2,9 @@
 //! an entry opened to its files. Pure; `AppState` turns its answers into
 //! effects.
 
+use super::git::{StashEntry, StashFile, StashRef};
 use crate::git::commit_files::CommitId;
 use crate::git::path::RepoPath;
-use crate::git::stash::{StashEntry, StashFile, StashRef};
 use crate::list_filter;
 use crate::op::StashMode;
 

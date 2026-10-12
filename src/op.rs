@@ -9,6 +9,7 @@ use crate::features::commits::bisect::git::run_bisect_start;
 use crate::features::commits::custom_patch::{CustomPatch, PatchAction};
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::features::commits::rewrite;
+use crate::features::stash::StashRef;
 use crate::git::bisect::BisectMark;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
@@ -19,7 +20,6 @@ use crate::git::remote::redact_userinfo;
 use crate::git::remotes::{RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
 use crate::git::runner::{GitCommand, GitOutput, GitRunner, run_checked};
-use crate::git::stash::StashRef;
 use crate::git::status::{EntryKind, FileEntry};
 use crate::git::tags::{TagName, validate_tag_name};
 use crate::git::version::{GitVersion, parse_version, version_command};
@@ -3052,7 +3052,7 @@ mod tests {
 
     // --- Stash ---
 
-    use crate::git::stash::StashRef;
+    use crate::features::stash::StashRef;
 
     const STASH_OID: &str = "5a5a5a";
 
@@ -4183,8 +4183,8 @@ mod tests {
         std::fs::read_to_string(dir.join(name)).unwrap()
     }
 
-    fn real_entries(dir: &Path) -> Vec<crate::git::stash::StashEntry> {
-        crate::git::stash::list_stashes(&crate::git::CliRunner::isolated(dir)).unwrap()
+    fn real_entries(dir: &Path) -> Vec<crate::features::stash::StashEntry> {
+        crate::features::stash::git::list_stashes(&crate::git::CliRunner::isolated(dir)).unwrap()
     }
 
     fn real_ref(dir: &Path, index: usize) -> StashRef {
@@ -4345,7 +4345,7 @@ mod tests {
             assert_eq!(after[0].oid, moved.oid);
             assert_eq!(tree("stash@{0}"), old_tree);
             // Every other entry is still there, in its order.
-            let others = |entries: &[crate::git::stash::StashEntry]| {
+            let others = |entries: &[crate::features::stash::StashEntry]| {
                 entries
                     .iter()
                     .filter(|e| e.oid != moved.oid)

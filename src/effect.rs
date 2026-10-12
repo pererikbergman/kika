@@ -16,6 +16,7 @@ use crate::features::commits::rewrite;
 use crate::features::commits::{compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
+use crate::features::stash::StashEntry;
 use crate::features::{
     blame, conflicts, custom_commands, pull_requests, repos, review, stash, submodules, sync,
     worktrees,
@@ -39,7 +40,6 @@ use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
-use crate::git::stash::StashEntry;
 use crate::git::status::read_status;
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;

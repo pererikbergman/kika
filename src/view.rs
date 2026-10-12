@@ -5374,7 +5374,7 @@ mod tests {
         state.stash.begin(1);
         state.stash.loaded(
             1,
-            Ok(vec![crate::git::stash::StashEntry {
+            Ok(vec![crate::features::stash::StashEntry {
                 index: 0,
                 oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
                 base: crate::git::commit_files::CommitId::parse("b0").unwrap(),

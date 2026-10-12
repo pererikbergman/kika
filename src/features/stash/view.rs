@@ -6,8 +6,8 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::git::StashEntry;
 use super::list::{StashFilesList, StashList};
-use crate::git::stash::StashEntry;
 use crate::rows::commit_file_line;
 use crate::view::{
     PanelLook, elide_right, list_title, no_matches, range_row, reversed, scrolled, width_of,
@@ -133,9 +133,9 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
+    use crate::features::stash::StashFile;
     use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
     use crate::git::diff::{DiffChunk, DiffLine, LineKind};
-    use crate::git::stash::StashFile;
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{AppState, Context, Focus};
     use crate::view::{buffer_rows, render};

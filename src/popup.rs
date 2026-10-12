@@ -964,8 +964,8 @@ mod tests {
 
     #[test]
     fn the_drop_stash_question_names_the_entry_and_says_it_is_gone_for_good() {
+        use crate::features::stash::StashRef;
         use crate::git::commit_files::CommitId;
-        use crate::git::stash::StashRef;
         let ask = DropStashConfirm {
             label: "stash@{2}: On main: wip".into(),
             op: GitOp::StashDrop(StashRef {

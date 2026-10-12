@@ -30,7 +30,6 @@ pub mod repo_root;
 pub mod repo_state;
 pub mod retry;
 pub mod runner;
-pub mod stash;
 pub mod status;
 pub mod submodule;
 pub mod tags;

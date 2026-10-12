@@ -41,9 +41,11 @@
 //! `op.rs`) arrive as `git.rs` in the next slice.
 
 pub(crate) mod effects;
+pub(crate) mod git;
 pub(crate) mod keys;
 pub(crate) mod list;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use git::{StashEntry, StashFile, StashRef};
 pub(crate) use list::{StashDraft, StashList};
