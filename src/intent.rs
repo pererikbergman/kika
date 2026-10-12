@@ -10,6 +10,7 @@ use crate::effect::Tag;
 use crate::external_diff::ExternalRenderer;
 use crate::features::commits::custom_patch::{PatchAction, PatchChoice};
 use crate::features::commits::reflog::Reflog;
+use crate::features::commits::rewrite::TodoFile;
 use crate::features::conflicts::Choice;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::features::review::{CommitsHere, PrFileRow};
@@ -45,7 +46,6 @@ use crate::menu::MenuId;
 use crate::op::{GitOp, MergeStrategy, ResetMode};
 use crate::popup::{ConfirmKind, PromptKind};
 use crate::prompts::PromptFacts;
-use crate::rebase_todo::TodoFile;
 use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
