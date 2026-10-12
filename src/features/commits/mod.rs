@@ -7,6 +7,7 @@
 //! stopped rebase's todo list, are in `rewrite`.
 
 pub(crate) mod bisect;
+pub(crate) mod compare;
 pub(crate) mod copy;
 pub(crate) mod custom_patch;
 pub(crate) mod reflog;

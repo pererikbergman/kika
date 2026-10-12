@@ -22,6 +22,7 @@ use crate::features::branches::remotes::{RemotePending, RemoteRow};
 use crate::features::branches::tags::PendingTag;
 use crate::features::branches::tags::keys::delete_tag_disabled;
 use crate::features::command_log::CommandLog;
+use crate::features::commits::compare::{MARK_CLEARED, PendingDiff};
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
 use crate::features::commits::reflog;
@@ -319,16 +320,6 @@ pub struct AppState {
     /// The workspace has had its first load; a session started in review
     /// mode starts it on the way out.
     pub workspace_started: bool,
-}
-
-/// A comparison asked for, kept until its ends are read as commits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingDiff {
-    pub seq: u64,
-    /// The mark's label, for the title.
-    pub against: String,
-    /// The compared commit's or branch's label, for the title.
-    pub target: String,
 }
 
 impl AppState {
@@ -2084,7 +2075,7 @@ impl AppState {
     /// The diff keeps its hunk view when it already has focus. Leaving the
     /// Commits or Stash panel closes a commit's or a stash's files, so the
     /// pane never shows their diff under another panel.
-    fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
+    pub(crate) fn focus_panel(&mut self, panel: Panel) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }
@@ -4350,7 +4341,6 @@ mod rewrite_range;
 mod stash_actions;
 
 use crate::features::commits::custom_patch::NO_PATCH;
-use log_query::MARK_CLEARED;
 
 #[cfg(test)]
 mod tests {
