@@ -824,8 +824,10 @@ be the commit's parent.
 `M` marks a commit for diffing (`M` on a local branch in the Branches panel
 marks the branch). `enter` on another commit, or on another branch, then lists
 the files changed from the mark to it, in place of the log, and the diff pane
-shows each one. `esc` clears a range, then the `/` filter, then the mark, then
-the log filter, and only then quits.
+shows each one. The marked row shows `◆` in both panels. In the Commits
+panel, `esc` clears a range, then the `/` filter, then the mark, then the log
+filter, and only then quits; in the Branches panel, `M` on the marked branch
+clears the mark.
 
 `space` asks first, since a detached HEAD is on no branch: commits made there
 belong to no branch until you create one. Git refuses the checkout when it

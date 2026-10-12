@@ -1317,9 +1317,11 @@ pub(crate) fn filter_title(look: &PanelLook, name: &str, query: &str, counts: &s
 }
 
 /// `<name> · path: <path> · author: <author>`, naming the parts set, each
-/// made safe and cut so the title fits the border with `reserve` columns
-/// to spare. Where it does not fit whole, `name` goes, then the path loses
-/// its start, so the file name stays, and the author its end.
+/// made safe, cut so the title fits the border with `reserve` columns to
+/// spare. As room runs out, `name` goes, then the parts share what is left
+/// (the path loses its start, so the file name stays, the author its end),
+/// then the labels go, and last only the path's end is left. The result
+/// always fits, so [`PanelLook::title`] never cuts the end it kept.
 pub(crate) fn query_title(
     look: &PanelLook,
     name: &str,
@@ -1328,40 +1330,71 @@ pub(crate) fn query_title(
     reserve: usize,
 ) -> String {
     let author = author.map(|a| sanitize(a.as_bytes()));
-    let join = |prefix: &str, path: Option<String>, author: Option<String>| {
+    let (path_label, author_label) = ("path: ", "author: ");
+    let join = |labels: bool, path: Option<String>, author: Option<String>| {
         let parts: Vec<String> = [
-            path.map(|p| format!("path: {p}")),
-            author.map(|a| format!("author: {a}")),
+            path.map(|p| {
+                if labels {
+                    format!("{path_label}{p}")
+                } else {
+                    p
+                }
+            }),
+            author.map(|a| {
+                if labels {
+                    format!("{author_label}{a}")
+                } else {
+                    a
+                }
+            }),
         ]
         .into_iter()
         .flatten()
         .collect();
-        format!("{prefix}{}", parts.join(" · "))
+        parts.join(" · ")
     };
-    let whole = join(
-        &format!("{name} · "),
-        path.map(str::to_string),
-        author.clone(),
+    let whole = format!(
+        "{name} · {}",
+        join(true, path.map(str::to_string), author.clone())
     );
     if look.fits(&format!("{whole}{}", " ".repeat(reserve))) {
         return whole;
     }
-    // Too long: the name goes, and what is left once the labels are
-    // drawn is shared out.
-    let labels = join(
-        "",
-        path.map(|_| String::new()),
-        author.as_ref().map(|_| String::new()),
-    );
-    let fixed = width_of(&format!(" [{}] {labels}{} ", look.number, look.mode));
-    let room = look.title_width.saturating_sub(fixed + reserve);
+    // Measured without the padding `title` drops first when it must.
+    let room = |labels: bool, reserve: usize| {
+        let empty = join(
+            labels,
+            path.map(|_| String::new()),
+            author.as_ref().map(|_| String::new()),
+        );
+        let fixed = width_of(&format!("[{}] {empty}{}", look.number, look.mode));
+        look.title_width.saturating_sub(fixed + reserve)
+    };
     let shares = usize::from(path.is_some()) + usize::from(author.is_some());
-    let each = (room / shares.max(1)).max(1);
-    join(
-        "",
-        path.map(|p| elide_left(p, each)),
-        author.map(|a| elide_right(&a, each)),
-    )
+    let cut = |labels: bool, each: usize| {
+        join(
+            labels,
+            path.map(|p| elide_left(p, each)),
+            author.as_deref().map(|a| elide_right(a, each)),
+        )
+    };
+    // Each part keeps `…` and a few columns, or the tier gives way.
+    const PART_MIN: usize = 4;
+    let each = room(true, reserve) / shares.max(1);
+    if each >= PART_MIN {
+        return cut(true, each);
+    }
+    let each = room(false, 0) / shares.max(1);
+    if each >= PART_MIN {
+        return cut(false, each);
+    }
+    let last = width_of(&format!("[{}] {}", look.number, look.mode));
+    let room = look.title_width.saturating_sub(last);
+    match (path, &author) {
+        (Some(path), _) => elide_left(path, room),
+        (None, Some(author)) => elide_right(author, room),
+        (None, None) => String::new(),
+    }
 }
 
 /// Row `i` drawn as the cursor or a range row: both reversed, and within a

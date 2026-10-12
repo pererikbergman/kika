@@ -61,13 +61,22 @@ pub(crate) fn render_commits_panel(
         Some(_) => format!(" · {} selected", panel.range().len()),
         None => String::new(),
     };
+    // Only with a filter: counting the shown rows walks every loaded one.
+    let counts = || {
+        format!(
+            "{} of {} loaded{selected}",
+            panel.visible().len(),
+            panel.rows.len()
+        )
+    };
     let mut base = "Commits".to_string();
     if expanded && !reflog && panel.query.is_active() {
-        // With a filter as well, the query leaves it half the room.
+        // With a filter as well, the query leaves room for it, up to half.
         let reserve = if panel.filter.is_empty() {
             width_of(&selected)
         } else {
-            look.title_room() / 2
+            let filter = format!(" · /{} {}", panel.filter, counts());
+            width_of(&filter).min(look.title_room() / 2)
         };
         let query = &panel.query;
         base = query_title(
@@ -81,12 +90,7 @@ pub(crate) fn render_commits_panel(
         last.clone_from(&name);
     }
     if expanded && !reflog && !panel.filter.is_empty() {
-        let counts = format!(
-            "{} of {} loaded{selected}",
-            panel.visible().len(),
-            panel.rows.len()
-        );
-        name = filter_title(look, &base, &panel.filter, &counts);
+        name = filter_title(look, &base, &panel.filter, &counts());
         last.clone_from(&name);
     } else if expanded && !reflog && !selected.is_empty() {
         name = format!("{base}{selected}");
@@ -499,8 +503,10 @@ impl<'a> Marks<'a> {
     }
 }
 
-/// The diff mark's column, on a marked commit or branch row.
-pub(crate) const DIFF_MARK: &str = "* ";
+/// The diff mark's column, on a marked commit or branch row. Its own
+/// glyph, not the current branch's `*`, so the two read apart without
+/// colour.
+pub(crate) const DIFF_MARK: &str = "◆ ";
 
 pub(crate) fn diff_mark_style() -> Style {
     Style::new().fg(Color::Magenta).add_modifier(Modifier::BOLD)
@@ -1445,6 +1451,40 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_character_query_keeps_the_file_name_end_at_every_width() {
+        let path = format!("{}名前.rs", "目录/".repeat(10));
+        let state = queried(Some(&path), Some(&"作者".repeat(10)));
+        for (width, height) in [(40, 10), (20, 6), (12, 3), (8, 4)] {
+            let rows = buffer_rows(&draw(&state, width, height));
+            let title = &rows[0];
+            assert!(width_of(title) <= usize::from(width), "{rows:#?}");
+            // The title's last cell is the border, never a cut glyph.
+            assert!(!title.contains('\u{FFFD}'), "{title}");
+            if width >= 20 {
+                assert!(title.contains(".rs"), "{width}: {title}");
+            }
+            if width >= 40 {
+                assert!(
+                    title.contains("path: …") && title.contains("author: 作"),
+                    "{title}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_query_and_the_fuzzy_filter_share_the_title() {
+        let path = format!("{}name.rs", "dir/".repeat(30));
+        let mut state = queried(Some(&path), Some("ann"));
+        state.commits.filter = "work".into();
+        let rows = buffer_rows(&draw(&state, 80, 24));
+        let title = &rows[0];
+        assert!(width_of(title) <= 80, "{title}");
+        assert!(title.contains("name.rs · author: ann"), "{title}");
+        assert!(title.contains("/work"), "{title}");
+    }
+
+    #[test]
     fn an_empty_finished_query_says_nothing_matches() {
         let mut state = queried(None, Some("zed"));
         state.commits.set_query(state.commits.query.clone());
@@ -1464,7 +1504,7 @@ mod tests {
     }
 
     #[test]
-    fn the_marked_commit_draws_a_star_and_the_columns_stay_aligned() {
+    fn the_marked_commit_draws_its_mark_and_the_columns_stay_aligned() {
         let mut state = showing(merge_rows());
         state.diff_mark = Some(DiffMark::Commit {
             id: CommitId::parse("b000000aaa").unwrap(),
@@ -1473,7 +1513,7 @@ mod tests {
         let buffer = draw(&state, 100, 30);
         let rows = buffer_rows(&buffer);
         assert!(
-            line_with(&rows, "Main work").contains("* b000000"),
+            line_with(&rows, "Main work").contains("◆ b000000"),
             "{rows:#?}"
         );
         assert!(
@@ -1482,7 +1522,7 @@ mod tests {
         );
         assert_eq!(column_of(&rows, "b000000"), column_of(&rows, "s000000"));
         let y = rows.iter().position(|r| r.contains("Main work")).unwrap() as u16;
-        let x = column_of(&rows, "* b000000") as u16;
+        let x = column_of(&rows, "◆ b000000") as u16;
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Magenta));
     }
 

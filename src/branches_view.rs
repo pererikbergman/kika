@@ -635,7 +635,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_branch_marked_for_diffing_draws_a_star_before_its_row() {
+    fn the_branch_marked_for_diffing_draws_its_mark_before_the_current_marker() {
         let mut state = focused(vec![
             branch("main", true, None, Track::None),
             branch("topic", false, None, Track::None),
@@ -643,7 +643,38 @@ pub(crate) mod tests {
         state.diff_mark = Some(crate::diff_mark::DiffMark::Branch("topic".into()));
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "  * main"), "{rows:#?}");
-        assert!(contains(&rows, "*   topic"), "{rows:#?}");
+        assert!(contains(&rows, "◆   topic"), "{rows:#?}");
+
+        // Marked and current: both glyphs, each in its own column.
+        state.diff_mark = Some(crate::diff_mark::DiffMark::Branch("main".into()));
+        let rows = draw(&state, 80, 24);
+        assert!(contains(&rows, "◆ * main"), "{rows:#?}");
+        assert!(contains(&rows, "    topic"), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_narrow_marked_list_cuts_the_name_and_keeps_the_mark_column() {
+        let long = "feature/".repeat(6);
+        let mut state = focused(vec![
+            branch("main", true, Some("origin/main"), Track::None),
+            branch(&long, false, Some("origin/x"), Track::None),
+        ]);
+        state.diff_mark = Some(crate::diff_mark::DiffMark::Branch(long.as_str().into()));
+        state.screen_mode = crate::layout::ScreenMode::Full;
+        for width in [30, 16, 6] {
+            let rows = draw(&state, width, 10);
+            for row in &rows {
+                assert!(
+                    crate::view::width_of(row) <= usize::from(width),
+                    "{rows:#?}"
+                );
+            }
+            if width >= 16 {
+                let marked = rows.iter().find(|r| r.contains('◆')).expect("marked row");
+                assert!(marked.contains('…'), "{rows:#?}");
+                assert!(contains(&rows, "◆ "), "{rows:#?}");
+            }
+        }
     }
 
     #[test]
