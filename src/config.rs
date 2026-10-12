@@ -18,9 +18,12 @@
 //! fetch = 300     # absent = off. Setting it is the opt-in to network access.
 //! [diff]
 //! pager = "delta --paging=never"   # a renderer for the Diff pane
+//! [commit]
+//! hooks_detached = true   # hooks never ask: a commit that only runs them stays detached
 //! ```
 //!
-//! `[watch]` and `[diff]` are read from the global file only, at startup.
+//! `[watch]`, `[diff]` and `[commit]` are read from the global file only, at
+//! startup.
 //! `[[commands]]` is read from the global file only. A repository file
 //! arrives with a clone and is not trusted: it may hold `[keys]` and
 //! nothing else, so it can never turn on fetching, name a program to run or
@@ -106,6 +109,9 @@ pub struct Loaded {
     pub watch: WatchConfig,
     /// The global `[diff] pager` command, checked by `parse_command`.
     pub diff_pager: Option<String>,
+    /// The global `[commit] hooks_detached`: hooks alone do not hand a
+    /// commit the terminal.
+    pub commit_hooks_detached: bool,
     pub errors: Vec<ConfigError>,
 }
 
@@ -115,6 +121,7 @@ struct GlobalSettings {
     keymap: Keymap,
     watch: WatchConfig,
     diff_pager: Option<String>,
+    commit_hooks_detached: bool,
 }
 
 /// The global file. Unknown fields are errors, so a typo is reported
@@ -130,6 +137,14 @@ struct GlobalFile {
     diff: DiffTable,
     #[serde(default)]
     commands: Vec<CommandTable>,
+    #[serde(default)]
+    commit: CommitTable,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommitTable {
+    hooks_detached: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -146,9 +161,10 @@ struct WatchTable {
     fetch: Option<u64>,
 }
 
-/// A repository's file: keys only. A `[watch]` or `[diff]` table, or
-/// `[[commands]]`, here is an unknown field, so a cloned repository can
-/// neither turn on fetching nor name or run a program.
+/// A repository's file: keys only. A `[watch]`, `[diff]` or `[commit]`
+/// table, or `[[commands]]`, here is an unknown field, so a cloned
+/// repository can neither turn on fetching, name or run a program, nor take
+/// the terminal away from its own hooks.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RepoFile {
@@ -163,14 +179,24 @@ pub fn load(paths: &ConfigPaths) -> Loaded {
         keymap: Keymap::default(),
         watch: DEFAULT_WATCH,
         diff_pager: None,
+        commit_hooks_detached: false,
         errors: Vec::new(),
     };
     let global = layer(&paths.global, Trust::Global, &mut loaded.errors, |text| {
         apply_global(text, &loaded.keymap, loaded.watch)
     });
     if let Some(global) = global {
-        (loaded.keymap, loaded.watch, loaded.diff_pager) =
-            (global.keymap, global.watch, global.diff_pager);
+        (
+            loaded.keymap,
+            loaded.watch,
+            loaded.diff_pager,
+            loaded.commit_hooks_detached,
+        ) = (
+            global.keymap,
+            global.watch,
+            global.diff_pager,
+            global.commit_hooks_detached,
+        );
     }
     let repo = layer(&paths.repo, Trust::Repo, &mut loaded.errors, |text| {
         apply_repo(text, &loaded.keymap)
@@ -271,6 +297,7 @@ fn apply_global(text: &str, keymap: &Keymap, watch: WatchConfig) -> Result<Globa
         keymap,
         watch,
         diff_pager: file.diff.pager,
+        commit_hooks_detached: file.commit.hooks_detached.unwrap_or(false),
     })
 }
 
@@ -487,6 +514,7 @@ mod tests {
                 keymap: Keymap::default(),
                 watch: DEFAULT_WATCH,
                 diff_pager: None,
+                commit_hooks_detached: false,
                 errors: vec![],
             }
         );
@@ -761,5 +789,43 @@ output = "none"
         assert_eq!(loaded.diff_pager, Some("delta".into()));
         assert_eq!(loaded.errors.len(), 1);
         assert!(loaded.errors[0].message.contains("unknown field `diff`"));
+    }
+
+    #[test]
+    fn the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("commit");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("");
+        assert!(!files.load().commit_hooks_detached);
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert_eq!(loaded.errors, []);
+        assert!(loaded.commit_hooks_detached);
+
+        let typo = global("[commit]\nbogus = 1\n").unwrap_err();
+        assert!(typo.contains("unknown field `bogus`"), "{typo}");
+        files.global("[commit]\nhooks_detached = true\nbogus = 1\n");
+        assert!(
+            !files.load().commit_hooks_detached,
+            "a broken file is ignored"
+        );
+    }
+
+    #[test]
+    fn only_the_global_file_keeps_hook_only_commits_detached() {
+        let files = Files::new("repo-commit");
+        files.global("").repo("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(!loaded.commit_hooks_detached);
+        let path = files.dir.join(".kika.toml").display().to_string();
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
+        assert!(loaded.errors[0].message.contains("unknown field `commit`"));
+
+        files.global("[commit]\nhooks_detached = true\n");
+        let loaded = files.load();
+        assert!(loaded.commit_hooks_detached);
+        assert_eq!(loaded.errors.len(), 1, "{:?}", loaded.errors);
+        assert_eq!(loaded.errors[0].path, path);
     }
 }
