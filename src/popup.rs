@@ -7,6 +7,7 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::confirm_question::ConfirmQuestion;
 use crate::features::command_log::CommandLogView;
 use crate::features::commits::custom_patch::PatchAction;
 use crate::features::repos::RecentList;
@@ -40,7 +41,8 @@ pub enum Popup {
     Error(ErrorPopup),
     Discard(DiscardConfirm),
     DeleteBranch(DeleteBranchConfirm),
-    ResetHard(ResetHardConfirm),
+    /// A question that only its own yes key answers, such as a hard reset.
+    Question(ConfirmQuestion),
     /// Moving a detached `HEAD` would leave commits only the reflog has.
     LeaveCommits(LeaveCommitsConfirm),
     DropStash(DropStashConfirm),
@@ -297,36 +299,9 @@ impl DeleteBranchConfirm {
     }
 }
 
-/// "Reset hard and lose every uncommitted change?" Like
-/// [`DeleteBranchConfirm`], it carries the op chosen when it was asked, so
-/// a reload before the answer cannot change the target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResetHardConfirm {
-    /// The target's short id, as the log shows it.
-    pub short_oid: String,
-    pub op: GitOp,
-    /// The detached `HEAD` it was asked from, so `y` runs nothing once
-    /// `HEAD` has moved. `None` on a branch.
-    pub head: Option<CommitId>,
-}
-
-impl ResetHardConfirm {
-    pub fn title(&self) -> &'static str {
-        "Reset hard"
-    }
-
-    pub fn question(&self) -> String {
-        format!(
-            "Reset to {} and throw away every uncommitted change, staged and \
-             unstaged? Commits after it leave the branch. (y/n)",
-            self.short_oid
-        )
-    }
-}
-
 /// "Leave these commits behind?" Asked before a detached `HEAD` moves off
 /// commits that no branch, tag or remote-tracking branch reaches. Like
-/// [`ResetHardConfirm`], it carries the op planned when it was asked.
+/// [`DeleteBranchConfirm`], it carries the op planned when it was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveCommitsConfirm {
     pub op: GitOp,
@@ -392,7 +367,7 @@ impl LeaveCommitsConfirm {
     }
 }
 
-/// "Undo this?" or "Redo this?" Like [`ResetHardConfirm`], it carries the
+/// "Undo this?" or "Redo this?" Like [`DeleteBranchConfirm`], it carries the
 /// op planned when it was asked, so a reload before the answer cannot
 /// change what moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -607,7 +582,7 @@ impl RemoveWorktreeConfirm {
     }
 }
 
-/// "Drop this stash?" Like [`ResetHardConfirm`], it carries the op chosen
+/// "Drop this stash?" Like [`DeleteBranchConfirm`], it carries the op chosen
 /// when it was asked, so a reload before the answer cannot change which
 /// entry goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1015,15 +990,15 @@ mod tests {
     fn the_hard_reset_question_names_the_target_and_what_is_lost() {
         use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
-        let ask = ResetHardConfirm {
-            short_oid: "abc1234".into(),
-            op: GitOp::Reset {
+        let ask = crate::features::commits::reset_hard_question(
+            "abc1234".into(),
+            GitOp::Reset {
                 to: CommitId::parse("abc1234").unwrap(),
                 mode: ResetMode::Hard,
             },
-            head: None,
-        };
-        assert_eq!(ask.title(), "Reset hard");
+            None,
+        );
+        assert_eq!(ask.title, "Reset hard");
         assert_eq!(
             ask.question(),
             "Reset to abc1234 and throw away every uncommitted change, staged and \

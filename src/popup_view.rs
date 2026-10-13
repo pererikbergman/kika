@@ -81,12 +81,9 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 frame,
                 area,
             ),
-            Popup::ResetHard(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
+            Popup::Question(q) => {
+                render_question(&format!(" {} ", q.title), &q.question(), frame, area)
+            }
             Popup::LeaveCommits(confirm) => render_question(
                 &format!(" {} ", confirm.title()),
                 &confirm.question(),
@@ -1078,18 +1075,18 @@ mod tests {
 
     #[test]
     fn the_hard_reset_question_names_the_target_and_offers_no_enter() {
+        use crate::features::commits::reset_hard_question;
         use crate::git::commit_files::CommitId;
         use crate::op::ResetMode;
-        use crate::popup::ResetHardConfirm;
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::ResetHard(ResetHardConfirm {
-            short_oid: "abc1234".into(),
-            op: GitOp::Reset {
+        state.popups = vec![Popup::Question(reset_hard_question(
+            "abc1234".into(),
+            GitOp::Reset {
                 to: CommitId::parse("abc1234").unwrap(),
                 mode: ResetMode::Hard,
             },
-            head: None,
-        })];
+            None,
+        ))];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Reset hard "), "{rows:#?}");
         assert!(
