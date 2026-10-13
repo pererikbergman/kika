@@ -5,10 +5,11 @@
 
 use crate::effect::Effect;
 use crate::features::branches::BranchesTab;
+use crate::features::branches::keys::delete_branch_disabled;
 use crate::features::branches::remotes::keys::change_remote_disabled;
 use crate::features::branches::tags::keys::delete_tag_disabled;
 use crate::features::stash::keys::drop_stash_disabled;
-use crate::keymap::{self, Reason};
+use crate::keymap::Reason;
 use crate::model::{AppState, Context};
 use crate::popup::{Popup, RangeKind};
 
@@ -21,7 +22,7 @@ impl AppState {
             return;
         }
         let disabled: fn(&AppState) -> Option<Reason> = match kind {
-            RangeKind::Branches => keymap::delete_branch_disabled,
+            RangeKind::Branches => delete_branch_disabled,
             RangeKind::Tags => delete_tag_disabled,
             RangeKind::Remotes => change_remote_disabled,
             RangeKind::Stashes => drop_stash_disabled,
