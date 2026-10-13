@@ -65,7 +65,7 @@ mod bridge {
     use std::time::{Duration, Instant};
 
     use super::{Question, Secret};
-    use crate::git::diff::terminal_safe;
+    use crate::git::safe_text::terminal_safe;
 
     /// A question longer than this is cut; no real prompt comes near it.
     const MAX_REQUEST: usize = 64 * 1024;

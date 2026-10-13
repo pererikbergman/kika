@@ -114,7 +114,7 @@ fn plain_file(file: &Path) -> Result<(), String> {
 /// `file` as text safe to draw: a hostile name could carry ESC or a
 /// newline, which `Path::display` would pass to the terminal.
 fn shown(file: &Path) -> String {
-    crate::git::diff::sanitize(file.as_os_str().as_encoded_bytes())
+    crate::git::safe_text::sanitize(file.as_os_str().as_encoded_bytes())
 }
 
 /// The bytes of `file`, or `None` when there are more than `max`.

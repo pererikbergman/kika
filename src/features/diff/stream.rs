@@ -151,7 +151,7 @@ fn stream(
     let cmd = diff_command(request);
     let child = match runner.spawn(&cmd) {
         Ok(child) => child,
-        Err(e) => return emit(Err(format!("git diff: {e}"))),
+        Err(e) => return emit(Err(format!("git diff: {}", GitError::io(&e)))),
     };
     {
         let mut slot = lock(slot);
@@ -215,7 +215,7 @@ pub fn pump(
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(e) => {
                 child.kill();
-                return emit(Err(format!("git diff: {e}")));
+                return emit(Err(format!("git diff: {}", GitError::io(&e))));
             }
         }
     }
@@ -232,7 +232,7 @@ pub fn pump(
             lines: batch,
             done: true,
         })),
-        Err(e) => emit(Err(format!("git diff: {e}"))),
+        Err(e) => emit(Err(format!("git diff: {}", GitError::io(&e)))),
     }
 }
 
@@ -262,7 +262,7 @@ mod tests {
 
     fn pump_over(child: FakeChild, want: usize) -> Pumped {
         let runner = FakeRunner::new().expect_spawn(&["x"], child.clone());
-        let cmd = GitCommand::new("x");
+        let cmd = GitCommand::new("x").user_env();
         let spawned = runner.spawn(&cmd).unwrap();
         let (demand, demand_rx) = mpsc::channel();
         let (out, chunks) = mpsc::channel();
@@ -421,6 +421,39 @@ mod tests {
 
         assert!(child.was_killed());
         assert_eq!(emitted, 0);
+    }
+
+    /// A diff that cannot start keeps its `git diff:` prefix, and the
+    /// reason is drawn safely with no credentials.
+    #[test]
+    fn a_diff_that_cannot_start_says_why_safely() {
+        use crate::git::runner::{GitChild, GitOutput};
+        struct NoGit;
+        impl GitRunner for NoGit {
+            fn run(&self, _: &GitCommand) -> std::io::Result<GitOutput> {
+                unreachable!("only spawned")
+            }
+            fn spawn(&self, _: &GitCommand) -> std::io::Result<GitChild> {
+                Err(std::io::Error::other("no git at https://u:tok@h/x\x1b[2J"))
+            }
+        }
+        let (_demand, demand_rx) = mpsc::channel();
+        let mut emitted = Vec::new();
+
+        stream(
+            &NoGit,
+            &Slot::default(),
+            &untracked("a"),
+            demand_rx,
+            250,
+            EmojiZwj::Escape,
+            |chunk| emitted.push(chunk),
+        );
+
+        assert_eq!(
+            emitted,
+            [Err("git diff: no git at https://h/x\u{FFFD}[2J".to_string())]
+        );
     }
 
     const UNTRACKED_ARGV: &[&str] = &[

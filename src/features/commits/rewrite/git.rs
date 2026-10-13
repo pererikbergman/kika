@@ -78,7 +78,7 @@ mod tests {
         use crate::git::runner::EnvProfile;
         let plan = crate::git::rebase_plan::sample();
         let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
-        assert_eq!(cmd.env_profile(), EnvProfile::UserEnv);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv));
         let encoded = crate::git::rebase_plan::encode(&plan.steps);
         assert_eq!(
             cmd.process_env(),

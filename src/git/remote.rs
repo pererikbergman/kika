@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use super::askpass::SOCKET_ENV;
-use super::diff::terminal_safe;
+use super::error::GitError;
 use super::remotes::RemoteName;
 use super::runner::{GitCommand, GitRunner};
 use super::tags::TagName;
@@ -112,7 +112,7 @@ pub fn remote_command(op: &RemoteOp, askpass: Option<&AskpassEnv>) -> GitCommand
 /// when there is one.
 pub(crate) fn with_prompts(cmd: GitCommand, askpass: Option<&AskpassEnv>) -> GitCommand {
     let cmd = cmd
-        .env("LC_ALL", "C")
+        .locale_env()
         .env("GIT_TERMINAL_PROMPT", "0")
         .without_terminal();
     let Some(askpass) = askpass else {
@@ -159,18 +159,11 @@ fn run_remote_with(
     }
     let askpass = askpass_for(runner, askpass, env_set);
     let cmd = remote_command(op, askpass.as_ref());
-    let output = runner
-        .run(&cmd)
-        .map_err(|e| RemoteFailure::Failed(safe(e.to_string().as_bytes())))?;
-    if output.success {
-        return Ok(());
-    }
-    let message = safe(&output.stderr);
-    let message = if message.is_empty() {
-        let subcommand = cmd.args()[0].to_string_lossy();
-        format!("git {subcommand} failed")
-    } else {
-        message
+    let message = match runner.run_checked(&cmd) {
+        Ok(_) => return Ok(()),
+        Err(GitError::Io(message)) => return Err(RemoteFailure::Failed(message)),
+        // Empty stderr names the subcommand: "git push failed".
+        Err(failed) => failed.to_string(),
     };
     let behind = message.contains("[rejected]")
         && (message.contains("(non-fast-forward)") || message.contains("(fetch first)"));
@@ -209,36 +202,9 @@ fn user_askpass(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> bool 
     let cmd = GitCommand::new("config")
         .arg("--get")
         .arg("core.askPass")
-        .env("LC_ALL", "C");
+        .standard_env();
     // Unset is exit 1 with nothing on stderr.
     !matches!(runner.run(&cmd), Ok(out) if !out.success && out.stderr.is_empty())
-}
-
-/// Git's words, safe to draw and with no credentials in them.
-pub(crate) fn safe(bytes: &[u8]) -> String {
-    redact_userinfo(&terminal_safe(bytes))
-}
-
-/// `text` with the user part of every URL taken out: `scheme://user:pass@host`
-/// becomes `scheme://host`. Git quotes remote URLs in its errors, and a URL
-/// can carry a token. The authority ends only at the path or a line break,
-/// and everything up to its last `@` goes. Not at `?`, `#`, a quote or a
-/// space, so none of them inside a password can cut the redaction short;
-/// text after a URL with no path (its query included) can lose words up to
-/// a later `@`, which is the safe way to be wrong.
-pub fn redact_userinfo(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("://") {
-        let (before, after) = rest.split_at(at + 3);
-        out.push_str(before);
-        let end = after.find(['/', '\n', '\r']).unwrap_or(after.len());
-        let authority = &after[..end];
-        let host = authority.rfind('@').map_or(0, |i| i + 1);
-        rest = &after[host..];
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
@@ -247,6 +213,8 @@ mod tests {
 
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::STANDARD_ENV;
 
     const ASKPASS_UNSET: &[&str] = &["config", "--get", "core.askPass"];
 
@@ -265,9 +233,9 @@ mod tests {
             .collect()
     }
 
-    /// The env of the op's run, the last call made.
+    /// The whole env of the op's run, the last call made.
     fn op_env(fake: &FakeRunner) -> Vec<(OsString, OsString)> {
-        fake.envs().last().cloned().unwrap()
+        fake.process_envs().last().cloned().unwrap()
     }
 
     #[test]
@@ -307,9 +275,15 @@ mod tests {
             );
 
             fake.assert_done();
-            let mut expected = env(extra);
+            // The config read is a plain read; the op gets only the locale.
+            assert_eq!(fake.process_envs()[0], env(&STANDARD_ENV));
+            assert_eq!(
+                remote_command(&op, Some(&bridge())).env_profile(),
+                Some(EnvProfile::Locale)
+            );
+            let mut expected = env(&[("LC_ALL", "C")]);
+            expected.extend(env(extra));
             expected.extend(env(&[
-                ("LC_ALL", "C"),
                 ("GIT_TERMINAL_PROMPT", "0"),
                 ("GIT_ASKPASS", "/opt/my apps/kika"),
                 ("SSH_ASKPASS", "/opt/my apps/kika"),
@@ -531,60 +505,6 @@ mod tests {
         let op = push_tag("origin", b"v1");
         assert_eq!(op.doing(), "pushing tag…");
         assert_eq!(op.failure_title(), "Push tag failed");
-    }
-
-    #[test]
-    fn redact_userinfo_takes_the_user_part_out_of_every_url() {
-        let redacted = redact_userinfo("fatal: unable to access 'https://u:tok@h/r/'");
-        assert!(
-            !redacted.contains("u:tok") && !redacted.contains("tok"),
-            "{redacted}"
-        );
-        assert_eq!(redacted, "fatal: unable to access 'https://h/r/'");
-
-        assert_eq!(
-            redact_userinfo("from https://ghp_x@github.com/a and http://a:b@c:8080"),
-            "from https://github.com/a and http://c:8080"
-        );
-        // A password with an `@` or a quote in it goes too.
-        assert_eq!(redact_userinfo("ssh://u:p@ss@h/r"), "ssh://h/r");
-        assert_eq!(
-            redact_userinfo("unable to access 'https://u:to'k@h/r/'"),
-            "unable to access 'https://h/r/'"
-        );
-        assert_eq!(redact_userinfo("\"https://u:p\"w@h?x\""), "\"https://h?x\"");
-        // Whitespace inside a password, as typed or as a tab drawn as spaces.
-        assert_eq!(redact_userinfo("https://u:my pass@h/r"), "https://h/r");
-        assert_eq!(redact_userinfo("https://u:a\tb@h/r"), "https://h/r");
-        assert_eq!(redact_userinfo("https://u:a    b@h"), "https://h");
-        // A URL ends at a line break, so the next line keeps its `@`.
-        assert_eq!(
-            redact_userinfo("'https://h'\nhint: try git@x"),
-            "'https://h'\nhint: try git@x"
-        );
-        // Nothing to take out.
-        for text in ["git@github.com:a/b.git", "https://h/r", "no url", "a://"] {
-            assert_eq!(redact_userinfo(text), text);
-        }
-    }
-
-    #[test]
-    fn redact_userinfo_removes_a_password_holding_url_syntax_whole() {
-        for (url, password) in [
-            ("https://u:p?ss@h/r", "p?ss"),
-            ("https://u:p#ss@h/r", "p#ss"),
-            ("https://u:my pass@h/r", "my pass"),
-            ("https://u:to'k@h/r", "to'k"),
-            ("https://u:to\"k@h/r", "to\"k"),
-            ("ssh://u:p@ss@h/r", "p@ss"),
-        ] {
-            let redacted = redact_userinfo(url);
-            let (scheme, rest) = redacted.split_once("://").unwrap();
-            assert_eq!(redacted, format!("{scheme}://h/r"), "{url}");
-            for part in password.split(['?', '#', ' ', '\'', '"', '@']) {
-                assert!(!rest.contains(part), "{url} -> {redacted}");
-            }
-        }
     }
 
     #[test]

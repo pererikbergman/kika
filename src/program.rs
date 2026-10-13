@@ -308,7 +308,7 @@ mod tests {
             }
             let here = std::env::current_dir().unwrap();
             let runner = CliRunner::new(&here);
-            let version = GitCommand::new("--version");
+            let version = GitCommand::new("--version").standard_env();
             let not_found = |e: io::Error| e.kind() == io::ErrorKind::NotFound;
             assert!(runner.run(&version).is_err_and(not_found));
             assert!(runner.spawn(&version).is_err_and(not_found));

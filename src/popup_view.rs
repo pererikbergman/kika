@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use crate::features::command_log;
 use crate::features::repos::{RecentList, RecentRow};
 use crate::features::submodules::SubmoduleList;
-use crate::git::diff::sanitize;
+use crate::git::safe_text::sanitize;
 use crate::menu::{self, MenuId};
 use crate::model::AppState;
 use crate::pick_list::PickList;

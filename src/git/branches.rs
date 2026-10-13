@@ -4,8 +4,8 @@
 
 use std::ffi::{OsStr, OsString};
 
-use super::diff::terminal_safe;
-use super::runner::{GitCommand, GitOutput, GitRunner};
+use super::runner::{GitCommand, GitRunner};
+use super::safe_text::terminal_safe;
 
 /// A branch's short name as the raw bytes of its ref, so a name that is
 /// not UTF-8 reaches argv unchanged. Equality is on the bytes.
@@ -249,25 +249,15 @@ fn recent_checkouts(runner: &dyn GitRunner) -> Vec<BranchName> {
 }
 
 /// Run a read-only query that must not take the index lock from the user,
-/// returning its stdout or git's message.
+/// returning its stdout or git's message. Every caller reads refs, the
+/// reflog or a ref's log and passes no path, so literal pathspecs are a
+/// no-op and the [`Standard`](super::runner::EnvProfile::Standard) profile
+/// fits them all.
 pub(crate) fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<Vec<u8>, String> {
-    let cmd = cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
-    let GitOutput {
-        success,
-        stdout,
-        stderr,
-    } = runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if success {
-        return Ok(stdout);
-    }
-    let message = terminal_safe(&stderr);
-    if message.is_empty() {
-        let subcommand = cmd.args()[0].to_string_lossy();
-        return Err(format!("git {subcommand} failed"));
-    }
-    Err(message)
+    runner
+        .run_checked(&cmd.standard_env())
+        .map(|output| output.stdout)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -482,6 +472,7 @@ mod tests {
     #[test]
     fn a_failing_query_is_an_error_made_safe() {
         use crate::git::fake::{FakeRunner, fail};
+        use crate::test_support::{STANDARD_ENV, env_list};
         let fake = FakeRunner::new().expect(
             &[
                 "log",
@@ -498,11 +489,8 @@ mod tests {
             branch_log(&fake, OsStr::new("refs/heads/x")),
             Err("fatal: bad \u{FFFD}[2Jref".into())
         );
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(fake.envs(), [env]);
+        // A ref's log names no path, so the whole standard profile fits.
+        assert_eq!(fake.process_envs(), [env_list(&STANDARD_ENV)]);
     }
 
     /// Branch names that are not UTF-8 cannot be loose ref files on every

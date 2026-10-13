@@ -4,16 +4,15 @@
 
 use std::path::PathBuf;
 
-use super::diff::terminal_safe;
 use super::path::path_from_stdout;
 use super::runner::{GitCommand, GitRunner};
 
-/// Ask git for the top level of the worktree. It takes no paths, so it
-/// needs no `--` or literal pathspecs.
+/// Ask git for the top level of the worktree. It takes no paths and no
+/// lock, so the whole standard profile is safe on it.
 pub fn toplevel_command() -> GitCommand {
     GitCommand::new("rev-parse")
         .arg("--show-toplevel")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The path `rev-parse --show-toplevel` printed, from its raw bytes so a
@@ -40,21 +39,18 @@ pub fn resolve_workdir(runner: &dyn GitRunner, launch: PathBuf) -> PathBuf {
     find_toplevel(runner).unwrap_or(launch)
 }
 
+/// `git init -q`: a write, so only the locale.
+fn init_command() -> GitCommand {
+    GitCommand::new("init").arg("-q").locale_env()
+}
+
 /// Make the runner's directory a new repository and return its top level.
 /// `git init` takes no path here: it acts where the runner runs, which is
 /// the launch directory whenever there is no repository to offer.
 pub fn init_repo(runner: &dyn GitRunner) -> Result<PathBuf, String> {
-    let output = runner
-        .run(&GitCommand::new("init").arg("-q").env("LC_ALL", "C"))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git init failed".into()
-        } else {
-            message
-        });
-    }
+    runner
+        .run_checked(&init_command())
+        .map_err(|e| e.message_or("git init failed"))?;
     find_toplevel(runner).ok_or_else(|| "git init made no worktree here".into())
 }
 
@@ -63,6 +59,8 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const TOPLEVEL: &[&str] = &["rev-parse", "--show-toplevel"];
 
@@ -75,12 +73,9 @@ mod tests {
         let cmd = toplevel_command();
         let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, TOPLEVEL);
-        let envs: Vec<_> = cmd
-            .envs()
-            .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
-            .collect();
-        assert_eq!(envs, [("LC_ALL", "C")]);
+        // A read with no path and no lock: the whole standard profile.
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
     }
 
     #[test]
@@ -155,6 +150,12 @@ mod tests {
             .expect(TOPLEVEL, ok(b"/r/new\n"));
         assert_eq!(init_repo(&runner), Ok(PathBuf::from("/r/new")));
         runner.assert_done();
+        // The init is a write, so only the locale; the read gets it all.
+        assert_eq!(init_command().env_profile(), Some(EnvProfile::Locale));
+        assert_eq!(
+            runner.process_envs(),
+            [env_list(&[("LC_ALL", "C")]), env_list(&STANDARD_ENV)]
+        );
     }
 
     #[test]

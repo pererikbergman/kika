@@ -50,7 +50,7 @@ mod tests {
             ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
             ("SSH_ASKPASS".into(), "false".into()),
         ];
-        assert_eq!(fetch_command().env_profile(), EnvProfile::Locale);
+        assert_eq!(fetch_command().env_profile(), Some(EnvProfile::Locale));
         assert_eq!(fake.process_envs(), [env]);
         assert_eq!(fake.inputs(), [None]);
     }

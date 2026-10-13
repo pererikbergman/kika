@@ -120,7 +120,7 @@ mod tests {
                 "refs/heads/"
             ]
         );
-        assert_eq!(cmd.env_profile(), EnvProfile::Standard);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
         assert_eq!(
             cmd.process_env(),
             [
@@ -235,7 +235,7 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Write), "{op:?}");
             let envs: Vec<_> = cmd
                 .process_env()
                 .iter()
