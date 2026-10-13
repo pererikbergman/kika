@@ -45,7 +45,7 @@
 //! - the inline `ConfirmStageAll`, `ToggleCommitField`, `ToggleNoVerify` and
 //!   `EditCommitExternally` arms, which are not verbatim moves yet;
 //! - `op_finished`, `start_op_as`, `bisect_refuses` and the `GitOp::Commit`
-//!   arm of `op_command`: shared op-slot code.
+//!   arm of `op_command`: shared op-slot code (`op_slot.rs`, `op.rs`).
 
 pub(crate) mod editor;
 pub(crate) mod effects;
