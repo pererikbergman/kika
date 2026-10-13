@@ -33,6 +33,7 @@ mod program;
 mod prompts;
 mod range_delete;
 mod refresh;
+mod reload;
 mod remote_run;
 mod rows;
 mod sequence_editor;
