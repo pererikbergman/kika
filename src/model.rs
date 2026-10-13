@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
 use crate::diff_mark::DiffMark;
-use crate::diff_pane::DiffPane;
+use crate::diff_pane::{DiffPane, DiffStart};
 use crate::effect::{Effect, Tag};
 use crate::features::blame::BlameView;
 use crate::features::branches::remotes::RemotePending;
@@ -1591,13 +1591,19 @@ impl AppState {
     /// While a commit's or a stash's files are open the pane is theirs:
     /// the selection moves, but nothing loads.
     pub(crate) fn select(&mut self, index: usize) -> Vec<Effect> {
+        self.select_from(index, DiffStart::Keep)
+    }
+
+    /// `select`, with the diff starting from `start`.
+    pub(crate) fn select_from(&mut self, index: usize, start: DiffStart) -> Vec<Effect> {
         self.selected = Some(index);
         // The pane shows another diff; leaving it streams this one.
         if self.files_open() || self.review_files_shown() {
+            self.diff.rewind(start);
             return vec![];
         }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
-        let mut effects = self.stream_diff(request.clone());
+        let mut effects = self.open_diff(request.clone(), start);
         if let Focus::Diff(view) = &mut self.focus {
             // A file that stopped (or started) being untracked has other
             // sides now, so the remembered one no longer applies.
@@ -1610,22 +1616,6 @@ impl AppState {
         }
         effects.extend(self.render_shown());
         effects
-    }
-
-    /// Start streaming `request` into the Diff pane.
-    pub(crate) fn stream_diff(&mut self, request: DiffRequest) -> Vec<Effect> {
-        let seq = self.take_seq();
-        let want = self.diff.begin(seq, &request.path, self.diff_rows());
-        // Diff streams report many times, so they stay out of the busy count.
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: false,
-        };
-        vec![
-            Effect::LoadDiff { tag, request, want },
-            Effect::DiffLoadingDelay { tag },
-        ]
     }
 
     /// Take new diff options, with the context clamped to its limits, and
@@ -1641,10 +1631,10 @@ impl AppState {
         }
         self.diff_options = options;
         if self.commits.open.is_some() {
-            return self.commit_file_diff();
+            return self.commit_file_diff(DiffStart::Keep);
         }
         if self.stash.open.is_some() {
-            return self.stash_file_diff();
+            return self.stash_file_diff(DiffStart::Keep);
         }
         match self.selected {
             Some(index) if index < self.files.len() => self.select(index),
@@ -1674,7 +1664,7 @@ impl AppState {
                 // Another panel has no keys to step or clear the preview
                 // search, so it would stay marked with no way out.
                 if side != self.expanded {
-                    self.diff.search = None;
+                    self.diff.set_search("");
                 }
                 self.expanded = side;
                 // Leaving the diff or a blame, the pane shows the selected file.
@@ -1782,13 +1772,12 @@ impl AppState {
             if self.files_open() || self.review_files_shown() {
                 return vec![];
             }
-            self.diff = DiffPane::default();
             self.rendered = None;
             // Nothing is left for the diff or a blame to show.
             if !self.focus.is_side() {
                 self.focus = Focus::side(self.expanded);
             }
-            return vec![Effect::CancelDiff];
+            return self.close_diff();
         }
         let index = old_path
             .and_then(|path| self.files.iter().position(|f| f.path == path))
@@ -1883,7 +1872,7 @@ impl AppState {
         self.files.clear();
         self.branch = None;
         self.selected = None;
-        self.diff = DiffPane::default();
+        self.diff.clear();
         self.rendered = None;
         self.status_error = None;
         self.clear_op_error();
@@ -2002,11 +1991,9 @@ impl AppState {
     /// picked; nothing when neither is open.
     pub(super) fn reload_open_file_diff(&mut self) -> Vec<Effect> {
         if self.commits.open.is_some() {
-            self.diff.path = None;
-            self.commit_file_diff()
+            self.commit_file_diff(DiffStart::Top)
         } else if self.stash.open.is_some() {
-            self.diff.path = None;
-            self.stash_file_diff()
+            self.stash_file_diff(DiffStart::Top)
         } else {
             vec![]
         }
@@ -2018,13 +2005,9 @@ impl AppState {
         if self.commits.open.take().is_none() {
             return vec![];
         }
-        self.diff.path = None;
         match self.selected {
-            Some(index) if index < self.files.len() => self.select(index),
-            _ => {
-                self.diff = DiffPane::default();
-                vec![Effect::CancelDiff]
-            }
+            Some(index) if index < self.files.len() => self.select_from(index, DiffStart::Top),
+            _ => self.close_diff(),
         }
     }
 }

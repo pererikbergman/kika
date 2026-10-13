@@ -1,8 +1,9 @@
 use crate::diff_search::{DiffSearch, reveal};
-use crate::effect::Effect;
-use crate::git::diff::{DiffChunk, DiffLine};
+use crate::effect::{Effect, Tag};
+use crate::git::diff::{DiffChunk, DiffLine, DiffRequest};
 use crate::git::path::RepoPath;
 use crate::intent::Scroll;
+use crate::model::AppState;
 
 /// Lines read beyond the bottom of the pane, so scrolling rarely waits on git.
 pub const DIFF_PREFETCH: usize = 200;
@@ -32,11 +33,23 @@ pub struct DiffPane {
     pub search: Option<DiffSearch>,
 }
 
+/// Where an opened diff starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffStart {
+    /// A reopen of the same path keeps its scroll and search, as a reload
+    /// with new options or a moved cursor should.
+    Keep,
+    /// Line 0 with no search, even for the same path: another commit's,
+    /// stash's or pull request's file of the same name is new content.
+    Top,
+}
+
 impl DiffPane {
     /// Start showing request `seq` for `path`. The old lines stay on screen
     /// until the first chunk arrives, so switching files does not flicker.
     /// Returns how many lines to ask for.
-    pub fn begin(&mut self, seq: u64, path: &RepoPath, rows: usize) -> usize {
+    pub fn open(&mut self, seq: u64, path: &RepoPath, rows: usize, start: DiffStart) -> usize {
+        self.rewind(start);
         if self.path.as_ref() != Some(path) {
             self.path = Some(path.clone());
             self.scroll = 0;
@@ -49,6 +62,19 @@ impl DiffPane {
         self.error = None;
         self.requested = self.wanted(rows);
         self.requested
+    }
+
+    /// With `Top`, forget the path so the next `open` starts at the top.
+    /// Only `open` and a selection that loads nothing yet use it.
+    pub(crate) fn rewind(&mut self, start: DiffStart) {
+        if start == DiffStart::Top {
+            self.path = None;
+        }
+    }
+
+    /// Nothing to show: no lines, no request, no search.
+    pub fn clear(&mut self) {
+        *self = Self::default();
     }
 
     /// Take a chunk of request `seq`; chunks of any other request are dropped.
@@ -155,10 +181,38 @@ impl DiffPane {
     }
 }
 
+/// The request side of the Diff pane: every diff shown goes through
+/// `open_diff`, and every pane emptied through `close_diff`.
+impl AppState {
+    /// Stream `request` into the Diff pane from `start`.
+    pub(crate) fn open_diff(&mut self, request: DiffRequest, start: DiffStart) -> Vec<Effect> {
+        let seq = self.take_seq();
+        let want = self.diff.open(seq, &request.path, self.diff_rows(), start);
+        // Diff streams report many times, so they stay out of the busy count.
+        let tag = Tag {
+            generation: self.generation,
+            seq,
+            user: false,
+        };
+        vec![
+            Effect::LoadDiff { tag, request, want },
+            Effect::DiffLoadingDelay { tag },
+        ]
+    }
+
+    /// Stop the stream and empty the pane.
+    pub(crate) fn close_diff(&mut self) -> Vec<Effect> {
+        self.diff.clear();
+        vec![Effect::CancelDiff]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::diff::LineKind;
+    use crate::git::diff::{DiffOptions, LineKind};
+    use crate::model::Context;
+    use crate::test_support::changed;
 
     fn chunk(texts: &[&str], done: bool) -> Result<DiffChunk, String> {
         let lines = texts
@@ -174,7 +228,7 @@ mod tests {
     /// A pane of `a.rs` with request 1's first chunk in.
     fn loaded(texts: &[&str]) -> DiffPane {
         let mut pane = DiffPane::default();
-        pane.begin(1, &RepoPath::from("a.rs"), 10);
+        pane.open(1, &RepoPath::from("a.rs"), 10, DiffStart::Keep);
         pane.apply(1, chunk(texts, false));
         pane
     }
@@ -200,14 +254,116 @@ mod tests {
     fn a_new_path_drops_the_search_and_a_reload_of_the_same_path_keeps_it() {
         let mut pane = loaded(&["foo"]);
         pane.set_search("foo");
-        pane.begin(2, &RepoPath::from("a.rs"), 10);
+        pane.open(2, &RepoPath::from("a.rs"), 10, DiffStart::Keep);
         assert!(pane.search.is_some(), "a reload of the same path");
         // The reload's lines replace the old ones, and are searched again.
         pane.apply(2, chunk(&["x", "foo", "foo"], true));
         assert_eq!(rows_of(&pane), [1, 2]);
 
-        pane.begin(3, &RepoPath::from("b.rs"), 10);
+        pane.open(3, &RepoPath::from("b.rs"), 10, DiffStart::Keep);
         assert_eq!(pane.search, None);
+    }
+
+    /// A pane of `a.rs` scrolled to line 5 and searching, request 1 in.
+    fn scrolled_and_searching() -> DiffPane {
+        let mut texts = vec!["x"; 20];
+        texts[12] = "foo";
+        let mut pane = loaded(&texts);
+        pane.scroll = 5;
+        pane.set_search("foo");
+        pane
+    }
+
+    #[test]
+    fn opening_the_same_path_with_keep_keeps_the_scroll_and_the_search() {
+        let mut pane = scrolled_and_searching();
+        pane.open(2, &RepoPath::from("a.rs"), 10, DiffStart::Keep);
+        assert_eq!(pane.scroll, 5);
+        assert!(pane.search.is_some());
+    }
+
+    #[test]
+    fn opening_the_same_path_from_the_top_drops_the_scroll_and_the_search() {
+        let mut pane = scrolled_and_searching();
+        pane.open(2, &RepoPath::from("a.rs"), 10, DiffStart::Top);
+        assert_eq!(pane.scroll, 0);
+        assert_eq!(pane.search, None);
+        assert_eq!(pane.path, Some(RepoPath::from("a.rs")));
+    }
+
+    #[test]
+    fn opening_another_path_starts_at_the_top_either_way() {
+        for start in [DiffStart::Keep, DiffStart::Top] {
+            let mut pane = scrolled_and_searching();
+            pane.open(2, &RepoPath::from("b.rs"), 10, start);
+            assert_eq!(pane.scroll, 0, "{start:?}");
+            assert_eq!(pane.search, None, "{start:?}");
+            assert_eq!(pane.path, Some(RepoPath::from("b.rs")), "{start:?}");
+        }
+    }
+
+    #[test]
+    fn opening_keeps_the_old_lines_until_the_first_chunk_and_asks_past_the_rows() {
+        for start in [DiffStart::Keep, DiffStart::Top] {
+            let mut pane = scrolled_and_searching();
+            let old = pane.lines.clone();
+            let want = pane.open(2, &RepoPath::from("a.rs"), 10, start);
+            let scroll = pane.scroll;
+            assert_eq!(want, scroll + 10 + DIFF_PREFETCH, "{start:?}");
+            assert_eq!(pane.requested, want, "{start:?}");
+            assert_eq!(pane.seq, Some(2), "{start:?}");
+            assert!(pane.pending, "{start:?}");
+            assert_eq!(pane.lines, old, "{start:?}: the old lines stay on screen");
+            pane.apply(2, chunk(&["new"], true));
+            assert_eq!(
+                pane.lines.len(),
+                1,
+                "{start:?}: the first chunk replaces them"
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_leaves_an_empty_pane() {
+        let mut pane = scrolled_and_searching();
+        pane.clear();
+        assert_eq!(pane, DiffPane::default());
+    }
+
+    #[test]
+    fn open_diff_streams_the_request_under_a_fresh_background_tag() {
+        let mut state = AppState::new(Context::Workspace);
+        state.generation = 3;
+        let seq = state.next_seq;
+        let request = DiffRequest::for_entry(&changed("a.rs", '.', 'M'), DiffOptions::default());
+        let effects = state.open_diff(request.clone(), DiffStart::Top);
+        let tag = Tag {
+            generation: 3,
+            seq,
+            user: false,
+        };
+        assert_eq!(
+            effects,
+            [
+                Effect::LoadDiff {
+                    tag,
+                    request,
+                    want: state.diff.requested,
+                },
+                Effect::DiffLoadingDelay { tag },
+            ]
+        );
+        assert_eq!(state.diff.seq, Some(seq));
+        assert_eq!(state.next_seq, seq + 1, "the seq is taken");
+    }
+
+    #[test]
+    fn close_diff_cancels_the_stream_and_empties_the_pane() {
+        let mut state = AppState::new(Context::Workspace);
+        let request = DiffRequest::for_entry(&changed("a.rs", '.', 'M'), DiffOptions::default());
+        state.open_diff(request, DiffStart::Keep);
+        assert_eq!(state.close_diff(), [Effect::CancelDiff]);
+        assert_eq!(state.diff, DiffPane::default());
     }
 
     #[test]
@@ -215,7 +371,7 @@ mod tests {
         let mut texts = vec!["x"; 400];
         texts[350] = "foo";
         let mut pane = DiffPane::default();
-        pane.begin(1, &RepoPath::from("a.rs"), 10);
+        pane.open(1, &RepoPath::from("a.rs"), 10, DiffStart::Keep);
         assert_eq!(pane.requested, 10 + DIFF_PREFETCH);
         pane.apply(1, chunk(&texts, false));
         pane.set_search("foo");

@@ -36,12 +36,12 @@
 //! `pull_requests` (`rows`); in core, `bisect.rs`, `popup_view.rs` and
 //! `menu.rs`. The handlers read `files`, `selected`, `diff`, `popups` and
 //! `diff_options` (core) and call core's `close_commit_files`,
-//! `focus_panel`, `background_tag`, `stream_diff`, `start_op`,
-//! `run_op_where_it_belongs` and `confirm_refused`.
+//! `focus_panel`, `background_tag`, `open_diff`, `close_diff`,
+//! `start_op`, `run_op_where_it_belongs` and `confirm_refused`.
 //!
 //! What stays in core, and why: `reload_commits`, which repos and
-//! submodules call; `close_commit_files`, which calls `select` and which
-//! core's `focus_panel` calls; `reload_open_file_diff` and
+//! submodules call; `close_commit_files`, which calls `select_from` and
+//! which core's `focus_panel` calls; `reload_open_file_diff` and
 //! `set_diff_options`, which serve the stash's files too; the commit
 //! files filter's input arm and the other shared dispatch branches
 //! (`key_focus`, `open_filter`, the filter apply and `list_escape`);
