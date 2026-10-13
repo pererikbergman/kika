@@ -43,7 +43,7 @@ Seven intents shared by features, under `// --- core: shared by features ---`:
 
 | Intent | Why it stays core |
 |---|---|
-| `ContinueOperation` | Bound only in `operation/keys.rs`; the core arm reads core `bisect::continue_disabled` and calls operation's `resume`. Kept beside Skip and Abort as a trio. Open question below. |
+| `ContinueOperation` | Bound only in `operation/keys.rs`; the core arm reads core `bisect::continue_disabled` and calls operation's `resume`. Kept beside Skip and Abort as a trio, as the owner decided (see Decided below). |
 | `SkipOperation` | Bound in `operation/keys.rs`. The core arm sends it to `commits/bisect` while only a bisect runs, otherwise to operation's `resume`. Two features, so point 5 keeps it core. |
 | `AbortOperation` | Bound in `operation/keys.rs`. The core arm asks the bisect reset while only a bisect runs, otherwise operation's `ask_abort`. Two features, as for Skip. |
 | `OpenRepo` | Handled by `repos::open_repo` and sent by both repos and worktrees, which may not build each other's intents. |
@@ -74,13 +74,13 @@ Binding ids and order did not change: `registry_order_is_pinned` passes unedited
 
 ### Security
 
-Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. The security reviews of #390, #391 and #392 a/b/c confirmed this, so Decision 2's rule holds.
+Destructive `GitOp`s are reached only through a confirm question (`src/confirm_question.rs`) or the range question, never by a feature's `update` returning the run effect directly. Skip (`GitOp::Skip`) is the one deliberate exception: it is treated as a step of the running operation and runs without a question. The security reviews of #390, #391 and #392 a/b/c confirmed this, so Decision 2's rule holds with that one exception. #424 follows up with a confirm question for Skip, asked only when the worktree or index holds conflict-resolution changes since the stop.
 
 ### Deviations kept
 
 - `CommitIntent` and `ReviewIntent` carry `#[allow(clippy::large_enum_variant)]`. Their large variants were as large in the flat `AppIntent`, which wraps them and is larger still, so boxing them saves nothing.
 - `Effect` is still one flat enum, as point 6 decided.
 
-### Open question
+### Decided
 
-- **`ContinueOperation`** is used by one feature only, operation. It could become `OperationIntent::Continue` without changing a binding id. It stays core for now to keep the Continue, Skip and Abort trio together, as the `Operation` variant's doc says. This is for the owner to decide.
+- **`ContinueOperation` stays a core shared intent**, decided by the owner on 2026-10-13. Only operation uses it, so it could have become `OperationIntent::Continue` without changing a binding id. It stays core with `SkipOperation` and `AbortOperation`, so the Continue, Skip and Abort trio stays together, as the `Operation` variant's doc says. So "no feature-specific flat variant" means no panel-specific flat variant: all seven shared intents are kept on purpose.

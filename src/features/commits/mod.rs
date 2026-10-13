@@ -42,8 +42,9 @@
 //! Kept cross-feature reads of `state.commits`: `branches/tags`
 //! (`list.rows`, `list.selected`), `stash`, `review` and `diff/renderers`
 //! (`open`) and `pull_requests` (`list.rows`); in core, `bisect.rs`, `popup_view.rs` and
-//! `menu.rs`. The handlers read `files`, `selected`, `diff`, `popups` and
-//! `diff_options` (core) and call core's `close_commit_files`,
+//! `menu.rs`. The handlers read the Files panel's selected row
+//! (`files.selected_row()`), `diff`, `popups` and `diff_options` (core)
+//! and call core's `close_commit_files`,
 //! `focus_panel`, `background_tag`, `open_diff`, `close_diff`,
 //! `start_op`, `run_op_where_it_belongs` and `confirm_refused`.
 //!

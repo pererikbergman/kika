@@ -30,7 +30,7 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
 }
 
 /// Add `line` to the `.gitignore` in `workdir` off the event loop and
-/// report it as `IgnoreWritten`.
+/// report it as `FilesIntent::IgnoreWritten`.
 pub(crate) fn ignore(workdir: PathBuf, tx: UnboundedSender<AppIntent>, tag: Tag, line: Vec<u8>) {
     background::run(
         tx,

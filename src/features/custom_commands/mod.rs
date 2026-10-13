@@ -21,7 +21,8 @@
 //!
 //! Kept cross-feature reads and calls, left as they are because this slice
 //! only moves code:
-//! - `command_target` reads `selected` and `files` (files), the Diff
+//! - `command_target` reads the Files panel's selected row
+//!   (`files.selected_row()`, files), the Diff
 //!   pane's hunk cursor through core `hunk_view()` (diff) and the
 //!   `BlameView` in `Focus::Blame` (blame);
 //! - `command_finished` calls core `refresh_status` (`model.rs`).

@@ -37,17 +37,18 @@
 //! `view::hunk_title_parts`.
 //!
 //! Kept cross-feature reads: `hunk_disabled` reads the Files panel's
-//! `files` and `selected`, to refuse a conflicted or renamed file, and
-//! `open_in_editor` reads them to find the file to open (the Files
+//! selected row (`files.selected_row()`), to refuse a conflicted or renamed
+//! file, and `open_in_editor` reads it to find the file to open (the Files
 //! panel's `files.open` key dispatches the core `OpenInEditor` intent).
 //! The rest reads core state (`generation`, `diff`, `focus`,
 //! `diff_options`, the op slot, `keymap`).
 //!
 //! What stays in core, and why:
-//! - `set_diff_options` reads `commits.open`, `stash.open`, `selected`,
-//!   `files` and `diff_options`, and calls stash's `stash_file_diff` and
-//!   core `select`/`commit_file_diff`. A feature does not call a sibling's
-//!   behaviour, so core keeps it, `pub(crate)` so [`update`] can call it;
+//! - `set_diff_options` reads `commits.open`, `stash.open`, the Files
+//!   panel's selected row (`files.selected_row()`) and `diff_options`, and
+//!   calls stash's `stash_file_diff` and core `select`/`commit_file_diff`.
+//!   A feature does not call a sibling's behaviour, so core keeps it,
+//!   `pub(crate)` so [`update`] can call it;
 //! - the pane's one way in and out, `open_diff` and `close_diff` (with
 //!   `DiffPane::open`/`clear` and `DiffStart`, in `diff_pane.rs`),
 //!   because `commits`, `stash` and `review` call them; and `remap`,
