@@ -6,26 +6,22 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::{add_worktree, read_worktrees, remove_worktree};
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
-use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 
 /// List the worktrees and report them as `WorktreesLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_worktrees(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || read_worktrees(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git worktree list crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::WorktreesLoaded { tag, result });
-    });
+        background::crashed("git worktree list"),
+        move |result| AppIntent::WorktreesLoaded { tag, result },
+    );
 }
 
 /// Add a worktree for `branch` at `path` and report it as `WorktreeAdded`.
@@ -36,18 +32,13 @@ pub(crate) fn add(
     path: String,
     branch: BranchName,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || add_worktree(runner.as_ref(), &path, &branch),
         // A panic still reports back, or the busy counter would stay raised.
-        let result =
-            tokio::task::spawn_blocking(move || add_worktree(runner.as_ref(), &path, &branch))
-                .await
-                .unwrap_or_else(|e| {
-                    Err(terminal_safe(
-                        format!("git worktree add crashed: {e}").as_bytes(),
-                    ))
-                });
-        let _ = tx.send(AppIntent::WorktreeAdded { tag, result });
-    });
+        background::crashed("git worktree add"),
+        move |result| AppIntent::WorktreeAdded { tag, result },
+    );
 }
 
 /// Remove the worktree at `path`, never forced, and report it as
@@ -58,17 +49,13 @@ pub(crate) fn remove(
     tag: Tag,
     path: RepoPath,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || remove_worktree(runner.as_ref(), &path),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || remove_worktree(runner.as_ref(), &path))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git worktree remove crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::WorktreeRemoved { tag, result });
-    });
+        background::crashed("git worktree remove"),
+        move |result| AppIntent::WorktreeRemoved { tag, result },
+    );
 }
 
 #[cfg(test)]

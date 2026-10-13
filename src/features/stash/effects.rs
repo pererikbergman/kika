@@ -7,24 +7,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::{StashEntry, list_stashes, stash_files};
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::intent::AppIntent;
 
 /// Read the stash list and report it as `StashesLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || list_stashes(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
-        let result = tokio::task::spawn_blocking(move || list_stashes(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git stash list crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::StashesLoaded { tag, result });
-    });
+        background::crashed("git stash list"),
+        move |result| AppIntent::StashesLoaded { tag, result },
+    );
 }
 
 /// List `entry`'s files and report them as `StashFilesLoaded`.
@@ -34,17 +30,13 @@ pub(crate) fn load_files(
     tag: Tag,
     entry: StashEntry,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || stash_files(runner.as_ref(), &entry),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || stash_files(runner.as_ref(), &entry))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git diff-tree crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::StashFilesLoaded { tag, result });
-    });
+        background::crashed("git diff-tree"),
+        move |result| AppIntent::StashFilesLoaded { tag, result },
+    );
 }
 
 #[cfg(test)]

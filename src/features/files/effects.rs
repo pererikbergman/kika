@@ -8,9 +8,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::gitignore::{self, IgnoreAdded};
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{sanitize, terminal_safe};
+use crate::git::diff::sanitize;
 use crate::git::path::RepoPath;
 use crate::git::status::read_status;
 use crate::intent::AppIntent;
@@ -18,30 +19,25 @@ use crate::worktree_file;
 
 /// Read the status and report it as `StatusLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_status(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || read_status(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| Err(format!("git status crashed: {e}")));
-        // A closed channel means the app is quitting; nothing to report to.
-        let _ = tx.send(AppIntent::StatusLoaded { tag, result });
-    });
+        |e| Err(format!("git status crashed: {e}")),
+        move |result| AppIntent::StatusLoaded { tag, result },
+    );
 }
 
 /// Add `line` to the `.gitignore` in `workdir` off the event loop and
 /// report it as `IgnoreWritten`.
 pub(crate) fn ignore(workdir: PathBuf, tx: UnboundedSender<AppIntent>, tag: Tag, line: Vec<u8>) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || append_ignore(&workdir, &line),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || append_ignore(&workdir, &line))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("Writing .gitignore crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::IgnoreWritten { tag, result });
-    });
+        background::crashed("Writing .gitignore"),
+        move |result| AppIntent::IgnoreWritten { tag, result },
+    );
 }
 
 /// The largest `.gitignore` read to add a line to it.

@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::{DIFF_LOADING_DELAY, Tag};
 use crate::git::GitRunner;
-use crate::git::diff::{DiffRequest, terminal_safe};
+use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
 
 /// Report `DiffSlow` after [`DIFF_LOADING_DELAY`], so fast loads never
@@ -30,15 +31,13 @@ pub(crate) fn load_patch(
     tag: Tag,
     request: DiffRequest,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || crate::git::diff::load_patch(runner.as_ref(), &request),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || {
-            crate::git::diff::load_patch(runner.as_ref(), &request)
-        })
-        .await
-        .unwrap_or_else(|e| Err(terminal_safe(format!("git diff crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::PatchLoaded { tag, result });
-    });
+        background::crashed("git diff"),
+        move |result| AppIntent::PatchLoaded { tag, result },
+    );
 }
 
 #[cfg(test)]
