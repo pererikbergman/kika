@@ -363,6 +363,7 @@ fn hidden_sequence_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::repos::ReposIntent;
     use crate::git::diff::{DiffLine, LineKind};
 
     /// A state with a diff stream for request 1 that has asked for 10 lines.
@@ -400,11 +401,11 @@ mod tests {
     #[test]
     fn a_recent_list_still_on_its_way_is_not_idle() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(AppIntent::OpenRecent);
+        state.update(AppIntent::Repos(ReposIntent::OpenRecent));
         assert!(!is_idle(&state));
 
         let seq = state.recent_seq;
-        state.update(AppIntent::RecentLoaded { seq, list: vec![] });
+        state.update(AppIntent::Repos(ReposIntent::Loaded { seq, list: vec![] }));
         assert!(is_idle(&state));
     }
 

@@ -2,6 +2,7 @@
 //! load landing, moving between blocks, picking a side and writing the
 //! file, staging it once resolved, and handing it to the merge tool.
 
+use super::ConflictsIntent;
 use super::keys;
 use super::state::{Choice, ConflictView, PendingPick};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
@@ -13,6 +14,23 @@ use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{ErrorPopup, Popup};
 use crate::refresh::Selection;
+
+/// The conflict view's half of `update`: core's one `AppIntent::Conflicts`
+/// arm lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: ConflictsIntent) -> Vec<Effect> {
+    match intent {
+        ConflictsIntent::Loaded { tag, path, result } => state.conflict_loaded(tag, path, result),
+        ConflictsIntent::Next => state.with_conflict(|view, rows| view.move_by(1, rows)),
+        ConflictsIntent::Prev => state.with_conflict(|view, rows| view.move_by(-1, rows)),
+        ConflictsIntent::Pick(choice) => return state.pick_conflict(choice),
+        ConflictsIntent::ResolvedWritten { tag, path, result } => {
+            return state.resolved_written(tag, path, result);
+        }
+        ConflictsIntent::StageResolved => return state.stage_resolved(),
+        ConflictsIntent::OpenMergeTool => return state.open_merge_tool(),
+    }
+    Vec::new()
+}
 
 /// The conflict view: loading a conflicted file, picking a side of each
 /// block, writing the file after each pick, and staging it at the end.
@@ -211,7 +229,9 @@ pub(crate) fn stage_resolved_question() -> ConfirmQuestion {
         title: "Stage resolved file".into(),
         text: "Every conflict in this file is resolved. Stage it? (y/n)".into(),
         answer: Answer::YOrEnter,
-        then: Then::Intent(Box::new(AppIntent::StageResolved)),
+        then: Then::Intent(Box::new(AppIntent::Conflicts(
+            ConflictsIntent::StageResolved,
+        ))),
         range: false,
         head: None,
     }
@@ -252,11 +272,11 @@ mod tests {
     /// `conflict_opened`, with `CONFLICT` read.
     fn conflict_shown() -> AppState {
         let (mut state, tag) = conflict_opened();
-        state.update(AppIntent::ConflictLoaded {
+        state.update(AppIntent::Conflicts(ConflictsIntent::Loaded {
             tag,
             path: "c.txt".into(),
             result: Ok((CONFLICT.to_vec(), 7)),
-        });
+        }));
         state
     }
 
@@ -287,11 +307,11 @@ mod tests {
     }
 
     fn written(tag: Tag, result: Result<Vec<u8>, String>) -> AppIntent {
-        AppIntent::ResolvedWritten {
+        AppIntent::Conflicts(ConflictsIntent::ResolvedWritten {
             tag,
             path: "c.txt".into(),
             result,
-        }
+        })
     }
 
     #[test]
@@ -316,11 +336,11 @@ mod tests {
             seq: tag.seq + 100,
             ..tag
         };
-        state.update(AppIntent::ConflictLoaded {
+        state.update(AppIntent::Conflicts(ConflictsIntent::Loaded {
             tag: stale,
             path: "c.txt".into(),
             result: Ok((CONFLICT.to_vec(), 7)),
-        });
+        }));
         assert_eq!(conflict(&state).loaded, None);
         assert_eq!(conflict(&state).seq, Some(tag.seq));
     }
@@ -345,7 +365,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 't'), vec![]);
         assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
         assert_eq!(
-            state.update(AppIntent::PickConflict(Choice::Theirs)),
+            state.update(AppIntent::Conflicts(ConflictsIntent::Pick(Choice::Theirs))),
             vec![]
         );
         assert_eq!(conflict(&state).choices, [Some(Choice::Ours), None]);
@@ -394,11 +414,11 @@ mod tests {
             [Effect::LoadConflict { tag, .. }] => *tag,
             other => panic!("expected one LoadConflict, got {other:?}"),
         };
-        state.update(AppIntent::ConflictLoaded {
+        state.update(AppIntent::Conflicts(ConflictsIntent::Loaded {
             tag: load,
             path: "c.txt".into(),
             result: Ok((CONFLICT.to_vec(), 7)),
-        });
+        }));
         state.update(written(tag, Ok(b"a\nours 1\nb\n".to_vec())));
         let view = conflict(&state);
         assert_eq!(view.loaded.as_ref().unwrap().on_disk, CONFLICT);
@@ -431,11 +451,11 @@ mod tests {
     #[test]
     fn an_unparsable_file_shows_why_and_nothing_can_be_picked() {
         let (mut state, tag) = conflict_opened();
-        state.update(AppIntent::ConflictLoaded {
+        state.update(AppIntent::Conflicts(ConflictsIntent::Loaded {
             tag,
             path: "c.txt".into(),
             result: Ok((b"a\n=======\n".to_vec(), 7)),
-        });
+        }));
         assert!(
             conflict(&state)
                 .error

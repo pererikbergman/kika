@@ -17,6 +17,7 @@ use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
+use crate::features::sync::SyncIntent;
 use crate::features::{
     blame, commit, conflicts, custom_commands, files, pull_requests, repos, review, stash,
     submodules, sync, worktrees,
@@ -1228,7 +1229,7 @@ impl Bridge {
         let server = std::env::current_exe().ok().and_then(|program| {
             let server = AskpassServer::start(move |question| match question {
                 Question::Notice(text) => {
-                    let _ = tx.send(AppIntent::RemoteNotice { tag, text });
+                    let _ = tx.send(AppIntent::Sync(SyncIntent::RemoteNotice { tag, text }));
                     None
                 }
                 Question::Ask { prompt, confirm } => {
@@ -1286,12 +1287,15 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::features::blame::BlameIntent;
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::compare::CompareIntent;
     use crate::features::commits::copy::CopyIntent;
     use crate::features::commits::reflog::ReflogIntent;
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
+    use crate::features::custom_commands::CustomCommandsIntent;
+    use crate::features::repos::ReposIntent;
     use crate::git::remote::RemoteFailure;
     use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
 
@@ -1652,10 +1656,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::BlameLoaded {
+            Some(AppIntent::Blame(BlameIntent::Loaded {
                 tag: got,
                 result: Ok(lines),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0].author, "Ann");
@@ -1680,10 +1684,10 @@ mod tests {
             path: "a.rs".into(),
         });
         match rx.recv().await {
-            Some(AppIntent::BlameLoaded {
+            Some(AppIntent::Blame(BlameIntent::Loaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git blame crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -1696,10 +1700,10 @@ mod tests {
             oid: "abc".into(),
         });
         match rx.recv().await {
-            Some(AppIntent::CommitLoaded {
+            Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git show crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -1736,10 +1740,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::CommitLoaded {
+            Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                 tag: got,
                 result: Ok(lines),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0].text, "commit abc");
@@ -1909,7 +1913,7 @@ mod tests {
             path: std::env::temp_dir(),
             seq: 1,
         });
-        let empty = |seq| Some(AppIntent::RecentLoaded { seq, list: vec![] });
+        let empty = |seq| Some(AppIntent::Repos(ReposIntent::Loaded { seq, list: vec![] }));
         assert_eq!(rx.recv().await, empty(1));
         runtime.spawn(Effect::LoadRecent { seq: 2 });
         assert_eq!(rx.recv().await, empty(2));
@@ -1932,19 +1936,19 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RecentLoaded {
+            Some(AppIntent::Repos(ReposIntent::Loaded {
                 seq: 1,
                 list: vec![repo.clone()]
-            })
+            }))
         );
         assert!(store.is_file());
         runtime.spawn(Effect::LoadRecent { seq: 2 });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RecentLoaded {
+            Some(AppIntent::Repos(ReposIntent::Loaded {
                 seq: 2,
                 list: vec![repo]
-            })
+            }))
         );
     }
 
@@ -1967,10 +1971,10 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RepoInitialised {
+            Some(AppIntent::Repos(ReposIntent::Initialised {
                 tag,
                 result: Ok("/r/new".into()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2137,10 +2141,10 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::FetchFinished {
+            Some(AppIntent::Sync(SyncIntent::FetchFinished {
                 tag: background(5),
                 result: Ok(()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2153,10 +2157,10 @@ mod tests {
         runtime.spawn(Effect::Fetch { tag: background(6) });
 
         match rx.recv().await {
-            Some(AppIntent::FetchFinished {
+            Some(AppIntent::Sync(SyncIntent::FetchFinished {
                 tag,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(tag, background(6));
                 assert!(message.starts_with("git fetch crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -2220,11 +2224,11 @@ mod tests {
 
         runtime.spawn(run(&["sh", "-c", "printf hi; exit 3"], OutputMode::Popup));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title,
                 output: OutputMode::Popup,
                 result: Err(CommandFailure::Exited(e)),
-            }) => {
+            })) => {
                 assert_eq!(title, "Try");
                 assert!(e.contains('3') && e.contains("hi"), "{e}");
             }
@@ -2235,17 +2239,18 @@ mod tests {
         runtime.spawn(run(&["sh", "-c", "printf hi"], OutputMode::None));
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Try".into(),
                 output: OutputMode::None,
                 result: Ok(String::new()),
-            })
+            }))
         );
         runtime.spawn(run(&["sh", "-c", "pwd"], OutputMode::Popup));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
-                result: Ok(cwd), ..
-            }) => assert_eq!(
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
+                result: Ok(cwd),
+                ..
+            })) => assert_eq!(
                 std::fs::canonicalize(cwd).unwrap(),
                 std::fs::canonicalize(tmp.path()).unwrap()
             ),
@@ -2255,10 +2260,10 @@ mod tests {
         // A program that cannot start still answers, once.
         runtime.spawn(run(&["kika-no-such-program"], OutputMode::None));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 result: Err(CommandFailure::Launch(e)),
                 ..
-            }) => {
+            })) => {
                 assert!(e.starts_with("Could not start"), "{e}")
             }
             other => panic!("expected a start failure, got {other:?}"),
@@ -2284,11 +2289,11 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Hang".into(),
                 output: OutputMode::Popup,
                 result: Err(CommandFailure::Cancelled),
-            })
+            }))
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         // A second cancel finds nothing to stop and sends nothing.
@@ -2336,9 +2341,9 @@ mod tests {
                 path: "a".into(),
             });
             match rx.recv().await {
-                Some(AppIntent::BlameLoaded {
+                Some(AppIntent::Blame(BlameIntent::Loaded {
                     result: Ok(lines), ..
-                }) => assert_eq!(lines[0].text, text, "{emoji:?}"),
+                })) => assert_eq!(lines[0].text, text, "{emoji:?}"),
                 other => panic!("expected a blame, got {other:?}"),
             }
             runtime.spawn(Effect::LoadCommit {
@@ -2346,9 +2351,9 @@ mod tests {
                 oid: oid.clone(),
             });
             match rx.recv().await {
-                Some(AppIntent::CommitLoaded {
+                Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                     result: Ok(lines), ..
-                }) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
+                })) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
                 other => panic!("expected a commit, got {other:?}"),
             }
             runner.assert_done();
@@ -2382,11 +2387,11 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RemoteFinished {
+            Some(AppIntent::Sync(SyncIntent::RemoteFinished {
                 tag,
                 op,
                 result: Ok(()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2407,11 +2412,11 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::RemoteFinished {
+            Some(AppIntent::Sync(SyncIntent::RemoteFinished {
                 tag: got,
                 op: RemoteOp::Fetch,
                 result: Err(RemoteFailure::Failed(message)),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -2482,7 +2487,7 @@ mod tests {
             );
             runtime.spawn(Effect::AnswerCredential(answer));
             match rx.recv().await {
-                Some(AppIntent::RemoteFinished { result, .. }) => {
+                Some(AppIntent::Sync(SyncIntent::RemoteFinished { result, .. })) => {
                     assert_eq!(result.is_ok(), succeeded, "{result:?}")
                 }
                 other => panic!("expected RemoteFinished, got {other:?}"),

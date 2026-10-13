@@ -9,27 +9,29 @@ use crate::confirm_question::{Answer, ConfirmQuestion, Then, quit_question};
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
 use crate::effect::{Effect, Tag};
-use crate::features::blame::BlameView;
+use crate::features::blame::{self, BlameView};
 use crate::features::branches::remotes::RemotePending;
 use crate::features::branches::tags::PendingTag;
 use crate::features::branches::{self, BranchesPanel, BranchesTab};
 use crate::features::command_log::{self, CommandLog};
-use crate::features::commit::CommitEditor;
+use crate::features::commit::{self, CommitEditor};
 use crate::features::commits::bisect::BisectIntent;
 use crate::features::commits::compare::PendingDiff;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
 use crate::features::commits::rewrite::LeftBehindCheck;
 use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
-use crate::features::conflicts::ConflictView;
-use crate::features::custom_commands::PendingCommand;
+use crate::features::conflicts::{self, ConflictView};
+use crate::features::custom_commands::{self, PendingCommand};
 use crate::features::diff::renderers::external_diff::map_rows;
 use crate::features::diff::renderers::{ExternalRenderer, RenderedDiff, RendererKind};
 use crate::features::files::IgnoreDraft;
+use crate::features::operation;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
-use crate::features::repos::ParkedRepo;
+use crate::features::repos::{self, ParkedRepo};
 use crate::features::review::{self, PrMerging};
 use crate::features::stash::{StashDraft, StashList, StashMode};
+use crate::features::sync;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -42,7 +44,6 @@ use crate::git::diff::{
 use crate::git::patch::{self, Direction, PatchSelection};
 use crate::git::path::RepoPath;
 use crate::git::refs::RefsSnapshot;
-use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::version::GitVersion;
@@ -63,6 +64,8 @@ use crate::remote_run::RemoteRun;
 use crate::watch::{WatchEvent, WatchState};
 // Names the tests below reach through `super::*` since the op slot moved
 // to `op_slot.rs`.
+#[cfg(test)]
+use crate::git::remote::RemoteOp;
 #[cfg(test)]
 use crate::op::MergeStrategy;
 #[cfg(test)]
@@ -560,42 +563,6 @@ impl AppState {
             AppIntent::ToggleStage => return self.toggle_stage(),
             AppIntent::ToggleStageAll => return self.toggle_stage_all(),
             AppIntent::Discard => self.ask_discard(),
-            AppIntent::OpenCommit => self.open_commit(),
-            AppIntent::ConfirmStageAll => {
-                if self.commit == CommitFlow::ConfirmStageAll {
-                    self.commit = CommitFlow::Editing(CommitEditor::new(true));
-                }
-            }
-            AppIntent::CancelCommit => self.cancel_commit(),
-            AppIntent::DiscardCommit => self.discard_commit(),
-            AppIntent::ResumeCommit => self.resume_commit(),
-            AppIntent::SubmitCommit => return self.submit_commit(),
-            AppIntent::InterruptCommit => return self.interrupt_commit(),
-            AppIntent::ToggleCommitField => {
-                if let CommitFlow::Editing(editor) = &mut self.commit {
-                    editor.toggle_field();
-                }
-            }
-            AppIntent::OpenAmend => return self.open_amend(),
-            AppIntent::HeadMessageLoaded { tag, result } => self.head_message_loaded(tag, result),
-            AppIntent::ToggleNoVerify => {
-                if let CommitFlow::Editing(editor) = &mut self.commit {
-                    editor.no_verify = !editor.no_verify;
-                }
-            }
-            AppIntent::EditCommitExternally => {
-                if let CommitFlow::Editing(editor) = &self.commit {
-                    let initial = editor.message();
-                    return vec![Effect::HandOff(HandOff::EditCommitMessage { initial })];
-                }
-            }
-            AppIntent::CommitMessageEdited { result } => {
-                return self.commit_message_edited(result);
-            }
-            AppIntent::DismissCommitError => self.dismiss_commit_error(),
-            AppIntent::CommitProbed { tag, op, facts } => {
-                return self.commit_probed(tag, op, facts);
-            }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
             AppIntent::OpenMenu(id) => {
                 if self.context == Context::Workspace {
@@ -631,20 +598,12 @@ impl AppState {
                 Some(closed) => self.popup_closed(&closed),
                 None => {}
             },
-            AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
-            AppIntent::CommandFinished {
-                title,
-                output,
-                result,
-            } => return self.command_finished(&title, output, result),
-            AppIntent::CancelCommand => return self.cancel_command(),
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::EditHunk => return self.edit_hunk(),
             AppIntent::EditorClosed { result } => return self.editor_closed(result),
             AppIntent::HunkEdited { result } => return self.hunk_edited(result),
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
-            AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
             AppIntent::StashesLoaded { tag, result } => {
                 self.stash.list.loaded(tag, self.generation, result);
             }
@@ -701,28 +660,13 @@ impl AppState {
             AppIntent::CommandLog(i) => return command_log::update(self, i),
             AppIntent::Commits(i) => return commits::update(self, i),
             AppIntent::Branches(i) => return branches::update(self, i),
-            AppIntent::OpenBlame => return self.open_blame(),
-            AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
-            AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
-            AppIntent::BlamePrev => self.with_blame(|view, rows| view.move_by(-1, rows)),
-            AppIntent::BlamePageDown => self.with_blame(|view, rows| view.page(true, rows)),
-            AppIntent::BlamePageUp => self.with_blame(|view, rows| view.page(false, rows)),
-            AppIntent::OpenBlameCommit => return self.open_blame_commit(),
-            AppIntent::CommitLoaded { tag, result } => self.commit_loaded(tag, result),
-            AppIntent::CloseBlameCommit => self.close_blame_commit(),
-            AppIntent::ScrollCommit(by) => self.scroll_commit(by),
-            AppIntent::CloseBlame => return self.close_blame(),
-            AppIntent::ConflictLoaded { tag, path, result } => {
-                self.conflict_loaded(tag, path, result)
-            }
-            AppIntent::ConflictNext => self.with_conflict(|view, rows| view.move_by(1, rows)),
-            AppIntent::ConflictPrev => self.with_conflict(|view, rows| view.move_by(-1, rows)),
-            AppIntent::PickConflict(choice) => return self.pick_conflict(choice),
-            AppIntent::ResolvedWritten { tag, path, result } => {
-                return self.resolved_written(tag, path, result);
-            }
-            AppIntent::StageResolved => return self.stage_resolved(),
-            AppIntent::OpenMergeTool => return self.open_merge_tool(),
+            AppIntent::Commit(i) => return commit::update(self, i),
+            AppIntent::Blame(i) => return blame::update(self, i),
+            AppIntent::Conflicts(i) => return conflicts::update(self, i),
+            AppIntent::CustomCommands(i) => return custom_commands::update(self, i),
+            AppIntent::Sync(i) => return sync::update(self, i),
+            AppIntent::Operation(i) => return operation::update(self, i),
+            AppIntent::Repos(i) => return repos::update(self, i),
             AppIntent::CycleRenderer => return self.cycle_renderer(),
             AppIntent::RenderersFound(renderers) => self.renderers_found(renderers),
             AppIntent::DiffRendered { tag, result } => self.diff_rendered(tag, result),
@@ -732,16 +676,7 @@ impl AppState {
                 errors,
             } => self.config_loaded(repo, keymap, errors),
             AppIntent::Start => return self.start(),
-            AppIntent::OpenRecent => return self.open_recent(),
-            AppIntent::RecentLoaded { seq, list } => self.recent_loaded(seq, list),
-            AppIntent::RecentNext => self.move_recent_cursor(1),
-            AppIntent::RecentPrev => self.move_recent_cursor(-1),
-            AppIntent::RecentSelect => return self.recent_select(),
             AppIntent::OpenRepo(path) => return self.open_repo(path),
-            AppIntent::InitRepo => return self.init_repo(),
-            AppIntent::RepoInitialised { tag, result } => {
-                return self.repo_initialised(tag, result);
-            }
             AppIntent::ForgeRepoNone { tag } => {
                 if tag.generation == self.generation {
                     self.forge.repo_none(tag);
@@ -813,18 +748,6 @@ impl AppState {
                 result,
             } => self.pr_detail_loaded(tag, number, repo, result),
             AppIntent::ConfirmDeleteRange => return self.confirm_delete_range(),
-            AppIntent::Fetch => return self.start_remote(RemoteOp::Fetch),
-            AppIntent::Pull => return self.start_remote(RemoteOp::Pull),
-            AppIntent::Push => {
-                return self.start_remote(RemoteOp::Push {
-                    force_with_lease: false,
-                });
-            }
-            AppIntent::ForcePush => {
-                return self.start_remote(RemoteOp::Push {
-                    force_with_lease: true,
-                });
-            }
             AppIntent::CredentialAsked {
                 tag,
                 prompt,
@@ -837,15 +760,6 @@ impl AppState {
                 }
             }
             AppIntent::CredentialAnswered(answer) => return self.credential_answered(answer),
-            AppIntent::RemoteNotice { tag, text } => self.remote_notice(tag, text),
-            AppIntent::RemoteFinished { tag, op, result } => {
-                return self.remote_finished(tag, op, result);
-            }
-            AppIntent::SpinnerTick => self.spinner_tick(),
-            AppIntent::Merge(strategy) => {
-                return self.branch_op(|branch| GitOp::Merge { branch, strategy });
-            }
-            AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
             AppIntent::ContinueOperation => {
                 return self.resume(bisect::continue_disabled, GitOp::Continue);
             }
@@ -857,9 +771,6 @@ impl AppState {
             AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
             AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
-            AppIntent::ConfirmAbort(operation) => {
-                return self.start_op(Ok(Some(GitOp::Abort(operation))));
-            }
             AppIntent::CopyFailed(why) => {
                 self.notice_text = None;
                 self.push_error(ErrorPopup::new(
@@ -2020,10 +1931,14 @@ mod tests {
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::remotes::RemotesIntent;
     use crate::features::branches::tags::TagsIntent;
+    use crate::features::commit::CommitIntent;
     use crate::features::commits::copy::CopyIntent;
     use crate::features::commits::custom_patch::CustomPatchIntent;
     use crate::features::commits::rewrite::RewriteIntent;
+    use crate::features::conflicts::ConflictsIntent;
+    use crate::features::operation::OperationIntent;
     use crate::features::operation::abort_question;
+    use crate::features::sync::SyncIntent;
     use crate::git::diff::DiffSide;
     use crate::git::rebase_plan;
     use crate::git::status::{EntryKind, RepoStatus};
@@ -4229,7 +4144,9 @@ mod tests {
         let mut state = in_progress(&[Operation::Bisect]);
         state.update(AppIntent::Branches(BranchesIntent::Next));
         assert_eq!(
-            state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)),
+            state.update(AppIntent::Operation(OperationIntent::Merge(
+                MergeStrategy::FastForwardOnly
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()));
@@ -4249,7 +4166,9 @@ mod tests {
     fn a_finished_squash_says_the_changes_wait_to_be_committed() {
         let mut state = in_progress(&[]);
         state.update(AppIntent::Branches(BranchesIntent::Next));
-        let (tag, op) = op_of(&state.update(AppIntent::Merge(MergeStrategy::Squash)));
+        let (tag, op) = op_of(&state.update(AppIntent::Operation(OperationIntent::Merge(
+            MergeStrategy::Squash,
+        ))));
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(
             state.notice,
@@ -4734,8 +4653,18 @@ mod tests {
         let mut cases: Vec<HeadMove> = vec![
             ("commit key", to_commit, vec![], key('c')),
             ("amend key", to_commit, vec![], key('A')),
-            ("open commit", to_commit, vec![], AppIntent::OpenCommit),
-            ("open amend", to_commit, vec![], AppIntent::OpenAmend),
+            (
+                "open commit",
+                to_commit,
+                vec![],
+                AppIntent::Commit(CommitIntent::Open),
+            ),
+            (
+                "open amend",
+                to_commit,
+                vec![],
+                AppIntent::Commit(CommitIntent::OpenAmend),
+            ),
             (
                 "commit item",
                 to_commit,
@@ -4835,7 +4764,7 @@ mod tests {
                 "rebase onto",
                 with_branches,
                 vec![AppIntent::Branches(BranchesIntent::Next)],
-                AppIntent::RebaseOnto,
+                AppIntent::Operation(OperationIntent::RebaseOnto),
             ),
         ];
         for mode in [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard] {
@@ -4871,7 +4800,7 @@ mod tests {
                 "merge",
                 with_branches,
                 vec![AppIntent::Branches(BranchesIntent::Next)],
-                AppIntent::Merge(strategy),
+                AppIntent::Operation(OperationIntent::Merge(strategy)),
             ));
         }
         cases
@@ -4925,7 +4854,7 @@ mod tests {
         let before = state.commit.clone();
         assert!(matches!(before, CommitFlow::Editing(_)));
         start_bisecting(&mut state);
-        let effects = state.update(AppIntent::SubmitCommit);
+        let effects = state.update(AppIntent::Commit(CommitIntent::Submit));
         assert!(
             !effects
                 .iter()
@@ -5822,11 +5751,19 @@ mod tests {
         let ids = vec![cid("c0"), cid("c1")];
         vec![
             (quit_question(), AppIntent::Quit, true),
-            (force_push_question(), AppIntent::ForcePush, true),
-            (stage_resolved_question(), AppIntent::StageResolved, true),
+            (
+                force_push_question(),
+                AppIntent::Sync(SyncIntent::ForcePush),
+                true,
+            ),
+            (
+                stage_resolved_question(),
+                AppIntent::Conflicts(ConflictsIntent::StageResolved),
+                true,
+            ),
             (
                 abort_question(Operation::Merge).unwrap(),
-                AppIntent::ConfirmAbort(Operation::Merge),
+                AppIntent::Operation(OperationIntent::ConfirmAbort(Operation::Merge)),
                 false,
             ),
             (

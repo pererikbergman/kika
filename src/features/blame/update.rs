@@ -2,6 +2,7 @@
 //! load, moving its cursor, and opening, scrolling and closing the commit
 //! of a line.
 
+use super::BlameIntent;
 use super::keys::blame_disabled;
 use super::state::{BlameView, CommitView};
 use crate::effect::{Effect, Tag};
@@ -9,6 +10,25 @@ use crate::git::blame::BlameLine;
 use crate::git::diff::DiffLine;
 use crate::intent::Scroll;
 use crate::model::{AppState, Context, Focus};
+
+/// The Blame feature's half of `update`: core's one `AppIntent::Blame` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: BlameIntent) -> Vec<Effect> {
+    match intent {
+        BlameIntent::Open => return state.open_blame(),
+        BlameIntent::Loaded { tag, result } => state.blame_loaded(tag, result),
+        BlameIntent::Next => state.with_blame(|view, rows| view.move_by(1, rows)),
+        BlameIntent::Prev => state.with_blame(|view, rows| view.move_by(-1, rows)),
+        BlameIntent::PageDown => state.with_blame(|view, rows| view.page(true, rows)),
+        BlameIntent::PageUp => state.with_blame(|view, rows| view.page(false, rows)),
+        BlameIntent::OpenCommit => return state.open_blame_commit(),
+        BlameIntent::CommitLoaded { tag, result } => state.commit_loaded(tag, result),
+        BlameIntent::CloseCommit => state.close_blame_commit(),
+        BlameIntent::ScrollCommit(by) => state.scroll_commit(by),
+        BlameIntent::Close => return state.close_blame(),
+    }
+    Vec::new()
+}
 
 /// The blame and the commit opened from it.
 impl AppState {
@@ -167,10 +187,10 @@ mod tests {
             seq: tag.seq + 100,
             ..tag
         };
-        state.update(AppIntent::BlameLoaded {
+        state.update(AppIntent::Blame(BlameIntent::Loaded {
             tag: stale,
             result: Ok(vec![blame_line(OID, 1)]),
-        });
+        }));
         assert!(!blame(&state).loaded);
         assert_eq!(state.busy_count(), 0);
 
@@ -178,16 +198,16 @@ mod tests {
             generation: tag.generation + 1,
             ..tag
         };
-        state.update(AppIntent::BlameLoaded {
+        state.update(AppIntent::Blame(BlameIntent::Loaded {
             tag: old_generation,
             result: Ok(vec![blame_line(OID, 1)]),
-        });
+        }));
         assert!(!blame(&state).loaded);
 
-        state.update(AppIntent::BlameLoaded {
+        state.update(AppIntent::Blame(BlameIntent::Loaded {
             tag,
             result: Ok(vec![blame_line(OID, 1)]),
-        });
+        }));
         assert!(blame(&state).loaded);
         assert_eq!(blame(&state).lines.len(), 1);
     }
@@ -197,10 +217,10 @@ mod tests {
         let (mut state, tag) = blaming(24);
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.focus, Focus::Files);
-        state.update(AppIntent::BlameLoaded {
+        state.update(AppIntent::Blame(BlameIntent::Loaded {
             tag,
             result: Ok(vec![blame_line(OID, 1)]),
-        });
+        }));
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.busy_count(), 0);
     }
@@ -271,10 +291,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
 
         let lines = vec![line("commit abc"), line("+added")];
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok(lines.clone()),
-        });
+        }));
         assert_eq!(state.busy_count(), 0);
         let commit = blame(&state).commit.as_ref().expect("commit open");
         assert!(commit.loaded);
@@ -308,21 +328,21 @@ mod tests {
             [Effect::LoadCommit { tag, .. }] => *tag,
             other => panic!("expected one LoadCommit, got {other:?}"),
         };
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag: Tag {
                 seq: tag.seq + 100,
                 ..tag
             },
             result: Ok(vec![line("x")]),
-        });
+        }));
         assert!(!blame(&state).commit.as_ref().unwrap().loaded);
         assert_eq!(state.busy_count(), 0);
         // Closed before it landed: the result has nowhere to go.
         press(&mut state, KeyCode::Esc);
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok(vec![line("x")]),
-        });
+        }));
         assert_eq!(blame(&state).commit, None);
     }
 
@@ -333,10 +353,10 @@ mod tests {
             [Effect::LoadCommit { tag, .. }] => *tag,
             other => panic!("expected one LoadCommit, got {other:?}"),
         };
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok((0..20).map(|i| line(&i.to_string())).collect()),
-        });
+        }));
         let scroll = |state: &AppState| blame(state).commit.as_ref().unwrap().scroll;
         press(&mut state, KeyCode::Char('j'));
         press(&mut state, KeyCode::Down);

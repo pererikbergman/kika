@@ -1273,6 +1273,7 @@ mod tests {
     use super::*;
     use crate::diff_pane_view::{CURRENT_MATCH, MATCH};
     use crate::features::blame::CommitView;
+    use crate::features::custom_commands::CustomCommandsIntent;
     use crate::git::FileEntry;
     use crate::git::diff::EmojiZwj;
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
@@ -2471,11 +2472,11 @@ mod tests {
         let [Effect::RunCommand { title, .. }] = effects.as_slice() else {
             panic!("expected RunCommand, got {effects:?}");
         };
-        state.update(AppIntent::CommandFinished {
+        state.update(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
             title: title.clone(),
             output: OutputMode::Popup,
             result: Ok("done".into()),
-        });
+        }));
         let rows = draw(&state, 100, 30);
         assert!(contains(&rows, "evil<U+202E>txt"), "{rows:#?}");
         assert!(!contains(&rows, "\u{202E}"), "{rows:#?}");

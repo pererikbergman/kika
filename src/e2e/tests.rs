@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::e2e::harness::Harness;
 use crate::e2e::repo::TestRepo;
+use crate::features::repos::ReposIntent;
 use crate::git::CliRunner;
 use crate::git::fake::{TempDir, git};
 use crate::git::repo_root::resolve_workdir;
@@ -932,10 +933,10 @@ async fn the_recent_list_switches_repositories_and_back_restores_the_view() {
         .await;
     // The harness has no store, so the real load answered with an empty
     // list; this answers the same request with A and B instead.
-    app.intent(AppIntent::RecentLoaded {
+    app.intent(AppIntent::Repos(ReposIntent::Loaded {
         seq: app.state().recent_seq,
         list: vec![a_top.clone(), b.path().to_path_buf()],
-    })
+    }))
     .await;
     app.assert_screen_contains(" Recent repositories ");
     app.press(KeyCode::Enter).await;

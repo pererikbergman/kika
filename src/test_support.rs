@@ -3,18 +3,20 @@
 //! use stays with that feature.
 
 use crate::effect::{Effect, Tag};
+use crate::features::blame::BlameIntent;
 use crate::features::branches::BranchesIntent;
 use crate::features::branches::BranchesTab;
 use crate::features::branches::remotes::RemotesIntent;
 use crate::features::branches::remotes::{RemoteLine, lines};
 use crate::features::branches::tags::TagsIntent;
-use crate::features::commit::CommitEditor;
+use crate::features::commit::{CommitEditor, CommitIntent};
 use crate::features::commits::CommitFilesList;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::reflog::Reflog;
 use crate::features::commits::reflog::ReflogIntent;
 use crate::features::commits::rewrite::RewriteIntent;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
+use crate::features::sync::SyncIntent;
 use crate::filtered_list::{FilteredList, Row};
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
@@ -390,10 +392,10 @@ pub(crate) fn blamed(n: usize, height: u16) -> AppState {
     let lines = (1..=n)
         .map(|i| blame_line(if i == n { &zero } else { OID }, i))
         .collect();
-    state.update(AppIntent::BlameLoaded {
+    state.update(AppIntent::Blame(BlameIntent::Loaded {
         tag,
         result: Ok(lines),
-    });
+    }));
     state
 }
 
@@ -1011,7 +1013,43 @@ pub(crate) fn remote_finished(
     op: RemoteOp,
     result: Result<(), RemoteFailure>,
 ) -> AppIntent {
-    AppIntent::RemoteFinished { tag, op, result }
+    AppIntent::Sync(SyncIntent::RemoteFinished { tag, op, result })
+}
+
+/// The intent that starts `op` by hand: fetch, pull, push, or push again
+/// with the lease. Core builds the sync intent, so tests in other features
+/// need not name it.
+pub(crate) fn remote_intent(op: &RemoteOp) -> AppIntent {
+    AppIntent::Sync(match op {
+        RemoteOp::Fetch => SyncIntent::Fetch,
+        RemoteOp::Pull => SyncIntent::Pull,
+        RemoteOp::Push {
+            force_with_lease: false,
+        } => SyncIntent::Push,
+        RemoteOp::Push {
+            force_with_lease: true,
+        } => SyncIntent::ForcePush,
+        other => panic!("no key starts {other:?}"),
+    })
+}
+
+/// Draw the next frame of the remote operation's spinner, as the tick
+/// does. Core builds the sync intent, so tests in other features need not
+/// name it.
+pub(crate) fn spinner_tick(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Sync(SyncIntent::SpinnerTick))
+}
+
+/// Open the commit popup, as `c` in the Files panel does. Core builds the
+/// commit intent, so tests in other features need not name it.
+pub(crate) fn open_commit(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Commit(CommitIntent::Open))
+}
+
+/// Move the blame cursor down one line. Core builds the blame intent, so
+/// tests in other features need not name it.
+pub(crate) fn next_blame_line(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Blame(BlameIntent::Next))
 }
 
 pub(crate) const PUSH: RemoteOp = RemoteOp::Push {

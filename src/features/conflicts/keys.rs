@@ -4,6 +4,7 @@
 //! places both chunks, so their position there is behaviour.
 
 use super::state::Choice;
+use crate::features::conflicts::ConflictsIntent;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never};
@@ -48,7 +49,7 @@ pub(crate) static CONFLICTS_FILES: &[Binding] = &[
         id: "files.mergetool",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenMergeTool,
+        intent: AppIntent::Conflicts(ConflictsIntent::OpenMergeTool),
         description: "Resolve the selected conflicted file in your merge tool",
         label: "merge tool",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
@@ -66,7 +67,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Conflict,
-        intent: AppIntent::ConflictNext,
+        intent: AppIntent::Conflicts(ConflictsIntent::Next),
         description: "Move to the next conflict",
         label: "",
         bar: false,
@@ -79,7 +80,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Conflict,
-        intent: AppIntent::ConflictPrev,
+        intent: AppIntent::Conflicts(ConflictsIntent::Prev),
         description: "Move to the previous conflict",
         label: "",
         bar: false,
@@ -89,7 +90,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
         id: "conflict.ours",
         keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
         scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Ours),
+        intent: AppIntent::Conflicts(ConflictsIntent::Pick(Choice::Ours)),
         description: "Keep our side of this conflict and write the file",
         label: "ours",
         bar: true,
@@ -99,7 +100,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
         id: "conflict.theirs",
         keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
         scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Theirs),
+        intent: AppIntent::Conflicts(ConflictsIntent::Pick(Choice::Theirs)),
         description: "Keep their side of this conflict and write the file",
         label: "theirs",
         bar: true,
@@ -109,7 +110,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
         id: "conflict.both",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
         scope: KeyScope::Conflict,
-        intent: AppIntent::PickConflict(Choice::Both),
+        intent: AppIntent::Conflicts(ConflictsIntent::Pick(Choice::Both)),
         description: "Keep both sides of this conflict, ours first, and write the file",
         label: "both",
         bar: true,
@@ -119,7 +120,7 @@ pub(crate) static CONFLICTS_KEYS: &[Binding] = &[
         id: "conflict.mergetool",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
         scope: KeyScope::Conflict,
-        intent: AppIntent::OpenMergeTool,
+        intent: AppIntent::Conflicts(ConflictsIntent::OpenMergeTool),
         description: "Resolve this file in your merge tool instead",
         label: "merge tool",
         bar: true,

@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::effect::Tag;
+use crate::features::commit::CommitIntent;
 use crate::features::commit::git::{MessageSource, commit_command};
 use crate::features::commits::copy::git::ordered;
 use crate::features::commits::custom_patch;
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::git::GitRunner;
 use crate::git::path::RepoPath;
@@ -140,14 +142,16 @@ pub fn execute_as(
         HandOff::EditHunk { header, hunk } => AppIntent::HunkEdited {
             result: edit_hunk(&header, &hunk, runner, workdir),
         },
-        HandOff::EditCommitMessage { initial } => AppIntent::CommitMessageEdited {
+        HandOff::EditCommitMessage { initial } => AppIntent::Commit(CommitIntent::MessageEdited {
             result: edit_commit_message(&initial, runner, workdir),
-        },
-        HandOff::RunCommand { title, argv } => AppIntent::CommandFinished {
-            title,
-            output: OutputMode::Terminal,
-            result: run_command(&argv, workdir).map(|()| String::new()),
-        },
+        }),
+        HandOff::RunCommand { title, argv } => {
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished {
+                title,
+                output: OutputMode::Terminal,
+                result: run_command(&argv, workdir).map(|()| String::new()),
+            })
+        }
     }
 }
 
@@ -1136,9 +1140,9 @@ mod tests {
 
         assert_eq!(
             intent,
-            AppIntent::CommitMessageEdited {
+            AppIntent::Commit(CommitIntent::MessageEdited {
                 result: Ok(Some("new subj\n\nnew body".into()))
-            }
+            })
         );
         let before = fs::read_to_string(dir.join("before")).unwrap();
         assert!(
@@ -1173,7 +1177,7 @@ mod tests {
         };
 
         match execute(job, &runner, dir) {
-            AppIntent::CommitMessageEdited { result: Err(e) } => {
+            AppIntent::Commit(CommitIntent::MessageEdited { result: Err(e) }) => {
                 assert!(e.starts_with("The editor exited with"), "{e}")
             }
             other => panic!("expected a failed edit, got {other:?}"),
@@ -1390,11 +1394,11 @@ mod tests {
 
         assert_eq!(
             intent,
-            AppIntent::CommandFinished {
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Show".into(),
                 output: OutputMode::Terminal,
                 result: Ok(String::new()),
-            }
+            })
         );
         let args = fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(args, "a b;$(touch x)\n*\n");
@@ -1415,7 +1419,7 @@ mod tests {
             &FakeRunner::new(),
             tmp.path(),
         ) {
-            AppIntent::CommandFinished { result, .. } => result,
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished { result, .. }) => result,
             other => panic!("expected CommandFinished, got {other:?}"),
         };
         let Err(CommandFailure::Exited(failed)) = result(&["sh", "-c", "exit 3"]) else {
