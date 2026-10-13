@@ -6,7 +6,7 @@
 use super::state::{NO_FORGE, ReviewScreen};
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::{MergeMethod, merge_options};
-use crate::forge::remote::matches;
+use crate::forge::remote::allowed;
 use crate::forge::review::MergeState;
 use crate::forge::{
     CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
@@ -52,10 +52,7 @@ impl AppState {
             .or_else(|| self.review.repo.clone())
             .ok_or(NO_FORGE)?;
         // A repository `[forge.allow]` leaves out is never asked about.
-        let host = matches(&repo, &self.forge.hosts)
-            .filter(|host| host.allows(&repo))
-            .ok_or(NO_FORGE)?
-            .clone();
+        let host = allowed(&repo, &self.forge.hosts).ok_or(NO_FORGE)?.clone();
         self.merge_allowed(&host)?;
         Ok((host, repo))
     }
@@ -151,8 +148,7 @@ impl AppState {
             self.notice = Some(MERGING.into());
             return vec![];
         }
-        let host = matches(&confirm.repo, &self.forge.hosts);
-        if host != Some(&confirm.host) || !confirm.host.allows(&confirm.repo) {
+        if allowed(&confirm.repo, &self.forge.hosts) != Some(&confirm.host) {
             self.notice = Some(NO_FORGE.into());
             return vec![];
         }

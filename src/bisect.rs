@@ -81,7 +81,7 @@ fn selected_commit(state: &AppState) -> Option<CommitId> {
 /// op at a time, a commit to mark, the default terms, and for a mark that
 /// would start a bisect, a repository it can start in.
 pub(crate) fn mark_disabled(state: &AppState, target: Target, mark: BisectMark) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     match target {
@@ -125,7 +125,7 @@ fn start_disabled(state: &AppState) -> Option<Reason> {
 
 /// Why the bisect cannot be reset now.
 pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if !bisecting(state) {
         Some(NO_BISECT.into())
@@ -180,7 +180,7 @@ fn head_skip_disabled(state: &AppState) -> Option<Reason> {
 
 /// Continue: never for a bisect, which goes on by marking.
 pub(crate) fn continue_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_none() && bisect_only(state) {
+    if !state.op_is_running() && bisect_only(state) {
         return Some(MARK_INSTEAD.into());
     }
     crate::keymap::resume_disabled(state)

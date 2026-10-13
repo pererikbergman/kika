@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::github::{Answer, Gh, GhCall, MAX_URL, Refusal, classify, split_include};
-use super::remote::{matches, parse_remote, segment_ok};
+use super::remote::{allowed, matches, parse_remote, segment_ok};
 use super::task::ForgeContext;
 use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use crate::git::GitRunner;
@@ -804,8 +804,8 @@ pub fn resolve(
         Some(repo) => repo.clone(),
         None => read_remote_url(git).and_then(|url| parse_remote(&url))?,
     };
-    let host = matches(&repo, hosts)?.clone();
-    host.allows(&repo).then_some((host, repo))
+    let host = allowed(&repo, hosts)?.clone();
+    Some((host, repo))
 }
 
 /// The remote a pull request's commits may be fetched from: the one
@@ -817,7 +817,7 @@ pub fn fetch_remote(
     hosts: &[ForgeHost],
     repo: &ForgeRepo,
 ) -> Option<RemoteName> {
-    matches(repo, hosts)?.allows(repo).then_some(())?;
+    allowed(repo, hosts)?;
     let (name, url) = read_fetch_remote(git)?;
     let named = parse_remote(&url)?;
     let same = named.host.eq_ignore_ascii_case(&repo.host)
@@ -855,19 +855,9 @@ pub fn run<T>(
     if let Some(until) = limited_until(load.limited, &host, load.now) {
         return (Some(repo), Err(ReviewError::Limited { until }));
     }
-    // As for badge loads: `gh` runs in the cache directory, never the
-    // repository, so it reads no repository's git config.
-    let cwd = ctx
-        .cache_dir
-        .clone()
-        .filter(|dir| super::cache::ensure_dir(dir).is_ok())
-        .unwrap_or_else(std::env::temp_dir);
-    let gh = Gh {
-        runner: ctx.gh.as_ref(),
-        sink: &ctx.sink,
-        host: &host,
-        cwd,
-        now: load.now,
+    // `resolve` applied the same allow gate; this is its answer.
+    let Some(gh) = ctx.gh(&host, &repo, load.now) else {
+        return (None, Err(ReviewError::NoForgeHost));
     };
     let result = fetch(&gh, &repo).map_err(ReviewError::from);
     (Some(repo), result)

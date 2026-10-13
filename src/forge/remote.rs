@@ -41,6 +41,13 @@ pub fn matches<'a>(repo: &ForgeRepo, hosts: &'a [ForgeHost]) -> Option<&'a Forge
     hosts.iter().find(|h| h.as_str() == host)
 }
 
+/// The configured host `repo` is on, when its `[forge.allow]` lets Kika
+/// ask about `repo`: the gate, as a pure answer for the model to decide
+/// what to offer.
+pub fn allowed<'a>(repo: &ForgeRepo, hosts: &'a [ForgeHost]) -> Option<&'a ForgeHost> {
+    matches(repo, hosts).filter(|host| host.allows(repo))
+}
+
 /// `authority` (`[userinfo@]host[:port]`) and `owner/repo[.git]`.
 /// `port` is the one port allowed; `None` allows none.
 fn from_parts(authority: &str, port: Option<&str>, path: &str) -> Option<ForgeRepo> {
@@ -103,6 +110,24 @@ mod tests {
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
+    }
+
+    #[test]
+    fn allowed_is_the_matching_host_only_when_it_lets_the_repo_in() {
+        use super::super::allow::AllowRule;
+        let widgets = repo("github.com", "acme", "widgets").unwrap();
+        let other = ForgeHost::parse("gitlab.example").unwrap();
+        assert_eq!(allowed(&widgets, std::slice::from_ref(&other)), None);
+        let rule = |r: &str| vec![AllowRule::parse(r).unwrap()];
+        let shut = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(rule("someone"));
+        assert_eq!(allowed(&widgets, &[other.clone(), shut]), None);
+        let open = ForgeHost::parse("github.com")
+            .unwrap()
+            .with_allow(rule("acme"));
+        let hosts = [other, open.clone()];
+        assert_eq!(allowed(&widgets, &hosts), Some(&open));
     }
 
     /// Whether `url` parses to a repository on github.com.

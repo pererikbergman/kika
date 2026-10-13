@@ -8,7 +8,7 @@ use std::ffi::OsString;
 
 use crate::clipboard::CopyWhat;
 use crate::effect::Effect;
-use crate::forge::remote::matches;
+use crate::forge::remote::{allowed, matches};
 use crate::forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
 use crate::forge::{
     CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
@@ -301,7 +301,7 @@ impl AppState {
             .filter(|(_, repo)| repo.host.eq_ignore_ascii_case(&head_repo.host))
             // Only the repository `gh` is asked to change must be allowed;
             // the head may be in the user's own, unlisted fork.
-            .filter(|(_, repo)| matches(repo, &self.forge.hosts).is_some_and(|h| h.allows(repo)))
+            .filter(|(_, repo)| allowed(repo, &self.forge.hosts).is_some())
             .collect::<Vec<_>>();
         if targets.is_empty() {
             return Err(NOT_ALLOWED);
@@ -440,7 +440,7 @@ impl AppState {
             self.notice = Some(NO_FORGE.into());
             return vec![];
         };
-        if !host.allows(&target) {
+        if allowed(&target, &self.forge.hosts).is_none() {
             self.notice = Some(NOT_ALLOWED.into());
             return vec![];
         }
