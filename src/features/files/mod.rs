@@ -43,10 +43,11 @@
 //! - `files_visible` and `files_selected_hidden`: core (`model.rs`,
 //!   `keymap.rs`) and a stash test call them;
 //! - `status_unchanged`, `files_range`, `files_range_paths`,
-//!   `RANGE_FILES_CHANGED` and `stream_diff`, the files fields of
-//!   `AppState`, `refresh::Selection`, `src/git/status.rs`,
-//!   the `Effect::LoadStatus` variant, the `StatusLoaded`/`SelectNext`/
-//!   `SelectPrev` intents and their `update()` arms;
+//!   `RANGE_FILES_CHANGED` and `select_from` (the commit and stash closes
+//!   call it), the files fields of `AppState`, `refresh::Selection`,
+//!   `src/git/status.rs`, the `Effect::LoadStatus` variant, the
+//!   `StatusLoaded`/`SelectNext`/`SelectPrev` intents and their
+//!   `update()` arms;
 //! - the `ignore_draft` field, the `OpenIgnore`, `IgnorePatternAnswered`,
 //!   `IgnoreWritten` and `GoToFile` intents, and the prompt kinds and menu
 //!   item that open them;

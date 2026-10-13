@@ -41,8 +41,10 @@
 //!   `files` and `diff_options`, and calls stash's `stash_file_diff` and
 //!   core `select`/`commit_file_diff`. A feature does not call a sibling's
 //!   behaviour, so core keeps it;
-//! - `stream_diff` and `remap`, because `stash`, `review` and
-//!   `custom_patch` call them;
+//! - the pane's one way in and out, `open_diff` and `close_diff` (with
+//!   `DiffPane::open`/`clear` and `DiffStart`, in `diff_pane.rs`),
+//!   because `commits`, `stash` and `review` call them; and `remap`,
+//!   because `custom_patch` calls it;
 //! - `focus_diff`, because it calls `focus_commit_diff` (custom_patch),
 //!   `files_open` (stash) and `open_conflict` (conflicts);
 //! - `toggle_hunk_stage` and `toggle_lines_stage`, because a commit's

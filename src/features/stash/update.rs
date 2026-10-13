@@ -6,7 +6,7 @@ use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use super::keys;
 use super::list::{StashDraft, StashFilesList};
 use super::push::{self, StashSet};
-use crate::diff_pane::DiffPane;
+use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
 use crate::keymap;
@@ -75,12 +75,10 @@ impl AppState {
             return vec![];
         }
         if open.selected_file().is_none() {
-            self.diff = DiffPane::default();
-            return vec![Effect::CancelDiff];
+            return self.close_diff();
         }
         // Another stash's file: start at its top, whatever was shown.
-        self.diff.path = None;
-        self.stash_file_diff()
+        self.stash_file_diff(DiffStart::Top)
     }
 
     pub(crate) fn move_stash_file(&mut self, delta: isize) -> Vec<Effect> {
@@ -90,14 +88,15 @@ impl AppState {
             .as_mut()
             .is_some_and(|open| open.move_by(delta));
         if moved {
-            self.stash_file_diff()
+            self.stash_file_diff(DiffStart::Keep)
         } else {
             vec![]
         }
     }
 
-    /// Stream the selected stash file's diff, if one is selected.
-    pub(crate) fn stash_file_diff(&mut self) -> Vec<Effect> {
+    /// Stream the selected stash file's diff from `start`, if one is
+    /// selected.
+    pub(crate) fn stash_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
         let request = self.stash.open.as_ref().and_then(|open| {
             let file = open.selected_file()?;
             Some(DiffRequest::for_commit_file(
@@ -107,7 +106,7 @@ impl AppState {
             ))
         });
         match request {
-            Some(request) => self.stream_diff(request),
+            Some(request) => self.open_diff(request, start),
             None => vec![],
         }
     }
@@ -118,13 +117,9 @@ impl AppState {
         if self.stash.open.take().is_none() {
             return vec![];
         }
-        self.diff.path = None;
         match self.selected {
-            Some(index) if index < self.files.len() => self.select(index),
-            _ => {
-                self.diff = DiffPane::default();
-                vec![Effect::CancelDiff]
-            }
+            Some(index) if index < self.files.len() => self.select_from(index, DiffStart::Top),
+            _ => self.close_diff(),
         }
     }
 
@@ -335,6 +330,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff_pane::DiffPane;
     use crate::git::FileEntry;
     use crate::git::commit_files::CommitRange;
     use crate::git::path::RepoPath;
