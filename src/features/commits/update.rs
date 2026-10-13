@@ -5,7 +5,7 @@
 use super::git::Tip;
 use super::{CommitFilesList, CommitsTab};
 use crate::diff_mark::{DiffEnd, DiffMark};
-use crate::diff_pane::DiffPane;
+use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::DiffRequest;
@@ -143,12 +143,10 @@ impl AppState {
             return vec![];
         }
         if open.selected_file().is_none() {
-            self.diff = DiffPane::default();
-            return vec![Effect::CancelDiff];
+            return self.close_diff();
         }
         // Another commit's file: start at its top, whatever was shown.
-        self.diff.path = None;
-        self.commit_file_diff()
+        self.commit_file_diff(DiffStart::Top)
     }
 
     pub(crate) fn move_commit_file(&mut self, delta: isize) -> Vec<Effect> {
@@ -158,14 +156,15 @@ impl AppState {
             .as_mut()
             .is_some_and(|open| open.move_by(delta));
         if moved {
-            self.commit_file_diff()
+            self.commit_file_diff(DiffStart::Keep)
         } else {
             vec![]
         }
     }
 
-    /// Stream the selected commit file's diff, if one is selected.
-    pub(crate) fn commit_file_diff(&mut self) -> Vec<Effect> {
+    /// Stream the selected commit file's diff from `start`, if one is
+    /// selected.
+    pub(crate) fn commit_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
         let request = self.commits.open.as_ref().and_then(|open| {
             let file = open.selected_file()?;
             Some(DiffRequest::for_commit_file(
@@ -175,7 +174,7 @@ impl AppState {
             ))
         });
         match request {
-            Some(request) => self.stream_diff(request),
+            Some(request) => self.open_diff(request, start),
             None => vec![],
         }
     }
@@ -186,6 +185,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::diff_pane::DiffPane;
     use crate::features::commits::panel::{PAGE, PREFETCH};
     use crate::git::log::Markers;
     use crate::intent::AppIntent;

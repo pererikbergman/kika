@@ -6,7 +6,7 @@
 
 use super::git::{CommitsHere, FileCounts, PrFileRow};
 use super::state::{ReviewScreen, ReviewState};
-use crate::diff_pane::DiffPane;
+use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::forge::review::ViewedState;
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
@@ -374,16 +374,14 @@ impl AppState {
             }
         }
         if files.rows.is_empty() {
-            self.diff = DiffPane::default();
-            return vec![Effect::CancelDiff];
+            return self.close_diff();
         }
         // Another pull request's file: start at its top.
-        self.diff.path = None;
-        self.review_file_diff()
+        self.review_file_diff(DiffStart::Top)
     }
 
-    /// Stream the selected file's diff, merge base to head.
-    fn review_file_diff(&mut self) -> Vec<Effect> {
+    /// Stream the selected file's diff, merge base to head, from `start`.
+    fn review_file_diff(&mut self, start: DiffStart) -> Vec<Effect> {
         let request = self.review.files.as_ref().and_then(|files| {
             let range = files.range.as_ref()?;
             let row = files.selected()?;
@@ -394,7 +392,7 @@ impl AppState {
             ))
         });
         match request {
-            Some(request) => self.stream_diff(request),
+            Some(request) => self.open_diff(request, start),
             None => vec![],
         }
     }
@@ -412,7 +410,7 @@ impl AppState {
             return vec![];
         }
         files.cursor = next;
-        self.review_file_diff()
+        self.review_file_diff(DiffStart::Keep)
     }
 
     pub(crate) fn toggle_review_files_focus(&mut self) {
@@ -431,8 +429,7 @@ impl AppState {
             return vec![];
         };
         self.review.screen = ReviewScreen::Detail(files.number);
-        self.diff = DiffPane::default();
-        vec![Effect::CancelDiff]
+        self.close_diff()
     }
 
     /// Scroll the review diff, asking for more lines only past those asked.
@@ -461,7 +458,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
-    use crate::diff_pane::DIFF_PREFETCH;
+    use crate::diff_pane::{DIFF_PREFETCH, DiffPane};
     use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
     use crate::git::diff::{DiffChunk, DiffLine, LineKind};
     use crate::git::remotes::RemoteName;
