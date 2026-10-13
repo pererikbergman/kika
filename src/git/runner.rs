@@ -7,6 +7,39 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use super::diff::terminal_safe;
+use super::error::GitError;
+
+/// Which standard env vars the runner adds to a command. A command names its
+/// profile; the runner owns the vars, so the rules live in one place.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EnvProfile {
+    /// The runner adds nothing and the command sets its own vars.
+    /// Transitional: every command gets a named profile, then this goes (#374).
+    #[default]
+    PerCommand,
+    /// Reads and streamed commands: the C locale for parseable output, no
+    /// optional locks so a read never blocks a write, and literal pathspecs.
+    Standard,
+    /// Ops that take `index.lock` and run no hooks: like `Standard`, but they
+    /// take their locks.
+    Write,
+    /// Commands that run hooks or the user's programs, which must see the
+    /// user's own locale and pathspec rules.
+    UserEnv,
+}
+
+/// The vars `profile` adds, the single source of them.
+pub fn profile_env(profile: EnvProfile) -> &'static [(&'static str, &'static str)] {
+    match profile {
+        EnvProfile::Standard => &[
+            ("LC_ALL", "C"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_LITERAL_PATHSPECS", "1"),
+        ],
+        EnvProfile::Write => &[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")],
+        EnvProfile::PerCommand | EnvProfile::UserEnv => &[],
+    }
+}
 
 /// A `git` invocation as argv plus environment, and optionally bytes for its
 /// stdin. Kept as separate arguments so paths and user input can never be
@@ -15,6 +48,7 @@ use super::diff::terminal_safe;
 pub struct GitCommand {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    env_profile: EnvProfile,
     stdin: Option<Vec<u8>>,
     // Only unix can take the terminal away.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -26,6 +60,7 @@ impl GitCommand {
         Self {
             args: vec![subcommand.into()],
             env: Vec::new(),
+            env_profile: EnvProfile::PerCommand,
             stdin: None,
             no_terminal: false,
         }
@@ -38,6 +73,29 @@ impl GitCommand {
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Run with the [`EnvProfile::Standard`] vars.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn standard_env(self) -> Self {
+        self.with_profile(EnvProfile::Standard)
+    }
+
+    /// Run with the [`EnvProfile::Write`] vars.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn write_env(self) -> Self {
+        self.with_profile(EnvProfile::Write)
+    }
+
+    /// Run in the user's own env, see [`EnvProfile::UserEnv`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn user_env(self) -> Self {
+        self.with_profile(EnvProfile::UserEnv)
+    }
+
+    fn with_profile(mut self, profile: EnvProfile) -> Self {
+        self.env_profile = profile;
         self
     }
 
@@ -80,8 +138,26 @@ impl GitCommand {
             .map_or(OsStr::new(""), OsString::as_os_str)
     }
 
+    /// Only the vars the command set itself, not its profile's.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn envs(&self) -> &[(OsString, OsString)] {
         &self.env
+    }
+
+    /// Which standard vars the runner adds, for tests of a command's builder.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn env_profile(&self) -> EnvProfile {
+        self.env_profile
+    }
+
+    /// Everything the command adds to git's env: its profile's vars, then
+    /// its own, which come last so they win.
+    pub fn process_env(&self) -> Vec<(OsString, OsString)> {
+        profile_env(self.env_profile)
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .chain(self.env.iter().cloned())
+            .collect()
     }
 
     /// The bytes for stdin, if any; runners close stdin otherwise.
@@ -137,6 +213,19 @@ pub trait GitRunner: Send + Sync {
     /// Run later commands in `dir` instead, such as a submodule's top
     /// level. Commands already started keep theirs.
     fn set_workdir(&self, _dir: PathBuf) {}
+
+    /// Run `cmd` and fail unless git succeeded. The error's message is
+    /// already safe to draw, with URL credentials removed. Callers move
+    /// here from the free [`run_checked`] in #372/#373.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn run_checked(&self, cmd: &GitCommand) -> Result<GitOutput, GitError> {
+        let output = self.run(cmd).map_err(|e| GitError::io(&e))?;
+        if output.success {
+            Ok(output)
+        } else {
+            Err(GitError::failed(cmd, &output))
+        }
+    }
 }
 
 /// A running `git` process: its stdout pipe, plus a handle to kill or reap it.
@@ -223,7 +312,7 @@ impl CliRunner {
             .current_dir(&*self.workdir.read().unwrap_or_else(|e| e.into_inner()))
             .envs(self.env.iter().map(|(k, v)| (k, v)))
             .args(cmd.args())
-            .envs(cmd.envs().iter().map(|(k, v)| (k, v)))
+            .envs(cmd.process_env())
             .stdin(Stdio::null());
         Ok(command)
     }
@@ -530,6 +619,169 @@ mod tests {
             .filter(|(k, _)| *k == OsStr::new(key))
             .last()
             .map(|(_, v)| v.map(OsStr::to_os_string))
+    }
+
+    const PROFILE_KEYS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_PATHSPECS"];
+
+    /// `cmd` with each profile, the same argv and explicit env otherwise.
+    fn every_profile(cmd: &GitCommand) -> [GitCommand; 4] {
+        [
+            cmd.clone(),
+            cmd.clone().standard_env(),
+            cmd.clone().write_env(),
+            cmd.clone().user_env(),
+        ]
+    }
+
+    #[test]
+    fn the_runner_sets_exactly_the_vars_of_the_command_s_profile() {
+        let runner = CliRunner::new("/r");
+        for cmd in every_profile(&GitCommand::new("status")) {
+            let process = runner.command(&cmd).unwrap();
+            let listed = profile_env(cmd.env_profile());
+            for key in PROFILE_KEYS {
+                let expected = listed
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| Some(OsString::from(v)));
+                assert_eq!(env_of(&process, key), expected, "{cmd:?} {key}");
+            }
+        }
+        assert_eq!(
+            profile_env(EnvProfile::Standard),
+            [
+                ("LC_ALL", "C"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_LITERAL_PATHSPECS", "1")
+            ]
+        );
+        assert_eq!(
+            profile_env(EnvProfile::Write),
+            [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")]
+        );
+        assert!(profile_env(EnvProfile::UserEnv).is_empty());
+        assert!(profile_env(EnvProfile::PerCommand).is_empty());
+        assert_eq!(
+            GitCommand::new("status").env_profile(),
+            EnvProfile::PerCommand
+        );
+    }
+
+    #[test]
+    fn a_command_s_own_var_overrides_its_profile() {
+        let runner = CliRunner::new("/r");
+        let cmd = GitCommand::new("status")
+            .env("LC_ALL", "en_US.UTF-8")
+            .standard_env();
+
+        let process = runner.command(&cmd).unwrap();
+
+        assert_eq!(env_of(&process, "LC_ALL"), Some(Some("en_US.UTF-8".into())));
+        assert_eq!(
+            env_of(&process, "GIT_OPTIONAL_LOCKS"),
+            Some(Some("0".into()))
+        );
+        // `envs` still lists only what the command set itself.
+        assert_eq!(cmd.envs(), [("LC_ALL".into(), "en_US.UTF-8".into())]);
+    }
+
+    /// The profile reaches git itself: literal pathspecs turn `*.rs` from a
+    /// glob into a file name.
+    #[cfg(unix)]
+    #[test]
+    fn the_standard_profile_makes_git_read_pathspecs_literally() {
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("profile-env");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::write(dir.join("*.rs"), "glob\n").unwrap();
+        std::fs::write(dir.join("a.rs"), "a\n").unwrap();
+        git(dir, &["add", "-A"]);
+        let runner = CliRunner::isolated(dir).with_env("GIT_LITERAL_PATHSPECS", "0");
+        let ls = GitCommand::new("ls-files").arg("--").arg("*.rs");
+
+        let literal = runner.run(&ls.clone().standard_env()).unwrap();
+        let glob = runner.run(&ls).unwrap();
+
+        assert_eq!(literal.stdout, b"*.rs\n");
+        assert_eq!(glob.stdout, b"*.rs\na.rs\n");
+    }
+
+    /// The fake records the env the real runner would set, whichever way
+    /// the command is run.
+    #[test]
+    fn the_fake_records_the_env_the_real_runner_sets() {
+        use crate::git::fake::{FakeChild, FakeRunner, ok};
+        use std::collections::BTreeMap;
+
+        let real = CliRunner::new("/r");
+        let base = GitCommand::new("status").env("GIT_LITERAL_PATHSPECS", "0");
+        for cmd in every_profile(&base) {
+            let fake = FakeRunner::new()
+                .expect(&["status"], ok(b""))
+                .expect_spawn(&["status"], FakeChild::lines(0))
+                .expect_attached(&["status"], true);
+            fake.run(&cmd).unwrap();
+            fake.spawn(&cmd).unwrap();
+            fake.run_attached(&cmd).unwrap();
+            fake.assert_done();
+
+            let process = real.command(&cmd).unwrap();
+            let set: BTreeMap<_, _> = process
+                .get_envs()
+                .filter_map(|(k, v)| Some((k.to_os_string(), v?.to_os_string())))
+                .collect();
+            let recorded = fake.process_envs();
+            assert_eq!(recorded.len(), 3, "{cmd:?}");
+            for env in recorded {
+                let env: BTreeMap<_, _> = env.into_iter().collect();
+                assert_eq!(env, set, "{cmd:?}");
+            }
+            assert!(fake.envs().iter().all(|env| env == base.envs()), "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn a_checked_run_returns_a_typed_sanitised_error() {
+        use crate::git::fake::{FakeRunner, fail, ok};
+
+        let runner = FakeRunner::new()
+            .expect(
+                &["fetch"],
+                fail("fatal: https://u:tok@h/r \x1b[2J refused\n"),
+            )
+            .expect(&["fetch"], fail(""))
+            .expect(&["fetch"], ok(b"done"));
+        let fetch = GitCommand::new("fetch");
+
+        let loud = runner.run_checked(&fetch).unwrap_err();
+        let silent = runner.run_checked(&fetch).unwrap_err();
+        let done = runner.run_checked(&fetch).unwrap();
+
+        assert!(matches!(loud, GitError::Failed { .. }));
+        let text = loud.to_string();
+        assert!(!text.contains("tok") && !text.contains("u:"), "{text}");
+        assert!(!text.contains('\x1b'), "{text}");
+        assert_eq!(silent.to_string(), "git fetch failed");
+        assert_eq!(done.stdout, b"done");
+    }
+
+    #[test]
+    fn a_checked_run_that_cannot_start_git_is_an_io_error() {
+        struct Broken;
+        impl GitRunner for Broken {
+            fn run(&self, _: &GitCommand) -> io::Result<GitOutput> {
+                Err(io::Error::other("no git at https://u:tok@h"))
+            }
+            fn spawn(&self, _: &GitCommand) -> io::Result<GitChild> {
+                Err(io::ErrorKind::Unsupported.into())
+            }
+        }
+
+        let error = Broken.run_checked(&GitCommand::new("status")).unwrap_err();
+
+        assert_eq!(error, GitError::Io("no git at https://h".into()));
     }
 
     #[test]
