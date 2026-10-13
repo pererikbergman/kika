@@ -13,7 +13,7 @@ use crate::features::stash::StashIntent;
 use crate::git::GitRunner;
 use crate::intent::AppIntent;
 
-/// Read the stash list and report it as `StashesLoaded`.
+/// Read the stash list and report it as `StashIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
@@ -24,7 +24,7 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
     );
 }
 
-/// List `entry`'s files and report them as `StashFilesLoaded`.
+/// List `entry`'s files and report them as `StashIntent::FilesLoaded`.
 pub(crate) fn load_files(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

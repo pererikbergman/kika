@@ -15,7 +15,7 @@ use crate::git::GitRunner;
 use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
 
-/// Report `DiffSlow` after [`DIFF_LOADING_DELAY`], so fast loads never
+/// Report `DiffIntent::Slow` after [`DIFF_LOADING_DELAY`], so fast loads never
 /// flash "Loading…".
 pub(crate) fn loading_delay(tx: UnboundedSender<AppIntent>, tag: Tag) {
     tokio::spawn(async move {
@@ -25,7 +25,7 @@ pub(crate) fn loading_delay(tx: UnboundedSender<AppIntent>, tag: Tag) {
 }
 
 /// Read the patch `request` names off the event loop and report it as
-/// `PatchLoaded`.
+/// `DiffIntent::PatchLoaded`.
 pub(crate) fn load_patch(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

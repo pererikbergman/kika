@@ -212,7 +212,7 @@ pub(crate) fn line(text: &str) -> DiffLine {
     }
 }
 
-/// A `DiffLoaded` chunk of `n` lines for `tag`, each naming its seq.
+/// A `DiffIntent::Loaded` chunk of `n` lines for `tag`, each naming its seq.
 pub(crate) fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
     diff_chunk(
         tag,

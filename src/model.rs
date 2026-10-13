@@ -924,7 +924,7 @@ impl AppState {
     /// questions whose binding sends `ConfirmYes` (abort, bisect reset,
     /// autosquash, custom patch and drop range). Every other question
     /// answers only to its own intent (such as
-    /// `BranchesIntent::ConfirmDelete` or `ConfirmCreatePullRequest`), so
+    /// `BranchesIntent::ConfirmDelete` or `PullRequestsIntent::ConfirmCreate`), so
     /// yes here keeps it open.
     fn answer_confirm_question(&mut self, scope: KeyScope, yes: bool) -> Vec<Effect> {
         if !yes {

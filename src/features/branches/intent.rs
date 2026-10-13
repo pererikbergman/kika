@@ -36,9 +36,9 @@ pub(crate) enum BranchesIntent {
     Rename,
     /// Ask before deleting the selected branch.
     Delete,
-    /// The new branch's name, typed into the `NewBranch` prompt.
+    /// The new branch's name, typed into the `PromptKind::NewBranch` prompt.
     CreateNamed(String),
-    /// The new name, typed into the `RenameBranch` prompt.
+    /// The new name, typed into the `PromptKind::RenameBranch` prompt.
     RenameTo(String),
     /// Delete the branch the open question names: plainly, or with
     /// `force` when its commits are not merged.
@@ -47,7 +47,8 @@ pub(crate) enum BranchesIntent {
     },
     /// Ask which remote branch the selected local branch should track.
     SetUpstream,
-    /// The upstream, as `remote/branch`, typed into the `SetUpstream` prompt.
+    /// The upstream, as `remote/branch`, typed into the
+    /// `PromptKind::SetUpstream` prompt.
     SetUpstreamTo(String),
     /// Stop the selected local branch tracking its upstream.
     UnsetUpstream,
