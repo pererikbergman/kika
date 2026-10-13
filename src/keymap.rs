@@ -1436,7 +1436,7 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
                 .commits
                 .open
                 .as_ref()
-                .is_some_and(CommitFilesList::selected_hidden),
+                .is_some_and(|open| open.list.selected_hidden()),
             false,
         ),
         _ => return None,
@@ -4245,7 +4245,7 @@ mod tests {
             path: "src/lib.rs".into(),
             orig_path: None,
         };
-        open.loaded(1, Ok(vec![file]));
+        load_list(&mut open.list, Ok(vec![file]));
         state.commits.open = Some(open);
         assert_eq!(state.panel_focus(), KeyScope::CommitFiles);
         assert_eq!(patch_file_disabled(&state), None);
@@ -4256,6 +4256,7 @@ mod tests {
             .open
             .as_mut()
             .unwrap()
+            .list
             .set_filter("zzz".into());
         assert_eq!(
             patch_file_disabled(&state).as_deref(),

@@ -66,13 +66,10 @@ impl AppState {
     ) -> Vec<Effect> {
         // Every user effect reports back once, stale or not.
         self.user_done(tag);
-        if tag.generation != self.generation {
-            return vec![];
-        }
         let Some(open) = &mut self.stash.open else {
             return vec![];
         };
-        if !open.loaded(tag.seq, result) {
+        if !open.list.loaded(tag, self.generation, result) {
             return vec![];
         }
         if open.selected_file().is_none() {
@@ -87,7 +84,7 @@ impl AppState {
             .stash
             .open
             .as_mut()
-            .is_some_and(|open| open.move_by(delta));
+            .is_some_and(|open| open.list.move_by(delta));
         if moved {
             self.stash_file_diff(DiffStart::Keep)
         } else {
@@ -499,7 +496,7 @@ mod tests {
         });
         assert_eq!(effects, vec![]);
         assert_eq!(state.busy_count(), busy - 1);
-        assert!(!state.stash.open.as_ref().unwrap().loaded);
+        assert!(!state.stash.open.as_ref().unwrap().list.loaded);
 
         for result in [Ok(vec![]), Err("bad object".to_string())] {
             let mut state = on_stash_one();

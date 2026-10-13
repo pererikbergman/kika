@@ -84,7 +84,7 @@ impl AppState {
             if let Some(list) = self.worktree_list() {
                 self.input = Some(ListInput {
                     target: InputTarget::WorktreesFilter,
-                    line: LineInput::with_text(&list.filter),
+                    line: LineInput::with_text(&list.list.filter),
                 });
             }
             return;
@@ -107,9 +107,9 @@ impl AppState {
                 &self.branches.remotes.list.filter,
             ),
             KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
-            KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.filter),
+            KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.list.filter),
             KeyScope::CommitFiles => match &self.commits.open {
-                Some(open) => (InputTarget::CommitFilesFilter, &open.filter),
+                Some(open) => (InputTarget::CommitFilesFilter, &open.list.filter),
                 None => return,
             },
             KeyScope::Stash => (InputTarget::StashFilter, &self.stash.list.filter),
@@ -159,15 +159,17 @@ impl AppState {
                 return self.apply_branches_filter(input.target, text);
             }
             // A reflog row drives nothing, so a moved cursor loads nothing.
-            InputTarget::ReflogFilter => self.commits.reflog.set_filter(text),
+            InputTarget::ReflogFilter => {
+                self.commits.reflog.list.set_filter(text);
+            }
             // Only matched; the file the cursor moved to is loaded by its
             // own path, as a step would.
             InputTarget::CommitFilesFilter => {
-                let moved = self
-                    .commits
-                    .open
-                    .as_mut()
-                    .is_some_and(|open| open.set_filter(text));
+                let moved = self.commits.open.as_mut().is_some_and(|open| {
+                    let was = open.list.selected;
+                    open.list.set_filter(text);
+                    open.list.selected != was
+                });
                 if moved {
                     return self.commit_file_diff(DiffStart::Keep);
                 }
@@ -205,8 +207,7 @@ impl AppState {
             }
             InputTarget::WorktreesFilter => {
                 if let Some(list) = self.worktree_list_mut() {
-                    list.filter = text;
-                    list.reconcile();
+                    list.list.set_filter(text);
                 }
             }
             InputTarget::CommandLogFilter => {
@@ -320,9 +321,9 @@ impl AppState {
         }
         if self.key_focus() == KeyScope::Worktrees {
             if let Some(list) = self.worktree_list_mut()
-                && !list.filter.is_empty()
+                && !list.list.filter.is_empty()
             {
-                list.filter.clear();
+                list.list.set_filter(String::new());
                 return vec![];
             }
             return self.update(AppIntent::PopPopup);
@@ -347,7 +348,7 @@ impl AppState {
                 branches.tags.range_anchor.take().is_some(),
                 &mut branches.tags.filter,
             ),
-            KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
+            KeyScope::Reflog => (false, &mut self.commits.reflog.list.filter),
             KeyScope::Stash => (
                 self.stash.list.range_anchor.take().is_some(),
                 &mut self.stash.list.filter,
@@ -441,9 +442,9 @@ impl AppState {
         // The cursor stays: the filter showed it, or there were no rows.
         if scope == KeyScope::CommitFiles
             && let Some(open) = &mut self.commits.open
-            && !open.filter.is_empty()
+            && !open.list.filter.is_empty()
         {
-            open.filter.clear();
+            open.list.filter.clear();
             return vec![];
         }
         let cleared = match (scope, &mut self.focus) {
@@ -840,10 +841,10 @@ mod tests {
         preview_loaded(&mut state, tag);
         search_the_preview_for_foo(&mut state);
         type_text(&mut state, "/lib\n");
-        assert_eq!(open_files(&state).filter, "lib");
+        assert_eq!(open_files(&state).list.filter, "lib");
 
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(open_files(&state).filter, "", "the filter goes first");
+        assert_eq!(open_files(&state).list.filter, "", "the filter goes first");
         assert!(state.diff.search.is_some(), "the search stays");
         assert_eq!(state.key_focus(), KeyScope::CommitFiles);
         assert!(!state.should_quit);

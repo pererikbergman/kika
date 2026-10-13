@@ -18,8 +18,12 @@ use crate::popup::Popup;
 /// with handlers.
 pub(crate) fn update(state: &mut AppState, intent: ReflogIntent) -> Vec<Effect> {
     match intent {
-        ReflogIntent::Next => state.commits.reflog.move_by(1),
-        ReflogIntent::Prev => state.commits.reflog.move_by(-1),
+        ReflogIntent::Next => {
+            state.commits.reflog.list.move_by(1);
+        }
+        ReflogIntent::Prev => {
+            state.commits.reflog.list.move_by(-1);
+        }
         ReflogIntent::Loaded { tag, result } => return state.reflog_loaded(tag, result),
         ReflogIntent::Undo => return state.travel(undo::Direction::Undo),
         ReflogIntent::Redo => return state.travel(undo::Direction::Redo),
@@ -44,15 +48,11 @@ impl AppState {
             return vec![];
         }
         if self.head_unborn() {
-            let reflog = &mut self.commits.reflog;
-            reflog.data = Some(Reflog::default());
-            reflog.error = None;
-            reflog.seq = None;
-            reflog.selected = 0;
+            self.commits.reflog.unborn();
             return vec![];
         }
         let seq = self.take_seq();
-        self.commits.reflog.seq = Some(seq);
+        self.commits.reflog.list.begin(seq);
         vec![Effect::LoadReflog {
             tag: self.effect_tag(seq, user),
         }]
@@ -67,18 +67,15 @@ impl AppState {
         result: Result<Reflog, String>,
     ) -> Vec<Effect> {
         self.user_done(tag);
-        if tag.generation != self.generation {
-            return vec![];
-        }
         let failed = result.is_err();
-        if !self.commits.reflog.loaded(tag.seq, result) {
+        if !self.commits.reflog.read(tag, self.generation, result) {
             return vec![];
         }
         let Some(direction) = self.commits.reflog.planning.take() else {
             return vec![];
         };
         if failed {
-            match self.commits.reflog.error.clone() {
+            match self.commits.reflog.list.error.clone() {
                 Some(message) => self.set_op_error(message),
                 None => self.clear_op_error(),
             }
@@ -118,7 +115,7 @@ impl AppState {
             self.notice = Some(reason);
             return;
         }
-        let Some(reflog) = &self.commits.reflog.data else {
+        let Some(reflog) = self.commits.reflog.reflog() else {
             return;
         };
         // The branch as read with the reflog, not as the last status saw it.
@@ -132,7 +129,7 @@ impl AppState {
             branches: &self.branches.list.rows,
             dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
         };
-        match undo::plan(direction, reflog, &ctx) {
+        match undo::plan(direction, &reflog, &ctx) {
             Ok(plan) => self.popups.push(Popup::Question(travel_question(
                 plan.direction.title(),
                 &plan.preview,
@@ -232,6 +229,39 @@ mod tests {
         );
         assert_eq!(state.key_focus(), KeyScope::Travel);
         assert_eq!(state.held_seq(), None);
+    }
+
+    #[test]
+    fn a_stale_or_other_repository_read_is_dropped_but_still_lowers_busy() {
+        let mut state = undoable();
+        let tag = reflog_tag(&press_with(&mut state, 'z', KeyModifiers::CONTROL));
+        let busy = state.busy_count();
+        for stale in [
+            Tag {
+                seq: tag.seq + 100,
+                ..tag
+            },
+            Tag {
+                generation: tag.generation + 1,
+                ..tag
+            },
+        ] {
+            state.update(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::Loaded {
+                    tag: stale,
+                    result: Ok(commit_reflog('c')),
+                },
+            )));
+        }
+        assert_eq!(state.busy_count(), busy - 2);
+        assert!(!state.commits.reflog.list.loaded);
+        assert_eq!(
+            state.commits.reflog.list.seq,
+            Some(tag.seq),
+            "still in flight"
+        );
+        assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
+        assert_eq!(state.popups, []);
     }
 
     #[test]
@@ -389,9 +419,9 @@ mod tests {
         press_char(&mut state, 'j');
         press(&mut state, KeyCode::Down);
         press(&mut state, KeyCode::Down);
-        assert_eq!(state.commits.reflog.selected, 2);
+        assert_eq!(state.commits.reflog.list.selected, 2);
         press_char(&mut state, 'k');
-        assert_eq!(state.commits.reflog.selected, 1);
+        assert_eq!(state.commits.reflog.list.selected, 1);
         assert_eq!(state.popups, [], "the tab acts on no row");
 
         assert_eq!(press_char(&mut state, '['), vec![]);
@@ -422,16 +452,16 @@ mod tests {
         assert_eq!(input.target.prompt(), "/");
         assert_eq!(state.key_focus(), KeyScope::Input);
         type_text(&mut state, "bbb");
-        assert_eq!(state.commits.reflog.visible(), [1], "by short id");
-        assert_eq!(state.commits.reflog.selected, 1, "the cursor follows");
+        assert_eq!(state.commits.reflog.list.visible(), [1], "by short id");
+        assert_eq!(state.commits.reflog.list.selected, 1, "the cursor follows");
         for _ in 0..3 {
             press(&mut state, KeyCode::Backspace);
         }
         type_text(&mut state, "root");
-        assert_eq!(state.commits.reflog.visible(), [2], "by message");
+        assert_eq!(state.commits.reflog.list.visible(), [2], "by message");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.input, None);
-        assert_eq!(state.commits.reflog.filter, "root");
+        assert_eq!(state.commits.reflog.list.filter, "root");
         assert_eq!(state.key_focus(), KeyScope::Reflog);
         // `/` again starts from the kept text.
         press_char(&mut state, '/');
@@ -447,7 +477,7 @@ mod tests {
         press_char(&mut state, '/');
         type_text(&mut state, "first\n");
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(state.commits.reflog.filter, "");
+        assert_eq!(state.commits.reflog.list.filter, "");
         assert!(!state.should_quit);
         press(&mut state, KeyCode::Esc);
         assert!(state.should_quit);
@@ -461,7 +491,7 @@ mod tests {
             press_char(&mut state, 'z');
         }
         assert_eq!(
-            state.commits.reflog.filter.chars().count(),
+            state.commits.reflog.list.filter.chars().count(),
             list_filter::MAX_INPUT
         );
         assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
@@ -482,13 +512,13 @@ mod tests {
         assert_eq!(state.input.as_ref().unwrap().line.text, "");
         type_text(&mut state, "c1\n");
         assert_eq!(state.commits.filter, "c1");
-        assert_eq!(state.commits.reflog.filter, "root");
+        assert_eq!(state.commits.reflog.list.filter, "root");
         press_char(&mut state, ']');
-        assert_eq!(state.commits.reflog.filter, "root");
+        assert_eq!(state.commits.reflog.list.filter, "root");
         assert_eq!(state.commits.filter, "c1");
         // Esc in the Reflog tab clears only its own.
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.commits.reflog.filter, "");
+        assert_eq!(state.commits.reflog.list.filter, "");
         assert_eq!(state.commits.filter, "c1");
     }
 
@@ -505,8 +535,8 @@ mod tests {
             effects.extend(press_char(&mut state, c));
         }
         effects.extend(press(&mut state, KeyCode::Enter));
-        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
-        assert!(state.commits.reflog.visible().is_empty());
+        assert!(state.commits.reflog.list.filter.starts_with("--force -D x"));
+        assert!(state.commits.reflog.list.visible().is_empty());
         assert!(!leaks(&effects), "{effects:?}");
 
         // A refresh asks git exactly what it asks with no filter set.
@@ -557,7 +587,7 @@ mod tests {
             },
         )));
         assert!(!leaks(&loaded), "{loaded:?}");
-        assert!(state.commits.reflog.filter.starts_with("--force -D x"));
+        assert!(state.commits.reflog.list.filter.starts_with("--force -D x"));
     }
 
     #[test]
@@ -600,7 +630,7 @@ mod tests {
             state.update(AppIntent::Commits(CommitsIntent::SwitchTab)),
             vec![]
         );
-        assert_eq!(state.commits.reflog.data, Some(Reflog::default()));
+        assert_eq!(state.commits.reflog.reflog(), Some(Reflog::default()));
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::Reflog(
                 ReflogIntent::Undo

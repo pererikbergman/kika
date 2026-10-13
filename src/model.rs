@@ -1453,8 +1453,7 @@ impl AppState {
             Effect::LoadBranchTips { tag: tips },
         ];
         // The reflog moves with the log, once it has been read at all.
-        let reflog = &self.commits.reflog;
-        if reflog.data.is_some() || reflog.error.is_some() {
+        if self.commits.reflog.list.loaded {
             effects.extend(self.load_reflog(false));
         }
         effects
@@ -5004,15 +5003,19 @@ mod tests {
         assert_eq!(input.target.prompt(), "/");
         assert_eq!(state.key_focus(), KeyScope::Input);
         type_text(&mut state, "src");
-        assert_eq!(open_files(&state).visible(), [0, 1]);
+        assert_eq!(open_files(&state).list.visible(), [0, 1]);
         for _ in 0..3 {
             press(&mut state, KeyCode::Backspace);
         }
         type_text(&mut state, "legacy");
-        assert_eq!(open_files(&state).visible(), [1], "a rename's old name");
+        assert_eq!(
+            open_files(&state).list.visible(),
+            [1],
+            "a rename's old name"
+        );
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.input, None);
-        assert_eq!(open_files(&state).filter, "legacy");
+        assert_eq!(open_files(&state).list.filter, "legacy");
         assert_eq!(state.key_focus(), KeyScope::CommitFiles);
         // `/` again starts from the kept text.
         press_char(&mut state, '/');
@@ -5025,7 +5028,7 @@ mod tests {
         press_char(&mut state, '/');
         // No other path has an m.
         let effects = typed(&mut state, "md");
-        assert_eq!(open_files(&state).selected, 2);
+        assert_eq!(open_files(&state).list.selected, 2);
         let request = diff_request(&effects);
         assert_eq!(request.path, "docs/guide.md".into());
         assert_eq!(request.commit, Some(range_of("c5", "c6")));
@@ -5033,15 +5036,15 @@ mod tests {
         assert_eq!(typed(&mut state, " guide"), vec![]);
         // Hiding every row leaves the cursor and loads nothing.
         assert_eq!(typed(&mut state, "zzz"), vec![]);
-        assert_eq!(open_files(&state).selected, 2);
-        assert!(open_files(&state).visible().is_empty());
+        assert_eq!(open_files(&state).list.selected, 2);
+        assert!(open_files(&state).list.visible().is_empty());
     }
 
     #[test]
     fn j_and_k_in_a_commits_files_step_over_hidden_rows() {
         let mut state = commit_files_open();
         type_text(&mut state, "/rs\n"); // lib.rs and the rename
-        assert_eq!(open_files(&state).visible(), [0, 1]);
+        assert_eq!(open_files(&state).list.visible(), [0, 1]);
         let request = diff_request(&press_char(&mut state, 'j'));
         assert_eq!(request.path, "src/new.rs".into());
         assert_eq!(
@@ -5049,22 +5052,22 @@ mod tests {
             vec![],
             "stops at the last shown"
         );
-        assert_eq!(open_files(&state).selected, 1);
+        assert_eq!(open_files(&state).list.selected, 1);
         press_char(&mut state, 'k');
-        assert_eq!(open_files(&state).selected, 0);
+        assert_eq!(open_files(&state).list.selected, 0);
 
         // `/` starts from `rs`: `d` in its place shows the rename and the doc.
         press_char(&mut state, '/');
         press(&mut state, KeyCode::Backspace);
         press(&mut state, KeyCode::Backspace);
         type_text(&mut state, "d\n");
-        assert_eq!(open_files(&state).visible(), [1, 2]);
-        assert_eq!(open_files(&state).selected, 1);
+        assert_eq!(open_files(&state).list.visible(), [1, 2]);
+        assert_eq!(open_files(&state).list.selected, 1);
         press_char(&mut state, 'j');
-        assert_eq!(open_files(&state).selected, 2);
+        assert_eq!(open_files(&state).list.selected, 2);
         press_char(&mut state, 'k');
         press_char(&mut state, 'k');
-        assert_eq!(open_files(&state).selected, 1, "row 0 is hidden");
+        assert_eq!(open_files(&state).list.selected, 1, "row 0 is hidden");
     }
 
     #[test]
@@ -5075,7 +5078,7 @@ mod tests {
             press_char(&mut state, 'z');
         }
         assert_eq!(
-            open_files(&state).filter.chars().count(),
+            open_files(&state).list.filter.chars().count(),
             list_filter::MAX_INPUT
         );
         assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
@@ -5090,14 +5093,14 @@ mod tests {
         press_char(&mut state, 'j');
         let (_, range) = files_load(&press(&mut state, KeyCode::Enter));
         assert_eq!(range, range_of("c6", "c7"));
-        assert_eq!(open_files(&state).filter, "");
+        assert_eq!(open_files(&state).list.filter, "");
     }
 
     #[test]
     fn a_hidden_commit_file_is_neither_picked_nor_focused() {
         let mut state = commit_files_open();
         type_text(&mut state, "/zzz\n");
-        assert!(open_files(&state).selected_hidden());
+        assert!(open_files(&state).list.selected_hidden());
         assert_eq!(
             crate::features::commits::custom_patch::keys::patch_file_disabled(&state).as_deref(),
             Some(crate::keymap::FILTER_HIDES_ROW)
@@ -5130,7 +5133,7 @@ mod tests {
             effects.extend(press_char(&mut state, c));
         }
         effects.extend(press(&mut state, KeyCode::Enter));
-        let kept = open_files(&state).filter.clone();
+        let kept = open_files(&state).list.filter.clone();
         assert!(kept.starts_with("--output=x -- "), "{kept:?}");
         assert!(kept.ends_with('\u{202e}'), "{kept:?}");
         for key in ['j', 'k', 'l'] {
