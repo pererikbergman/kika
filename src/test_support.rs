@@ -1456,15 +1456,74 @@ pub(crate) mod screen {
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::status::{BranchStatus, EntryKind, Head};
     use crate::hunk_view::HunkView;
-    use crate::layout::SidePanel;
+    use crate::layout::{Panel, SidePanel, workspace_layout};
     use crate::model::{AppState, Context, Focus};
-    use crate::view::{buffer_rows, render};
+    use crate::view::{buffer_rows, render, screen_layout, width_of};
+    use ratatui::layout::Rect;
 
     /// Draw into a `width` x `height` buffer and return its rows as text.
     pub(crate) fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(state, frame)).unwrap();
         buffer_rows(terminal.backend().buffer())
+    }
+
+    /// Draw a workspace whose Files panel is exactly `panel` columns wide and
+    /// return only that panel's columns of each row.
+    pub(crate) fn draw_files(state: &AppState, panel: u16, height: u16) -> Vec<String> {
+        let width = (panel..panel * 4)
+            .find(|&w| {
+                let [main, _] = screen_layout(Rect::new(0, 0, w, height));
+                let layout =
+                    workspace_layout(main, state.focus.panel(), state.expanded, state.screen_mode);
+                layout.rect(Panel::Side(SidePanel::Files)).map(|r| r.width) == Some(panel)
+            })
+            .expect("a total width for this panel width");
+        thin(draw(state, width, height))
+            .into_iter()
+            .map(|row| {
+                let mut used = 0;
+                row.chars()
+                    .take_while(|c| {
+                        used += width_of(c.encode_utf8(&mut [0; 4])).max(1);
+                        used <= usize::from(panel)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(crate) fn renamed(orig: &str, path: &str) -> FileEntry {
+        FileEntry {
+            path: path.into(),
+            orig_path: Some(orig.into()),
+            index: 'R',
+            worktree: '.',
+            kind: EntryKind::Renamed,
+        }
+    }
+
+    /// The Files panel's title row and the row below it.
+    pub(crate) fn files_rows(rows: &[String]) -> (usize, &String) {
+        let title = rows
+            .iter()
+            .position(|row| row.contains(" Files "))
+            .unwrap_or_else(|| panic!("no Files panel: {rows:#?}"));
+        (title, &rows[title + 1])
+    }
+
+    pub(crate) fn cell_at<'a>(
+        buffer: &'a ratatui::buffer::Buffer,
+        needle: &str,
+    ) -> &'a ratatui::buffer::Cell {
+        let rows = buffer_rows(buffer);
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")));
+        let x = row[..row.find(needle).unwrap()].chars().count();
+        &buffer[(x as u16, y as u16)]
     }
 
     pub(crate) fn contains(rows: &[String], needle: &str) -> bool {

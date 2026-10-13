@@ -44,6 +44,7 @@ pub(crate) mod commits;
 pub(crate) mod conflicts;
 pub(crate) mod custom_commands;
 pub(crate) mod diff;
+pub(crate) mod files;
 pub(crate) mod operation;
 pub(crate) mod pull_requests;
 pub(crate) mod repos;

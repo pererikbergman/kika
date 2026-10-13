@@ -18,8 +18,8 @@ use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
 use crate::features::{
-    blame, commit, conflicts, custom_commands, pull_requests, repos, review, stash, submodules,
-    sync, worktrees,
+    blame, commit, conflicts, custom_commands, files, pull_requests, repos, review, stash,
+    submodules, sync, worktrees,
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::task::ForgeContext;
@@ -36,7 +36,6 @@ use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
-use crate::git::status::read_status;
 use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
@@ -862,16 +861,7 @@ impl Runtime {
         let runner = Arc::clone(&self.runner);
         let tx = self.tx.clone();
         match effect {
-            Effect::LoadStatus { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result = tokio::task::spawn_blocking(move || read_status(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| Err(format!("git status crashed: {e}")));
-                    // A closed channel means the app is quitting; nothing to report to.
-                    let _ = tx.send(AppIntent::StatusLoaded { tag, result });
-                });
-            }
+            Effect::LoadStatus { tag } => files::effects::load(runner, tx, tag),
             Effect::LoadHeadMessage { tag } => commit::effects::load_head_message(runner, tx, tag),
             Effect::LoadSubmodules { tag } => submodules::effects::load(runner, tx, tag),
             Effect::LoadWorktrees { tag } => worktrees::effects::load(runner, tx, tag),
@@ -1424,12 +1414,10 @@ mod tests {
             assert_eq!(finished, 1, "{id}");
         }
     }
-    use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeChild, FakeRunner, fail, ok};
     #[cfg(unix)]
     use crate::git::runner::{GitChild, GitCommand, GitOutput};
-    use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
 
     #[tokio::test]
     async fn load_config_reads_the_files_again_each_time() {
@@ -1530,60 +1518,6 @@ mod tests {
         assert!(line.ends_with("log -1 --format=%B 0123abcd --"), "{line:?}");
         assert!(!line.contains("clip"), "{line:?}");
         assert_eq!(outcome, &CommandOutcome::Ok);
-    }
-
-    #[tokio::test]
-    async fn load_status_reports_back_with_the_same_tag() {
-        let runner = Arc::new(
-            FakeRunner::new()
-                .expect(
-                    &[
-                        "status",
-                        "--porcelain=v2",
-                        "--branch",
-                        "-z",
-                        "--untracked-files=all",
-                    ],
-                    ok(b"# branch.oid 1234567\0# branch.head main\0? new_file\0"),
-                )
-                .expect(
-                    &["rev-parse", "--absolute-git-dir"],
-                    ok(b"/no/such/kika/repo/.git\n"),
-                ),
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 2,
-            seq: 5,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadStatus { tag });
-
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::StatusLoaded {
-                tag,
-                result: Ok(RepoStatus {
-                    branch: BranchStatus {
-                        head: Head::Branch("main".into()),
-                        upstream: None,
-                        ahead_behind: None,
-                        in_progress: vec![],
-                        bisect: None,
-                    },
-                    files: vec![FileEntry {
-                        path: "new_file".into(),
-                        orig_path: None,
-                        index: '?',
-                        worktree: '?',
-                        kind: EntryKind::Untracked,
-                    }],
-                }),
-            })
-        );
-        runner.assert_done();
     }
 
     #[tokio::test]
