@@ -171,7 +171,7 @@ mod tests {
         FILTER_HIDES_ROW, Keymap, REPO_LOCKED, Resolution, Trust, registry, resolve,
     };
     use crate::model::{AppState, Context};
-    use crate::test_support::{build, from, key, plain};
+    use crate::test_support::{build, from, key, load_list, plain};
 
     #[test]
     fn the_worktree_list_has_its_own_keys_and_never_reaches_global_ones() {
@@ -205,11 +205,14 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.repo = Some("/r/a".into());
         let mut list = WorktreeList::loading(0);
-        list.loaded(Ok(parse_list(
-            b"worktree /r/a\0bare\0\0worktree /r/b\0detached\0\0",
-            0,
-        )));
-        list.move_cursor(1);
+        load_list(
+            &mut list.list,
+            Ok(parse_list(
+                b"worktree /r/a\0bare\0\0worktree /r/b\0detached\0\0",
+                0,
+            )),
+        );
+        list.list.move_by(1);
         state.popups = vec![Popup::Worktrees(list)];
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
         let run = |k| match resolve(
@@ -249,13 +252,16 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.repo = Some("/r/a".into());
         let mut list = WorktreeList::loading(0);
-        list.loaded(Ok(parse_list(
-            b"worktree /r/a\0branch refs/heads/main\0\0\
+        load_list(
+            &mut list.list,
+            Ok(parse_list(
+                b"worktree /r/a\0branch refs/heads/main\0\0\
               worktree /r/b\0branch refs/heads/topic\0\0",
-            0,
-        )));
-        list.move_cursor(1);
-        list.filter = "zzz".into();
+                0,
+            )),
+        );
+        list.list.move_by(1);
+        list.list.filter = "zzz".into();
         state.popups = vec![Popup::Worktrees(list)];
         let found = |k| {
             resolve(

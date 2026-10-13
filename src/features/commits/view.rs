@@ -102,9 +102,9 @@ pub(crate) fn render_commits_panel(
     } else if expanded && !reflog && !selected.is_empty() {
         name = format!("{base}{selected}");
         last.clone_from(&name);
-    } else if reflog && !panel.reflog.filter.is_empty() {
-        let list = &panel.reflog;
-        let total = list.data.as_ref().map_or(0, |d| d.entries.len());
+    } else if reflog && !panel.reflog.list.filter.is_empty() {
+        let list = &panel.reflog.list;
+        let total = list.rows.len();
         let counts = format!("{} of {total}", list.visible().len());
         name = filter_title(look, "Reflog", &list.filter, &counts);
         last.clone_from(&name);
@@ -190,13 +190,14 @@ fn render_commit_files(
         None => format!("Commit {}", open.short_oid),
     };
     // Counting the shown rows walks every file, so only with a filter.
-    let shown = (!open.filter.is_empty()).then(|| open.visible());
+    let list = &open.list;
+    let shown = (!list.filter.is_empty()).then(|| list.visible());
     // A filter names itself in place of the patch; the row marks still
     // say what is picked.
     let title = match (&shown, patch) {
         (Some(shown), _) => {
-            let counts = format!("{} of {}", shown.len(), open.files.len());
-            filter_title(look, &base, &open.filter, &counts)
+            let counts = format!("{} of {}", shown.len(), list.rows.len());
+            filter_title(look, &base, &list.filter, &counts)
         }
         (None, Some(patch)) if look.fits(&format!("{base} · {}", patch.summary())) => {
             format!("{base} · {}", patch.summary())
@@ -208,8 +209,8 @@ fn render_commit_files(
     let block = look.block(look.title(&title));
     let inner = block.inner(area);
     let (height, width) = (usize::from(inner.height), usize::from(inner.width));
-    let paragraph = match &open.error {
-        _ if !open.loaded => Paragraph::new("Loading…"),
+    let paragraph = match &list.error {
+        _ if !list.loaded => Paragraph::new("Loading…"),
         Some(error) => {
             let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
             if let Some(first) = lines.first_mut() {
@@ -217,23 +218,23 @@ fn render_commit_files(
             }
             Paragraph::new(lines).wrap(Wrap { trim: false })
         }
-        None if open.files.is_empty() => Paragraph::new(Line::styled(
+        None if list.rows.is_empty() => Paragraph::new(Line::styled(
             "No files changed",
             Style::new().fg(Color::DarkGray),
         )),
         None if shown.as_ref().is_some_and(Vec::is_empty) => Paragraph::new(no_matches()),
         None => {
-            let shown = shown.unwrap_or_else(|| (0..open.files.len()).collect());
+            let shown = shown.unwrap_or_else(|| (0..list.rows.len()).collect());
             Paragraph::new(
-                scrolled(&shown, Some(open.selected), height)
+                scrolled(&shown, Some(list.selected), height)
                     .iter()
                     .map(|&i| {
-                        let file = &open.files[i];
+                        let file = &list.rows[i];
                         let line = match picks {
                             Some(patch) => picked_file_line(patch, file, width),
                             None => commit_file_line(file, width),
                         };
-                        if i == open.selected {
+                        if i == list.selected {
                             reversed(line, width)
                         } else {
                             line
@@ -1417,6 +1418,7 @@ mod tests {
     use crate::features::commits::CommitFilesList;
     use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
     use crate::git::diff::{DiffLine, LineKind};
+    use crate::test_support::load_list;
 
     fn commit_file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
         CommitFile {
@@ -1436,7 +1438,7 @@ mod tests {
         };
         let mut open = CommitFilesList::begin(range, "a000000".into(), 3);
         if let Some(result) = result {
-            open.loaded(3, result);
+            load_list(&mut open.list, result);
         }
         state.commits.open = Some(open);
         state
@@ -1525,7 +1527,7 @@ mod tests {
         let mut state = opened(Some(Ok(five_files())));
         with_patch(&mut state);
         let open = state.commits.open.as_mut().unwrap();
-        open.set_filter("d.".into()); // not typed
+        open.list.set_filter("d.".into()); // not typed
         let rows = buffer_rows(&draw(&state, 80, 20));
         line_with(&rows, "Commit a000000 · /d. 4 of 5");
         assert!(!rows[0].contains("patch"), "the filter in its place");
@@ -1536,7 +1538,7 @@ mod tests {
 
         // A hostile filter matches nothing and draws made safe.
         let open = state.commits.open.as_mut().unwrap();
-        open.set_filter("x\x1b[2J\u{9b}31m\u{202E}\r\0".into());
+        open.list.set_filter("x\x1b[2J\u{9b}31m\u{202E}\r\0".into());
         let rows = buffer_rows(&draw(&state, 80, 20));
         line_with(&rows, "No matches");
         line_with(&rows, "Commit a000000 · /");
@@ -1550,7 +1552,13 @@ mod tests {
 
         // An empty commit still says so, filter or not.
         let mut state = opened(Some(Ok(vec![])));
-        state.commits.open.as_mut().unwrap().set_filter("x".into());
+        state
+            .commits
+            .open
+            .as_mut()
+            .unwrap()
+            .list
+            .set_filter("x".into());
         line_with(&buffer_rows(&draw(&state, 80, 20)), "No files changed");
     }
 
@@ -1567,9 +1575,9 @@ mod tests {
             .collect();
         let mut state = opened(Some(Ok(files)));
         let open = state.commits.open.as_mut().unwrap();
-        open.set_filter("even".into());
-        while open.move_by(1) {}
-        assert_eq!(open.selected, 28);
+        open.list.set_filter("even".into());
+        while open.list.move_by(1) {}
+        assert_eq!(open.list.selected, 28);
         let rows = buffer_rows(&draw(&state, 80, 12));
         line_with(&rows, "M even28.rs");
         assert!(!rows.iter().any(|r| r.contains("odd")), "{rows:#?}");
@@ -1592,7 +1600,7 @@ mod tests {
     #[test]
     fn an_open_commit_lists_its_files_with_coloured_letters_and_renames_as_arrows() {
         let mut state = opened(Some(Ok(five_files())));
-        state.commits.open.as_mut().unwrap().move_by(3);
+        state.commits.open.as_mut().unwrap().list.move_by(3);
         let buffer = draw(&state, 80, 20);
         let rows = buffer_rows(&buffer);
 
@@ -1628,7 +1636,7 @@ mod tests {
             .map(|i| commit_file('M', &format!("file{i:02}"), None))
             .collect();
         let mut state = opened(Some(Ok(files)));
-        state.commits.open.as_mut().unwrap().move_by(30);
+        state.commits.open.as_mut().unwrap().list.move_by(30);
         let rows = buffer_rows(&draw(&state, 80, 12));
         line_with(&rows, "M file30");
         assert!(!rows.iter().any(|r| r.contains("file00")), "{rows:#?}");

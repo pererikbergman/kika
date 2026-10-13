@@ -835,7 +835,7 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             (leading, vec![ids[1], ids[2]])
         }
         KeyScope::Reflog => {
-            let leading = if state.commits.reflog.filter.is_empty() {
+            let leading = if state.commits.reflog.list.filter.is_empty() {
                 vec![]
             } else {
                 vec!["reflog.escape"]
@@ -960,7 +960,7 @@ fn commit_files_filtered(state: &AppState) -> bool {
         .commits
         .open
         .as_ref()
-        .is_some_and(|open| !open.filter.is_empty())
+        .is_some_and(|open| !open.list.filter.is_empty())
 }
 
 /// The bindings that lead the hints while commits are copied.
@@ -3788,17 +3788,20 @@ mod tests {
         state.files_loaded = true;
         state.focus = Focus::Commits;
         state.commits.tab = crate::features::commits::CommitsTab::Reflog;
-        state.commits.reflog.data = Some(crate::features::commits::reflog::Reflog {
-            entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
-                "git/fixtures/reflog/commit.bin"
-            )),
-            ..Default::default()
-        });
+        crate::test_support::load_reflog_list(
+            &mut state.commits.reflog,
+            Ok(crate::features::commits::reflog::Reflog {
+                entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
+                    "git/fixtures/reflog/commit.bin"
+                )),
+                ..Default::default()
+            }),
+        );
         let rows = draw(&state, 120, 10);
         assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
         assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
         assert!(!rows[9].contains("V range"), "{:?}", rows[9]);
-        state.commits.reflog.set_filter("first".into());
+        state.commits.reflog.list.set_filter("first".into());
         let rows = draw(&state, 120, 10);
         assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
         assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
@@ -3822,7 +3825,7 @@ mod tests {
             path: "a.rs".into(),
             orig_path: None,
         };
-        open.loaded(1, Ok(vec![file]));
+        crate::test_support::load_list(&mut open.list, Ok(vec![file]));
         state.commits.open = Some(open);
         let rows = draw(&state, 160, 10);
         assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
@@ -3838,7 +3841,13 @@ mod tests {
         );
 
         // The filter goes before the search, so Esc says "clear".
-        state.commits.open.as_mut().unwrap().set_filter("a".into());
+        state
+            .commits
+            .open
+            .as_mut()
+            .unwrap()
+            .list
+            .set_filter("a".into());
         let rows = draw(&state, 160, 10);
         assert!(
             rows[9].starts_with(" n next match  N previous match  esc clear "),

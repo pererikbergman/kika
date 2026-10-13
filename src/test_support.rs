@@ -638,7 +638,7 @@ pub(crate) fn commit_files_list(
 ) -> CommitFilesList {
     let mut open = CommitFilesList::begin(range, short_oid.into(), seq);
     if let Some(files) = files {
-        open.loaded(seq, Ok(files));
+        load_list(&mut open.list, Ok(files));
     }
     open
 }
@@ -1212,6 +1212,21 @@ pub(crate) fn load_list<R: Row>(list: &mut FilteredList<R>, result: Result<Vec<R
         user: false,
     };
     assert!(list.loaded(tag, 0, result));
+}
+
+/// Apply a reflog read to a list built by hand, as the read in flight,
+/// for tests that do not go through a reload.
+pub(crate) fn load_reflog_list(
+    list: &mut crate::features::commits::reflog::ReflogList,
+    result: Result<crate::features::commits::reflog::Reflog, String>,
+) {
+    list.list.begin(0);
+    let tag = Tag {
+        generation: 0,
+        seq: 0,
+        user: false,
+    };
+    assert!(list.read(tag, 0, result));
 }
 
 /// [`load_list`] for the Remotes tab, its remotes flattened into rows.

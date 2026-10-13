@@ -1,12 +1,13 @@
-//! The Worktrees popup's state: the list as last loaded, or why it could
-//! not be, the cursor, the filter, and the branch an add was asked for,
-//! plus why its keys cannot run. Pure; the model loads it and moves the
-//! cursor.
+//! The Worktrees popup's state: the list (a `FilteredList`, which owns its
+//! rows, error, cursor, filter and load in flight) and the branch an add
+//! was asked for, plus why its keys cannot run. Pure; the model loads it
+//! and moves the cursor.
 
 use super::git::Worktree;
+use crate::filtered_list::{FilteredList, Row};
 use crate::git::branches::BranchName;
+use crate::git::path::RepoPath;
 use crate::keymap::{FILTER_HIDES_ROW, OP_RUNNING, Reason};
-use crate::list_filter;
 use crate::model::AppState;
 
 /// Hex digits of a detached commit, enough to tell commits apart.
@@ -14,107 +15,56 @@ const SHORT_OID: usize = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeList {
-    /// The load whose result is awaited; older ones are dropped.
-    pub seq: u64,
-    /// `None` until the first load lands.
-    pub items: Option<Vec<Worktree>>,
-    pub error: Option<String>,
-    pub cursor: usize,
+    /// The worktrees, with the cursor, filter and load in flight. A
+    /// reload keeps the cursor at its place, clamped.
+    pub list: FilteredList<Worktree>,
     /// The branch `a` was pressed on, kept while its path is typed so a
     /// reload that moves the Branches selection cannot change it.
     pub pending_branch: Option<BranchName>,
     /// The add or remove whose result is awaited; older ones are dropped.
     pub action_seq: Option<u64>,
-    /// Narrows the rows shown. Only ever matched, never passed to git.
-    pub filter: String,
+}
+
+impl Row for Worktree {
+    type Key = RepoPath;
+    const FOLLOW_ROW: bool = false;
+
+    fn key(&self) -> RepoPath {
+        self.path.clone()
+    }
+
+    /// Its label and its path, as drawn.
+    fn filter_text(&self) -> String {
+        format!("{} {}", label(self), self.path.display())
+    }
 }
 
 impl WorktreeList {
     /// Waiting for load `seq`, with nothing to show yet.
     pub fn loading(seq: u64) -> Self {
+        let mut list = FilteredList::default();
+        list.begin(seq);
         Self {
-            seq,
-            items: None,
-            error: None,
-            cursor: 0,
+            list,
             pending_branch: None,
             action_seq: None,
-            filter: String::new(),
-        }
-    }
-
-    /// Take a load's result. The cursor stays where it was, inside the list
-    /// and on a row the filter shows.
-    pub fn loaded(&mut self, result: Result<Vec<Worktree>, String>) {
-        match result {
-            Ok(items) => {
-                self.cursor = self.cursor.min(items.len().saturating_sub(1));
-                self.items = Some(items);
-                self.error = None;
-                self.reconcile();
-            }
-            Err(message) => {
-                self.items = None;
-                self.error = Some(message);
-            }
-        }
-    }
-
-    /// Move the cursor by `delta` among the rows shown, stopping at either
-    /// end.
-    pub fn move_cursor(&mut self, delta: isize) {
-        if let Some(next) = list_filter::step(&self.visible(), self.cursor, delta) {
-            self.cursor = next;
         }
     }
 
     /// The worktree under the cursor, once there is one and the filter
     /// shows it, so no action reaches a row that is not drawn.
     pub fn selected(&self) -> Option<&Worktree> {
-        if self.selected_hidden() {
+        if self.list.selected_hidden() {
             return None;
         }
-        self.items.as_ref()?.get(self.cursor)
-    }
-
-    /// The indexes of the rows the filter shows, in list order.
-    pub fn visible(&self) -> Vec<usize> {
-        let Some(items) = &self.items else {
-            return Vec::new();
-        };
-        if self.filter.is_empty() {
-            return (0..items.len()).collect();
-        }
-        let texts: Vec<String> = items.iter().map(filter_text).collect();
-        list_filter::visible(&self.filter, texts.iter().map(String::as_str))
-    }
-
-    /// The filter hides the cursor's row, which happens only when it hides
-    /// every row.
-    pub fn selected_hidden(&self) -> bool {
-        !self.filter.is_empty()
-            && self
-                .items
-                .as_ref()
-                .and_then(|items| items.get(self.cursor))
-                .is_some_and(|w| !list_filter::matches(&self.filter, &filter_text(w)))
-    }
-
-    /// Put a cursor the filter hides on the first row shown; leave it be
-    /// when no row is.
-    pub fn reconcile(&mut self) {
-        if self.selected_hidden()
-            && let Some(&first) = self.visible().first()
-        {
-            self.cursor = first;
-        }
+        self.list.selected_row()
     }
 
     /// Whether a listed worktree has `branch` checked out.
     pub fn has_branch(&self, branch: &BranchName) -> bool {
-        self.items
+        self.list
+            .rows
             .iter()
-            .flatten()
             .any(|w| w.branch.as_ref() == Some(branch))
     }
 }
@@ -132,11 +82,6 @@ pub(crate) fn label(worktree: &Worktree) -> String {
         let short: String = oid.chars().take(SHORT_OID).collect();
         format!("(detached) {short}").trim_end().to_string()
     }
-}
-
-/// The text the filter matches a row by: its label and its path, as drawn.
-fn filter_text(worktree: &Worktree) -> String {
-    format!("{} {}", label(worktree), worktree.path.display())
 }
 
 /// Why the Worktrees popup cannot open: it lists the top-level
@@ -162,7 +107,7 @@ const UNSURE: &str = "Path cannot be read safely with this Git";
 pub(crate) fn open_worktree_disabled(state: &AppState) -> Option<Reason> {
     if state
         .worktree_list()
-        .is_some_and(WorktreeList::selected_hidden)
+        .is_some_and(|list| list.list.selected_hidden())
     {
         return Some(FILTER_HIDES_ROW.into());
     }
@@ -198,7 +143,7 @@ pub(crate) fn add_worktree_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
     if state
         .worktree_list()
-        .is_some_and(WorktreeList::selected_hidden)
+        .is_some_and(|list| list.list.selected_hidden())
     {
         return Some(FILTER_HIDES_ROW.into());
     }
@@ -227,6 +172,7 @@ pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
 mod tests {
     use super::*;
     use crate::features::worktrees::git::parse_list;
+    use crate::test_support::load_list;
 
     fn list(paths: &[&str]) -> Vec<Worktree> {
         let out: String = paths
@@ -239,26 +185,26 @@ mod tests {
     #[test]
     fn the_cursor_stays_inside_the_list() {
         let mut wl = WorktreeList::loading(1);
-        wl.move_cursor(1);
-        assert_eq!((wl.cursor, wl.selected()), (0, None));
-        wl.loaded(Ok(list(&["a", "b"])));
-        wl.move_cursor(5);
+        wl.list.move_by(1);
+        assert_eq!((wl.list.selected, wl.selected()), (0, None));
+        load_list(&mut wl.list, Ok(list(&["a", "b"])));
+        wl.list.move_by(5);
         assert_eq!(wl.selected().unwrap().path.display(), "b");
-        wl.move_cursor(-5);
-        assert_eq!(wl.cursor, 0);
+        wl.list.move_by(-5);
+        assert_eq!(wl.list.selected, 0);
     }
 
     #[test]
     fn a_shorter_reload_pulls_the_cursor_in_and_an_error_replaces_the_list() {
         let mut wl = WorktreeList::loading(1);
-        wl.loaded(Ok(list(&["a", "b"])));
-        wl.move_cursor(1);
-        wl.loaded(Ok(list(&["a"])));
-        assert_eq!(wl.cursor, 0);
-        wl.loaded(Err("boom".into()));
+        load_list(&mut wl.list, Ok(list(&["a", "b"])));
+        wl.list.move_by(1);
+        load_list(&mut wl.list, Ok(list(&["a"])));
+        assert_eq!(wl.list.selected, 0);
+        load_list(&mut wl.list, Err("boom".into()));
         assert_eq!(
-            (wl.items.clone(), wl.error.as_deref()),
-            (None, Some("boom"))
+            (wl.list.rows.clone(), wl.list.error.as_deref()),
+            (vec![], Some("boom"))
         );
     }
 
@@ -266,7 +212,7 @@ mod tests {
     fn has_branch_looks_through_every_listed_worktree() {
         let mut wl = WorktreeList::loading(1);
         assert!(!wl.has_branch(&"b".into()));
-        wl.loaded(Ok(list(&["a", "b"])));
+        load_list(&mut wl.list, Ok(list(&["a", "b"])));
         assert!(wl.has_branch(&"b".into()));
         assert!(!wl.has_branch(&"c".into()));
     }
@@ -284,21 +230,20 @@ mod tests {
              worktree /r/d2\0HEAD {OID}\0detached\0\0"
         );
         let mut wl = WorktreeList::loading(1);
-        wl.loaded(Ok(parse_list(out.as_bytes(), 0)));
+        load_list(&mut wl.list, Ok(parse_list(out.as_bytes(), 0)));
         wl
     }
 
     fn filtered(filter: &str) -> WorktreeList {
         let mut wl = mixed();
-        wl.filter = filter.into();
-        wl.reconcile();
+        wl.list.set_filter(filter.into());
         wl
     }
 
     #[test]
     fn labels_name_the_branch_bare_or_detached_commit() {
         let wl = mixed();
-        let items = wl.items.as_ref().unwrap();
+        let items = &wl.list.rows;
         assert_eq!(label(&items[1]), "topic");
         assert_eq!(label(&items[3]), "(detached) abcdef1");
         let bare = parse_list(b"worktree /r/b.git\0bare\0\0", 0);
@@ -309,69 +254,68 @@ mod tests {
 
     #[test]
     fn an_empty_filter_shows_every_row_and_none_before_a_load() {
-        assert_eq!(WorktreeList::loading(1).visible(), Vec::<usize>::new());
-        assert_eq!(mixed().visible(), [0, 1, 2, 3, 4]);
-        assert!(!mixed().selected_hidden());
+        assert_eq!(WorktreeList::loading(1).list.visible(), Vec::<usize>::new());
+        assert_eq!(mixed().list.visible(), [0, 1, 2, 3, 4]);
+        assert!(!mixed().list.selected_hidden());
     }
 
     #[test]
     fn the_filter_matches_paths_branch_labels_and_detached_rows() {
-        assert_eq!(filtered("wt-2").visible(), [2]);
-        assert_eq!(filtered("topic").visible(), [1]);
-        assert_eq!(filtered("hotfix").visible(), [2]);
-        assert_eq!(filtered("detached").visible(), [3, 4]);
-        assert_eq!(filtered("main").visible(), [0]);
+        assert_eq!(filtered("wt-2").list.visible(), [2]);
+        assert_eq!(filtered("topic").list.visible(), [1]);
+        assert_eq!(filtered("hotfix").list.visible(), [2]);
+        assert_eq!(filtered("detached").list.visible(), [3, 4]);
+        assert_eq!(filtered("main").list.visible(), [0]);
         // Smart case, as every list filter.
-        assert_eq!(filtered("WT").visible(), Vec::<usize>::new());
-        assert_eq!(filtered("DETACHED").visible(), Vec::<usize>::new());
+        assert_eq!(filtered("WT").list.visible(), Vec::<usize>::new());
+        assert_eq!(filtered("DETACHED").list.visible(), Vec::<usize>::new());
     }
 
     #[test]
     fn the_cursor_skips_hidden_rows_and_stops_at_the_ends() {
         let mut wl = filtered("detached");
-        assert_eq!(wl.cursor, 3, "moved off the hidden row it was on");
-        wl.move_cursor(1);
-        assert_eq!(wl.cursor, 4);
-        wl.move_cursor(1);
-        assert_eq!(wl.cursor, 4);
-        wl.move_cursor(-5);
-        assert_eq!(wl.cursor, 3);
+        assert_eq!(wl.list.selected, 3, "moved off the hidden row it was on");
+        wl.list.move_by(1);
+        assert_eq!(wl.list.selected, 4);
+        wl.list.move_by(1);
+        assert_eq!(wl.list.selected, 4);
+        wl.list.move_by(-5);
+        assert_eq!(wl.list.selected, 3);
         assert_eq!(wl.selected().unwrap().path.display(), "/r/d1");
     }
 
     #[test]
     fn nothing_matching_selects_nothing_and_keeps_the_cursor() {
         let mut wl = mixed();
-        wl.move_cursor(2);
-        wl.filter = "zzz".into();
-        wl.reconcile();
-        assert_eq!(wl.cursor, 2);
-        assert!(wl.selected_hidden());
+        wl.list.move_by(2);
+        wl.list.set_filter("zzz".into());
+        assert_eq!(wl.list.selected, 2);
+        assert!(wl.list.selected_hidden());
         assert_eq!(wl.selected(), None);
-        wl.move_cursor(1);
-        assert_eq!(wl.cursor, 2);
-        wl.filter.clear();
+        wl.list.move_by(1);
+        assert_eq!(wl.list.selected, 2);
+        wl.list.filter.clear();
         assert_eq!(wl.selected().unwrap().path.display(), "/r/wt-2");
     }
 
     #[test]
     fn a_reload_that_hides_the_cursor_row_moves_it_to_the_first_shown() {
         let mut wl = filtered("wt");
-        wl.move_cursor(1);
-        assert_eq!(wl.cursor, 2);
+        wl.list.move_by(1);
+        assert_eq!(wl.list.selected, 2);
         // `/r/wt-2` is gone; `/r/wt-1` stays at row 1.
         let out = format!(
             "worktree /r/main\0HEAD {OID}\0branch refs/heads/main\0\0\
              worktree /r/wt-1\0HEAD {OID}\0branch refs/heads/topic\0\0\
              worktree /r/d1\0HEAD {OID}\0detached\0\0"
         );
-        wl.loaded(Ok(parse_list(out.as_bytes(), 0)));
-        assert_eq!(wl.cursor, 1);
+        load_list(&mut wl.list, Ok(parse_list(out.as_bytes(), 0)));
+        assert_eq!(wl.list.selected, 1);
         assert_eq!(wl.selected().unwrap().path.display(), "/r/wt-1");
     }
 
     #[test]
     fn a_new_list_starts_unfiltered() {
-        assert_eq!(WorktreeList::loading(7).filter, "");
+        assert_eq!(WorktreeList::loading(7).list.filter, "");
     }
 }

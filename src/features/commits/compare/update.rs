@@ -263,7 +263,7 @@ mod tests {
             parent: Some(id(0)),
         };
         let mut before = CommitFilesList::begin(range.clone(), "old".into(), 1);
-        before.filter = "lib".into();
+        before.list.filter = "lib".into();
         state.commits.open = Some(before);
         type_text(&mut state, "Mj");
 
@@ -275,7 +275,7 @@ mod tests {
 
         let open = state.commits.open.as_ref().unwrap();
         assert_eq!(open.against.as_deref(), Some("main"));
-        assert_eq!(open.filter, "");
+        assert_eq!(open.list.filter, "");
     }
 
     #[test]

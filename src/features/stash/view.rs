@@ -99,21 +99,22 @@ fn render_stash_files(open: &StashFilesList, look: &PanelLook, frame: &mut Frame
     let block = look.block(look.title(&open.stash.arg()));
     let inner = block.inner(area);
     let (height, width) = (usize::from(inner.height), usize::from(inner.width));
-    let paragraph = match &open.error {
-        _ if !open.loaded => Paragraph::new("Loading…"),
+    let list = &open.list;
+    let paragraph = match &list.error {
+        _ if !list.loaded => Paragraph::new("Loading…"),
         Some(error) => error_paragraph(error, None),
-        None if open.files.is_empty() => Paragraph::new(Line::styled(
+        None if list.rows.is_empty() => Paragraph::new(Line::styled(
             "No files in this stash",
             Style::new().fg(Color::DarkGray),
         )),
         None => {
-            let start = (open.selected + 1).saturating_sub(height.max(1));
-            let end = (start + height).min(open.files.len());
+            let start = (list.selected + 1).saturating_sub(height.max(1));
+            let end = (start + height).min(list.rows.len());
             Paragraph::new(
                 (start..end)
                     .map(|i| {
-                        let line = commit_file_line(&open.files[i].file, width);
-                        if i == open.selected {
+                        let line = commit_file_line(&list.rows[i].file, width);
+                        if i == list.selected {
                             reversed(line, width)
                         } else {
                             line
@@ -363,7 +364,7 @@ mod tests {
         let at = state.stash.list.selected_row().unwrap().stash_ref();
         let mut open = StashFilesList::begin(at, 3);
         if let Some(result) = result {
-            open.loaded(3, result);
+            crate::test_support::load_list(&mut open.list, result);
         }
         state.stash.open = Some(open);
         state

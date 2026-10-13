@@ -22,7 +22,7 @@ impl AppState {
 
     pub(crate) fn move_submodule_cursor(&mut self, delta: isize) {
         if let Some(list) = self.submodule_list() {
-            list.move_cursor(delta);
+            list.list.move_by(delta);
         }
     }
 
@@ -45,7 +45,7 @@ impl AppState {
         }
         let seq = self.take_seq();
         if let Some(list) = self.submodule_list() {
-            list.seq = seq;
+            list.list.begin(seq);
         }
         self.load_submodules(seq)
     }
@@ -58,13 +58,9 @@ impl AppState {
 
     pub(crate) fn submodules_loaded(&mut self, tag: Tag, result: Result<Vec<Submodule>, String>) {
         self.user_done(tag);
-        if tag.generation != self.generation {
-            return;
-        }
-        if let Some(list) = self.submodule_list()
-            && list.seq == tag.seq
-        {
-            list.loaded(result);
+        let generation = self.generation;
+        if let Some(list) = self.submodule_list() {
+            list.list.loaded(tag, generation, result);
         }
     }
 
@@ -182,7 +178,7 @@ mod tests {
             tag,
             result: Ok(subs.clone()),
         });
-        assert_eq!(submodule_list(&state).items, Some(subs));
+        assert_eq!(submodule_list(&state).list.rows, subs);
         assert_eq!(state.busy_count(), busy);
     }
 
@@ -219,7 +215,7 @@ mod tests {
             tag: stale_generation,
             result: Ok(subs.clone()),
         });
-        assert_eq!(submodule_list(&state).items, None);
+        assert!(!submodule_list(&state).list.loaded);
         assert_eq!(state.busy_count(), 0);
 
         // Closed before the answer: nothing comes back.
@@ -240,15 +236,15 @@ mod tests {
             submodule("b", SubmoduleState::OutOfDate),
         ]);
         press_char(&mut state, 'k');
-        assert_eq!(submodule_list(&state).cursor, 0);
+        assert_eq!(submodule_list(&state).list.selected, 0);
         for _ in 0..3 {
             press_char(&mut state, 'j');
         }
-        assert_eq!(submodule_list(&state).cursor, 1);
+        assert_eq!(submodule_list(&state).list.selected, 1);
         press(&mut state, KeyCode::Up);
-        assert_eq!(submodule_list(&state).cursor, 0);
+        assert_eq!(submodule_list(&state).list.selected, 0);
         press(&mut state, KeyCode::Down);
-        assert_eq!(submodule_list(&state).cursor, 1);
+        assert_eq!(submodule_list(&state).list.selected, 1);
         // The file selection did not move.
         assert_eq!(state.selected, Some(1));
     }
@@ -290,9 +286,9 @@ mod tests {
             other => panic!("expected a status and a submodule load, got {other:?}"),
         };
         let list = submodule_list(&state);
-        assert_eq!(list.seq, seq);
+        assert_eq!(list.list.seq, Some(seq));
         // What it showed stays until the reload lands.
-        assert!(list.items.is_some());
+        assert!(list.list.loaded);
 
         // Closed: only the files reload.
         let (tag, op) = op_of(&state.update(AppIntent::UpdateSubmodule));

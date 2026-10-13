@@ -1,11 +1,13 @@
 //! The Stash panel: the stash list (a `FilteredList`, which owns its
-//! cursor, filter, range and loads), and an entry opened to its files. Pure; `AppState` turns its answers into
+//! cursor, filter, range and loads), and an entry opened to its files
+//! (another `FilteredList`). Pure; `AppState` turns its answers into
 //! effects.
 
 use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use crate::filtered_list::{FilteredList, Row};
 use crate::git::commit_files::CommitId;
 use crate::git::path::RepoPath;
+use crate::rows::drawn_path;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StashList {
@@ -39,63 +41,34 @@ impl Row for StashEntry {
 pub struct StashFilesList {
     /// For the panel title.
     pub stash: StashRef,
-    pub files: Vec<StashFile>,
-    pub selected: usize,
-    /// The load in flight; only its result is applied.
-    pub seq: Option<u64>,
-    /// The list has answered, so an empty one means "no files".
-    pub loaded: bool,
-    pub error: Option<String>,
+    /// The files, with the cursor and load in flight. Each open is a
+    /// fresh list, so it starts on the first file. It has no filter.
+    pub list: FilteredList<StashFile>,
+}
+
+impl Row for StashFile {
+    type Key = RepoPath;
+
+    fn key(&self) -> RepoPath {
+        self.file.path.clone()
+    }
+
+    /// Its path as drawn. The list has no filter, so this is never matched.
+    fn filter_text(&self) -> String {
+        drawn_path(&self.file)
+    }
 }
 
 impl StashFilesList {
     /// The files of `stash`, loading under `seq`.
     pub fn begin(stash: StashRef, seq: u64) -> Self {
-        Self {
-            stash,
-            files: Vec::new(),
-            selected: 0,
-            seq: Some(seq),
-            loaded: false,
-            error: None,
-        }
-    }
-
-    /// Apply a result if it is the load in flight, with the cursor on the
-    /// first file. Returns whether it was applied.
-    pub fn loaded(&mut self, seq: u64, result: Result<Vec<StashFile>, String>) -> bool {
-        if self.seq != Some(seq) {
-            return false;
-        }
-        self.seq = None;
-        self.loaded = true;
-        self.selected = 0;
-        match result {
-            Ok(files) => {
-                self.files = files;
-                self.error = None;
-            }
-            Err(message) => {
-                self.files.clear();
-                self.error = Some(message);
-            }
-        }
-        true
-    }
-
-    /// Move the cursor, stopping at the ends. Returns whether it moved.
-    pub fn move_by(&mut self, delta: isize) -> bool {
-        let next = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(self.files.len().saturating_sub(1));
-        let moved = next != self.selected;
-        self.selected = next;
-        moved
+        let mut list = FilteredList::default();
+        list.begin(seq);
+        Self { stash, list }
     }
 
     pub fn selected_file(&self) -> Option<&StashFile> {
-        self.files.get(self.selected)
+        self.list.selected_row()
     }
 }
 
@@ -133,14 +106,17 @@ mod tests {
         oids.iter().enumerate().map(|(i, o)| entry(i, o)).collect()
     }
 
-    fn reload(list: &mut FilteredList<StashEntry>, seq: u64, entries: Vec<StashEntry>) {
-        let tag = Tag {
+    fn tag(seq: u64) -> Tag {
+        Tag {
             generation: 0,
             seq,
             user: false,
-        };
+        }
+    }
+
+    fn reload(list: &mut FilteredList<StashEntry>, seq: u64, entries: Vec<StashEntry>) {
         list.begin(seq);
-        assert!(list.loaded(tag, 0, Ok(entries)));
+        assert!(list.loaded(tag(seq), 0, Ok(entries)));
     }
 
     fn list(oids: &[&str]) -> FilteredList<StashEntry> {
@@ -222,17 +198,17 @@ mod tests {
     #[test]
     fn an_entrys_files_load_once_and_the_cursor_stops_at_the_ends() {
         let mut open = StashFilesList::begin(entry(0, "a1").stash_ref(), 7);
-        assert!(!open.loaded(6, Ok(vec![file("old")])));
-        assert!(open.loaded(7, Ok(vec![file("a"), file("b")])));
+        assert!(!open.list.loaded(tag(6), 0, Ok(vec![file("old")])));
+        assert!(open.list.loaded(tag(7), 0, Ok(vec![file("a"), file("b")])));
         assert_eq!(open.selected_file(), Some(&file("a")));
-        assert!(!open.move_by(-1));
-        assert!(open.move_by(1));
-        assert!(!open.move_by(1));
+        assert!(!open.list.move_by(-1));
+        assert!(open.list.move_by(1));
+        assert!(!open.list.move_by(1));
         assert_eq!(open.selected_file(), Some(&file("b")));
 
         let mut failed = StashFilesList::begin(entry(0, "a1").stash_ref(), 7);
-        failed.loaded(7, Err("bad".into()));
-        assert_eq!(failed.error.as_deref(), Some("bad"));
+        failed.list.loaded(tag(7), 0, Err("bad".into()));
+        assert_eq!(failed.list.error.as_deref(), Some("bad"));
         assert_eq!(failed.selected_file(), None);
     }
 }

@@ -7,8 +7,9 @@
 //! op runs through the core op slot.
 //!
 //! Its `pub(crate)` API:
-//! - the state types `ReflogList` (`list.rs`), `Reflog` (`git.rs`) and
-//!   the planner's `Direction`, `Step` and `Expected` (`undo.rs`);
+//! - the state types `ReflogList` and `ReflogHead` (`list.rs`), `Reflog`
+//!   (`git.rs`) and the planner's `Direction`, `Step` and `Expected`
+//!   (`undo.rs`);
 //! - `keys::{REFLOG_WORKSPACE, REFLOG_KEYS, REFLOG_TRAVEL_CONFIRM,
 //!   REFLOG_LOG_FILTER}`;
 //! - the handlers in `update.rs`: `load_reflog`, `reflog_loaded`,
