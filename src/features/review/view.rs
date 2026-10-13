@@ -550,6 +550,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::features::review::ReviewIntent;
     use crate::features::review::state::tests::{
         detail_from, fixture_detail, fixture_queues, repo,
     };
@@ -729,7 +730,7 @@ mod tests {
     #[test]
     fn with_no_forge_host_the_view_says_so_and_a_limit_says_until_when() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(crate::intent::AppIntent::EnterReview);
+        state.update(crate::intent::AppIntent::Review(ReviewIntent::Enter));
         let rows = draw(&state, 80, 10);
         assert!(contains(&rows, NO_FORGE), "{rows:#?}");
 
@@ -824,7 +825,7 @@ mod tests {
     #[test]
     fn a_problem_and_its_next_step_wrap_to_a_narrow_panel() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(crate::intent::AppIntent::EnterReview);
+        state.update(crate::intent::AppIntent::Review(ReviewIntent::Enter));
         let rows = draw(&state, 40, 10);
         assert!(contains(&rows, "[forge] github"), "{rows:#?}");
         assert!(

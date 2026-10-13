@@ -4,6 +4,7 @@
 
 use super::create::refresh_disabled;
 use crate::confirm_question::Answer;
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never, no_branch_selected};
 use crate::menu::MenuId;
@@ -25,7 +26,7 @@ pub(crate) static PULL_REQUESTS_BRANCHES: &[Binding] = &[
         id: "branches.refresh_pull_requests",
         keys: &[KeyPattern::any(KeyCode::Char('B'))],
         scope: KeyScope::Branches,
-        intent: AppIntent::RefreshPullRequests,
+        intent: AppIntent::PullRequests(PullRequestsIntent::Refresh),
         description: "Ask GitHub again for the branches' pull requests",
         label: "refresh PRs",
         bar: false,
@@ -42,7 +43,7 @@ pub(crate) static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::PickList,
-        intent: AppIntent::PickNext,
+        intent: AppIntent::PullRequests(PullRequestsIntent::PickNext),
         description: "Select the next row",
         label: "",
         bar: false,
@@ -55,7 +56,7 @@ pub(crate) static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::PickList,
-        intent: AppIntent::PickPrev,
+        intent: AppIntent::PullRequests(PullRequestsIntent::PickPrev),
         description: "Select the previous row",
         label: "",
         bar: false,
@@ -65,7 +66,7 @@ pub(crate) static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
         id: "pick_list.pick",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::PickList,
-        intent: AppIntent::PickSelect,
+        intent: AppIntent::PullRequests(PullRequestsIntent::PickSelect),
         description: "Take the selected row",
         label: "pick",
         bar: true,
@@ -99,7 +100,7 @@ pub(crate) static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
         id: "create_pull_request.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::CreatePullRequest,
-        intent: AppIntent::ConfirmCreatePullRequest,
+        intent: AppIntent::PullRequests(PullRequestsIntent::ConfirmCreate),
         description: "Yes, create the pull request on GitHub",
         label: "create",
         bar: true,

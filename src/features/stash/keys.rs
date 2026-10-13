@@ -6,6 +6,7 @@
 
 use super::push::{self, leading_dirs};
 use crate::confirm_question::Answer;
+use crate::features::stash::StashIntent;
 use crate::git::FileEntry;
 use crate::git::path::RepoPath;
 use crate::git::status::EntryKind;
@@ -167,7 +168,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Stash,
-        intent: AppIntent::StashNext,
+        intent: AppIntent::Stash(StashIntent::Next),
         description: "Select the next stash",
         label: "",
         bar: false,
@@ -180,7 +181,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Stash,
-        intent: AppIntent::StashPrev,
+        intent: AppIntent::Stash(StashIntent::Prev),
         description: "Select the previous stash",
         label: "",
         bar: false,
@@ -190,7 +191,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         id: "stash.files",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Stash,
-        intent: AppIntent::OpenStashFiles,
+        intent: AppIntent::Stash(StashIntent::OpenFiles),
         description: "Show the files the selected stash holds",
         label: "files",
         bar: true,
@@ -200,7 +201,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         id: "stash.apply",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Stash,
-        intent: AppIntent::ApplyStash,
+        intent: AppIntent::Stash(StashIntent::Apply),
         description: "Apply the selected stash to the worktree and keep it",
         label: "apply",
         bar: true,
@@ -210,7 +211,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         id: "stash.pop",
         keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
         scope: KeyScope::Stash,
-        intent: AppIntent::PopStash,
+        intent: AppIntent::Stash(StashIntent::Pop),
         description: "Apply the selected stash and drop it; a conflict keeps it",
         label: "pop",
         bar: true,
@@ -220,7 +221,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         id: "stash.drop",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Stash,
-        intent: AppIntent::DropStash,
+        intent: AppIntent::Stash(StashIntent::Drop),
         description: "Drop the selected stash, or the range, asking first",
         label: "drop",
         bar: true,
@@ -230,7 +231,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         id: "stash.rename",
         keys: &[KeyPattern::any(KeyCode::Char('R'))],
         scope: KeyScope::Stash,
-        intent: AppIntent::RenameStash,
+        intent: AppIntent::Stash(StashIntent::Rename),
         description: "Give the selected stash a new message; it moves to stash@{0}",
         label: "rename",
         bar: true,
@@ -273,7 +274,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::StashFiles,
-        intent: AppIntent::StashFileNext,
+        intent: AppIntent::Stash(StashIntent::FileNext),
         description: "Select the next file and show its change",
         label: "",
         bar: false,
@@ -286,7 +287,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::StashFiles,
-        intent: AppIntent::StashFilePrev,
+        intent: AppIntent::Stash(StashIntent::FilePrev),
         description: "Select the previous file and show its change",
         label: "",
         bar: false,
@@ -298,7 +299,7 @@ pub(crate) static STASH_KEYS: &[Binding] = &[
         // stands in for this one in the bar.
         keys: &[KeyPattern::any(KeyCode::Backspace)],
         scope: KeyScope::StashFiles,
-        intent: AppIntent::CloseStashFiles,
+        intent: AppIntent::Stash(StashIntent::CloseFiles),
         description: "Back to the stash list, at the same stash",
         label: "back",
         bar: false,
@@ -330,7 +331,7 @@ pub(crate) static STASH_DROP_CONFIRM: &[Binding] = &[
         id: "drop_stash.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::DropStash,
-        intent: AppIntent::ConfirmDropStash,
+        intent: AppIntent::Stash(StashIntent::ConfirmDrop),
         description: "Yes, drop the stash",
         label: "drop",
         bar: true,
@@ -379,27 +380,42 @@ mod tests {
         assert_eq!(KeyScope::Stash.title(), "Stash");
         let stash = |k| from(KeyScope::Stash, k);
         let none = KeyModifiers::NONE;
-        assert_eq!(stash(key(KeyCode::Enter, none)), Some(OpenStashFiles));
-        assert_eq!(stash(plain(' ')), Some(ApplyStash));
-        assert_eq!(stash(plain('g')), Some(PopStash));
-        assert_eq!(stash(plain('d')), Some(DropStash));
+        assert_eq!(
+            stash(key(KeyCode::Enter, none)),
+            Some(Stash(StashIntent::OpenFiles))
+        );
+        assert_eq!(stash(plain(' ')), Some(Stash(StashIntent::Apply)));
+        assert_eq!(stash(plain('g')), Some(Stash(StashIntent::Pop)));
+        assert_eq!(stash(plain('d')), Some(Stash(StashIntent::Drop)));
         assert_eq!(
             stash(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
-            Some(RenameStash)
+            Some(Stash(StashIntent::Rename))
         );
-        assert_eq!(stash(plain('j')), Some(StashNext));
-        assert_eq!(stash(key(KeyCode::Down, none)), Some(StashNext));
-        assert_eq!(stash(plain('k')), Some(StashPrev));
-        assert_eq!(stash(key(KeyCode::Up, none)), Some(StashPrev));
+        assert_eq!(stash(plain('j')), Some(Stash(StashIntent::Next)));
+        assert_eq!(
+            stash(key(KeyCode::Down, none)),
+            Some(Stash(StashIntent::Next))
+        );
+        assert_eq!(stash(plain('k')), Some(Stash(StashIntent::Prev)));
+        assert_eq!(
+            stash(key(KeyCode::Up, none)),
+            Some(Stash(StashIntent::Prev))
+        );
         assert_eq!(stash(plain('q')), Some(Quit));
 
         assert_eq!(KeyScope::StashFiles.parent(), Some(KeyScope::Workspace));
         assert_eq!(KeyScope::StashFiles.title(), "Stash files");
         let files = |k| from(KeyScope::StashFiles, k);
         assert_eq!(files(key(KeyCode::Esc, none)), Some(PaneEscape));
-        assert_eq!(files(key(KeyCode::Backspace, none)), Some(CloseStashFiles));
-        assert_eq!(files(plain('j')), Some(StashFileNext));
-        assert_eq!(files(key(KeyCode::Up, none)), Some(StashFilePrev));
+        assert_eq!(
+            files(key(KeyCode::Backspace, none)),
+            Some(Stash(StashIntent::CloseFiles))
+        );
+        assert_eq!(files(plain('j')), Some(Stash(StashIntent::FileNext)));
+        assert_eq!(
+            files(key(KeyCode::Up, none)),
+            Some(Stash(StashIntent::FilePrev))
+        );
         assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
 
         assert_eq!(
@@ -545,7 +561,10 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmDropStash));
+        assert_eq!(
+            resolve_in(plain('y')),
+            Some(AppIntent::Stash(StashIntent::ConfirmDrop))
+        );
         assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
             resolve_in(key(KeyCode::Esc, none)),

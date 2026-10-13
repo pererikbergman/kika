@@ -5,7 +5,14 @@
 //! `LoadPullRequests`, `OpenUrl` and `CreatePullRequest` (`effects.rs`).
 //! `ForgeState`, `src/forge`, merging and review mode stay outside it.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`PullRequestsIntent`] in
+//! `AppIntent::PullRequests`, and its one `update` arm calls [`update`]
+//! here. `update.rs` holds only that function; it dispatches to the
+//! handlers in `badges.rs` and `create.rs`. The pick list's intents are
+//! here too, because its bindings and `pick_select` are.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`PullRequestsIntent`] and the free function [`update`];
 //! - the types [`PrDraft`] and [`PrCreating`], which `AppState` holds;
 //! - the builders `with_forge_hosts` and `with_forge_links` on `AppState`;
 //! - the guards `open_url_disabled`, `copy_url_disabled`,
@@ -33,12 +40,16 @@
 mod badges;
 mod create;
 pub(crate) mod effects;
+mod intent;
 pub(crate) mod keys;
+mod update;
 
 pub(crate) use create::{
     PrCreating, PrDraft, commit_page, commit_url_disabled, copy_url_disabled, create_disabled,
     open_url_disabled,
 };
+pub(crate) use intent::PullRequestsIntent;
+pub(crate) use update::update;
 
 #[cfg(test)]
 pub(crate) use create::create_question;

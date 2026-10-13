@@ -459,6 +459,7 @@ mod tests {
 
     use super::*;
     use crate::diff_pane::{DIFF_PREFETCH, DiffPane};
+    use crate::features::review::ReviewIntent;
     use crate::features::review::state::tests::{github, in_detail, press, repo, type_char};
     use crate::git::diff::{DiffChunk, DiffLine, LineKind};
     use crate::git::remotes::RemoteName;
@@ -551,14 +552,14 @@ mod tests {
     /// Open, find the commits here, and list `rows()`.
     fn ready() -> (AppState, Vec<Effect>) {
         let (mut state, tag) = opened();
-        state.update(AppIntent::ReviewObjectsChecked {
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: Ok(CommitsHere::All),
-        });
-        let effects = state.update(AppIntent::ReviewFilesLoaded {
+        }));
+        let effects = state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
             tag,
             result: Ok((range(), rows())),
-        });
+        }));
         (state, effects)
     }
 
@@ -583,10 +584,10 @@ mod tests {
     fn with_the_commits_here_f_lists_from_the_merge_base_and_streams_the_first_file() {
         let (mut state, tag) = opened();
         assert_eq!(stage(&state), FilesStage::Checking);
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: Ok(CommitsHere::All),
-        });
+        }));
         assert_eq!(
             effects,
             [Effect::LoadReviewFiles {
@@ -596,10 +597,10 @@ mod tests {
             }]
         );
         assert_eq!(stage(&state), FilesStage::Listing);
-        let effects = state.update(AppIntent::ReviewFilesLoaded {
+        let effects = state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
             tag,
             result: Ok((range(), rows())),
-        });
+        }));
         assert_eq!(fetches(&effects), 0);
         let (request, want) = streamed(&effects);
         assert_eq!(request.commit, Some(range()));
@@ -637,10 +638,10 @@ mod tests {
     #[test]
     fn missing_commits_are_fetched_once_from_the_matched_remote() {
         let (mut state, tag) = opened();
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("upstream")),
-        });
+        }));
         let fetch_tag = match effects.as_slice() {
             [Effect::FetchReviewCommits { tag, remote, oids }] => {
                 assert_eq!(*remote, RemoteName::from("upstream"));
@@ -656,16 +657,16 @@ mod tests {
         );
 
         // Fetched: look again. Still missing: an error, never a second fetch.
-        let effects = state.update(AppIntent::ReviewHeadFetched {
+        let effects = state.update(AppIntent::Review(ReviewIntent::HeadFetched {
             tag: fetch_tag,
             result: Ok(()),
-        });
+        }));
         assert_eq!((state.busy_count(), state.held_seq()), (0, None));
         let tag = check_tag(&effects);
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("upstream")),
-        });
+        }));
         assert_eq!(effects, []);
         assert_eq!(stage(&state), FilesStage::Failed(STILL_MISSING.into()));
 
@@ -673,10 +674,10 @@ mod tests {
         // for the same head.
         press(&mut state, KeyCode::Esc);
         let tag = check_tag(&type_char(&mut state, 'f'));
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("upstream")),
-        });
+        }));
         assert_eq!(fetches(&effects), 0);
         assert_eq!(stage(&state), FilesStage::Failed(FETCHED_BEFORE.into()));
         state.review.restart();
@@ -686,17 +687,17 @@ mod tests {
     #[test]
     fn a_failed_fetch_says_why_and_frees_the_git_slot() {
         let (mut state, tag) = opened();
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("origin")),
-        });
+        }));
         let [Effect::FetchReviewCommits { tag, .. }] = effects.as_slice() else {
             panic!("{effects:?}");
         };
-        let effects = state.update(AppIntent::ReviewHeadFetched {
+        let effects = state.update(AppIntent::Review(ReviewIntent::HeadFetched {
             tag: *tag,
             result: Err("fatal: could not read from remote".into()),
-        });
+        }));
         assert_eq!(effects, []);
         assert_eq!(
             stage(&state),
@@ -708,10 +709,10 @@ mod tests {
     #[test]
     fn the_review_fetch_may_ask_for_a_password_but_nothing_else_may() {
         let (mut state, tag) = opened();
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("origin")),
-        });
+        }));
         let [Effect::FetchReviewCommits { tag, .. }] = effects.as_slice() else {
             panic!("{effects:?}");
         };
@@ -725,20 +726,20 @@ mod tests {
         assert_eq!(state.update(ask(*tag)), []);
         assert_eq!(state.key_focus(), KeyScope::Credential);
         // The fetch ends: the question goes with it.
-        state.update(AppIntent::ReviewHeadFetched {
+        state.update(AppIntent::Review(ReviewIntent::HeadFetched {
             tag: *tag,
             result: Err("cancelled".into()),
-        });
+        }));
         assert!(state.popups.is_empty());
     }
 
     #[test]
     fn a_stale_fetch_result_leaves_the_running_fetchs_question_open() {
         let (mut state, tag) = opened();
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("origin")),
-        });
+        }));
         let [Effect::FetchReviewCommits { tag, .. }] = effects.as_slice() else {
             panic!("{effects:?}");
         };
@@ -753,10 +754,10 @@ mod tests {
             seq: tag.seq + 99,
             ..*tag
         };
-        state.update(AppIntent::ReviewHeadFetched {
+        state.update(AppIntent::Review(ReviewIntent::HeadFetched {
             tag: stale,
             result: Err("cancelled".into()),
-        });
+        }));
 
         assert_eq!(state.key_focus(), KeyScope::Credential);
         assert!(state.holds_op(*tag));
@@ -767,10 +768,10 @@ mod tests {
         let (mut state, tag) = opened();
         state.hold_op(77);
 
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("origin")),
-        });
+        }));
 
         assert_eq!(effects, []);
         assert_eq!(stage(&state), FilesStage::Failed(OP_RUNNING.into()));
@@ -781,10 +782,10 @@ mod tests {
     #[test]
     fn with_no_remote_for_the_repository_nothing_is_fetched_and_the_screen_says_why() {
         let (mut state, tag) = opened();
-        let effects = state.update(AppIntent::ReviewObjectsChecked {
+        let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(None),
-        });
+        }));
         assert_eq!(effects, []);
         assert_eq!(stage(&state), FilesStage::Failed(NO_FETCH_REMOTE.into()));
         assert_eq!((state.busy_count(), state.held_seq()), (0, None));
@@ -803,17 +804,17 @@ mod tests {
             ..tag
         };
         for stale in [old, other] {
-            let effects = state.update(AppIntent::ReviewObjectsChecked {
+            let effects = state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
                 tag: stale,
                 result: Ok(CommitsHere::All),
-            });
+            }));
             assert_eq!(effects, []);
             assert_eq!(stage(&state), FilesStage::Checking);
         }
-        state.update(AppIntent::ReviewObjectsChecked {
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: missing(Some("origin")),
-        });
+        }));
         let fetch = Tag {
             seq: state.held_seq().unwrap(),
             user: true,
@@ -824,21 +825,21 @@ mod tests {
             ..fetch
         };
         assert_eq!(
-            state.update(AppIntent::ReviewHeadFetched {
+            state.update(AppIntent::Review(ReviewIntent::HeadFetched {
                 tag: stale,
                 result: Ok(())
-            }),
+            })),
             []
         );
         assert_eq!(stage(&state), FilesStage::Fetching);
-        let tag = check_tag(&state.update(AppIntent::ReviewHeadFetched {
+        let tag = check_tag(&state.update(AppIntent::Review(ReviewIntent::HeadFetched {
             tag: fetch,
             result: Ok(()),
-        }));
-        state.update(AppIntent::ReviewObjectsChecked {
+        })));
+        state.update(AppIntent::Review(ReviewIntent::ObjectsChecked {
             tag,
             result: Ok(CommitsHere::All),
-        });
+        }));
         for stale in [
             old,
             Tag {
@@ -846,10 +847,10 @@ mod tests {
                 ..tag
             },
         ] {
-            let effects = state.update(AppIntent::ReviewFilesLoaded {
+            let effects = state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
                 tag: stale,
                 result: Ok((range(), rows())),
-            });
+            }));
             assert_eq!(effects, []);
             assert_eq!(stage(&state), FilesStage::Listing);
         }
@@ -873,10 +874,10 @@ mod tests {
             user: false,
         };
         assert_eq!(
-            state.update(AppIntent::ReviewFilesLoaded {
+            state.update(AppIntent::Review(ReviewIntent::FilesLoaded {
                 tag,
                 result: Ok((range(), rows()))
-            }),
+            })),
             []
         );
     }

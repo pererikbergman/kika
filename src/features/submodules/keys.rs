@@ -4,6 +4,7 @@
 //! `CHUNKS` in `keymap.rs` places the three chunks, so their position there
 //! is behaviour.
 
+use crate::features::submodules::SubmodulesIntent;
 use crate::git::submodule::SubmoduleState;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
@@ -63,7 +64,7 @@ pub(crate) static SUBMODULES_WORKSPACE: &[Binding] = &[
         id: "workspace.parent",
         keys: &[KeyPattern::any(KeyCode::Backspace)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::LeaveSubmodule,
+        intent: AppIntent::Submodules(SubmodulesIntent::Leave),
         description: "Back to the parent repository",
         label: "parent",
         bar: true,
@@ -78,7 +79,7 @@ pub(crate) static SUBMODULES_FILES: &[Binding] = &[
         id: "files.submodules",
         keys: &[KeyPattern::any(KeyCode::Char('S'))],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenSubmodules,
+        intent: AppIntent::Submodules(SubmodulesIntent::Open),
         description: "Show submodules",
         label: "submodules",
         bar: false,
@@ -95,7 +96,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Submodules,
-        intent: AppIntent::SubmoduleNext,
+        intent: AppIntent::Submodules(SubmodulesIntent::Next),
         description: "Select the next submodule",
         label: "",
         bar: false,
@@ -108,7 +109,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Submodules,
-        intent: AppIntent::SubmodulePrev,
+        intent: AppIntent::Submodules(SubmodulesIntent::Prev),
         description: "Select the previous submodule",
         label: "",
         bar: false,
@@ -118,7 +119,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
         id: "submodules.enter",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Submodules,
-        intent: AppIntent::EnterSubmodule,
+        intent: AppIntent::Submodules(SubmodulesIntent::Enter),
         description: "Work in the selected submodule",
         label: "enter",
         bar: true,
@@ -128,7 +129,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
         id: "submodules.update",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
         scope: KeyScope::Submodules,
-        intent: AppIntent::UpdateSubmodule,
+        intent: AppIntent::Submodules(SubmodulesIntent::Update),
         description: "Clone or check out the selected submodule at the recorded commit",
         label: "update",
         bar: true,
@@ -138,7 +139,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
         id: "submodules.init",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
         scope: KeyScope::Submodules,
-        intent: AppIntent::InitSubmodule,
+        intent: AppIntent::Submodules(SubmodulesIntent::Init),
         description: "Record the selected submodule's URL without cloning it",
         label: "init",
         bar: true,
@@ -171,6 +172,7 @@ pub(crate) static SUBMODULES_KEYS: &[Binding] = &[
 
 #[cfg(test)]
 mod tests {
+    use crate::features::submodules::SubmodulesIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{Binding, KeyPattern, KeyScope, Keymap, Resolution, registry, resolve};
     use crate::model::{AppState, Context};
@@ -188,7 +190,7 @@ mod tests {
         let shift = KeyModifiers::SHIFT;
         assert_eq!(
             from(KeyScope::Files, key(KeyCode::Char('S'), shift)),
-            Some(OpenSubmodules)
+            Some(Submodules(SubmodulesIntent::Open))
         );
         assert_eq!(KeyScope::Submodules.parent(), None);
         assert_eq!(KeyScope::Submodules.title(), "Submodules");
@@ -216,13 +218,22 @@ mod tests {
             Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
         };
-        assert_eq!(run(plain('j')), Some(SubmoduleNext));
-        assert_eq!(run(key(KeyCode::Down, none)), Some(SubmoduleNext));
-        assert_eq!(run(plain('k')), Some(SubmodulePrev));
-        assert_eq!(run(key(KeyCode::Up, none)), Some(SubmodulePrev));
-        assert_eq!(run(key(KeyCode::Enter, none)), Some(EnterSubmodule));
-        assert_eq!(run(plain('i')), Some(InitSubmodule));
-        assert_eq!(run(plain('u')), Some(UpdateSubmodule));
+        assert_eq!(run(plain('j')), Some(Submodules(SubmodulesIntent::Next)));
+        assert_eq!(
+            run(key(KeyCode::Down, none)),
+            Some(Submodules(SubmodulesIntent::Next))
+        );
+        assert_eq!(run(plain('k')), Some(Submodules(SubmodulesIntent::Prev)));
+        assert_eq!(
+            run(key(KeyCode::Up, none)),
+            Some(Submodules(SubmodulesIntent::Prev))
+        );
+        assert_eq!(
+            run(key(KeyCode::Enter, none)),
+            Some(Submodules(SubmodulesIntent::Enter))
+        );
+        assert_eq!(run(plain('i')), Some(Submodules(SubmodulesIntent::Init)));
+        assert_eq!(run(plain('u')), Some(Submodules(SubmodulesIntent::Update)));
         assert_eq!(run(key(KeyCode::Esc, none)), Some(PopPopup));
         assert_eq!(run(plain('q')), Some(PopPopup));
         assert_eq!(
@@ -264,7 +275,7 @@ mod tests {
                 matches!(
                     resolve(registry(), &Keymap::default(), scope, &state, backspace),
                     Resolution::Run(Binding {
-                        intent: AppIntent::LeaveSubmodule,
+                        intent: AppIntent::Submodules(SubmodulesIntent::Leave),
                         ..
                     })
                 ),

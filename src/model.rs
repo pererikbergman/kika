@@ -31,8 +31,10 @@ use crate::features::operation;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
 use crate::features::repos::{self, ParkedRepo};
 use crate::features::review::{self, PrMerging};
-use crate::features::stash::{StashDraft, StashList, StashMode};
+use crate::features::stash::{self, StashDraft, StashList};
+use crate::features::submodules;
 use crate::features::sync;
+use crate::features::worktrees;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -58,7 +60,7 @@ use crate::list_input::{RANGE_FILES_CHANGED, search_input};
 use crate::menu;
 use crate::op::GitOp;
 use crate::op_slot::OpSlot;
-use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
+use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
 use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
@@ -558,59 +560,9 @@ impl AppState {
             AppIntent::OpenInEditor => return self.open_in_editor(),
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
-            AppIntent::StashesLoaded { tag, result } => {
-                self.stash.list.loaded(tag, self.generation, result);
-            }
-            AppIntent::StashNext => {
-                self.stash.list.move_by(1);
-            }
-            AppIntent::StashPrev => {
-                self.stash.list.move_by(-1);
-            }
-            AppIntent::OpenStashFiles => return self.open_stash_files(),
-            AppIntent::CloseStashFiles => return self.close_stash_files(),
-            AppIntent::StashFileNext => return self.move_stash_file(1),
-            AppIntent::StashFilePrev => return self.move_stash_file(-1),
-            AppIntent::StashFilesLoaded { tag, result } => {
-                return self.stash_files_loaded(tag, result);
-            }
-            AppIntent::ApplyStash => return self.stash_op(GitOp::StashApply),
-            AppIntent::PopStash => return self.stash_op(GitOp::StashPop),
-            AppIntent::DropStash if self.stash.list.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Stashes)
-            }
-            AppIntent::DropStash => self.ask_drop_stash(),
-            AppIntent::ConfirmDropStash => return self.confirm_drop_stash(),
-            AppIntent::RenameStash => self.ask_rename_stash(),
-            AppIntent::RenameStashTo(text) => return self.rename_stash_to(&text),
-            AppIntent::StashAll => self.ask_stash_message(StashMode::All),
-            AppIntent::StashIncludingUntracked => {
-                self.ask_stash_message(StashMode::IncludeUntracked)
-            }
-            AppIntent::StashStaged => self.ask_stash_message(StashMode::Staged),
-            AppIntent::StashFile => self.ask_stash_file_message(),
-            AppIntent::StashMessageAnswered(text) => return self.stash_message_answered(&text),
-            AppIntent::OpenSubmodules => return self.open_submodules(),
-            AppIntent::SubmodulesLoaded { tag, result } => self.submodules_loaded(tag, result),
-            AppIntent::SubmoduleNext => self.move_submodule_cursor(1),
-            AppIntent::SubmodulePrev => self.move_submodule_cursor(-1),
-            AppIntent::InitSubmodule => return self.init_submodule(),
-            AppIntent::UpdateSubmodule => return self.update_submodule(),
-            AppIntent::EnterSubmodule => return self.enter_submodule(),
-            AppIntent::LeaveSubmodule => return self.leave_submodule(),
-            AppIntent::OpenWorktrees => return self.open_worktrees(),
-            AppIntent::WorktreesLoaded { tag, result } => self.worktrees_loaded(tag, result),
-            AppIntent::WorktreeNext => self.move_worktree_cursor(1),
-            AppIntent::WorktreePrev => self.move_worktree_cursor(-1),
-            AppIntent::OpenWorktree => return self.open_worktree(),
-            AppIntent::AddWorktree => self.ask_worktree_path(),
-            AppIntent::AddWorktreeAt(text) => return self.add_worktree_at(text),
-            AppIntent::WorktreeAdded { tag, result } => return self.worktree_added(tag, result),
-            AppIntent::RemoveWorktree => self.ask_remove_worktree(),
-            AppIntent::ConfirmRemoveWorktree => return self.confirm_remove_worktree(),
-            AppIntent::WorktreeRemoved { tag, result } => {
-                return self.worktree_removed(tag, result);
-            }
+            AppIntent::Stash(i) => return stash::update(self, i),
+            AppIntent::Submodules(i) => return submodules::update(self, i),
+            AppIntent::Worktrees(i) => return worktrees::update(self, i),
             AppIntent::CommandLog(i) => return command_log::update(self, i),
             AppIntent::Commits(i) => return commits::update(self, i),
             AppIntent::Branches(i) => return branches::update(self, i),
@@ -630,76 +582,8 @@ impl AppState {
             } => self.config_loaded(repo, keymap, errors),
             AppIntent::Start => return self.start(),
             AppIntent::OpenRepo(path) => return self.open_repo(path),
-            AppIntent::ForgeRepoNone { tag } => {
-                if tag.generation == self.generation {
-                    self.forge.repo_none(tag);
-                }
-            }
-            AppIntent::PullRequestsCached { tag, repo, badges } => {
-                if tag.generation == self.generation {
-                    self.forge.cached(tag, repo, badges);
-                }
-            }
-            AppIntent::PullRequestsFetched {
-                tag,
-                result,
-                limited_until,
-            } => {
-                return self.pull_requests_fetched(tag, result, limited_until);
-            }
-            AppIntent::OpenForgeUrl => return self.open_forge_url(),
-            AppIntent::CopyForgeUrl => return self.copy_forge_url(),
-            AppIntent::RefreshPullRequests => return self.refresh_pull_requests(),
-            AppIntent::OpenUrlFailed(message) => self.push_error(ErrorPopup::new(
-                "Could not open the browser",
-                &message,
-                "Check forge.browser in the global config.",
-            )),
-            AppIntent::CreatePrStart => self.create_pr_start(),
-            AppIntent::PickNext => self.move_pick_cursor(1),
-            AppIntent::PickPrev => self.move_pick_cursor(-1),
-            AppIntent::PickSelect => return self.pick_select(),
-            AppIntent::PullRequestTitled(text) => self.pull_request_titled(&text),
-            AppIntent::ConfirmCreatePullRequest => return self.confirm_create_pull_request(),
-            AppIntent::PullRequestCreated { tag, result } => {
-                return self.pull_request_created(tag, result);
-            }
-            AppIntent::EnterReview => return self.enter_review(),
-            AppIntent::NextQueue => self.step_review_queue(false),
-            AppIntent::PrevQueue => self.step_review_queue(true),
-            AppIntent::OpenPr => return self.open_pr(),
-            AppIntent::CloseReviewDetail => return self.close_review(),
-            AppIntent::RefreshReview => return self.refresh_review(),
-            AppIntent::OpenCheckDetails => return self.open_check_details(),
-            AppIntent::OpenMergePr => self.open_merge_pr(),
-            AppIntent::ConfirmMergePr => return self.confirm_merge_pr(),
-            AppIntent::PullRequestMerged {
-                tag,
-                number,
-                result,
-            } => return self.pull_request_merged(tag, number, result),
-            AppIntent::ReviewNext => return self.review_move(1),
-            AppIntent::ReviewPrev => return self.review_move(-1),
-            AppIntent::OpenReviewFiles => return self.open_review_files(),
-            AppIntent::ToggleReviewFilesFocus => self.toggle_review_files_focus(),
-            AppIntent::ReviewObjectsChecked { tag, result } => {
-                return self.review_objects_checked(tag, result);
-            }
-            AppIntent::ReviewHeadFetched { tag, result } => {
-                return self.review_head_fetched(tag, result);
-            }
-            AppIntent::ReviewFilesLoaded { tag, result } => {
-                return self.review_files_loaded(tag, result);
-            }
-            AppIntent::ReviewQueuesLoaded { tag, repo, result } => {
-                self.review_queues_loaded(tag, repo, result)
-            }
-            AppIntent::PrDetailLoaded {
-                tag,
-                number,
-                repo,
-                result,
-            } => self.pr_detail_loaded(tag, number, repo, result),
+            AppIntent::PullRequests(i) => return pull_requests::update(self, i),
+            AppIntent::Review(i) => return review::update(self, i),
             AppIntent::ConfirmDeleteRange => return self.confirm_delete_range(),
             AppIntent::CredentialAsked {
                 tag,
@@ -1889,6 +1773,8 @@ mod tests {
     use crate::features::files::FilesIntent;
     use crate::features::operation::OperationIntent;
     use crate::features::operation::abort_question;
+    use crate::features::pull_requests::PullRequestsIntent;
+    use crate::features::stash::StashMode;
     use crate::features::sync::SyncIntent;
     use crate::git::diff::DiffSide;
     use crate::git::rebase_plan;
@@ -5763,7 +5649,7 @@ mod tests {
             ),
             (
                 create_question(state),
-                AppIntent::ConfirmCreatePullRequest,
+                AppIntent::PullRequests(PullRequestsIntent::ConfirmCreate),
                 false,
             ),
         ]

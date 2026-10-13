@@ -94,6 +94,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::pull_requests::PullRequestsIntent;
     use crate::forge::{CiState, ForgeHost, ForgeRepo, ForgeState, ForgeView, PrState};
     use crate::git::FileEntry;
     use crate::git::branches::{Branch, Track};
@@ -253,11 +254,11 @@ mod tests {
         // While it runs, nothing else starts.
         assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
 
-        state.update(AppIntent::PullRequestsFetched {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: first,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
         assert!(!state.forge.in_flight);
         assert_eq!(state.forge.status, ForgeView::Fresh);
         let later = loads(&list_branches(&mut state, &["main"]));
@@ -276,19 +277,19 @@ mod tests {
         };
         let effects = remote_ok(&mut state, remote_intent(&push), push);
         assert_eq!(loads(&effects), []);
-        let effects = state.update(AppIntent::PullRequestsFetched {
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: first,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
         let [(second, true)] = loads(&effects)[..] else {
             panic!("{effects:?}")
         };
-        state.update(AppIntent::PullRequestsFetched {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: second,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
 
         for (intent, op) in [
             (remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch),
@@ -298,11 +299,11 @@ mod tests {
             let [(tag, true)] = loads(&effects)[..] else {
                 panic!("{effects:?}")
             };
-            state.update(AppIntent::PullRequestsFetched {
+            state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
                 tag,
                 result: Ok(HashMap::new()),
                 limited_until: None,
-            });
+            }));
         }
     }
 
@@ -317,11 +318,11 @@ mod tests {
         state.forge.reset();
         assert_eq!(state.forge.hosts, github());
         assert!(state.forge.badges.is_empty() && !state.forge.in_flight);
-        state.update(AppIntent::PullRequestsFetched {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: old,
             result: Ok(HashMap::from([("main".into(), badge(9))])),
             limited_until: None,
-        });
+        }));
         assert!(state.forge.badges.is_empty());
         assert!(matches!(
             loads(&list_branches(&mut state, &["main"]))[..],
@@ -335,16 +336,16 @@ mod tests {
         let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
             panic!()
         };
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag,
             repo: repo(),
             badges: None,
-        });
-        state.update(AppIntent::PullRequestsFetched {
+        }));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
         let known = |effects: &[Effect]| {
             effects.iter().find_map(|e| match e {
                 Effect::LoadPullRequests { known, refresh, .. } => Some((known.clone(), *refresh)),
@@ -361,7 +362,9 @@ mod tests {
 
         // Once the remote matched no host, reloads start nothing, until a
         // user fetch asks again.
-        state.update(AppIntent::ForgeRepoNone { tag });
+        state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+            tag,
+        }));
         assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
         let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
         assert_eq!(known(&effects), Some((None, true)));
@@ -386,19 +389,19 @@ mod tests {
             panic!()
         };
         let shown = HashMap::from([("main".into(), badge(3))]);
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag,
             repo: ForgeRepo {
                 host: "GitHub.com".into(),
                 ..repo()
             },
             badges: Some(shown.clone()),
-        });
-        let effects = state.update(AppIntent::PullRequestsFetched {
+        }));
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag,
             result: Err(ForgeStatus::RateLimited),
             limited_until: Some(T),
-        });
+        }));
         assert_eq!(effects, []);
         assert_eq!(
             state.forge.limited,
@@ -432,16 +435,16 @@ mod tests {
         };
 
         // An answer clears it.
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag: tag2,
             repo: repo(),
             badges: None,
-        });
-        state.update(AppIntent::PullRequestsFetched {
+        }));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: tag2,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
         assert!(state.forge.limited.is_empty());
         assert_eq!(state.forge.limited_until, None);
         let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
@@ -454,7 +457,9 @@ mod tests {
         let [(tag, true)] = loads(&list_branches(&mut state, &["main"]))[..] else {
             panic!()
         };
-        state.update(AppIntent::ForgeRepoNone { tag });
+        state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+            tag,
+        }));
         assert_eq!(state.forge.status, ForgeView::Off);
         assert!(!state.forge.in_flight);
         let rows = crate::test_support::draw_branches(&state, 80, 12);
@@ -468,11 +473,11 @@ mod tests {
         let [(tag, true)] = loads(&state.load_pull_requests())[..] else {
             panic!()
         };
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag,
             repo: repo(),
             badges: Some(HashMap::from([("topic".into(), badge(12))])),
-        });
+        }));
         assert_eq!(state.forge.status, ForgeView::Updating);
         let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
@@ -492,16 +497,16 @@ mod tests {
         let [(tag, true)] = loads(&state.load_pull_requests())[..] else {
             panic!()
         };
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag,
             repo: repo(),
             badges: Some(HashMap::from([("main".into(), badge(3))])),
-        });
-        let effects = state.update(AppIntent::PullRequestsFetched {
+        }));
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag,
             result: Err(ForgeStatus::Offline),
             limited_until: None,
-        });
+        }));
         assert_eq!(effects, []);
         assert_eq!(state.forge.badges[&BranchName::from("main")], badge(3));
         assert_eq!(state.forge.status, ForgeView::Problem(ForgeStatus::Offline));
@@ -544,17 +549,19 @@ mod tests {
             seq: tag.seq + 100,
             ..tag
         };
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag: old,
             repo: repo(),
             badges: Some(HashMap::from([("main".into(), badge(1))])),
-        });
-        state.update(AppIntent::ForgeRepoNone { tag: old });
-        state.update(AppIntent::PullRequestsFetched {
+        }));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+            tag: old,
+        }));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: old,
             result: Err(ForgeStatus::Failed),
             limited_until: None,
-        });
+        }));
         assert!(state.forge.in_flight);
         assert_eq!(state.forge.repo, None);
         assert_eq!(state.forge.status, ForgeView::Updating);
@@ -581,7 +588,7 @@ mod tests {
     #[test]
     fn the_refresh_key_asks_the_forge_again_once() {
         let mut state = loaded();
-        let effects = state.update(AppIntent::RefreshPullRequests);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh));
         let [(tag, true)] = loads(&effects)[..] else {
             panic!("{effects:?}")
         };
@@ -597,11 +604,11 @@ mod tests {
             Some("Pull requests are already being refreshed")
         );
         assert!(!state.forge.refresh_wanted);
-        let effects = state.update(AppIntent::PullRequestsFetched {
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag,
             result: Ok(HashMap::new()),
             limited_until: None,
-        });
+        }));
         assert_eq!(effects, []);
         assert!(!state.forge.in_flight);
     }
@@ -615,7 +622,10 @@ mod tests {
             off.notice.as_deref(),
             Some("Name GitHub hosts under [forge] in the global config")
         );
-        assert_eq!(off.update(AppIntent::RefreshPullRequests), []);
+        assert_eq!(
+            off.update(AppIntent::PullRequests(PullRequestsIntent::Refresh)),
+            []
+        );
 
         let mut unknown = loaded();
         unknown.forge.repo = None;
@@ -626,12 +636,19 @@ mod tests {
         );
 
         let mut unmatched = loaded();
-        let [(tag, true)] = loads(&unmatched.update(AppIntent::RefreshPullRequests))[..] else {
+        let [(tag, true)] =
+            loads(&unmatched.update(AppIntent::PullRequests(PullRequestsIntent::Refresh)))[..]
+        else {
             panic!()
         };
-        unmatched.update(AppIntent::ForgeRepoNone { tag });
+        unmatched.update(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+            tag,
+        }));
         assert!(unmatched.forge.unmatched);
-        assert_eq!(unmatched.update(AppIntent::RefreshPullRequests), []);
+        assert_eq!(
+            unmatched.update(AppIntent::PullRequests(PullRequestsIntent::Refresh)),
+            []
+        );
         assert_eq!(
             unmatched.notice.as_deref(),
             Some("The remote is on no forge host in the global config, or not in [forge.allow]")
@@ -696,7 +713,7 @@ mod tests {
 
         // Asking again does call the forge.
         let mut state = limited();
-        let effects = state.update(AppIntent::RefreshPullRequests);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh));
         assert_eq!(refreshes(&effects), 1, "{effects:?}");
     }
 
@@ -704,7 +721,10 @@ mod tests {
     fn the_refresh_key_does_nothing_outside_the_workspace() {
         let mut state = loaded();
         state.context = Context::Review { number: None };
-        assert_eq!(state.update(AppIntent::RefreshPullRequests), []);
+        assert_eq!(
+            state.update(AppIntent::PullRequests(PullRequestsIntent::Refresh)),
+            []
+        );
         assert!(!state.forge.in_flight);
     }
 }
