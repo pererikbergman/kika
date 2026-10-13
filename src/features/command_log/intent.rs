@@ -10,9 +10,12 @@ pub(crate) enum CommandLogIntent {
     Logged(CommandEvent),
     /// Show the git commands Kika ran this session.
     Open,
-    /// Move the Command log cursor a row or a page down or up.
+    /// Move the Command log cursor a row down.
     Next,
+    /// Move the Command log cursor a row up.
     Prev,
+    /// Move the Command log cursor a page down.
     PageDown,
+    /// Move the Command log cursor a page up.
     PageUp,
 }
