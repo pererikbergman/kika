@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::external_diff::{self, ExternalRenderer, LIMITS, Limits, MAX_BYTES};
-use crate::git::diff::{DiffRequest, DiffSide, terminal_safe};
+use crate::git::diff::{DiffRequest, DiffSide};
+use crate::git::error::GitError;
 use crate::git::path::RepoPath;
 use crate::git::runner::{GitCommand, GitRunner};
 use crate::worktree_file;
@@ -107,19 +108,7 @@ impl ObjectId {
 /// A git read of a repo file name: the name is literal, never pathspec
 /// magic or a glob, and the read takes no lock.
 fn path_command(subcommand: &str) -> GitCommand {
-    GitCommand::new(subcommand)
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-}
-
-fn failure(stderr: &[u8], what: &str) -> String {
-    let message = terminal_safe(stderr);
-    if message.is_empty() {
-        format!("{what} failed")
-    } else {
-        message
-    }
+    GitCommand::new(subcommand).standard_env()
 }
 
 /// The space-separated fields before the tab of each NUL-ended record
@@ -164,10 +153,7 @@ fn index_entry(
         .arg("-z")
         .arg("--")
         .arg(path.as_os_str());
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
-    if !output.success {
-        return Err(failure(&output.stderr, "git ls-files"));
-    }
+    let output = runner.run_checked(&cmd).map_err(|e| e.to_string())?;
     let mut found = None;
     // `<mode> <oid> <stage>\t<path>`
     for fields in records_of(&output.stdout, path) {
@@ -190,12 +176,12 @@ fn head_entry(runner: &dyn GitRunner, path: &RepoPath) -> Result<Option<Entry>, 
         .arg("HEAD")
         .arg("--")
         .arg(path.as_os_str());
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if !output.success {
         return if head_is_unborn(runner) {
             Ok(None)
         } else {
-            Err(failure(&output.stderr, "git ls-tree"))
+            Err(GitError::failed(&cmd, &output).to_string())
         };
     }
     // `<mode> <type> <oid>\t<path>`
@@ -207,13 +193,14 @@ fn head_entry(runner: &dyn GitRunner, path: &RepoPath) -> Result<Option<Entry>, 
         .transpose()
 }
 
-/// Whether `HEAD` names no commit, as on a branch with none yet.
+/// Whether `HEAD` names no commit, as on a branch with none yet. A read
+/// that names no path.
 fn head_is_unborn(runner: &dyn GitRunner) -> bool {
     let cmd = GitCommand::new("rev-parse")
         .arg("--verify")
         .arg("--quiet")
         .arg("HEAD^{commit}")
-        .env("LC_ALL", "C");
+        .standard_env();
     runner.run(&cmd).is_ok_and(|o| !o.success)
 }
 
@@ -232,10 +219,7 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
         return Err(not_regular(label));
     }
     let size = GitCommand::new("cat-file").arg("-s").arg(&entry.oid.0);
-    let output = runner.run(&size).map_err(|e| e.to_string())?;
-    if !output.success {
-        return Err(failure(&output.stderr, "git cat-file"));
-    }
+    let output = runner.run_checked(&size).map_err(|e| e.to_string())?;
     let size: u64 = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
@@ -244,10 +228,7 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
         return Err(too_large(label));
     }
     let read = GitCommand::new("cat-file").arg("blob").arg(entry.oid.0);
-    let output = runner.run(&read).map_err(|e| e.to_string())?;
-    if !output.success {
-        return Err(failure(&output.stderr, "git cat-file"));
-    }
+    let output = runner.run_checked(&read).map_err(|e| e.to_string())?;
     Ok(output.stdout)
 }
 
@@ -352,6 +333,8 @@ mod tests {
     #[cfg(unix)]
     use crate::git::fake::fail;
     use crate::git::fake::{FakeRunner, TempDir, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn tool(argv: &[&str]) -> ExternalRenderer {
         ExternalRenderer {
@@ -420,18 +403,13 @@ mod tests {
         );
         assert_eq!(out, Ok(b"old\nnew\n".to_vec()));
         runner.assert_done();
-        let envs = runner.envs();
-        for var in [
-            ("GIT_LITERAL_PATHSPECS", "1"),
-            ("GIT_OPTIONAL_LOCKS", "0"),
-            ("LC_ALL", "C"),
-        ] {
-            assert!(
-                envs[0].contains(&(var.0.into(), var.1.into())),
-                "{var:?} in {:?}",
-                envs[0]
-            );
-        }
+        // The path read is literal and takes no lock; the blob reads, which
+        // set no var, are left as they were.
+        assert_eq!(path_command("ls-files").env_profile(), EnvProfile::Standard);
+        assert_eq!(
+            runner.process_envs(),
+            [env_list(&STANDARD_ENV), vec![], vec![]]
+        );
         assert!(empty(&base), "the temp directory is removed");
     }
 
@@ -461,11 +439,8 @@ mod tests {
         );
         assert_eq!(out, Ok(b"a\nb\n".to_vec()));
         runner.assert_done();
-        assert!(
-            runner.envs()[0].contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
-            "{:?}",
-            runner.envs()[0]
-        );
+        assert_eq!(runner.process_envs()[0], env_list(&STANDARD_ENV));
+        assert_eq!(runner.process_envs()[3], env_list(&STANDARD_ENV));
     }
 
     #[cfg(unix)]
@@ -494,6 +469,8 @@ mod tests {
         );
         assert_eq!(out, Ok(b"b\n".to_vec()));
         runner.assert_done();
+        // The unborn check is a read that names no path.
+        assert_eq!(runner.process_envs()[1], env_list(&STANDARD_ENV));
     }
 
     #[cfg(unix)]
