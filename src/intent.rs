@@ -6,6 +6,7 @@ use crossterm::event::{Event, KeyEventKind};
 use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::effect::Tag;
+use crate::features::command_log::CommandLogIntent;
 use crate::features::commits::custom_patch::{PatchAction, PatchChoice};
 use crate::features::commits::git::Tip;
 use crate::features::commits::reflog::Reflog;
@@ -31,7 +32,6 @@ use crate::git::log::{LogPage, Markers};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan::{Direction, Edit};
-use crate::git::recording::CommandEvent;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
@@ -443,15 +443,8 @@ pub enum AppIntent {
     },
 
     // --- command_log ---
-    /// A git command started or ended; the runner reports every one.
-    CommandLogged(CommandEvent),
-    /// Show the git commands Kika ran this session.
-    OpenCommandLog,
-    /// Move the Command log cursor a row or a page down or up.
-    CommandLogNext,
-    CommandLogPrev,
-    CommandLogPageDown,
-    CommandLogPageUp,
+    /// Everything the Command log does; its own `update` handles it.
+    CommandLog(CommandLogIntent),
 
     // --- custom_commands ---
     /// The answer to a custom command's current prompt.
@@ -949,6 +942,12 @@ pub enum Scroll {
     LineUp,
     PageDown,
     PageUp,
+}
+
+impl From<CommandLogIntent> for AppIntent {
+    fn from(intent: CommandLogIntent) -> Self {
+        Self::CommandLog(intent)
+    }
 }
 
 impl AppIntent {

@@ -2,6 +2,7 @@
 //! the log's own scope moves, pages, filters and closes it. `CHUNKS` in
 //! `keymap.rs` places both chunks, so their position there is behaviour.
 
+use super::CommandLogIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -16,7 +17,7 @@ pub(crate) static COMMAND_LOG_WORKSPACE: &[Binding] = &[
         id: "workspace.command_log",
         keys: &[KeyPattern::any(KeyCode::Char('@'))],
         scope: KeyScope::Workspace,
-        intent: AppIntent::OpenCommandLog,
+        intent: AppIntent::CommandLog(CommandLogIntent::Open),
         description: "Show the git commands Kika ran",
         label: "command log",
         bar: false,
@@ -33,7 +34,7 @@ pub(crate) static COMMAND_LOG_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::CommandLog,
-        intent: AppIntent::CommandLogNext,
+        intent: AppIntent::CommandLog(CommandLogIntent::Next),
         description: "Select the next command",
         label: "",
         bar: false,
@@ -46,7 +47,7 @@ pub(crate) static COMMAND_LOG_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::CommandLog,
-        intent: AppIntent::CommandLogPrev,
+        intent: AppIntent::CommandLog(CommandLogIntent::Prev),
         description: "Select the previous command",
         label: "",
         bar: false,
@@ -56,7 +57,7 @@ pub(crate) static COMMAND_LOG_KEYS: &[Binding] = &[
         id: "command_log.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::CommandLog,
-        intent: AppIntent::CommandLogPageDown,
+        intent: AppIntent::CommandLog(CommandLogIntent::PageDown),
         description: "Move a page down",
         label: "",
         bar: false,
@@ -66,7 +67,7 @@ pub(crate) static COMMAND_LOG_KEYS: &[Binding] = &[
         id: "command_log.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::CommandLog,
-        intent: AppIntent::CommandLogPageUp,
+        intent: AppIntent::CommandLog(CommandLogIntent::PageUp),
         description: "Move a page up",
         label: "",
         bar: false,
@@ -116,6 +117,7 @@ pub(crate) static COMMAND_LOG_KEYS: &[Binding] = &[
 
 #[cfg(test)]
 mod tests {
+    use crate::features::command_log::CommandLogIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{
         KeyPattern, KeyScope, Keymap, REPO_LOCKED, Resolution, Trust, parse_key, registry, resolve,
@@ -137,7 +139,7 @@ mod tests {
             .find(|b| b.id == "workspace.command_log")
             .unwrap();
         assert_eq!(binding.scope, KeyScope::Workspace);
-        assert_eq!(binding.intent, OpenCommandLog);
+        assert_eq!(binding.intent, CommandLog(CommandLogIntent::Open));
         assert_eq!(binding.keys, [KeyPattern::any(at)]);
         assert_eq!(parse_key("@"), Ok(KeyPattern::any(at)));
 
@@ -186,7 +188,7 @@ mod tests {
                     key(at, mods),
                 );
                 assert!(
-                    matches!(found, Resolution::Run(b) if b.intent == OpenCommandLog),
+                    matches!(found, Resolution::Run(b) if b.intent == CommandLog(CommandLogIntent::Open)),
                     "{scope:?} {mods:?}"
                 );
             }
@@ -212,12 +214,24 @@ mod tests {
             Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
         };
-        assert_eq!(run(plain('j')), Some(CommandLogNext));
-        assert_eq!(run(key(KeyCode::Down, none)), Some(CommandLogNext));
-        assert_eq!(run(plain('k')), Some(CommandLogPrev));
-        assert_eq!(run(key(KeyCode::Up, none)), Some(CommandLogPrev));
-        assert_eq!(run(key(KeyCode::PageDown, none)), Some(CommandLogPageDown));
-        assert_eq!(run(key(KeyCode::PageUp, none)), Some(CommandLogPageUp));
+        assert_eq!(run(plain('j')), Some(CommandLog(CommandLogIntent::Next)));
+        assert_eq!(
+            run(key(KeyCode::Down, none)),
+            Some(CommandLog(CommandLogIntent::Next))
+        );
+        assert_eq!(run(plain('k')), Some(CommandLog(CommandLogIntent::Prev)));
+        assert_eq!(
+            run(key(KeyCode::Up, none)),
+            Some(CommandLog(CommandLogIntent::Prev))
+        );
+        assert_eq!(
+            run(key(KeyCode::PageDown, none)),
+            Some(CommandLog(CommandLogIntent::PageDown))
+        );
+        assert_eq!(
+            run(key(KeyCode::PageUp, none)),
+            Some(CommandLog(CommandLogIntent::PageUp))
+        );
         assert_eq!(run(plain('/')), Some(OpenFilter));
         assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));

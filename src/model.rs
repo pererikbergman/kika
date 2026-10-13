@@ -13,7 +13,7 @@ use crate::features::blame::BlameView;
 use crate::features::branches::remotes::RemotePending;
 use crate::features::branches::tags::PendingTag;
 use crate::features::branches::{BranchesPanel, BranchesTab};
-use crate::features::command_log::CommandLog;
+use crate::features::command_log::{self, CommandLog};
 use crate::features::commit::CommitEditor;
 use crate::features::commits::compare::PendingDiff;
 use crate::features::commits::copy::CopiedCommits;
@@ -716,12 +716,7 @@ impl AppState {
             AppIntent::WorktreeRemoved { tag, result } => {
                 return self.worktree_removed(tag, result);
             }
-            AppIntent::CommandLogged(event) => self.command_logged(event),
-            AppIntent::OpenCommandLog => self.open_command_log(),
-            AppIntent::CommandLogNext => self.move_command_log(1),
-            AppIntent::CommandLogPrev => self.move_command_log(-1),
-            AppIntent::CommandLogPageDown => self.move_command_log(self.command_log_page()),
-            AppIntent::CommandLogPageUp => self.move_command_log(-self.command_log_page()),
+            AppIntent::CommandLog(i) => return command_log::update(self, i),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -4652,6 +4647,7 @@ mod tests {
 
     #[test]
     fn a_credential_answer_never_reaches_the_command_log() {
+        use crate::features::command_log::CommandLogIntent;
         use crate::git::command_line::display_line;
         use crate::git::recording::{CommandEvent, CommandOutcome};
         use crate::git::remote::{AskpassEnv, remote_command};
@@ -4663,17 +4659,21 @@ mod tests {
             git_askpass: true,
         };
         let line = display_line(&remote_command(&PUSH, Some(&askpass)));
-        state.update(AppIntent::CommandLogged(CommandEvent::Started {
-            id: 0,
-            line,
-            attached: false,
-        }));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Started {
+                id: 0,
+                line,
+                attached: false,
+            },
+        )));
         state.update(AppIntent::CredentialAnswered(Some(Secret::new("hunter2"))));
-        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
-            id: 0,
-            outcome: CommandOutcome::Ok,
-            elapsed: std::time::Duration::from_millis(5),
-        }));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Finished {
+                id: 0,
+                outcome: CommandOutcome::Ok,
+                elapsed: std::time::Duration::from_millis(5),
+            },
+        )));
 
         let entries = state.command_log.entries();
         assert_eq!(entries.len(), 1);

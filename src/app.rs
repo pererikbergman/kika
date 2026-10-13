@@ -16,6 +16,7 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
+use crate::features::command_log::CommandLogIntent;
 use crate::forge;
 use crate::forge::github::CliGh;
 use crate::forge::task::ForgeContext;
@@ -43,7 +44,7 @@ pub async fn run(
     // Before anything runs git, so every command reaches the log.
     let log_tx = tx.clone();
     sink.connect(move |event| {
-        let _ = log_tx.send(AppIntent::CommandLogged(event));
+        let _ = log_tx.send(CommandLogIntent::Logged(event).into());
     });
     // Only when the user named hosts; otherwise `gh` is never run.
     let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
@@ -529,11 +530,13 @@ mod tests {
     }
 
     fn started(id: u64) -> AppIntent {
-        AppIntent::CommandLogged(crate::git::recording::CommandEvent::Started {
-            id,
-            line: format!("git command-{id}"),
-            attached: false,
-        })
+        AppIntent::CommandLog(CommandLogIntent::Logged(
+            crate::git::recording::CommandEvent::Started {
+                id,
+                line: format!("git command-{id}"),
+                attached: false,
+            },
+        ))
     }
 
     fn logged_lines(state: &AppState) -> Vec<String> {

@@ -3,6 +3,7 @@
 
 use crate::bisect;
 use crate::clipboard::CopyWhat;
+use crate::features::command_log::CommandLogIntent;
 use crate::features::commit::keys::{amend_disabled, commit_disabled};
 use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
@@ -109,7 +110,7 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Command log…",
-        intent: AppIntent::OpenCommandLog,
+        intent: AppIntent::CommandLog(CommandLogIntent::Open),
         disabled: never,
     },
     MenuItem {

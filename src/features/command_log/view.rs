@@ -109,6 +109,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::features::command_log::CommandLogIntent;
     use crate::git::recording::CommandEvent;
     use crate::git::runner::GitCommand;
     use crate::intent::AppIntent;
@@ -125,7 +126,7 @@ mod tests {
     }
 
     fn log(state: &mut AppState, event: CommandEvent) {
-        state.update(AppIntent::CommandLogged(event));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(event)));
     }
 
     fn started(id: u64, line: &str, attached: bool) -> CommandEvent {
@@ -154,7 +155,7 @@ mod tests {
     }
 
     fn open(state: &mut AppState) {
-        state.update(AppIntent::OpenCommandLog);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Open));
     }
 
     #[test]
@@ -248,7 +249,7 @@ mod tests {
         assert!(rows.iter().all(|row| !row.contains("git cmd00")));
 
         for _ in 0..29 {
-            state.update(AppIntent::CommandLogPrev);
+            state.update(AppIntent::CommandLog(CommandLogIntent::Prev));
         }
         let (_, rows) = draw(&state, 60, 12);
         line_with(&rows, " Command log 1/30 ");
@@ -386,7 +387,7 @@ mod tests {
 
         // The cursor bar sits on the filtered row it is on.
         let mut state = state;
-        state.update(AppIntent::CommandLogPrev);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Prev));
         let (buffer, rows) = draw(&state, 80, 24);
         let cursor = reversed_row(&buffer, &rows).expect("a cursor row");
         assert!(cursor.contains("git cmd10"), "{cursor}");
@@ -397,7 +398,7 @@ mod tests {
         // `cmd1`, `cmd10`..`cmd19`: 11 rows in 6 lines.
         let mut state = filtered(20, "cmd1");
         for _ in 0..10 {
-            state.update(AppIntent::CommandLogPrev);
+            state.update(AppIntent::CommandLog(CommandLogIntent::Prev));
         }
         let (buffer, rows) = draw(&state, 60, 8);
         line_with(&rows, " Command log · /cmd1 11 of 20 · 1/11 ");
