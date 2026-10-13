@@ -790,7 +790,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
 fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'static str>) {
     match focus {
         KeyScope::Files => {
-            let clears = state.files_anchor.is_some() || !state.files_filter.is_empty();
+            let clears = state.files.range_anchor.is_some() || !state.files.filter.is_empty();
             let mut leading = if searching(state, focus) {
                 vec!["files.search_next", "files.search_prev"]
             } else {
@@ -947,7 +947,7 @@ fn esc_label(state: &AppState, focus: KeyScope) -> Option<&'static str> {
 /// range or a filter goes first, and in a commit's files the filter.
 fn esc_clears_search(state: &AppState, focus: KeyScope) -> bool {
     let list_first = match focus {
-        KeyScope::Files => state.files_anchor.is_some() || !state.files_filter.is_empty(),
+        KeyScope::Files => state.files.range_anchor.is_some() || !state.files.filter.is_empty(),
         KeyScope::CommitFiles => commit_files_filtered(state),
         _ => false,
     };
@@ -1290,7 +1290,7 @@ mod tests {
     #[test]
     fn a_short_terminal_collapses_the_other_panels_to_title_rows() {
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
-        state.selected = Some(0);
+        state.files.selected = 0;
 
         // 80x24: the others drop to a title and a line each, so Files
         // keeps 13 rows inside its border.
@@ -1337,7 +1337,7 @@ mod tests {
         main.upstream = Some("origin/main".into());
         main.ahead_behind = Some((0, 3));
         let mut state = on(main);
-        state.files = vec![file("a.rs")];
+        state.files.rows = vec![file("a.rs")];
         let rows = thin(draw(&state, 80, 24));
         assert!(rows[1].starts_with("│main "), "{rows:#?}");
         assert!(!contains(&rows, "origin/main"), "{rows:#?}");
@@ -1361,7 +1361,7 @@ mod tests {
     #[test]
     fn the_bar_offers_close_while_help_is_open() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.help_open = true;
         let rows = draw(&state, 80, 20);
         assert!(rows[19].starts_with(" ? close  q quit "), "{rows:#?}");
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn a_disabled_hint_is_dimmed() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let buffer = draw_buffer(&state, 80, 8);
         let (x, y) = find(&buffer, "space stage");
         assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
@@ -1429,7 +1429,7 @@ mod tests {
     #[test]
     fn help_lists_the_keys_of_the_focused_panel() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.help_open = true;
         // Tall enough for every Files key; a shorter screen clips the list.
         let rows = draw(&state, 80, 60);
@@ -1464,7 +1464,7 @@ mod tests {
     #[test]
     fn help_and_the_bar_show_the_remapped_keys() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = remapped(state, &[("files.stage", &["x"])]);
         let rows = draw(&state, 80, 30);
         assert!(rows[29].starts_with(" x stage  a all"), "{rows:#?}");
@@ -1482,7 +1482,7 @@ mod tests {
     #[test]
     fn a_disabled_binding_leaves_help_and_the_bar() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = remapped(state, &[("files.discard", &[])]);
         let rows = draw(&state, 80, 30);
         assert!(
@@ -1499,7 +1499,7 @@ mod tests {
     #[test]
     fn remapped_focus_keys_show_in_help_and_work() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = remapped(
             state,
             &[
@@ -1569,7 +1569,7 @@ mod tests {
     #[test]
     fn workspace_lists_files_with_status_letters_and_renames() {
         let mut state = loaded(vec![renamed("old.txt", "new.txt")]);
-        state.files.push(FileEntry {
+        state.files.rows.push(FileEntry {
             path: "new_file".into(),
             orig_path: None,
             index: '?',
@@ -1601,12 +1601,13 @@ mod tests {
         let mut state = loaded((0..5).map(|i| file(&format!("file-{i}"))).collect());
         state
             .files
+            .rows
             .push(renamed("a/very/long/old", "a/very/long/new"));
         for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4)] {
             draw(&state, w, h);
-            state.status_error = Some("boom".into());
+            state.files.error = Some("boom".into());
             draw(&state, w, h);
-            state.status_error = None;
+            state.files.error = None;
         }
     }
 
@@ -1654,9 +1655,9 @@ mod tests {
                 .map(|i| diff_line(LineKind::Added, &format!("+\u{65e5}\u{672c} {i}")))
                 .collect(),
         );
-        state.files = (0..20).map(|i| file(&format!("file-{i}"))).collect();
+        state.files.rows = (0..20).map(|i| file(&format!("file-{i}"))).collect();
         for (selected, scroll) in [(0, 0), (19, 99), (10, 500)] {
-            state.selected = Some(selected);
+            state.files.selected = selected;
             state.diff.scroll = scroll;
             for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4), (7, 5)] {
                 draw(&state, w, h);
@@ -2281,7 +2282,7 @@ mod tests {
         assert!(contains(&rows, "No changes in this view"), "{rows:#?}");
 
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.seq = Some(3);
         state.focus_hunk_view(view);
@@ -2330,7 +2331,7 @@ mod tests {
     #[test]
     fn help_lists_a_command_in_its_panel_only_and_never_in_the_bar() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = with_files_command(state, "Tidy \x1b[2Jthe file");
         let rows = draw(&state, 100, 40);
         assert!(!contains(&rows, "ctrl-t"), "{rows:#?}");
@@ -2359,7 +2360,7 @@ mod tests {
     fn scrolled_help_at_80_by_24_reaches_the_users_commands() {
         use crate::intent::{AppIntent, Scroll};
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = with_files_command(state, "Tidy the file");
         state.update(AppIntent::Resize {
             width: 80,
@@ -2385,7 +2386,7 @@ mod tests {
     #[test]
     fn a_rule_separates_the_users_commands_from_the_built_in_keys() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = with_files_command(state, "Tidy the file");
         state.help_open = true;
         let rows = draw(&state, 100, 60);
@@ -2397,7 +2398,7 @@ mod tests {
         assert_eq!(rows.iter().filter(|r| is_rule(r)).count(), 1, "{rows:#?}");
 
         let mut plain = loaded(vec![file("a.rs")]);
-        plain.selected = Some(0);
+        plain.files.selected = 0;
         plain.help_open = true;
         let rows = draw(&plain, 100, 60);
         assert!(!rows.iter().any(|r| is_rule(r)), "{rows:#?}");
@@ -2406,7 +2407,7 @@ mod tests {
     #[test]
     fn the_bar_offers_the_cancel_key_only_while_a_command_runs() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let rows = draw(&state, 100, 20);
         assert!(!contains(&rows, "cancel command"), "{rows:#?}");
 
@@ -2427,7 +2428,7 @@ mod tests {
     #[test]
     fn help_lists_the_cancel_key() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.help_open = true;
         let rows = draw(&state, 100, 60);
         let row = rows
@@ -2445,7 +2446,7 @@ mod tests {
         use crate::keymap::KeyPress;
         use crossterm::event::{KeyCode, KeyModifiers};
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut state = with_files_command(state, "evil\u{202E}txt");
         state.help_open = true;
         let rows = draw(&state, 100, 60);
@@ -2504,7 +2505,7 @@ mod tests {
     #[test]
     fn help_lists_the_diff_option_keys_from_files_and_diff() {
         let mut files = loaded(vec![file("a.rs")]);
-        files.selected = Some(0);
+        files.files.selected = 0;
         let mut diff = hunks(DiffSide::Worktree, TWO_HUNKS);
         for state in [&mut files, &mut diff] {
             state.help_open = true;
@@ -2581,7 +2582,7 @@ mod tests {
                 state
             }
         };
-        state.files = vec![file("a.rs"), file("src/b.rs"), file("c.txt")];
+        state.files.rows = vec![file("a.rs"), file("src/b.rs"), file("c.txt")];
         state.diff.path = Some("a.rs".into());
         state.diff.lines = vec![diff_line(LineKind::Added, "+new")];
         state.diff.done = true;
@@ -2734,7 +2735,7 @@ mod tests {
     #[test]
     fn help_in_files_lists_list_scroll_and_focus_keys() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.help_open = true;
         let rows = draw(&state, 100, 50);
         let row = |needle: &str| {
@@ -2771,7 +2772,7 @@ mod tests {
     fn help_scrolls_at_80_by_24_and_says_more_is_below() {
         use crate::intent::{AppIntent, Scroll};
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.update(AppIntent::Resize {
             width: 80,
             height: 24,
@@ -2813,7 +2814,7 @@ mod tests {
     #[test]
     fn the_bar_drops_whole_hints_and_keeps_help_and_quit() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let all = [
             "space stage",
             "a all",
@@ -2980,7 +2981,7 @@ mod tests {
     fn help_scrolls_to_its_last_entry_at_80_by_8() {
         use crate::intent::{AppIntent, Scroll};
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.update(AppIntent::Resize {
             width: 80,
             height: 8,
@@ -3260,7 +3261,7 @@ mod tests {
             );
         }
         // In Files a filter goes before the search, so Esc says "clear".
-        files.files_filter = "a".into();
+        files.files.filter = "a".into();
         let rows = draw(&files, 120, 20);
         assert!(
             rows[19].starts_with(" n next match  N previous match  esc clear "),
@@ -3273,7 +3274,7 @@ mod tests {
     #[test]
     fn the_bar_shows_the_typed_filter_made_safe() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         typing(
             &mut state,
             crate::list_filter::InputTarget::FilesFilter,
@@ -3557,8 +3558,8 @@ mod tests {
     #[test]
     fn a_huge_filter_title_is_elided_in_linear_time() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
-        state.files_filter = "a".repeat(10_000);
+        state.files.selected = 0;
+        state.files.filter = "a".repeat(10_000);
         let start = std::time::Instant::now();
         let rows = draw(&state, 100, 20);
         // Quadratic elision took seconds at this length; linear takes far
@@ -3570,11 +3571,11 @@ mod tests {
     #[test]
     fn a_wide_query_is_elided_without_splitting_a_glyph() {
         let mut state = loaded(vec![file("日本語.md"), file("a.rs")]);
-        state.selected = Some(0);
-        state.files_filter = "日本語".repeat(20);
+        state.files.selected = 0;
+        state.files.filter = "日本語".repeat(20);
         let rows = draw(&state, 120, 20);
         assert!(contains(&rows, "… 0 of 2"), "{rows:#?}");
-        state.files_filter = "日本".into();
+        state.files.filter = "日本".into();
         let rows = draw(&state, 120, 20);
         assert!(contains(&rows, "Files · /日本 1 of 2"), "{rows:#?}");
         assert!(contains(&rows, "日本語.md"), "{rows:#?}");
@@ -3584,7 +3585,7 @@ mod tests {
     #[test]
     fn a_long_input_keeps_the_cursor_on_the_bar() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         typing(
             &mut state,
             crate::list_filter::InputTarget::FilesFilter,
@@ -3618,7 +3619,7 @@ mod tests {
     /// text, the cursor and the whole notice in yellow, and nothing raw.
     fn assert_full_notice_shows(target: crate::list_filter::InputTarget, text: &str) {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         typing(&mut state, target, text);
         state.notice = Some(crate::list_filter::input_full_notice().into());
         let (buffer, (cx, cy)) = draw_with_cursor(&state, 80, 24);
@@ -3655,7 +3656,7 @@ mod tests {
     #[test]
     fn a_full_input_on_a_narrow_bar_elides_the_notice() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         typing(
             &mut state,
             crate::list_filter::InputTarget::FilesFilter,
@@ -3700,9 +3701,9 @@ mod tests {
     #[test]
     fn filters_ranges_and_searches_draw_at_any_size() {
         let mut files = loaded(vec![file("a.rs"), file("b.rs"), file("日本.md")]);
-        files.selected = Some(1);
-        files.files_filter = "rs".into();
-        files.files_anchor = Some("a.rs".into());
+        files.files.selected = 1;
+        files.files.filter = "rs".into();
+        files.files.range_anchor = Some("a.rs".into());
         let mut typing_files = files.clone();
         typing(
             &mut typing_files,
@@ -3723,11 +3724,11 @@ mod tests {
     #[test]
     fn esc_clear_leads_the_bar_while_there_is_something_to_clear() {
         let mut state = loaded(vec![file("a.rs"), file("b.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let rows = draw(&state, 120, 10);
         assert!(rows[9].contains("/ filter  V range"), "{:?}", rows[9]);
         assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
-        state.files_filter = "a".into();
+        state.files.filter = "a".into();
         let rows = draw(&state, 120, 10);
         assert!(
             rows[9].starts_with(" esc clear  space stage"),
@@ -3752,7 +3753,7 @@ mod tests {
     #[test]
     fn esc_clear_leads_the_stash_bar_while_it_has_a_filter_or_a_range() {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Stash;
         state.stash.list.begin(1);
         state.stash.list.loaded(
@@ -3786,7 +3787,7 @@ mod tests {
     #[test]
     fn esc_clear_leads_the_reflog_tabs_bar_while_it_has_a_filter() {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Commits;
         state.commits.tab = crate::features::commits::CommitsTab::Reflog;
         crate::test_support::load_reflog_list(
@@ -3813,7 +3814,7 @@ mod tests {
         use crate::features::commits::CommitFilesList;
         use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Commits;
         state.expanded = SidePanel::Commits;
         let range = CommitRange {

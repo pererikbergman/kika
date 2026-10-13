@@ -190,14 +190,14 @@ impl AppState {
             diff_focused: false,
         });
         self.repo_stack = parked.repo_stack;
-        self.files = parked.files;
-        self.files_loaded = parked.files_loaded;
+        self.files.rows = parked.files;
+        self.files.loaded = parked.files_loaded;
         self.branch = parked.branch;
         let set_repo = self.set_repo(&path);
         let mut effects = vec![set_repo, self.record_recent(path)];
-        if let Some(index) = parked.selected.filter(|&i| i < self.files.len()) {
+        if let Some(index) = parked.selected.filter(|&i| i < self.files.rows.len()) {
             if parked.diff_focused {
-                let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
+                let request = DiffRequest::for_entry(&self.files.rows[index], self.diff_options);
                 self.focus_hunk_view(HunkView::new(request.path, request.side));
             }
             effects.extend(self.select(index));
@@ -212,12 +212,14 @@ impl AppState {
 
     /// What the current repository shows, taken out of the state to keep.
     fn park(&mut self) -> ParkedRepo {
+        // Read before the rows are taken, or there is no row to select.
+        let selected = self.files.selected_row().map(|_| self.files.selected);
         ParkedRepo {
             repo_stack: std::mem::take(&mut self.repo_stack),
-            files: std::mem::take(&mut self.files),
-            files_loaded: self.files_loaded,
+            files: std::mem::take(&mut self.files.rows),
+            files_loaded: self.files.loaded,
             branch: self.branch.take(),
-            selected: self.selected.take(),
+            selected,
             diff_focused: self.focus == Focus::Diff,
         }
     }
@@ -508,9 +510,9 @@ mod tests {
 
         assert_eq!(state.generation, generation + 1);
         assert_eq!(state.repo, Some("/r/b".into()));
-        assert_eq!(state.files, []);
-        assert!(!state.files_loaded);
-        assert_eq!(state.selected, None);
+        assert_eq!(state.files.rows, []);
+        assert!(!state.files.loaded);
+        assert_eq!(state.files.selected_row(), None);
         assert_eq!(state.focus, Focus::Files);
         match effects.as_slice() {
             [
@@ -542,7 +544,7 @@ mod tests {
     #[test]
     fn switching_back_restores_the_files_selection_and_diff_focus() {
         let mut state = in_repo_a();
-        let files = state.files.clone();
+        let files = state.files.rows.clone();
         let branch = state.branch.clone();
         press(&mut state, KeyCode::Enter);
         assert!(matches!(state.focus, Focus::Diff));
@@ -553,10 +555,10 @@ mod tests {
         let effects = state.update(AppIntent::OpenRepo("/r/a".into()));
 
         // Back before the status lands.
-        assert_eq!(state.files, files);
-        assert!(state.files_loaded);
+        assert_eq!(state.files.rows, files);
+        assert!(state.files.loaded);
         assert_eq!(state.branch, branch);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         match state.hunk_view() {
             Some(view) => assert_eq!(view.path, "b.rs".into()),
             None => panic!("expected the Diff pane, got {:?}", state.focus),
@@ -594,7 +596,7 @@ mod tests {
         state.update(AppIntent::OpenRepo("/r/b".into()));
         let effects = state.update(AppIntent::OpenRepo("/r/a".into()));
         assert_eq!(state.focus, Focus::Files);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         assert!(
             !effects
                 .iter()
@@ -644,7 +646,7 @@ mod tests {
     #[test]
     fn opening_the_open_repository_from_a_submodule_goes_back_to_its_top() {
         let mut state = in_repo_a();
-        let files = state.files.clone();
+        let files = state.files.rows.clone();
         state.repo_stack = vec![ParentRepo {
             path: "sub".into(),
             files: files.clone(),
@@ -652,11 +654,11 @@ mod tests {
             branch: None,
             selected: Some(2),
         }];
-        state.files = vec![];
+        state.files.rows = vec![];
         let effects = state.update(AppIntent::OpenRepo("/r/a".into()));
         assert_eq!(state.repo_stack, []);
-        assert_eq!(state.files, files);
-        assert_eq!(state.selected, Some(2));
+        assert_eq!(state.files.rows, files);
+        assert_eq!(state.files.selected, 2);
         assert_eq!(
             effects[0],
             Effect::SetRepo {

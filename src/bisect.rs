@@ -116,7 +116,12 @@ fn start_disabled(state: &AppState) -> Option<Reason> {
         Some("Finish or abort the operation in progress".into())
     } else if matches!(branch.head, Head::Unborn(_)) {
         Some("No commits yet".into())
-    } else if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind != EntryKind::Untracked)
+    {
         Some(DIRTY.into())
     } else {
         None
@@ -361,7 +366,7 @@ mod tests {
             ('U', 'U', EntryKind::Conflicted),
         ] {
             let mut state = on_main();
-            state.files = vec![file(kind, index, worktree)];
+            state.files.rows = vec![file(kind, index, worktree)];
             assert_eq!(
                 selected_bad_disabled(&state),
                 Some(DIRTY.into()),
@@ -369,7 +374,7 @@ mod tests {
             );
         }
         let mut untracked = on_main();
-        untracked.files = vec![file(EntryKind::Untracked, '?', '?')];
+        untracked.files.rows = vec![file(EntryKind::Untracked, '?', '?')];
         assert_eq!(selected_good_disabled(&untracked), None);
 
         let merging = state(Head::Branch("main".into()), &[Operation::Merge], None);
@@ -387,7 +392,7 @@ mod tests {
     #[test]
     fn during_a_bisect_changes_do_not_stop_a_mark() {
         let mut state = testing();
-        state.files = vec![file(EntryKind::Changed, '.', 'M')];
+        state.files.rows = vec![file(EntryKind::Changed, '.', 'M')];
         assert_eq!(selected_skip_disabled(&state), None);
         assert_eq!(head_bad_disabled(&state), None);
     }

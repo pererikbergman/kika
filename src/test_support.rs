@@ -260,7 +260,7 @@ pub(crate) fn commit_op() -> GitOp {
 }
 
 pub(crate) fn select_path(state: &mut AppState, path: &str) {
-    while state.files[state.selected.unwrap()].path != path.into() {
+    while state.files.rows[state.files.selected].path != path.into() {
         state.update(AppIntent::Files(FilesIntent::Next));
     }
 }
@@ -1002,7 +1002,7 @@ pub(crate) fn remote_ready() -> AppState {
     let mut state = with_branches().with_location(Some("/r".into()), "/r".into());
     state.branch = Some(on_branch("main"));
     state.set_busy(0);
-    state.status_seq = None;
+    state.files.seq = None;
     state
 }
 
@@ -1218,7 +1218,7 @@ pub(crate) fn bisect_branch(
 pub(crate) fn ready_to_bisect() -> AppState {
     let mut state = with_commits(3, true);
     state.branch = Some(on_branch("main"));
-    state.files_loaded = true;
+    state.files.loaded = true;
     state
 }
 
@@ -1457,7 +1457,7 @@ impl GitRunner for HostilePanic {
 /// care what it shows.
 pub(crate) fn draw_branches(state: &AppState, width: u16, height: u16) -> Vec<String> {
     let mut state = state.clone();
-    state.files_loaded = true;
+    state.files.loaded = true;
     state.focus = Focus::Branches;
     state.expanded = SidePanel::Branches;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1513,7 +1513,7 @@ pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
     state.forge.set_branches(branches);
     state.focus = Focus::Branches;
     state.expanded = SidePanel::Branches;
-    state.files_loaded = true;
+    state.files.loaded = true;
     state
 }
 
@@ -1564,14 +1564,14 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         untracked: None,
         subject: "On main: wip".into(),
     }];
-    state.files = vec![crate::git::FileEntry {
+    state.files.rows = vec![crate::git::FileEntry {
         path: "a.rs".into(),
         orig_path: None,
         index: '.',
         worktree: 'M',
         kind: EntryKind::Changed,
     }];
-    state.selected = Some(0);
+    state.files.selected = 0;
     state.commits.list.rows = vec![crate::git::log::CommitRow {
         oid: "abc".into(),
         short_oid: "abc".into(),
@@ -1695,7 +1695,7 @@ pub(crate) fn with_a_fixup() -> AppState {
         row.subject = subject.into();
         row.short_oid = short.into();
     }
-    state.files = vec![FileEntry {
+    state.files.rows = vec![FileEntry {
         path: "x.txt".into(),
         orig_path: None,
         index: 'M',
@@ -1852,8 +1852,8 @@ pub(crate) mod screen {
     /// A workspace after a status load of `files` on branch `main`.
     pub(crate) fn loaded(files: Vec<FileEntry>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
-        state.files = files;
+        state.files.loaded = true;
+        state.files.rows = files;
         state.branch = Some(branch(Head::Branch("main".into())));
         state
     }
@@ -1905,7 +1905,7 @@ pub(crate) mod screen {
     /// A workspace with one file selected and `lines` fully loaded.
     pub(crate) fn with_diff(lines: Vec<DiffLine>) -> AppState {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.diff.seq = Some(0);
         state.diff.path = Some("a.rs".into());
         state.diff.lines = lines;
@@ -1922,7 +1922,7 @@ pub(crate) mod screen {
     /// its patch loaded from `bytes`.
     pub(crate) fn hunks(side: DiffSide, bytes: &[u8]) -> AppState {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut view = HunkView::new("a.rs".into(), side);
         view.loaded(crate::git::patch::parse(bytes).unwrap(), 20);
         state.focus_hunk_view(view);
@@ -1963,7 +1963,7 @@ pub(crate) mod screen {
     /// A workspace showing a loaded blame of `a.rs` with `lines`.
     pub(crate) fn blamed(lines: Vec<BlameLine>, cursor: usize) -> AppState {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         let mut view = BlameView::new("a.rs".into(), 0);
         view.loaded(Ok(lines));
         view.cursor = cursor;

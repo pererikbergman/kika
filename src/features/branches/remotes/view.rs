@@ -154,7 +154,7 @@ mod tests {
     /// The Branches panel focused on its Remotes tab, showing `remotes`.
     fn focused(remotes: Vec<Remote>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         load_list(&mut state.branches.list, Ok(vec![]));

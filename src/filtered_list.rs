@@ -31,7 +31,10 @@
 //! `loaded` and each later one through `append`; its graph rows and the
 //! rebase todo stay beside it on the panel.
 //!
-//! Lists not on it yet: the Files panel (its selection drives the diff).
+//! The Files panel is on it too. Its cursor drives the diff, so after the
+//! list moves the cursor (a step, a filter or a status load) the caller
+//! calls `select` to show the file it landed on. A failed status keeps
+//! the files shown ([`Row::KEEP_ROWS_ON_ERROR`]).
 //!
 //! Other lists:
 //! - A list whose rows live outside it (the command log, drawn from the

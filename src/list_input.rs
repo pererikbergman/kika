@@ -19,7 +19,7 @@ use crate::git::log::LogQuery;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
-use crate::list_filter::{self, InputTarget, ListInput};
+use crate::list_filter::{InputTarget, ListInput};
 use crate::model::{AppState, Focus};
 use crate::popup::{LineInput, Popup};
 
@@ -44,38 +44,28 @@ pub(crate) fn no_matches(search: &Option<DiffSearch>) -> bool {
 
 /// List filters and range selections.
 impl AppState {
-    /// The files the range covers, in order; empty without one.
-    pub fn files_range(&self) -> Vec<usize> {
-        let anchor = self
-            .files_anchor
-            .as_ref()
-            .and_then(|anchor| self.files.iter().position(|f| &f.path == anchor));
-        match (anchor, self.selected) {
-            (Some(anchor), Some(cursor)) => {
-                list_filter::range(&self.files_visible(), anchor, cursor)
-            }
-            _ => Vec::new(),
-        }
-    }
-
     /// The files a Files action on "the selected files" takes: the range
     /// when one is set there, else the file under the cursor. Says which.
     pub(crate) fn files_marked(&self) -> (Vec<&FileEntry>, bool) {
-        let from_range = self.files_anchor.is_some() && self.focus == Focus::Files;
+        let from_range = self.files.range_anchor.is_some() && self.focus == Focus::Files;
         let marked = if from_range {
-            self.files_range()
+            self.files.range()
         } else {
-            self.selected.into_iter().collect()
+            vec![self.files.selected]
         };
-        let entries = marked.iter().filter_map(|&i| self.files.get(i)).collect();
+        let entries = marked
+            .iter()
+            .filter_map(|&i| self.files.rows.get(i))
+            .collect();
         (entries, from_range)
     }
 
     /// The paths of the files the range covers, in order.
     pub(crate) fn files_range_paths(&self) -> Vec<RepoPath> {
-        self.files_range()
+        self.files
+            .range()
             .into_iter()
-            .map(|i| self.files[i].path.clone())
+            .map(|i| self.files.rows[i].path.clone())
             .collect()
     }
 
@@ -100,7 +90,7 @@ impl AppState {
             return;
         }
         let (target, text) = match self.panel_focus() {
-            KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
+            KeyScope::Files => (InputTarget::FilesFilter, &self.files.filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.list.filter),
             KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.list.filter),
             KeyScope::Remotes => (
@@ -134,17 +124,15 @@ impl AppState {
         };
         let text = input.line.text.clone();
         match input.target {
+            // The cursor drives the diff, so a filter that moved it off a
+            // hidden file loads the one it moved to.
             InputTarget::FilesFilter => {
-                if text != self.files_filter {
-                    self.files_filter = text;
-                    if self.files_anchor.take().is_some() {
-                        self.notice = Some(SELECTION_CLEARED.into());
-                    }
+                let before = self.files.selected;
+                if self.files.set_filter(text) {
+                    self.notice = Some(SELECTION_CLEARED.into());
                 }
-                if self.files_selected_hidden()
-                    && let Some(&first) = self.files_visible().first()
-                {
-                    return self.select(first);
+                if self.files.selected != before {
+                    return self.select(self.files.selected);
                 }
             }
             InputTarget::CommitsFilter => {
@@ -278,13 +266,7 @@ impl AppState {
     /// Start a range at the cursor, or clear the one there is.
     pub(crate) fn toggle_range(&mut self) {
         match self.panel_focus() {
-            KeyScope::Files if self.files_anchor.is_some() => self.files_anchor = None,
-            KeyScope::Files if !self.files_selected_hidden() => {
-                self.files_anchor = self
-                    .selected
-                    .and_then(|i| self.files.get(i))
-                    .map(|f| f.path.clone());
-            }
+            KeyScope::Files => self.files.toggle_range(),
             KeyScope::Commits if self.commits.list.range_anchor.is_some() => {
                 self.commits.list.range_anchor = None;
             }
@@ -328,7 +310,10 @@ impl AppState {
         let focus = self.panel_focus();
         let branches = &mut self.branches;
         let (cleared, filter) = match focus {
-            KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
+            KeyScope::Files => (
+                self.files.range_anchor.take().is_some(),
+                &mut self.files.filter,
+            ),
             KeyScope::Commits => (
                 self.commits.list.range_anchor.take().is_some(),
                 &mut self.commits.list.filter,
@@ -494,29 +479,28 @@ mod tests {
         ];
         let (mut state, _) = with_files(files, 24);
         press_char(&mut state, 'j');
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         type_text(&mut state, "/mod");
         assert_eq!(state.key_focus(), KeyScope::Input);
-        assert_eq!(state.files_filter, "mod");
-        assert_eq!(state.files_visible(), [0, 2]);
+        assert_eq!(state.files.filter, "mod");
+        assert_eq!(state.files.visible(), [0, 2]);
         assert_eq!(
-            state.selected,
-            Some(0),
+            state.files.selected, 0,
             "the hidden cursor moved to a shown row"
         );
 
         press(&mut state, KeyCode::Enter);
         assert_eq!(state.input, None);
-        assert_eq!(state.files_filter, "mod", "Enter keeps the filter");
+        assert_eq!(state.files.filter, "mod", "Enter keeps the filter");
         press_char(&mut state, 'j');
-        assert_eq!(state.selected, Some(2), "j skips the hidden row");
+        assert_eq!(state.files.selected, 2, "j skips the hidden row");
         press_char(&mut state, 'j');
-        assert_eq!(state.selected, Some(2));
+        assert_eq!(state.files.selected, 2);
         press_char(&mut state, 'k');
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
 
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.files_filter, "");
+        assert_eq!(state.files.filter, "");
         assert!(!state.should_quit);
         press(&mut state, KeyCode::Esc);
         assert!(
@@ -529,11 +513,11 @@ mod tests {
     fn esc_in_the_filter_input_clears_the_filter_and_closes_it() {
         let (mut state, _) = with_files(three_files(), 24);
         type_text(&mut state, "/b");
-        assert_eq!(state.files_visible(), [1]);
+        assert_eq!(state.files.visible(), [1]);
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.input, None);
-        assert_eq!(state.files_filter, "");
-        assert_eq!(state.files_visible(), [0, 1, 2]);
+        assert_eq!(state.files.filter, "");
+        assert_eq!(state.files.visible(), [0, 1, 2]);
         assert!(!state.should_quit);
     }
 
@@ -564,7 +548,7 @@ mod tests {
         for c in ['q', '?', 'd'] {
             effects.extend(press_char(&mut state, c));
         }
-        assert_eq!(state.files_filter, "q?d");
+        assert_eq!(state.files.filter, "q?d");
         assert!(!state.should_quit);
         assert!(!state.help_open);
         assert!(state.popups.is_empty());
@@ -686,10 +670,10 @@ mod tests {
         assert_eq!(state.diff.path, Some("a.rs".into()));
 
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.files_anchor, None, "the range goes first");
+        assert_eq!(state.files.range_anchor, None, "the range goes first");
         assert!(state.diff.search.is_some());
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.files_filter, "", "then the filter");
+        assert_eq!(state.files.filter, "", "then the filter");
         assert!(state.diff.search.is_some());
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.diff.search, None, "then the search");

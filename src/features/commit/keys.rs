@@ -16,9 +16,14 @@ pub(crate) fn commit_disabled(state: &AppState) -> Option<Reason> {
         Some(OP_RUNNING.into())
     } else if let Some(reason) = crate::bisect::head_move_disabled(state) {
         Some(reason)
-    } else if state.files.is_empty() {
+    } else if state.files.rows.is_empty() {
         Some("Nothing to commit".into())
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind == EntryKind::Conflicted)
+    {
         Some("Resolve conflicts before committing".into())
     } else {
         None
@@ -38,7 +43,12 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
         Some("No commit to amend".into())
     } else if let Some(reason) = crate::bisect::head_move_disabled(state) {
         Some(reason)
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind == EntryKind::Conflicted)
+    {
         Some("Resolve conflicts before amending".into())
     } else {
         None

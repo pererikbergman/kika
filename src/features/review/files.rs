@@ -896,7 +896,7 @@ mod tests {
         for files in [vec![entry], Vec::new()] {
             let (mut state, _) = ready();
             let diff = state.diff.clone();
-            state.status_seq = Some(500);
+            state.files.seq = Some(500);
             state.set_busy(state.busy_count() + 1);
             let status = RepoStatus {
                 branch: BranchStatus {

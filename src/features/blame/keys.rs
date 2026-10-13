@@ -13,7 +13,7 @@ use crossterm::event::KeyCode;
 /// Why `b` cannot blame the selected file. An untracked or deleted file
 /// has no lines git can blame.
 pub(crate) fn blame_disabled(state: &AppState) -> Option<Reason> {
-    match state.selected.and_then(|i| state.files.get(i)) {
+    match state.files.selected_row() {
         None => Some("No file selected".into()),
         Some(file) if file.kind == EntryKind::Untracked => {
             Some("Untracked file: nothing to blame".into())
