@@ -27,18 +27,16 @@ use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::diff::{DiffRequest, EmojiZwj, sanitize, terminal_safe};
+use crate::git::diff::{DiffRequest, EmojiZwj, terminal_safe};
 use crate::git::log::LogQuery;
 use crate::git::path::RepoPath;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
 use crate::git::remote::{AskpassEnv, RemoteOp};
 use crate::git::remotes::RemoteName;
-use crate::gitignore::{self, IgnoreAdded};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, run_op};
-use crate::worktree_file;
 
 /// Identifies an effect's result so the reducer can drop stale ones.
 /// `generation` changes when the repository changes; `seq` orders loads of the
@@ -1033,21 +1031,9 @@ impl Runtime {
                 head,
                 target,
             } => rewrite::effects::check_left_behind(runner, tx, tag, op, head, target),
+            // Where git runs now, inside an entered submodule too.
             Effect::AppendIgnore { tag, line } => {
-                // Where git runs now, inside an entered submodule too.
-                let workdir = self.runner.workdir();
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || append_ignore(&workdir, &line))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("Writing .gitignore crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::IgnoreWritten { tag, result });
-                });
+                files::effects::ignore(self.runner.workdir(), tx, tag, line)
             }
             // The loop takes these out and copies itself, between draws.
             // Without a loop there is no terminal to copy through.
@@ -1166,23 +1152,6 @@ impl Runtime {
             ),
         }
     }
-}
-
-/// The largest `.gitignore` read to add a line to it.
-const MAX_GITIGNORE: u64 = 1024 * 1024;
-
-/// Add `line` to the `.gitignore` at the top of `workdir`, unless it is a
-/// line there already. Nothing but that one file is touched: no git
-/// command runs and the index stays as it is.
-fn append_ignore(workdir: &std::path::Path, line: &[u8]) -> Result<IgnoreAdded, String> {
-    let file = RepoPath::from(".gitignore");
-    let added = worktree_file::update(workdir, &file, MAX_GITIGNORE, |old| {
-        gitignore::appended(old, line)
-    })?;
-    Ok(IgnoreAdded {
-        pattern: sanitize(line),
-        added,
-    })
 }
 
 /// Where a running remote operation waits for the user's answer.

@@ -36,6 +36,7 @@ use crate::keymap::{
 use crate::layout::{self, SidePanel};
 use crate::model::*;
 use crate::op::{GitOp, ResetMode};
+use crate::popup::Popup;
 use crate::view::{buffer_rows, render};
 use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -1476,6 +1477,17 @@ pub(crate) fn with_a_fixup() -> AppState {
         kind: EntryKind::Changed,
     }];
     state
+}
+
+pub(crate) fn two_txt_files() -> AppState {
+    with_files(vec![untracked("a.txt"), untracked("b.txt")], 24).0
+}
+
+pub(crate) fn prompt_text(state: &AppState) -> &str {
+    match state.popups.last() {
+        Some(Popup::Prompt { input, .. }) => &input.text,
+        other => panic!("expected a prompt on top, got {other:?}"),
+    }
 }
 
 /// Screen helpers for view tests: draw a state into a test terminal and
