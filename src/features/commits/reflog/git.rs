@@ -2,11 +2,12 @@
 //! moved it. The Reflog tab lists it, and the undo planner reads it to
 //! find the last action to reverse.
 
+use crate::features::commits::git::detached_checkout;
 use crate::git::branches::run;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
 use crate::git::runner::{GitCommand, GitRunner};
-use crate::op::{checkout_command, detached_checkout};
+use crate::op::checkout_command;
 
 use super::undo::{Direction, Step};
 

@@ -74,12 +74,12 @@ pub(crate) use fixup_base::FixupBase;
 pub(crate) use leave_commits::LeftBehindCheck;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
 
+use super::keys::commit_action_disabled;
 use super::{Crossing, with_stacked_branches};
 use crate::git::rebase_plan::{self, Direction, Edit, RebasePlan, TodoEntry};
 use crate::git::version;
 use crate::keymap::{
-    CLEAR_LOG_FILTER, OP_RUNNING, Reason, commit_action_disabled, commits_range_disabled,
-    in_progress_disabled, list_guard,
+    CLEAR_LOG_FILTER, OP_RUNNING, Reason, commits_range_disabled, in_progress_disabled, list_guard,
 };
 use crate::model::AppState;
 

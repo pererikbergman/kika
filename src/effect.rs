@@ -26,7 +26,7 @@ use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::branches::BranchName;
-use crate::git::commit_files::{CommitId, CommitRange, commit_files};
+use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::diff::{DiffRequest, EmojiZwj, terminal_safe};
 use crate::git::log::LogQuery;
 use crate::git::path::RepoPath;
@@ -968,18 +968,7 @@ impl Runtime {
                 compare::effects::resolve(runner, tx, tag, base, target)
             }
             Effect::LoadCommitFiles { tag, range } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the busy counter would stay raised.
-                    let result =
-                        tokio::task::spawn_blocking(move || commit_files(runner.as_ref(), &range))
-                            .await
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(
-                                    format!("git diff-tree crashed: {e}").as_bytes(),
-                                ))
-                            });
-                    let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
-                });
+                commits::effects::load_files(runner, tx, tag, range)
             }
             Effect::LoadStashes { tag } => stash::effects::load(runner, tx, tag),
             Effect::LoadStashFiles { tag, entry } => {
@@ -2076,73 +2065,6 @@ mod tests {
             other => panic!("expected a failed DiffResolved, got {other:?}"),
         }
         runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn load_commit_files_reports_back_with_the_same_tag_even_on_a_panic() {
-        use crate::git::commit_files::{CommitFile, CommitId};
-        let range = CommitRange {
-            oid: CommitId::parse("abc").unwrap(),
-            parent: None,
-        };
-        let runner = Arc::new(FakeRunner::new().expect(
-            &[
-                "diff-tree",
-                "-r",
-                "-z",
-                "--no-commit-id",
-                "--name-status",
-                "-M",
-                "--root",
-                "abc",
-                "--",
-            ],
-            ok(b"A\0new\0"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-        let tag = Tag {
-            generation: 2,
-            seq: 8,
-            user: true,
-        };
-
-        runtime.spawn(Effect::LoadCommitFiles {
-            tag,
-            range: range.clone(),
-        });
-
-        let new = CommitFile {
-            status: 'A',
-            path: "new".into(),
-            orig_path: None,
-        };
-        assert_eq!(
-            rx.recv().await,
-            Some(AppIntent::CommitFilesLoaded {
-                tag,
-                result: Ok(vec![new])
-            })
-        );
-        runner.assert_done();
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-        runtime.spawn(Effect::LoadCommitFiles { tag, range });
-        match rx.recv().await {
-            Some(AppIntent::CommitFilesLoaded {
-                tag: got,
-                result: Err(message),
-            }) => {
-                assert_eq!(got, tag);
-                assert!(
-                    message.starts_with("git diff-tree crashed: "),
-                    "{message:?}"
-                );
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed CommitFilesLoaded, got {other:?}"),
-        }
     }
 
     #[tokio::test]

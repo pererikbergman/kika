@@ -7,13 +7,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use super::commit_files::CommitFilesList;
 use super::copy::CopiedCommits;
 use super::custom_patch::{CustomPatch, FilePick};
 use super::graph::{GraphCell, GraphRow};
 use super::panel::Marker;
 use super::reflog::view::reflog_lines;
 use super::{CommitsPanel, CommitsTab};
-use crate::commit_files::CommitFilesList;
 use crate::diff_mark::DiffMark;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
@@ -1332,7 +1332,7 @@ mod tests {
 
     // --- A commit's files ---
 
-    use crate::commit_files::CommitFilesList;
+    use crate::features::commits::CommitFilesList;
     use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
     use crate::git::diff::{DiffLine, LineKind};
 
