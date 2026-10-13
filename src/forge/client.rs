@@ -1,7 +1,8 @@
 //! The one forge client. Every `gh` call goes through [`ForgeContext`]:
-//! it applies the host's `[forge.allow]` gate, runs `gh` in the cache
-//! directory and reads the clock, so no caller can reach the network for
-//! a repository the user never opted in.
+//! it checks the repository is on the host and that the host's
+//! `[forge.allow]` lets it through, runs `gh` in the cache directory and
+//! reads the clock, so no caller can reach the network for a repository
+//! the user never opted in.
 
 use std::path::PathBuf;
 
@@ -15,7 +16,9 @@ use crate::git::commit_files::CommitId;
 impl ForgeContext {
     /// Seconds since the epoch, for rate limits and the cache.
     pub fn now(&self) -> i64 {
-        crate::effect::unix_now()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
     }
 
     /// Where `gh` runs: the cache directory, never the repository, so
@@ -27,10 +30,12 @@ impl ForgeContext {
             .unwrap_or_else(std::env::temp_dir)
     }
 
-    /// A `gh` for `repo` on `host`, or `None` when the host's allow-list
-    /// leaves `repo` out: then nothing may reach the network.
+    /// A `gh` for `repo` on `host`, or `None` when `repo` is on another
+    /// host or the host's allow-list leaves it out: then nothing may
+    /// reach the network.
     pub fn gh<'a>(&'a self, host: &'a ForgeHost, repo: &ForgeRepo, now: i64) -> Option<Gh<'a>> {
-        host.allows(repo).then(|| Gh {
+        let on_host = repo.host.eq_ignore_ascii_case(host.as_str());
+        (on_host && host.allows(repo)).then(|| Gh {
             runner: self.gh.as_ref(),
             sink: &self.sink,
             host,
@@ -40,7 +45,7 @@ impl ForgeContext {
     }
 
     /// Open a pull request on `repo`; see [`Gh::create_pull`]. A
-    /// repository the allow-list leaves out fails without a call.
+    /// repository [`Self::gh`] refuses fails without a call.
     pub fn create_pull(
         &self,
         host: &ForgeHost,
@@ -55,7 +60,7 @@ impl ForgeContext {
     }
 
     /// Merge pull request `number`; see [`Gh::merge_pull`]. A repository
-    /// the allow-list leaves out fails without a call.
+    /// [`Self::gh`] refuses fails without a call.
     pub fn merge_pull(
         &self,
         host: &ForgeHost,
@@ -118,6 +123,35 @@ mod tests {
             failed
         );
         assert!(runner.calls().is_empty());
+    }
+
+    #[test]
+    fn a_repository_on_another_host_never_reaches_gh() {
+        let runner = Arc::new(FakeGh::new());
+        let ctx = context(runner.clone(), None);
+        let host = ForgeHost::parse("gitlab.example").unwrap();
+        let failed = Err(CreateError::Status(ForgeStatus::Failed));
+
+        assert!(ctx.gh(&host, &repo(), 0).is_none());
+        assert_eq!(
+            ctx.create_pull(&host, &repo(), "topic", "main", "Add login")
+                .map(|_| ()),
+            failed
+        );
+        let head = CommitId::parse(&"a".repeat(40)).unwrap();
+        assert_eq!(
+            ctx.merge_pull(&host, &repo(), 7, MergeMethod::Merge, &head),
+            failed
+        );
+        assert!(runner.calls().is_empty());
+
+        // The host is compared without regard to case.
+        let github = ForgeHost::parse("github.com").unwrap();
+        let shown = ForgeRepo {
+            host: "GitHub.com".into(),
+            ..repo()
+        };
+        assert!(ctx.gh(&github, &shown, 0).is_some());
     }
 
     #[test]

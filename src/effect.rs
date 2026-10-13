@@ -23,7 +23,7 @@ use crate::features::{
 };
 use crate::forge::merge::MergeMethod;
 use crate::forge::task::ForgeContext;
-use crate::forge::{ForgeHost, ForgeRepo};
+use crate::forge::{ForgeHost, ForgeRepo, LoadSeq};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
 use crate::git::branches::BranchName;
@@ -47,6 +47,14 @@ pub struct Tag {
     pub generation: u64,
     pub seq: u64,
     pub user: bool,
+}
+
+/// The forge numbers its loads by the tag's `seq`; the generation check
+/// stays with the caller.
+impl From<Tag> for LoadSeq {
+    fn from(tag: Tag) -> Self {
+        LoadSeq(tag.seq)
+    }
 }
 
 /// Work the reducer asks for. Executed by [`Runtime`], never by `update`.

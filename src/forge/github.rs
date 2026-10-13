@@ -984,6 +984,38 @@ pub mod fixtures {
     pub const FORK_HEADS: &str = include_str!("fixtures/fork_heads.http");
     pub const FORK_PARENT: &str = include_str!("fixtures/fork_parent.http");
     pub const RENAMED_HEAD: &str = include_str!("fixtures/renamed_head.http");
+
+    /// The token a leaky `gh` holds and prints; it must never leave `gh`.
+    pub const SECRET_TOKEN: &str = "ghp_SENTINEL";
+    /// The ETag a leaky `gh`'s probe answers with; only the cache keeps it.
+    pub const SECRET_ETAG: &str = "W/\"etag_VALUE_9\"";
+
+    /// A `gh` that holds [`SECRET_TOKEN`] and prints it with every answer,
+    /// once in a header too, for two refreshes: a 200 probe carrying
+    /// [`SECRET_ETAG`] and the badges, then a 401 for both calls.
+    pub fn leaky_gh() -> super::FakeGh {
+        use super::{GhOutput, answer, failure};
+        let noisy = |output: GhOutput| GhOutput {
+            stderr: format!(
+                "GH_TOKEN={SECRET_TOKEN}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into_bytes(),
+            ..output
+        };
+        let probe = PROBE_200
+            .replace("W/\"5f1e0c2b9a7d\"", SECRET_ETAG)
+            .replace(
+                "Cache-Control:",
+                &format!("Authorization: token {SECRET_TOKEN}\r\nCache-Control:"),
+            );
+        super::FakeGh::new()
+            .with_inherited_env("GH_TOKEN", SECRET_TOKEN)
+            .reply(noisy(answer(&probe)))
+            .reply(noisy(answer(STATES)))
+            .reply(noisy(failure(1, HTTP_401_STDERR)))
+            .reply(noisy(failure(1, HTTP_401_STDERR)))
+    }
 }
 
 #[cfg(test)]
