@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::Tag;
+use crate::features::blame::BlameIntent;
 use crate::git::GitRunner;
 use crate::git::blame::{read_blame, read_commit};
 use crate::git::diff::EmojiZwj;
@@ -26,7 +27,7 @@ pub(crate) fn load(
         move || read_blame(runner.as_ref(), &path, emoji),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git blame"),
-        move |result| AppIntent::BlameLoaded { tag, result },
+        move |result| AppIntent::Blame(BlameIntent::Loaded { tag, result }),
     );
 }
 
@@ -43,6 +44,6 @@ pub(crate) fn load_commit(
         move || read_commit(runner.as_ref(), &oid, emoji),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git show"),
-        move |result| AppIntent::CommitLoaded { tag, result },
+        move |result| AppIntent::Blame(BlameIntent::CommitLoaded { tag, result }),
     );
 }

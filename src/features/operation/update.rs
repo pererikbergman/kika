@@ -2,6 +2,7 @@
 //! rebasing onto it, and continuing, skipping or asking before aborting
 //! the merge, rebase, cherry-pick or revert in progress.
 
+use super::OperationIntent;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::git::branches::BranchName;
@@ -11,6 +12,20 @@ use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+
+/// The operation's half of `update`: core's one `AppIntent::Operation` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: OperationIntent) -> Vec<Effect> {
+    match intent {
+        OperationIntent::Merge(strategy) => {
+            state.branch_op(|branch| GitOp::Merge { branch, strategy })
+        }
+        OperationIntent::RebaseOnto => state.branch_op(|onto| GitOp::Rebase { onto }),
+        OperationIntent::ConfirmAbort(operation) => {
+            state.start_op(Ok(Some(GitOp::Abort(operation))))
+        }
+    }
+}
 
 /// Merge, rebase onto, and the operation in progress.
 impl AppState {
@@ -83,7 +98,9 @@ pub(crate) fn abort_question(operation: Operation) -> Option<ConfirmQuestion> {
              Resolved conflicts are lost. (y/n)"
         ),
         answer: Answer::YOnly,
-        then: Then::Intent(Box::new(AppIntent::ConfirmAbort(operation))),
+        then: Then::Intent(Box::new(AppIntent::Operation(
+            OperationIntent::ConfirmAbort(operation),
+        ))),
         range: false,
         head: None,
     })
@@ -120,7 +137,8 @@ mod tests {
         for strategy in [MergeStrategy::FastForwardOnly, MergeStrategy::Squash] {
             let mut state = in_progress(&[]);
             next_branch(&mut state);
-            let (_, op) = op_of(&state.update(AppIntent::Merge(strategy)));
+            let (_, op) =
+                op_of(&state.update(AppIntent::Operation(OperationIntent::Merge(strategy))));
             assert_eq!(
                 op,
                 GitOp::Merge {
@@ -135,7 +153,9 @@ mod tests {
     fn a_merge_commit_and_a_rebase_run_on_the_terminal() {
         let mut state = in_progress(&[]);
         next_branch(&mut state);
-        let (tag, op) = attached_of(&state.update(AppIntent::Merge(MergeStrategy::NoFastForward)));
+        let (tag, op) = attached_of(&state.update(AppIntent::Operation(OperationIntent::Merge(
+            MergeStrategy::NoFastForward,
+        ))));
         assert_eq!(
             op,
             GitOp::Merge {
@@ -146,7 +166,7 @@ mod tests {
         assert_eq!(state.held_seq(), Some(tag.seq));
         state.update(finished(tag, op, Ok(())));
 
-        let (_, op) = attached_of(&state.update(AppIntent::RebaseOnto));
+        let (_, op) = attached_of(&state.update(AppIntent::Operation(OperationIntent::RebaseOnto)));
         assert_eq!(
             op,
             GitOp::Rebase {
@@ -179,10 +199,15 @@ mod tests {
         assert_eq!(state.notice, Some("Already on this branch".into()));
         assert_eq!(state.popups, []);
         assert_eq!(
-            state.update(AppIntent::Merge(MergeStrategy::Squash)),
+            state.update(AppIntent::Operation(OperationIntent::Merge(
+                MergeStrategy::Squash
+            ))),
             vec![]
         );
-        assert_eq!(state.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Operation(OperationIntent::RebaseOnto)),
+            vec![]
+        );
         assert_eq!(state.notice, Some("Already on this branch".into()));
 
         let mut merging = in_progress(&[Operation::Merge]);
@@ -193,7 +218,10 @@ mod tests {
             Some("Finish or abort the operation in progress".into())
         );
         assert_eq!(merging.popups, []);
-        assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(
+            merging.update(AppIntent::Operation(OperationIntent::RebaseOnto)),
+            vec![]
+        );
         assert_eq!(merging.held_seq(), None);
     }
 

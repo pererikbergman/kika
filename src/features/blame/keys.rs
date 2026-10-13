@@ -3,6 +3,7 @@
 //! commit scope scrolls it. `CHUNKS` in `keymap.rs` places all three chunks,
 //! so their position there is behaviour.
 
+use crate::features::blame::BlameIntent;
 use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
@@ -35,7 +36,7 @@ pub(crate) static BLAME_FILES: &[Binding] = &[
         id: "files.blame",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenBlame,
+        intent: AppIntent::Blame(BlameIntent::Open),
         description: "Blame the selected file",
         label: "blame",
         bar: false,
@@ -52,7 +53,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Blame,
-        intent: AppIntent::BlameNext,
+        intent: AppIntent::Blame(BlameIntent::Next),
         description: "Move to the next line",
         label: "",
         bar: false,
@@ -65,7 +66,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Blame,
-        intent: AppIntent::BlamePrev,
+        intent: AppIntent::Blame(BlameIntent::Prev),
         description: "Move to the previous line",
         label: "",
         bar: false,
@@ -75,7 +76,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
         id: "blame.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::Blame,
-        intent: AppIntent::BlamePageDown,
+        intent: AppIntent::Blame(BlameIntent::PageDown),
         description: "Move down a page",
         label: "",
         bar: false,
@@ -85,7 +86,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
         id: "blame.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::Blame,
-        intent: AppIntent::BlamePageUp,
+        intent: AppIntent::Blame(BlameIntent::PageUp),
         description: "Move up a page",
         label: "",
         bar: false,
@@ -95,7 +96,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
         id: "blame.commit",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Blame,
-        intent: AppIntent::OpenBlameCommit,
+        intent: AppIntent::Blame(BlameIntent::OpenCommit),
         description: "Show the commit that last changed this line",
         label: "commit",
         bar: true,
@@ -110,7 +111,7 @@ pub(crate) static BLAME_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Left),
         ],
         scope: KeyScope::Blame,
-        intent: AppIntent::CloseBlame,
+        intent: AppIntent::Blame(BlameIntent::Close),
         description: "Back to the file list",
         label: "back",
         bar: false,
@@ -127,7 +128,7 @@ pub(crate) static BLAME_COMMIT: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::LineDown),
+        intent: AppIntent::Blame(BlameIntent::ScrollCommit(Scroll::LineDown)),
         description: "Scroll the commit down a line",
         label: "",
         bar: false,
@@ -140,7 +141,7 @@ pub(crate) static BLAME_COMMIT: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::LineUp),
+        intent: AppIntent::Blame(BlameIntent::ScrollCommit(Scroll::LineUp)),
         description: "Scroll the commit up a line",
         label: "",
         bar: false,
@@ -150,7 +151,7 @@ pub(crate) static BLAME_COMMIT: &[Binding] = &[
         id: "blame_commit.page_down",
         keys: &[KeyPattern::any(KeyCode::PageDown)],
         scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::PageDown),
+        intent: AppIntent::Blame(BlameIntent::ScrollCommit(Scroll::PageDown)),
         description: "Scroll the commit down a page",
         label: "",
         bar: false,
@@ -160,7 +161,7 @@ pub(crate) static BLAME_COMMIT: &[Binding] = &[
         id: "blame_commit.page_up",
         keys: &[KeyPattern::any(KeyCode::PageUp)],
         scope: KeyScope::BlameCommit,
-        intent: AppIntent::ScrollCommit(Scroll::PageUp),
+        intent: AppIntent::Blame(BlameIntent::ScrollCommit(Scroll::PageUp)),
         description: "Scroll the commit up a page",
         label: "",
         bar: false,
@@ -175,7 +176,7 @@ pub(crate) static BLAME_COMMIT: &[Binding] = &[
             KeyPattern::any(KeyCode::Left),
         ],
         scope: KeyScope::BlameCommit,
-        intent: AppIntent::CloseBlameCommit,
+        intent: AppIntent::Blame(BlameIntent::CloseCommit),
         description: "Back to the blame, at the same line",
         label: "back",
         bar: false,
@@ -198,7 +199,7 @@ mod tests {
             .iter()
             .find(|b| b.scope == KeyScope::Files && b.matches(plain('b')))
             .expect("b is bound in Files");
-        assert_eq!(b.intent, OpenBlame);
+        assert_eq!(b.intent, Blame(BlameIntent::Open));
         assert_eq!(b.label, "blame");
         assert!(!b.bar);
         assert_eq!(from(KeyScope::Diff, plain('b')), None);
@@ -210,17 +211,32 @@ mod tests {
         assert_eq!(KeyScope::BlameCommit.title(), "Commit");
 
         let blame = |k| from(KeyScope::Blame, k);
-        assert_eq!(blame(plain('j')), Some(BlameNext));
-        assert_eq!(blame(key(KeyCode::Down, none)), Some(BlameNext));
-        assert_eq!(blame(plain('k')), Some(BlamePrev));
-        assert_eq!(blame(key(KeyCode::Up, none)), Some(BlamePrev));
-        assert_eq!(blame(key(KeyCode::PageDown, none)), Some(BlamePageDown));
-        assert_eq!(blame(key(KeyCode::PageUp, none)), Some(BlamePageUp));
-        assert_eq!(blame(key(KeyCode::Enter, none)), Some(OpenBlameCommit));
+        assert_eq!(blame(plain('j')), Some(Blame(BlameIntent::Next)));
+        assert_eq!(
+            blame(key(KeyCode::Down, none)),
+            Some(Blame(BlameIntent::Next))
+        );
+        assert_eq!(blame(plain('k')), Some(Blame(BlameIntent::Prev)));
+        assert_eq!(
+            blame(key(KeyCode::Up, none)),
+            Some(Blame(BlameIntent::Prev))
+        );
+        assert_eq!(
+            blame(key(KeyCode::PageDown, none)),
+            Some(Blame(BlameIntent::PageDown))
+        );
+        assert_eq!(
+            blame(key(KeyCode::PageUp, none)),
+            Some(Blame(BlameIntent::PageUp))
+        );
+        assert_eq!(
+            blame(key(KeyCode::Enter, none)),
+            Some(Blame(BlameIntent::OpenCommit))
+        );
         // Esc clears a search first, then closes the blame.
         assert_eq!(blame(key(KeyCode::Esc, none)), Some(PaneEscape));
         for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(blame(k), Some(CloseBlame), "{k:?}");
+            assert_eq!(blame(k), Some(Blame(BlameIntent::Close)), "{k:?}");
         }
         assert_eq!(blame(plain('q')), Some(Quit));
         // File and hunk keys do not reach the blame.
@@ -229,15 +245,21 @@ mod tests {
         }
 
         let commit = |k| from(KeyScope::BlameCommit, k);
-        assert_eq!(commit(plain('j')), Some(ScrollCommit(Scroll::LineDown)));
-        assert_eq!(commit(plain('k')), Some(ScrollCommit(Scroll::LineUp)));
+        assert_eq!(
+            commit(plain('j')),
+            Some(Blame(BlameIntent::ScrollCommit(Scroll::LineDown)))
+        );
+        assert_eq!(
+            commit(plain('k')),
+            Some(Blame(BlameIntent::ScrollCommit(Scroll::LineUp)))
+        );
         assert_eq!(
             commit(key(KeyCode::PageDown, none)),
-            Some(ScrollCommit(Scroll::PageDown))
+            Some(Blame(BlameIntent::ScrollCommit(Scroll::PageDown)))
         );
         assert_eq!(commit(key(KeyCode::Esc, none)), Some(PaneEscape));
         for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(commit(k), Some(CloseBlameCommit), "{k:?}");
+            assert_eq!(commit(k), Some(Blame(BlameIntent::CloseCommit)), "{k:?}");
         }
         assert_eq!(commit(key(KeyCode::Enter, none)), None);
     }

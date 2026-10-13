@@ -8,8 +8,12 @@
 //! the `git commit` argv is its git code. The commit itself runs through
 //! the core op slot.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`CommitIntent`] in
+//! `AppIntent::Commit`, and its one `update` arm calls [`update`] here.
+//!
 //! Its `pub(crate)` API:
 //! - `CommitEditor`, the typed message, which `CommitFlow` holds;
+//! - the intent enum [`CommitIntent`] and the free function [`update`];
 //! - the handlers in `update.rs`: `open_commit`, `open_amend`,
 //!   `head_message_loaded`, `submit_commit`, `commit_probed`,
 //!   `commit_message_edited`, `cancel_commit`, `discard_commit`,
@@ -43,16 +47,18 @@
 //!   its text with them too;
 //! - the popup's question box, `render_question`, and the text helpers
 //!   `clip`, `wrap` and `tail` (`view.rs`): shared drawing code;
-//! - the inline `ConfirmStageAll`, `ToggleCommitField`, `ToggleNoVerify` and
-//!   `EditCommitExternally` arms, which are not verbatim moves yet;
 //! - `op_finished`, `start_op_as`, `bisect_refuses` and the `GitOp::Commit`
 //!   arm of `op_command`: shared op-slot code (`op_slot.rs`, `op.rs`).
 
 pub(crate) mod editor;
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::CommitIntent;
+pub(crate) use update::update;
 
 pub(crate) use editor::CommitEditor;

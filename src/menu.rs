@@ -4,6 +4,7 @@
 use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::features::command_log::CommandLogIntent;
+use crate::features::commit::CommitIntent;
 use crate::features::commit::keys::{amend_disabled, commit_disabled};
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::bisect::BisectIntent;
@@ -13,10 +14,12 @@ use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
 use crate::features::commits::keys::reset_disabled;
 use crate::features::files::keys::{files_stage_disabled, stage_all_disabled};
+use crate::features::operation::OperationIntent;
 use crate::features::operation::keys::merge_disabled;
 use crate::features::pull_requests::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
+use crate::features::repos::ReposIntent;
 use crate::features::stash::keys::{
     stash_all_disabled, stash_file_disabled, stash_staged_disabled, stash_untracked_disabled,
 };
@@ -84,12 +87,12 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Commit…",
-        intent: AppIntent::OpenCommit,
+        intent: AppIntent::Commit(CommitIntent::Open),
         disabled: commit_disabled,
     },
     MenuItem {
         label: "Amend last commit…",
-        intent: AppIntent::OpenAmend,
+        intent: AppIntent::Commit(CommitIntent::OpenAmend),
         disabled: amend_disabled,
     },
     MenuItem {
@@ -119,7 +122,7 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Recent repositories…",
-        intent: AppIntent::OpenRecent,
+        intent: AppIntent::Repos(ReposIntent::OpenRecent),
         disabled: never,
     },
     MenuItem {
@@ -206,22 +209,22 @@ static STAGE: &[MenuItem] = &[
 static MERGE: &[MenuItem] = &[
     MenuItem {
         label: "Fast-forward only",
-        intent: AppIntent::Merge(MergeStrategy::FastForwardOnly),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::FastForwardOnly)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Merge commit",
-        intent: AppIntent::Merge(MergeStrategy::NoFastForward),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::NoFastForward)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Squash",
-        intent: AppIntent::Merge(MergeStrategy::Squash),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::Squash)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Rebase current branch onto it",
-        intent: AppIntent::RebaseOnto,
+        intent: AppIntent::Operation(OperationIntent::RebaseOnto),
         disabled: merge_disabled,
     },
 ];

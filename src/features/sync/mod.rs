@@ -5,7 +5,11 @@
 //! bindings and guards (`keys.rs`) and the I/O behind `Effect::Fetch` and
 //! `Effect::Remote` (`effects.rs`).
 //!
-//! Its `pub(crate)` API: the handlers `fetch_finished`, `start_remote`,
+//! Its intents are nested (ADR-0002): core wraps [`SyncIntent`] in
+//! `AppIntent::Sync`, and its one `update` arm calls [`update`] here.
+//!
+//! Its `pub(crate)` API: the intent enum [`SyncIntent`] and the free
+//! function [`update`]; the handlers `fetch_finished`, `start_remote`,
 //! `current_remote`, `remote_notice`, `spinner_tick` and `remote_finished` on
 //! `AppState`, the last asking `force_push_question` after a rejected push; the chunks `keys::{SYNC_WORKSPACE, SYNC_CREDENTIAL}`; and
 //! `effects::{fetch, remote}`.
@@ -27,8 +31,12 @@
 
 pub(crate) mod effects;
 mod git;
+mod intent;
 pub(crate) mod keys;
 mod update;
+
+pub(crate) use intent::SyncIntent;
+pub(crate) use update::update;
 
 #[cfg(test)]
 pub(crate) use update::force_push_question;

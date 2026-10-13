@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::git::run_fetch;
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
+use crate::features::sync::SyncIntent;
 use crate::git::GitRunner;
 use crate::git::remote::{RemoteFailure, RemoteOp, run_remote};
 use crate::git::safe_text::terminal_safe;
@@ -20,7 +21,7 @@ pub(crate) fn fetch(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, 
         move || run_fetch(runner.as_ref()),
         // A panic still reports back, or auto-fetch would stop for good.
         background::crashed("git fetch"),
-        move |result| AppIntent::FetchFinished { tag, result },
+        move |result| AppIntent::Sync(SyncIntent::FetchFinished { tag, result }),
     );
 }
 
@@ -47,6 +48,6 @@ pub(crate) fn remote(
                 format!("git crashed: {e}").as_bytes(),
             )))
         },
-        move |result| AppIntent::RemoteFinished { tag, op, result },
+        move |result| AppIntent::Sync(SyncIntent::RemoteFinished { tag, op, result }),
     );
 }

@@ -3,6 +3,7 @@
 //! scope sends, cancels or quits. `CHUNKS` in `keymap.rs` places the two
 //! chunks, so their position there is behaviour.
 
+use crate::features::sync::SyncIntent;
 use crate::git::status::Head;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, never, remote_disabled};
@@ -36,7 +37,7 @@ pub(crate) static SYNC_WORKSPACE: &[Binding] = &[
         id: "workspace.fetch",
         keys: &[KeyPattern::exact(KeyCode::Char('f'), NONE)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::Fetch,
+        intent: AppIntent::Sync(SyncIntent::Fetch),
         description: "Fetch every remote",
         label: "fetch",
         bar: false,
@@ -46,7 +47,7 @@ pub(crate) static SYNC_WORKSPACE: &[Binding] = &[
         id: "workspace.pull",
         keys: &[KeyPattern::exact(KeyCode::Char('p'), NONE)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::Pull,
+        intent: AppIntent::Sync(SyncIntent::Pull),
         description: "Pull into the current branch",
         label: "pull",
         bar: false,
@@ -56,7 +57,7 @@ pub(crate) static SYNC_WORKSPACE: &[Binding] = &[
         id: "workspace.push",
         keys: &[KeyPattern::any(KeyCode::Char('P'))],
         scope: KeyScope::Workspace,
-        intent: AppIntent::Push,
+        intent: AppIntent::Sync(SyncIntent::Push),
         description: "Push the current branch",
         label: "push",
         bar: false,

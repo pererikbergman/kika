@@ -2,6 +2,7 @@
 //! list's own scope moves, opens, inits and closes. `CHUNKS` in `keymap.rs`
 //! places both chunks, so their position there is behaviour.
 
+use crate::features::repos::ReposIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, never};
 use crate::model::AppState;
@@ -29,7 +30,7 @@ pub(crate) static REPOS_WORKSPACE: &[Binding] = &[
         keys: &[KeyPattern::any(KeyCode::Char('O'))],
         // From the Diff pane too, so switching away can keep it focused.
         scope: KeyScope::Workspace,
-        intent: AppIntent::OpenRecent,
+        intent: AppIntent::Repos(ReposIntent::OpenRecent),
         description: "Show recent repositories, to switch to one",
         label: "recent",
         bar: false,
@@ -46,7 +47,7 @@ pub(crate) static REPOS_RECENT: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Recent,
-        intent: AppIntent::RecentNext,
+        intent: AppIntent::Repos(ReposIntent::Next),
         description: "Select the next row",
         label: "",
         bar: false,
@@ -59,7 +60,7 @@ pub(crate) static REPOS_RECENT: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Recent,
-        intent: AppIntent::RecentPrev,
+        intent: AppIntent::Repos(ReposIntent::Prev),
         description: "Select the previous row",
         label: "",
         bar: false,
@@ -69,7 +70,7 @@ pub(crate) static REPOS_RECENT: &[Binding] = &[
         id: "recent.open",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Recent,
-        intent: AppIntent::RecentSelect,
+        intent: AppIntent::Repos(ReposIntent::Select),
         description: "Open the selected repository",
         label: "open",
         bar: true,
@@ -79,7 +80,7 @@ pub(crate) static REPOS_RECENT: &[Binding] = &[
         id: "recent.init",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
         scope: KeyScope::Recent,
-        intent: AppIntent::InitRepo,
+        intent: AppIntent::Repos(ReposIntent::Init),
         description: "Make the directory Kika started in a repository",
         label: "init",
         bar: true,
@@ -112,6 +113,7 @@ pub(crate) static REPOS_RECENT: &[Binding] = &[
 
 #[cfg(test)]
 mod tests {
+    use crate::features::repos::ReposIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyScope, Keymap, Resolution, registry, resolve};
     use crate::model::{AppState, Context};
@@ -127,7 +129,11 @@ mod tests {
             KeyScope::Lines,
             KeyScope::Blame,
         ] {
-            assert_eq!(from(scope, o), Some(AppIntent::OpenRecent), "{scope:?}");
+            assert_eq!(
+                from(scope, o),
+                Some(AppIntent::Repos(ReposIntent::OpenRecent)),
+                "{scope:?}"
+            );
         }
     }
 
@@ -135,19 +141,19 @@ mod tests {
     fn the_recent_list_has_its_own_keys() {
         use AppIntent::*;
         let recent = |k| from(KeyScope::Recent, k);
-        assert_eq!(recent(plain('j')), Some(RecentNext));
+        assert_eq!(recent(plain('j')), Some(Repos(ReposIntent::Next)));
         assert_eq!(
             recent(key(KeyCode::Down, KeyModifiers::NONE)),
-            Some(RecentNext)
+            Some(Repos(ReposIntent::Next))
         );
-        assert_eq!(recent(plain('k')), Some(RecentPrev));
+        assert_eq!(recent(plain('k')), Some(Repos(ReposIntent::Prev)));
         assert_eq!(
             recent(key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(RecentPrev)
+            Some(Repos(ReposIntent::Prev))
         );
         assert_eq!(
             recent(key(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(RecentSelect)
+            Some(Repos(ReposIntent::Select))
         );
         assert_eq!(
             recent(key(KeyCode::Esc, KeyModifiers::NONE)),

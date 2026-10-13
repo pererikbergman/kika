@@ -14,6 +14,7 @@ use crate::features::branches::tags::TagsIntent;
 use crate::features::command_log::CommandLogView;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::custom_patch::CustomPatchIntent;
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
@@ -560,7 +561,9 @@ impl PromptKind {
     pub fn submit(self, text: String) -> AppIntent {
         match self {
             PromptKind::GoToFile => AppIntent::GoToFile(text),
-            PromptKind::Command => AppIntent::CommandPromptAnswered(text),
+            PromptKind::Command => {
+                AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered(text))
+            }
             PromptKind::NewBranch => AppIntent::Branches(BranchesIntent::CreateNamed(text)),
             PromptKind::RenameBranch => AppIntent::Branches(BranchesIntent::RenameTo(text)),
             PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
@@ -677,6 +680,8 @@ impl ErrorPopup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::operation::OperationIntent;
+    use crate::features::sync::SyncIntent;
 
     fn press(input: &mut LineInput, code: KeyCode) {
         input.edit(KeyPress::new(code, KeyModifiers::NONE));
@@ -694,7 +699,11 @@ mod tests {
     fn the_abort_question_names_the_operation_and_yes_aborts_that_one() {
         use crate::features::operation::abort_question;
         use crate::git::repo_state::Operation;
-        let yes = |op| Then::Intent(Box::new(AppIntent::ConfirmAbort(op)));
+        let yes = |op| {
+            Then::Intent(Box::new(AppIntent::Operation(
+                OperationIntent::ConfirmAbort(op),
+            )))
+        };
         let ask = abort_question(Operation::CherryPick).unwrap();
         assert_eq!(ask.title, "Abort cherry-pick");
         assert_eq!(
@@ -1278,7 +1287,10 @@ mod tests {
     #[test]
     fn a_rejected_push_asks_before_forcing_with_a_lease() {
         let ask = crate::features::sync::force_push_question();
-        assert_eq!(ask.then, Then::Intent(Box::new(AppIntent::ForcePush)));
+        assert_eq!(
+            ask.then,
+            Then::Intent(Box::new(AppIntent::Sync(SyncIntent::ForcePush)))
+        );
         assert_eq!(
             (ask.scope, ask.answer),
             (KeyScope::Confirm, Answer::YOrEnter)
@@ -1304,7 +1316,7 @@ mod tests {
         );
         assert_eq!(
             PromptKind::Command.submit("c".into()),
-            AppIntent::CommandPromptAnswered("c".into())
+            AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered("c".into()))
         );
     }
 }

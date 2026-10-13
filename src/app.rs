@@ -17,6 +17,7 @@ use tokio::time::MissedTickBehavior;
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
 use crate::features::command_log::CommandLogIntent;
+use crate::features::sync::SyncIntent;
 use crate::forge;
 use crate::forge::github::CliGh;
 use crate::forge::task::ForgeContext;
@@ -402,7 +403,7 @@ impl Spinner {
                     ticks.tick().await;
                     loop {
                         ticks.tick().await;
-                        if tx.send(AppIntent::SpinnerTick).is_err() {
+                        if tx.send(AppIntent::Sync(SyncIntent::SpinnerTick)).is_err() {
                             break;
                         }
                     }
@@ -825,7 +826,7 @@ mod tests {
         tokio::time::sleep(SPINNER_TICK * 3 + SPINNER_TICK / 2).await;
         let mut ticks = 0;
         while let Ok(intent) = rx.try_recv() {
-            assert_eq!(intent, AppIntent::SpinnerTick);
+            assert_eq!(intent, AppIntent::Sync(SyncIntent::SpinnerTick));
             ticks += 1;
         }
         assert_eq!(ticks, 3);
