@@ -3,6 +3,7 @@
 //! step with the pane's width and the focused view's cursor.
 
 use super::{ExternalRenderer, RenderedDiff, StyledRow, external_diff};
+use crate::diff_pane::focused_hunks;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
 use crate::model::{AppState, Focus};
@@ -50,15 +51,17 @@ impl AppState {
                 .selected
                 .and_then(|i| self.files.get(i))
                 .map(|entry| DiffRequest::for_entry(entry, self.diff_options)),
-            // Like the commit's file in the Commits panel, never rendered.
-            Focus::Diff(view) if view.commit.is_some() => None,
-            Focus::Diff(view) => Some(DiffRequest {
-                path: view.path.clone(),
-                orig_path: None,
-                side: view.side,
-                options: self.diff_options,
-                commit: None,
-            }),
+            Focus::Diff => match self.hunk_view()? {
+                // Like the commit's file in the Commits panel, never rendered.
+                view if view.commit.is_some() => None,
+                view => Some(DiffRequest {
+                    path: view.path.clone(),
+                    orig_path: None,
+                    side: view.side,
+                    options: self.diff_options,
+                    commit: None,
+                }),
+            },
             Focus::Blame(_) | Focus::Conflict(_) => None,
         }
     }
@@ -82,8 +85,8 @@ impl AppState {
         if self.display_only() {
             return Some(rendered);
         }
-        match &self.focus {
-            Focus::Diff(view) if rendered.error.is_none() && !rendered.rendering() => {
+        match self.hunk_view() {
+            Some(view) if rendered.error.is_none() && !rendered.rendering() => {
                 let picked = view.picked();
                 rendered
                     .shows(view.hunk, picked.as_deref())
@@ -151,7 +154,10 @@ impl AppState {
     /// Keep the rows of the selected hunk or lines inside the pane.
     pub(crate) fn follow_cursor(&mut self) {
         let rows = self.pane_rows();
-        let (Focus::Diff(view), Some(rendered)) = (&self.focus, &mut self.rendered) else {
+        let (Some(view), Some(rendered)) = (
+            focused_hunks(&self.focus, &self.diff.hunks),
+            &mut self.rendered,
+        ) else {
             return;
         };
         let picked = view.picked();
@@ -278,7 +284,7 @@ mod tests {
         let mut state = with_renderers(three_files(), &["delta"]);
         press(&mut state, KeyCode::Char('1'));
         press(&mut state, KeyCode::Char('l'));
-        assert!(matches!(state.focus, Focus::Diff(_)));
+        assert!(matches!(state.focus, Focus::Diff));
         render_of(&state.update(AppIntent::Key(KeyPress::new(
             KeyCode::Char('R'),
             KeyModifiers::SHIFT,

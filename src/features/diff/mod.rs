@@ -62,11 +62,15 @@
 //! - `DIFF_LOADING_DELAY` in `effect.rs`, which this feature imports;
 //! - `failure_title` in `op_slot.rs`, which names every failed op and which
 //!   `edited_hunk_error` calls;
-//! - in `view.rs`: `diff_position`, because review draws it too;
-//!   `styled_diff_line`, because blame does; `render_hunk_view` and
-//!   `HunkPane`, because they draw custom_patch's picks; and
-//!   `diff_pane_body`, `found_note`, `marked_spans`, `MATCH` and
-//!   `CURRENT_MATCH`, which review, blame and search use;
+//! - the pane's drawing in `diff_pane_view.rs`: `render_hunk_view` and
+//!   `HunkPane`, which core calls with custom_patch's picks as an
+//!   overlay; `diff_position`, because review draws it too;
+//!   `styled_diff_line`, because blame does; and `diff_pane_body`,
+//!   `found_note`, `marks_of`, `marked_spans`, `clipped_marked`, `MATCH`
+//!   and `CURRENT_MATCH`, which review, blame and search use;
+//! - the hunk cursor, `DiffPane::hunks`, read through core
+//!   `hunk_view()`/`hunk_view_mut()` and set by `focus_hunk_view()`
+//!   (`diff_pane.rs`), the only way into `Focus::Diff`;
 //! - `handoff.rs`, the shared runner behind `Effect::HandOff`, which other
 //!   features hand off through too, and `diff_pane.rs`/`hunk_view.rs`,
 //!   which many features import.

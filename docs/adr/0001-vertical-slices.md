@@ -251,7 +251,11 @@ They were kept for two reasons. Moving a callee into `model.rs` would break "hub
 
 ### Deferred
 
-`render_hunk_view` and `HunkPane` stay in `src/view.rs`. To move them into `features/diff`, core would have to compute the custom patch's picks and pass them in. That changes a signature, so it is not a pure move.
+Resolved by #383:
+- The hunk cursor lives in `DiffPane` (`src/diff_pane.rs`), and `Focus::Diff` carries no state. Code reads it through `AppState::hunk_view` and enters the pane through `focus_hunk_view`.
+- `render_hunk_view`, `HunkPane` and the search-mark and span helpers are in core `src/diff_pane_view.rs`, not `features/diff`, because diff, review and blame all use them.
+- Core passes the custom patch's picks to `HunkPane` as an overlay of `(hunk, line)` rows, so the pane does not import the custom patch.
+- `src/diff_mark.rs` stays core: branches, commits and compare use it.
 
 ### Hubs, then and now
 

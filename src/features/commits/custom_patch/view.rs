@@ -1,5 +1,7 @@
 //! The custom patch's mark in the Diff pane: which rows of a commit's
-//! change the patch holds. Core `view.rs` draws the mark.
+//! change the patch holds. Core `view.rs` works them out and hands them
+//! to the Diff pane (`diff_pane_view.rs`) as an overlay, which draws the
+//! mark; the pane never reaches into the patch.
 
 use super::CustomPatch;
 use crate::hunk_view::HunkView;

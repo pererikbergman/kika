@@ -8,6 +8,7 @@ mod config;
 mod config_docs;
 mod diff_mark;
 mod diff_pane;
+mod diff_pane_view;
 mod diff_search;
 #[cfg(test)]
 mod e2e;

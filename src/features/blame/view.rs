@@ -8,11 +8,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::state::{BlameView, CommitView};
+use crate::diff_pane_view::{clipped_marked, found_note, marks_of, styled_diff_line};
 use crate::git::blame::BlameLine;
-use crate::view::{
-    PanelLook, clipped_marked, elide_right, found_note, marks_of, pad, reversed, short_hash,
-    styled_diff_line,
-};
+use crate::view::{PanelLook, elide_right, pad, reversed, short_hash};
 
 /// Columns the author takes in a blame row; longer names are elided.
 const BLAME_AUTHOR: usize = 16;
