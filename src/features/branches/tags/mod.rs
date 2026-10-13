@@ -19,7 +19,7 @@
 //! - `view::list_body`.
 //!
 //! Kept cross-feature reads and calls:
-//! - `commits.rows` and `commits.selected` (commits), to take the commit a
+//! - `commits.list.rows` and `commits.list.selected` (commits), to take the commit a
 //!   new tag points at;
 //! - `push_tag` calls `start_remote` (sync) on `AppState`, an accepted
 //!   cross-feature call listed in ADR-0001's Outcome;

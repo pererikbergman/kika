@@ -231,6 +231,7 @@ impl AppState {
         };
         let head = self
             .commits
+            .list
             .rows
             .first()
             .and_then(|row| CommitId::parse(&row.oid));
@@ -324,6 +325,7 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::bisect;
+    use crate::effect::Tag;
     use crate::git::commit_files::CommitFile;
     use crate::git::log::{CommitRow, LogPage};
     use crate::git::status::EntryKind;
@@ -360,19 +362,26 @@ mod tests {
             })
             .collect();
         state.commits.begin_page(900, 0);
-        state
-            .commits
-            .page_loaded(900, 0, Ok((LogPage { rows, done: true }, 1_000)));
+        state.commits.page_loaded(
+            Tag {
+                generation: state.generation,
+                seq: 900,
+                user: false,
+            },
+            state.generation,
+            0,
+            Ok((LogPage { rows, done: true }, 1_000)),
+        );
         state.commits.tips = Some(vec![]);
         state.focus = Focus::Commits;
         state.expanded = SidePanel::Commits;
-        state.commits.selected = selected;
+        state.commits.list.selected = selected;
         state
     }
 
     /// Open row `row`'s files, listing `a.rs` and `b.rs`.
     fn open_files(state: &mut AppState, row: usize) {
-        state.commits.selected = row;
+        state.commits.list.selected = row;
         let effects = press(state, KeyCode::Enter);
         let tag = match effects.as_slice() {
             [Effect::LoadCommitFiles { tag, .. }] => *tag,
@@ -544,7 +553,7 @@ mod tests {
         open_files(&mut state, 2);
         press(&mut state, KeyCode::Char(' '));
         press(&mut state, KeyCode::Esc);
-        state.commits.selected = row;
+        state.commits.list.selected = row;
         state
     }
 
@@ -739,8 +748,8 @@ mod tests {
         state.hold_op(1);
         state.branch.as_mut().unwrap().in_progress = vec![Operation::Rebase];
         state.files.push(changed("t.rs", '.', 'M'));
-        state.commits.filter = "x".into();
-        state.commits.rows[2].parents = vec![oid(3), oid(9)];
+        state.commits.list.filter = "x".into();
+        state.commits.list.rows[2].parents = vec![oid(3), oid(9)];
 
         let mut reasons = vec![];
         reasons.push(why(&state, PatchChoice::MoveToSelected));
@@ -752,11 +761,11 @@ mod tests {
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         state.files.retain(|f| f.kind == EntryKind::Untracked);
         reasons.push(why(&state, PatchChoice::MoveToSelected));
-        state.commits.filter.clear();
+        state.commits.list.filter.clear();
         reasons.push(why(&state, PatchChoice::MoveToSelected));
-        state.commits.rows[2].parents.clear();
+        state.commits.list.rows[2].parents.clear();
         reasons.push(why(&state, PatchChoice::MoveToSelected));
-        state.commits.rows[2].parents = vec![oid(3)];
+        state.commits.list.rows[2].parents = vec![oid(3)];
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         reasons.push(why(&state, PatchChoice::Remove));
 

@@ -27,7 +27,7 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
-        let row = self.commits.rows.get(self.commits.selected);
+        let row = self.commits.list.rows.get(self.commits.list.selected);
         let Some(target) = row.and_then(|row| CommitId::parse(&row.oid)) else {
             self.notice = Some("Not a commit id".into());
             return vec![];
@@ -129,17 +129,22 @@ impl AppState {
     fn select_fixup_base(&mut self, id: &CommitId) -> String {
         let commits = &mut self.commits;
         let short = commits.short_oid(id);
-        let Some(at) = commits.rows.iter().position(|row| row.oid == id.as_str()) else {
+        let Some(at) = commits
+            .list
+            .rows
+            .iter()
+            .position(|row| row.oid == id.as_str())
+        else {
             return format!(
                 "Fixup base: {short} (not loaded; move down to load more, then look again)"
             );
         };
-        let subject = commits.rows[at].subject.clone();
-        if !commits.visible().contains(&at) {
+        let subject = commits.list.rows[at].subject.clone();
+        if !commits.list.visible().contains(&at) {
             return format!("Fixup base: {short} {subject} (hidden by the filter)");
         }
-        commits.selected = at;
-        commits.range_anchor = None;
+        commits.list.selected = at;
+        commits.list.range_anchor = None;
         commits.todo_selected = None;
         format!("Fixup base: {short} {subject}")
     }
@@ -147,7 +152,7 @@ impl AppState {
     /// `ids` newest first as the log lists them; any not loaded follow in
     /// the order they came.
     fn log_order(&self, mut ids: Vec<CommitId>) -> Vec<CommitId> {
-        let rows = &self.commits.rows;
+        let rows = &self.commits.list.rows;
         let place = |id: &CommitId| rows.iter().position(|row| row.oid == id.as_str());
         // A stable sort keeps the unloaded ones in their order.
         ids.sort_by_key(|id| place(id).unwrap_or(usize::MAX));

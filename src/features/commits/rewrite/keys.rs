@@ -56,7 +56,7 @@ fn commits_range_rewrite_disabled(
     single: fn(&AppState) -> Option<Reason>,
 ) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
-        if state.commits.range_anchor.is_some() {
+        if state.commits.list.range_anchor.is_some() {
             range_rewrite_disabled(state, edit)
         } else {
             single(state)
@@ -389,13 +389,13 @@ mod tests {
             assert_eq!(disabled(&state), Some("No commits".into()));
         }
         // `a` on `b`, the root.
-        state.commits.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
+        state.commits.list.rows = vec![row(0, vec![ids[1].clone()]), row(1, vec![])];
         assert_eq!(drop_disabled(&state), None);
         assert_eq!(reword_disabled(&state), None);
         let below_is_root = Some("The commit below is the first commit");
         assert_eq!(squash_disabled(&state).as_deref(), below_is_root);
         assert_eq!(fixup_disabled(&state).as_deref(), below_is_root);
-        state.commits.selected = 1;
+        state.commits.list.selected = 1;
         for disabled in all {
             assert_eq!(
                 disabled(&state),
@@ -403,8 +403,8 @@ mod tests {
             );
         }
 
-        state.commits.selected = 0;
-        state.commits.rows[1].parents = vec![ids[2].clone()];
+        state.commits.list.selected = 0;
+        state.commits.list.rows[1].parents = vec![ids[2].clone()];
         for disabled in all {
             assert_eq!(disabled(&state), None);
         }
@@ -433,7 +433,7 @@ mod tests {
         let ids = ['a', 'b', 'c', 'd', 'e'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
-        state.commits.rows = (0..4)
+        state.commits.list.rows = (0..4)
             .map(|i| crate::git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: ids[i][..7].into(),
@@ -445,8 +445,8 @@ mod tests {
             })
             .collect();
         state.commits.tips = Some(vec![]);
-        state.commits.range_anchor = Some(ids[1].clone());
-        state.commits.selected = 2;
+        state.commits.list.range_anchor = Some(ids[1].clone());
+        state.commits.list.selected = 2;
         state
     }
 
@@ -472,10 +472,10 @@ mod tests {
 
         // A filter that hides `b`, between `a` and `c`.
         let mut gap = range_state();
-        gap.commits.rows[1].subject = "hide".into();
-        gap.commits.filter = "keep".into();
-        gap.commits.range_anchor = Some("a".repeat(40));
-        assert_eq!(gap.commits.range(), [0, 2]);
+        gap.commits.list.rows[1].subject = "hide".into();
+        gap.commits.list.filter = "keep".into();
+        gap.commits.list.range_anchor = Some("a".repeat(40));
+        assert_eq!(gap.commits.list.range(), [0, 2]);
         let mut todo = range_state();
         todo.commits.todo_selected = Some(0);
         let mut narrowed = range_state();
@@ -556,7 +556,7 @@ mod tests {
             subject_altered: false,
         };
         let mut state = AppState::new(Context::Workspace);
-        state.commits.rows = vec![
+        state.commits.list.rows = vec![
             row("d", "b", "fixup! A"),
             row("b", "a", "B"),
             row("a", "9", "A"),
@@ -617,13 +617,13 @@ mod tests {
         let mut todo = fixup_state();
         todo.commits.todo_selected = Some(0);
         let mut hidden = fixup_state();
-        hidden.commits.filter = "zzz".into();
+        hidden.commits.list.filter = "zzz".into();
         let mut range = fixup_state();
-        range.commits.range_anchor = Some("b".repeat(40));
+        range.commits.list.range_anchor = Some("b".repeat(40));
         let mut running = fixup_state();
         running.hold_op(1);
         let mut unborn = fixup_state();
-        unborn.commits.rows.clear();
+        unborn.commits.list.rows.clear();
         unborn.branch = Some(crate::git::status::BranchStatus {
             head: Head::Unborn("main".into()),
             upstream: None,
@@ -676,7 +676,7 @@ mod tests {
         let mut narrowed = fixup_state();
         narrowed.commits.query.author = Some("ann".into());
         let mut filtered = fixup_state();
-        filtered.commits.filter = "fixup".into();
+        filtered.commits.list.filter = "fixup".into();
         let mut todo = fixup_state();
         todo.commits.todo_selected = Some(0);
         let mut running = fixup_state();
@@ -684,7 +684,7 @@ mod tests {
         let mut rebasing = fixup_state();
         in_rebase(&mut rebasing);
         let mut none = fixup_state();
-        none.commits.rows[0].subject = "D".into();
+        none.commits.list.rows[0].subject = "D".into();
         let cases = [
             (&narrowed, CLEAR_LOG_FILTER),
             (&filtered, FILTER_HIDES_NEIGHBOUR),

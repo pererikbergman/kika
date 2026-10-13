@@ -132,7 +132,7 @@ mod tests {
             ),
         ] {
             let mut state = AppState::new(Context::Workspace);
-            state.commits.rows = vec![crate::git::log::CommitRow {
+            state.commits.list.rows = vec![crate::git::log::CommitRow {
                 oid: "abc".into(),
                 short_oid: "abc".into(),
                 parents: vec![],
@@ -154,7 +154,7 @@ mod tests {
                 kind: EntryKind::Changed,
             }];
             states.push(state.clone());
-            state.commits.rows.clear();
+            state.commits.list.rows.clear();
             states.push(state);
         }
         let items = crate::menu::items(MenuId::Bisect);

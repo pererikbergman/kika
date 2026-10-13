@@ -20,7 +20,7 @@ use crossterm::event::KeyCode;
 /// runs no git, so it works while an operation runs.
 pub(crate) fn copy_disabled(state: &AppState) -> Option<Reason> {
     no_commit(state).or_else(|| {
-        let row = state.commits.rows.get(state.commits.selected);
+        let row = state.commits.list.rows.get(state.commits.list.selected);
         row.is_some_and(|r| r.parents.len() > 1)
             .then_some("Cannot cherry-pick a merge commit".into())
     })
@@ -59,11 +59,11 @@ fn commits_copy_menu_disabled(state: &AppState) -> Option<Reason> {
 /// it can copy.
 pub(crate) fn commits_copy_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
-        if state.commits.range_anchor.is_none() {
+        if state.commits.list.range_anchor.is_none() {
             return copy_disabled(state);
         }
-        let rows = &state.commits.rows;
-        let range = state.commits.range();
+        let rows = &state.commits.list.rows;
+        let range = state.commits.list.range();
         no_commit(state).or_else(|| {
             range
                 .iter()
@@ -133,7 +133,7 @@ mod tests {
         // Everything enabled: a commit to copy, one copied, a clean branch.
         let mut state = AppState::new(Context::Workspace);
         let oid = "a".repeat(40);
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: oid.clone(),
             short_oid: "aaaaaaa".into(),
             parents: vec![],

@@ -126,13 +126,13 @@ mod tests {
     fn an_author_typed_on_the_bar_reloads_the_log_with_it_and_paging_keeps_it() {
         let mut state = with_log(5);
         type_text(&mut state, "jj");
-        assert_eq!(state.commits.selected, 2);
+        assert_eq!(state.commits.list.selected, 2);
 
         let effects = type_text(&mut state, "Aann\n");
 
         assert_eq!(state.commits.query.author.as_deref(), Some("ann"));
-        assert!(state.commits.rows.is_empty() && !state.commits.loaded);
-        assert_eq!(state.commits.selected, 0);
+        assert!(state.commits.list.rows.is_empty() && !state.commits.list.loaded);
+        assert_eq!(state.commits.list.selected, 0);
         assert_eq!(state.input, None);
         let [(tag, None, 0, ref query)] = loads(&effects)[..] else {
             panic!("expected one first-page load in {effects:?}");
@@ -198,7 +198,7 @@ mod tests {
 
         assert_eq!(state.input, None);
         assert_eq!(state.commits.query, author("bob"));
-        assert_eq!(state.commits.rows.len(), 3);
+        assert_eq!(state.commits.list.rows.len(), 3);
     }
 
     #[test]
@@ -228,15 +228,15 @@ mod tests {
         answer(&mut state, tag, 0, hex_page(5, true));
         type_text(&mut state, "M/commit\nV");
         assert!(state.diff_mark.is_some());
-        assert_eq!(state.commits.filter, "commit");
-        assert!(state.commits.range_anchor.is_some());
+        assert_eq!(state.commits.list.filter, "commit");
+        assert!(state.commits.list.range_anchor.is_some());
 
         assert!(press(&mut state, KeyCode::Esc).is_empty());
-        assert!(state.commits.range_anchor.is_none());
-        assert_eq!(state.commits.filter, "commit");
+        assert!(state.commits.list.range_anchor.is_none());
+        assert_eq!(state.commits.list.filter, "commit");
 
         assert!(press(&mut state, KeyCode::Esc).is_empty());
-        assert_eq!(state.commits.filter, "");
+        assert_eq!(state.commits.list.filter, "");
         assert!(state.diff_mark.is_some());
 
         assert!(press(&mut state, KeyCode::Esc).is_empty());

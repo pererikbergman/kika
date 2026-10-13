@@ -17,8 +17,8 @@
 //! - `effects::resolve`.
 //!
 //! Kept cross-feature reads and calls:
-//! - the handlers read `commits.rows`, `commits.selected`, `commits.open`,
-//!   `commits.tab` and `branches.selected_branch()`, and call
+//! - the handlers read `commits.list.rows`, `commits.list.selected`,
+//!   `commits.open`, `commits.tab` and `branches.selected_branch()`, and call
 //!   `close_commit_files` and `focus_panel`;
 //! - `commits_mark_disabled` calls core `list_guard`,
 //!   `commits_range_disabled` and `no_commit_selected`, and

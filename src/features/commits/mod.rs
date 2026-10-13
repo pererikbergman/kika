@@ -39,9 +39,9 @@
 //! - `view::{render_commits_panel, PATCH_MARK}`, `git::Tip` and
 //!   `git::detached_checkout`.
 //!
-//! Kept cross-feature reads of `state.commits`: `branches/tags` (`rows`,
-//! `selected`), `stash`, `review` and `diff/renderers` (`open`) and
-//! `pull_requests` (`rows`); in core, `bisect.rs`, `popup_view.rs` and
+//! Kept cross-feature reads of `state.commits`: `branches/tags`
+//! (`list.rows`, `list.selected`), `stash`, `review` and `diff/renderers`
+//! (`open`) and `pull_requests` (`list.rows`); in core, `bisect.rs`, `popup_view.rs` and
 //! `menu.rs`. The handlers read `files`, `selected`, `diff`, `popups` and
 //! `diff_options` (core) and call core's `close_commit_files`,
 //! `focus_panel`, `background_tag`, `open_diff`, `close_diff`,
@@ -120,7 +120,7 @@ pub(crate) fn with_stacked_branches(
     crossings: &[Crossing],
 ) -> Result<RebasePlan, Reason> {
     let commits = &state.commits;
-    let rows = commits.rows.as_slice();
+    let rows = commits.list.rows.as_slice();
     plan.update_refs = state.git_has(version::UPDATE_REFS);
     let head = match state.branch.as_ref().map(|b| &b.head) {
         Some(Head::Branch(name)) => Some(format!("refs/heads/{name}").into_bytes()),
