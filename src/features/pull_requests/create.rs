@@ -799,7 +799,7 @@ mod tests {
     #[test]
     fn the_copy_menu_gives_the_selected_commits_page() {
         let mut state = one_remote();
-        state.commits.rows = vec![CommitRow {
+        state.commits.list.rows = vec![CommitRow {
             oid: OID.into(),
             short_oid: "0123456".into(),
             parents: vec![],

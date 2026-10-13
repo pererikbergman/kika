@@ -1178,12 +1178,17 @@ pub(crate) fn no_commit(state: &AppState) -> Option<Reason> {
     if state.commits.todo_selected.is_some() {
         return Some("Select a commit in the log first".into());
     }
-    state.commits.rows.is_empty().then_some("No commits".into())
+    state
+        .commits
+        .list
+        .rows
+        .is_empty()
+        .then_some("No commits".into())
 }
 
 /// Why nothing can be copied from the Commits panel.
 pub(crate) fn no_commit_selected(state: &AppState) -> Option<Reason> {
-    let row = state.commits.rows.get(state.commits.selected);
+    let row = state.commits.list.rows.get(state.commits.list.selected);
     row.is_none().then_some("No commit selected".into())
 }
 
@@ -1214,6 +1219,7 @@ pub(crate) fn commit_source_disabled(state: &AppState, open: &CommitFilesList) -
     }
     let merge = state
         .commits
+        .list
         .rows
         .iter()
         .any(|row| row.oid == open.range.oid.as_str() && row.parents.len() > 1);
@@ -1427,8 +1433,8 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
         ),
         // The filter hides log rows only; a todo row above the log shows.
         KeyScope::Commits => (
-            state.commits.todo_selected.is_none() && state.commits.selected_hidden(),
-            state.commits.range_anchor.is_some(),
+            state.commits.todo_selected.is_none() && state.commits.list.selected_hidden(),
+            state.commits.list.range_anchor.is_some(),
         ),
         // No range: nothing acts on a range of a commit's files.
         KeyScope::CommitFiles => (
@@ -3443,7 +3449,7 @@ mod tests {
             kind: EntryKind::Changed,
         }];
         state.selected = Some(0);
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
             parents: vec!["p".into()],
@@ -3508,7 +3514,7 @@ mod tests {
     fn the_commits_panel_squashes_fixes_up_drops_and_rewords() {
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
-        state.commits.rows = (0..2)
+        state.commits.list.rows = (0..2)
             .map(|i| crate::git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: "x".into(),
@@ -3576,10 +3582,10 @@ mod tests {
                 RewriteIntent::Move(Direction::Down),
             ))),
         );
-        state.commits.selected = 1;
+        state.commits.list.selected = 1;
         assert_eq!(on(&state, key(KeyCode::Char('k'), alt)), up);
         assert_eq!(on(&state, key(KeyCode::Up, alt)), up);
-        state.commits.selected = 0;
+        state.commits.list.selected = 0;
         assert_eq!(on(&state, key(KeyCode::Char('j'), alt)), down);
         assert_eq!(on(&state, key(KeyCode::Down, alt)), down);
         // Plain arrows still move the cursor.
@@ -4141,7 +4147,7 @@ mod tests {
     fn rewrites_wait_for_the_log_filter_and_the_reflog_has_none() {
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
-        state.commits.rows = (0..2)
+        state.commits.list.rows = (0..2)
             .map(|i| crate::git::log::CommitRow {
                 oid: ids[i].clone(),
                 short_oid: "x".into(),

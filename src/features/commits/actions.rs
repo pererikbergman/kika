@@ -26,7 +26,7 @@ impl AppState {
             self.notice = Some(reason);
             return None;
         }
-        let row = self.commits.rows.get(self.commits.selected)?;
+        let row = self.commits.list.rows.get(self.commits.list.selected)?;
         match CommitId::parse(&row.oid) {
             Some(id) => Some((id, row.short_oid.clone())),
             None => {
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn a_revert_is_refused_on_a_merge_while_an_op_runs_or_during_an_operation() {
         let mut merge = on_commit();
-        merge.commits.rows[1].parents = vec!["c2".into(), "d0".into()];
+        merge.commits.list.rows[1].parents = vec!["c2".into(), "d0".into()];
         assert_eq!(press_char(&mut merge, 'R'), vec![]);
         assert_eq!(merge.notice, Some("Cannot revert a merge commit".into()));
         assert_eq!(

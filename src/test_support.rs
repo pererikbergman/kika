@@ -519,12 +519,19 @@ pub(crate) fn with_commits(first: usize, done: bool) -> AppState {
 pub(crate) fn on_commit_five() -> AppState {
     let (mut state, _) = with_files(three_files(), 24);
     state.commits.begin_page(900, 0);
-    state
-        .commits
-        .page_loaded(900, 0, Ok((page(0, 8, true), 1_000)));
+    state.commits.page_loaded(
+        Tag {
+            generation: state.generation,
+            seq: 900,
+            user: false,
+        },
+        state.generation,
+        0,
+        Ok((page(0, 8, true), 1_000)),
+    );
     state.focus = Focus::Commits;
     state.expanded = SidePanel::Commits;
-    state.commits.selected = 5;
+    state.commits.list.selected = 5;
     state
 }
 
@@ -964,7 +971,7 @@ pub(crate) const COPIED_OID: &str = "1111111111111111111111111111111111111111";
 /// with a full id and a short one.
 pub(crate) fn copy_ready() -> AppState {
     let mut state = on_commit();
-    let row = &mut state.commits.rows[1];
+    let row = &mut state.commits.list.rows[1];
     row.oid = COPIED_OID.into();
     // Not what the notice names: that is made from the full id.
     row.short_oid = "111".into();
@@ -983,10 +990,10 @@ pub(crate) fn one_copied() -> AppState {
 /// Four commits with full-length ids, the second a merge.
 pub(crate) fn with_merge() -> AppState {
     let mut state = with_commits(4, true);
-    for (i, row) in state.commits.rows.iter_mut().enumerate() {
+    for (i, row) in state.commits.list.rows.iter_mut().enumerate() {
         row.oid = format!("{i}").repeat(40);
     }
-    state.commits.rows[1].parents = vec!["2".repeat(40), "9".repeat(40)];
+    state.commits.list.rows[1].parents = vec!["2".repeat(40), "9".repeat(40)];
     state
 }
 
@@ -1152,7 +1159,7 @@ pub(crate) fn typing_password(typed: &str) -> (AppState, Tag) {
 pub(crate) fn on_linear_log() -> AppState {
     let mut state = on_commit();
     let ids = ['a', 'b', 'c', 'd'].map(|d| d.to_string().repeat(40));
-    for (i, row) in state.commits.rows.iter_mut().enumerate() {
+    for (i, row) in state.commits.list.rows.iter_mut().enumerate() {
         row.oid = ids[i].clone();
         row.parents = vec![ids[i + 1].clone()];
     }
@@ -1565,7 +1572,7 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
         kind: EntryKind::Changed,
     }];
     state.selected = Some(0);
-    state.commits.rows = vec![crate::git::log::CommitRow {
+    state.commits.list.rows = vec![crate::git::log::CommitRow {
         oid: "abc".into(),
         short_oid: "abc".into(),
         parents: vec![],
@@ -1680,6 +1687,7 @@ pub(crate) fn with_a_fixup() -> AppState {
     for (row, (subject, short)) in
         state
             .commits
+            .list
             .rows
             .iter_mut()
             .zip([("fixup! C", "a1"), ("B", "b1"), ("C", "c1")])

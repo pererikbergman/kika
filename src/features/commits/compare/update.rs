@@ -34,7 +34,7 @@ impl AppState {
     pub(crate) fn toggle_diff_mark(&mut self) {
         let mark = match self.panel_focus() {
             KeyScope::Commits => {
-                let Some(row) = self.commits.rows.get(self.commits.selected) else {
+                let Some(row) = self.commits.list.rows.get(self.commits.list.selected) else {
                     return;
                 };
                 let Some(id) = CommitId::parse(&row.oid) else {

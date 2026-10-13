@@ -1254,17 +1254,17 @@ async fn the_commits_panel_shows_head_and_loads_more_as_the_cursor_nears_the_end
     app.press(KeyCode::Char('4')).await;
     app.press(KeyCode::Char('z')).await;
     app.assert_screen_contains("commit 260");
-    assert_eq!(app.state().commits.rows.len(), 200);
+    assert_eq!(app.state().commits.list.rows.len(), 200);
 
     for _ in 0..210 {
         app.press(KeyCode::Char('j')).await;
     }
 
     let commits = &app.state().commits;
-    assert_eq!(commits.rows.len(), 260);
+    assert_eq!(commits.list.rows.len(), 260);
     assert!(commits.done);
-    assert_eq!(commits.selected, 210);
-    assert_eq!(commits.rows[210].subject, "commit 50");
+    assert_eq!(commits.list.selected, 210);
+    assert_eq!(commits.list.rows[210].subject, "commit 50");
     app.assert_screen_contains("commit 50");
 }
 
@@ -2109,7 +2109,7 @@ async fn alt_k_moves_the_selected_commit_above_the_newer_one() {
     assert_no_failure(&mut app);
     assert_eq!(subjects(&repo), "third\nfourth\nsecond\ninit\n");
     assert_eq!(current_branch(&repo), "main");
-    assert_eq!(app.state().commits.selected, 0);
+    assert_eq!(app.state().commits.list.selected, 0);
 }
 
 #[cfg(unix)]
@@ -2517,7 +2517,7 @@ async fn a_staged_deletion_with_a_file_back_at_its_path_stashes_nothing() {
 
 /// The subjects of the commits the log has loaded, newest first.
 fn log_subjects(app: &Harness) -> Vec<String> {
-    let rows = &app.state().commits.rows;
+    let rows = &app.state().commits.list.rows;
     rows.iter().map(|row| row.subject.clone()).collect()
 }
 
@@ -2622,8 +2622,8 @@ async fn ctrl_b_finds_the_base_ctrl_f_makes_the_fixup_and_shift_s_folds_it() {
 
     app.press_with(KeyCode::Char('b'), KeyModifiers::CONTROL)
         .await;
-    assert_eq!(app.state().commits.selected, 1);
-    assert_eq!(app.state().commits.rows[1].oid, a.trim());
+    assert_eq!(app.state().commits.list.selected, 1);
+    assert_eq!(app.state().commits.list.rows[1].oid, a.trim());
     app.press_with(KeyCode::Char('f'), KeyModifiers::CONTROL)
         .await;
 
@@ -2654,7 +2654,7 @@ async fn a_todo_list_that_differs_from_the_autosquash_plan_aborts_and_changes_no
     let a = String::from_utf8(repo.git(["rev-parse", "HEAD~1"])).unwrap();
     repo.git(["commit", "-q", "--fixup", a.trim()]);
     app.press(KeyCode::Char('r')).await;
-    assert_eq!(app.state().commits.rows[0].subject, "fixup! A");
+    assert_eq!(app.state().commits.list.rows[0].subject, "fixup! A");
 
     app.press_with(KeyCode::Char('S'), KeyModifiers::SHIFT)
         .await;
@@ -2847,10 +2847,10 @@ async fn pick_line_two_of_b(app: &mut Harness, row: usize) {
     app.press(KeyCode::Esc).await;
     app.press(KeyCode::Esc).await;
     assert!(app.state().commits.open.is_none());
-    while app.state().commits.selected > row {
+    while app.state().commits.list.selected > row {
         app.press(KeyCode::Char('k')).await;
     }
-    while app.state().commits.selected < row {
+    while app.state().commits.list.selected < row {
         app.press(KeyCode::Char('j')).await;
     }
 }

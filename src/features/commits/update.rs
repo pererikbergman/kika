@@ -113,11 +113,7 @@ impl AppState {
         skip: usize,
         result: Result<(LogPage, i64), String>,
     ) -> Vec<Effect> {
-        if tag.generation != self.generation {
-            return vec![];
-        }
-        self.commits.page_loaded(tag.seq, skip, result);
-        self.commits.reconcile();
+        self.commits.page_loaded(tag, self.generation, skip, result);
         self.more_commits()
     }
 
@@ -148,7 +144,7 @@ impl AppState {
         {
             return vec![];
         }
-        let Some(row) = self.commits.rows.get(self.commits.selected) else {
+        let Some(row) = self.commits.list.rows.get(self.commits.list.selected) else {
             return vec![];
         };
         if let Some(mark) = &self.diff_mark
@@ -161,7 +157,7 @@ impl AppState {
         let range = match CommitRange::of(row) {
             Ok(range) => range,
             Err(message) => {
-                self.commits.error = Some(message);
+                self.commits.list.error = Some(message);
                 return vec![];
             }
         };
@@ -256,12 +252,12 @@ mod tests {
     fn a_loaded_page_fills_the_rows_and_the_graph() {
         let state = with_commits(3, true);
         let commits = &state.commits;
-        assert!(commits.loaded && commits.done);
-        assert_eq!(commits.rows.len(), 3);
+        assert!(commits.list.loaded && commits.done);
+        assert_eq!(commits.list.rows.len(), 3);
         assert_eq!(commits.graph.len(), 3);
         assert_eq!(commits.tip.as_deref(), Some("c0"));
         assert_eq!(commits.loaded_at, 1_000);
-        assert_eq!(commits.page_seq, None);
+        assert_eq!(commits.list.seq, None);
     }
 
     #[test]
@@ -271,15 +267,15 @@ mod tests {
         for _ in 0..5 {
             press(&mut state, KeyCode::Char('j'));
         }
-        assert_eq!(state.commits.selected, 2);
+        assert_eq!(state.commits.list.selected, 2);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.commits.list.selected, 1);
     }
 
     #[test]
     fn nearing_the_end_loads_the_next_page_once_from_the_same_tip() {
         let mut state = with_commits(PAGE, false);
-        state.commits.selected = PAGE - PREFETCH - 2;
+        state.commits.list.selected = PAGE - PREFETCH - 2;
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::Next)),
             vec![]
@@ -297,9 +293,9 @@ mod tests {
         assert!(state.commits.more_in_flight);
 
         state.update(commits_loaded(tag, PAGE, page(PAGE, 10, true)));
-        assert_eq!(state.commits.rows.len(), PAGE + 10);
+        assert_eq!(state.commits.list.rows.len(), PAGE + 10);
         assert_eq!(state.commits.graph.len(), PAGE + 10);
-        assert_eq!(state.commits.rows[PAGE].oid, format!("c{PAGE}"));
+        assert_eq!(state.commits.list.rows[PAGE].oid, format!("c{PAGE}"));
         assert!(!state.commits.more_in_flight);
     }
 
@@ -312,7 +308,7 @@ mod tests {
                 vec![]
             );
         }
-        assert_eq!(state.commits.selected, 9);
+        assert_eq!(state.commits.list.selected, 9);
     }
 
     #[test]
@@ -335,7 +331,7 @@ mod tests {
             result: Ok(unpushed.clone()),
         }));
         assert_eq!(
-            state.commits.rows[0].oid, "c0",
+            state.commits.list.rows[0].oid, "c0",
             "the superseded page is dropped"
         );
         assert_eq!(state.commits.markers, Markers::default());
@@ -348,7 +344,7 @@ mod tests {
             tag: new_markers,
             result: Ok(unpushed.clone()),
         }));
-        assert_eq!(other.commits.rows[0].oid, "c0");
+        assert_eq!(other.commits.list.rows[0].oid, "c0");
         assert_eq!(other.commits.markers, Markers::default());
 
         state.update(commits_loaded(new, 0, page(50, 3, true)));
@@ -356,30 +352,37 @@ mod tests {
             tag: new_markers,
             result: Ok(unpushed.clone()),
         }));
-        assert_eq!(state.commits.rows[0].oid, "c50");
+        assert_eq!(state.commits.list.rows[0].oid, "c50");
         assert_eq!(state.commits.markers, unpushed);
     }
 
     #[test]
     fn a_reload_keeps_the_old_rows_until_it_lands_then_the_cursor_on_the_same_commit() {
         let mut state = with_commits(5, true);
-        state.commits.selected = 2;
+        state.commits.list.selected = 2;
         let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
-        assert_eq!(state.commits.rows.len(), 5, "shown while the reload runs");
+        assert_eq!(
+            state.commits.list.rows.len(),
+            5,
+            "shown while the reload runs"
+        );
 
         // A new commit on top moves c2 one row down.
         let mut newer = page(1, 4, true);
         newer.rows.insert(0, page(99, 1, true).rows.remove(0));
         newer.rows.splice(1..1, page(0, 1, true).rows);
         state.update(commits_loaded(tag, 0, newer));
-        assert_eq!(state.commits.rows[state.commits.selected].oid, "c2");
+        assert_eq!(
+            state.commits.list.rows[state.commits.list.selected].oid,
+            "c2"
+        );
         assert_eq!(state.commits.tip.as_deref(), Some("c99"));
 
         // Gone: the cursor stays near where it was, inside the list.
-        state.commits.selected = 5;
+        state.commits.list.selected = 5;
         let (tag, _, _) = commits_load(&state.update(AppIntent::RefreshStatus));
         state.update(commits_loaded(tag, 0, page(10, 2, true)));
-        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.commits.list.selected, 1);
     }
 
     // --- A commit's files ---
@@ -397,15 +400,15 @@ mod tests {
         let open = state.commits.open.as_ref().unwrap();
         assert_eq!((open.short_oid.as_str(), open.list.loaded), ("c5", false));
         assert_eq!(state.key_focus(), KeyScope::CommitFiles);
-        assert_eq!(state.commits.selected, 5);
+        assert_eq!(state.commits.list.selected, 5);
     }
 
     #[test]
     fn a_commit_whose_id_or_parent_is_not_hex_opens_nothing_and_says_why() {
         for (oid, parent) in [("--output=x", "c6"), ("c5", "-p")] {
             let mut state = on_commit_five();
-            state.commits.rows[5].oid = oid.into();
-            state.commits.rows[5].parents = vec![parent.into()];
+            state.commits.list.rows[5].oid = oid.into();
+            state.commits.list.rows[5].parents = vec![parent.into()];
 
             assert_eq!(
                 state.update(AppIntent::Commits(CommitsIntent::OpenFiles)),
@@ -413,7 +416,7 @@ mod tests {
             );
 
             assert_eq!(state.commits.open, None);
-            let error = state.commits.error.as_deref().unwrap();
+            let error = state.commits.list.error.as_deref().unwrap();
             assert!(error.starts_with("not a commit id"), "{error}");
         }
     }
@@ -421,7 +424,7 @@ mod tests {
     #[test]
     fn enter_with_no_commits_is_disabled() {
         let mut state = on_commit_five();
-        state.commits.rows.clear();
+        state.commits.list.rows.clear();
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some("No commits".into()));
     }

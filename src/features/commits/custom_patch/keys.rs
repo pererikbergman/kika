@@ -84,10 +84,10 @@ fn patch_state_disabled(state: &AppState) -> Option<Reason> {
     if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
         return Some("Commit or stash your changes first".into());
     }
-    if state.commits.query.is_active() || !state.commits.filter.is_empty() {
+    if state.commits.query.is_active() || !state.commits.list.filter.is_empty() {
         return Some(CLEAR_LOG_FILTER.into());
     }
-    let rows = &state.commits.rows;
+    let rows = &state.commits.list.rows;
     let source = patch.source.oid.as_str();
     match rows.iter().find(|row| row.oid == source) {
         None => Some("The patch's commit is not loaded; move down to load more".into()),
@@ -108,7 +108,7 @@ pub(crate) fn patch_action(state: &AppState, choice: PatchChoice) -> Result<Patc
             if state.commits.todo_selected.is_some() {
                 return Err("Select a commit in the log first".into());
             }
-            let row = state.commits.rows.get(state.commits.selected);
+            let row = state.commits.list.rows.get(state.commits.list.selected);
             let target = row.and_then(|row| CommitId::parse(&row.oid));
             PatchAction::MoveTo(target.ok_or("No commits")?)
         }
@@ -126,7 +126,7 @@ pub(crate) const TARGET_IS_SOURCE: &str =
 /// checked at the last commit too, while the rebase can still be aborted.
 pub(crate) fn patch_plan(state: &AppState, action: &PatchAction) -> Result<RebasePlan, Reason> {
     let patch = state.custom_patch.as_ref().ok_or(PATCH_EMPTY)?;
-    let rows = state.commits.rows.as_slice();
+    let rows = state.commits.list.rows.as_slice();
     let row_of = |id: &CommitId| rows.iter().position(|row| row.oid == id.as_str());
     let source = row_of(&patch.source.oid).ok_or("The patch's commit is not loaded")?;
     let stops = match action {

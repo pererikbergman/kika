@@ -472,7 +472,7 @@ mod tests {
     fn esc_in_the_reflog_tab_clears_the_filter_then_quits_and_v_sets_no_range() {
         let mut state = on_reflog_tab();
         assert_eq!(press_char(&mut state, 'V'), vec![]);
-        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.commits.list.range_anchor, None);
         assert_eq!(state.popups, []);
         press_char(&mut state, '/');
         type_text(&mut state, "first\n");
@@ -511,15 +511,15 @@ mod tests {
         );
         assert_eq!(state.input.as_ref().unwrap().line.text, "");
         type_text(&mut state, "c1\n");
-        assert_eq!(state.commits.filter, "c1");
+        assert_eq!(state.commits.list.filter, "c1");
         assert_eq!(state.commits.reflog.list.filter, "root");
         press_char(&mut state, ']');
         assert_eq!(state.commits.reflog.list.filter, "root");
-        assert_eq!(state.commits.filter, "c1");
+        assert_eq!(state.commits.list.filter, "c1");
         // Esc in the Reflog tab clears only its own.
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.commits.reflog.list.filter, "");
-        assert_eq!(state.commits.filter, "c1");
+        assert_eq!(state.commits.list.filter, "c1");
     }
 
     #[test]
