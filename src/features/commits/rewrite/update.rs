@@ -130,6 +130,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::features::commits::keys::TIPS_UNKNOWN;
     use crate::features::commits::rewrite;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
@@ -238,7 +239,7 @@ mod tests {
         let mut unknown = on_linear_log();
         unknown.commits.tips = None;
         assert_eq!(press_char(&mut unknown, 'd'), vec![]);
-        assert_eq!(unknown.notice, Some(keymap::TIPS_UNKNOWN.into()));
+        assert_eq!(unknown.notice, Some(TIPS_UNKNOWN.into()));
         // A failed read says so, and how to try again.
         unknown.commits.tips_error = Some("fatal: bad ref\nmore".into());
         assert_eq!(press_char(&mut unknown, 'd'), vec![]);

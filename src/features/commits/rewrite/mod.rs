@@ -38,15 +38,15 @@
 //! Kept cross-feature reads: `commits.todo`, `todo_selected`, `todo_seq`,
 //! `todo_write_seq`, `rows`, `selected`, `query`, `filter`, `tips`,
 //! `range_anchor`, `range()`, `fixup_base_seq`, `pending` and
-//! `short_oid` (the commits panel, still in core); `files` (the Files
+//! `short_oid` (the parent `commits` panel); `files` (the Files
 //! panel, core); `op_seq`, `branch` (and its `head`), `popups`,
 //! `left_behind_check`, `busy`, `generation` and `notice` (core).
 //!
-//! What stays in core, and why:
+//! What stays elsewhere, and why:
 //! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`, `range_anchor` and
-//!   the todo rows in `commits_view.rs`: the commits panel shows and
+//!   the todo rows in the parent's `view.rs`: the commits panel shows and
 //!   navigates them;
-//! - `git/rebase_plan.rs`, `git/comment_prefix.rs` and
+//! - in core: `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
 //! - the `AppIntent` and `Effect` variants, `ConfirmKind::{Autosquash,
 //!   DropRange}` with its question, `Popup::LeaveCommits`, the popup key

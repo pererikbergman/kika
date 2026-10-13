@@ -3,9 +3,6 @@ mod bisect;
 mod cli;
 mod clipboard;
 mod commit_files;
-mod commit_graph;
-mod commits;
-mod commits_view;
 mod config;
 #[cfg(test)]
 mod config_docs;

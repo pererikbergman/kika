@@ -4,7 +4,6 @@
 pub mod askpass;
 pub mod bisect;
 pub mod blame;
-pub mod branch_tips;
 pub mod branches;
 pub mod command_line;
 pub mod comment_prefix;

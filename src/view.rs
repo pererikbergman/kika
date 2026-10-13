@@ -1,4 +1,3 @@
-use crate::commits_view;
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
@@ -7,6 +6,7 @@ use crate::features::branches;
 use crate::features::branches::BranchesTab;
 use crate::features::branches::remotes;
 use crate::features::commit;
+use crate::features::commits;
 use crate::features::commits::custom_patch::{self, CustomPatch};
 use crate::features::conflicts;
 use crate::features::diff::renderers::view::{render_rendered, tool_title};
@@ -93,7 +93,7 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
                 )
             }
             SidePanel::Commits => {
-                commits_view::render_commits_panel(state, &look, expanded, frame, area)
+                commits::view::render_commits_panel(state, &look, expanded, frame, area)
             }
             SidePanel::Stash => {
                 stash::view::render_stash_panel(&state.stash, &look, expanded, frame, area)
@@ -1470,7 +1470,7 @@ fn render_hunk_view(
                     if let Some(ids) = &picked_ids {
                         let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
                         let mark = if held { "●" } else { " " };
-                        spans.push(Span::styled(mark, commits_view::PATCH_MARK));
+                        spans.push(Span::styled(mark, commits::view::PATCH_MARK));
                     }
                     spans.extend(clipped_marked(
                         &drawn_text(&row, emoji),
@@ -4638,7 +4638,7 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.files_loaded = true;
         state.focus = Focus::Commits;
-        state.commits.tab = crate::commits::CommitsTab::Reflog;
+        state.commits.tab = crate::features::commits::CommitsTab::Reflog;
         state.commits.reflog.data = Some(crate::features::commits::reflog::Reflog {
             entries: crate::features::commits::reflog::git::parse_records(include_bytes!(
                 "git/fixtures/reflog/commit.bin"

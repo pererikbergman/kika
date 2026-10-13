@@ -85,7 +85,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
 
-    use crate::commits::CommitsTab;
+    use crate::features::commits::CommitsTab;
     use crate::features::commits::reflog::git::{Reflog, parse_records};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{AppState, Context, Focus};
