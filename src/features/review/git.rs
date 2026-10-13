@@ -186,7 +186,7 @@ mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::env_list;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -227,12 +227,7 @@ mod tests {
                 "b0",
             ]
         );
-        let query = env_list(&[
-            ("LC_ALL", "C"),
-            ("GIT_OPTIONAL_LOCKS", "0"),
-            ("GIT_LITERAL_PATHSPECS", "1"),
-            ("GIT_NO_LAZY_FETCH", "1"),
-        ]);
+        let query = env_list(&[STANDARD_ENV.as_slice(), &[("GIT_NO_LAZY_FETCH", "1")]].concat());
         for cmd in [
             has_commit_command(&id("a1")),
             merge_base_command(&id("b0"), &id("a1")),

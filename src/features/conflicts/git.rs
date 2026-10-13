@@ -40,7 +40,7 @@ mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::env_list;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     #[test]
     fn the_command_is_literal_and_names_the_path_after_the_separator() {
@@ -51,14 +51,7 @@ mod tests {
             ["check-attr", "-z", "conflict-marker-size", "--", "-x"]
         );
         assert_eq!(cmd.env_profile(), EnvProfile::Standard);
-        assert_eq!(
-            cmd.process_env(),
-            env_list(&[
-                ("LC_ALL", "C"),
-                ("GIT_OPTIONAL_LOCKS", "0"),
-                ("GIT_LITERAL_PATHSPECS", "1"),
-            ])
-        );
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
     }
 
     #[test]
@@ -96,14 +89,7 @@ mod tests {
             Err("fatal: bad".into())
         );
         // The read the runner was given runs as a read.
-        assert_eq!(
-            runner.process_envs(),
-            [env_list(&[
-                ("LC_ALL", "C"),
-                ("GIT_OPTIONAL_LOCKS", "0"),
-                ("GIT_LITERAL_PATHSPECS", "1"),
-            ])]
-        );
+        assert_eq!(runner.process_envs(), [env_list(&STANDARD_ENV)]);
     }
 
     #[test]

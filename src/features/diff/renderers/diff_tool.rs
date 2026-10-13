@@ -334,14 +334,7 @@ mod tests {
     use crate::git::fake::fail;
     use crate::git::fake::{FakeRunner, TempDir, ok};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::env_list;
-
-    /// The env of a read.
-    const STANDARD: [(&str, &str); 3] = [
-        ("LC_ALL", "C"),
-        ("GIT_OPTIONAL_LOCKS", "0"),
-        ("GIT_LITERAL_PATHSPECS", "1"),
-    ];
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn tool(argv: &[&str]) -> ExternalRenderer {
         ExternalRenderer {
@@ -413,7 +406,10 @@ mod tests {
         // The path read is literal and takes no lock; the blob reads, which
         // set no var, are left as they were.
         assert_eq!(path_command("ls-files").env_profile(), EnvProfile::Standard);
-        assert_eq!(runner.process_envs(), [env_list(&STANDARD), vec![], vec![]]);
+        assert_eq!(
+            runner.process_envs(),
+            [env_list(&STANDARD_ENV), vec![], vec![]]
+        );
         assert!(empty(&base), "the temp directory is removed");
     }
 
@@ -443,8 +439,8 @@ mod tests {
         );
         assert_eq!(out, Ok(b"a\nb\n".to_vec()));
         runner.assert_done();
-        assert_eq!(runner.process_envs()[0], env_list(&STANDARD));
-        assert_eq!(runner.process_envs()[3], env_list(&STANDARD));
+        assert_eq!(runner.process_envs()[0], env_list(&STANDARD_ENV));
+        assert_eq!(runner.process_envs()[3], env_list(&STANDARD_ENV));
     }
 
     #[cfg(unix)]
@@ -474,7 +470,7 @@ mod tests {
         assert_eq!(out, Ok(b"b\n".to_vec()));
         runner.assert_done();
         // The unborn check is a read that names no path.
-        assert_eq!(runner.process_envs()[1], env_list(&STANDARD));
+        assert_eq!(runner.process_envs()[1], env_list(&STANDARD_ENV));
     }
 
     #[cfg(unix)]

@@ -750,17 +750,12 @@ mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::runner::{EnvProfile, GitOutput};
-    use crate::test_support::{argv, dirty_repo, env_list as env, file_entry as entry, paths};
+    use crate::test_support::{
+        STANDARD_ENV, argv, dirty_repo, env_list as env, file_entry as entry, paths,
+    };
 
     /// The env of an op that takes the index lock.
     const WRITE: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")];
-
-    /// The env of a read.
-    const STANDARD: [(&str, &str); 3] = [
-        ("LC_ALL", "C"),
-        ("GIT_OPTIONAL_LOCKS", "0"),
-        ("GIT_LITERAL_PATHSPECS", "1"),
-    ];
 
     #[test]
     fn merge_and_rebase_name_the_branch_by_its_full_ref_and_set_no_env() {
@@ -1373,7 +1368,7 @@ mod tests {
             if update {
                 env.push(("GIT_SSH_COMMAND".into(), BATCH_SSH.into()));
                 // The config read takes no lock and names no path.
-                assert_eq!(envs[0], self::env(&STANDARD), "{op:?}");
+                assert_eq!(envs[0], self::env(&STANDARD_ENV), "{op:?}");
             }
             assert_eq!(envs.last(), Some(&env), "{op:?}");
         }

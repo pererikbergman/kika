@@ -374,14 +374,7 @@ mod tests {
     use crate::git::CliRunner;
     use crate::git::fake::{self, FakeRunner, TempDir, fail, ok};
     use crate::git::runner::EnvProfile;
-    use crate::test_support::env_list;
-
-    /// The env of a read.
-    const STANDARD: [(&str, &str); 3] = [
-        ("LC_ALL", "C"),
-        ("GIT_OPTIONAL_LOCKS", "0"),
-        ("GIT_LITERAL_PATHSPECS", "1"),
-    ];
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     /// `stderr` as a failed `worktree remove` returns it.
     fn removal_failed(stderr: &[u8]) -> GitError {
@@ -591,7 +584,7 @@ mod tests {
             let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
             assert_eq!(args, if z { LIST_Z } else { LIST });
             assert_eq!(cmd.env_profile(), EnvProfile::Standard);
-            assert_eq!(cmd.process_env(), env_list(&STANDARD));
+            assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
         }
     }
 
@@ -646,7 +639,7 @@ mod tests {
             .collect();
         assert_eq!(unsure, [false, true]);
         runner.assert_done();
-        assert_eq!(runner.process_envs()[2], env_list(&STANDARD));
+        assert_eq!(runner.process_envs()[2], env_list(&STANDARD_ENV));
 
         let runner = FakeRunner::new()
             .expect(LIST_Z, fail("error: unknown switch `z'\n"))
@@ -863,7 +856,7 @@ mod tests {
         // The rev-parse is a read; the add takes a path and runs a hook.
         assert_eq!(
             runner.fake.process_envs(),
-            [env_list(&STANDARD), env_list(&[("LC_ALL", "C")])]
+            [env_list(&STANDARD_ENV), env_list(&[("LC_ALL", "C")])]
         );
 
         let runner = WorkdirRunner {

@@ -458,13 +458,7 @@ mod tests {
         );
         assert_eq!(read_prompt_facts(&runner), Ok(PromptFacts::default()));
         runner.assert_done();
-        let read: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
-            ("LC_ALL", "C"),
-            ("GIT_OPTIONAL_LOCKS", "0"),
-            ("GIT_LITERAL_PATHSPECS", "1"),
-        ]
-        .map(|(k, v)| (k.into(), v.into()))
-        .into();
+        let read = crate::test_support::env_list(&crate::test_support::STANDARD_ENV);
         assert_eq!(runner.process_envs(), [read.clone(), read]);
 
         let runner = FakeRunner::new().expect(&config, fail("fatal: bad boolean \x1b[2J\n"));
