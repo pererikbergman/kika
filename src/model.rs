@@ -15,12 +15,12 @@ use crate::features::branches::tags::PendingTag;
 use crate::features::branches::{BranchesPanel, BranchesTab};
 use crate::features::command_log::{self, CommandLog};
 use crate::features::commit::CommitEditor;
+use crate::features::commits::bisect::BisectIntent;
 use crate::features::commits::compare::PendingDiff;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
-use crate::features::commits::reflog;
-use crate::features::commits::rewrite::{LeftBehindCheck, Rewrite};
-use crate::features::commits::{CommitsPanel, CommitsTab};
+use crate::features::commits::rewrite::LeftBehindCheck;
+use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
 use crate::features::conflicts::ConflictView;
 use crate::features::custom_commands::PendingCommand;
 use crate::features::diff::renderers::external_diff::map_rows;
@@ -41,7 +41,6 @@ use crate::git::diff::{
 };
 use crate::git::patch::{self, Direction, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::rebase_plan;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
@@ -607,7 +606,6 @@ impl AppState {
             AppIntent::MenuPrev => self.move_menu_cursor(-1),
             AppIntent::MenuSelect => return self.menu_select(),
             AppIntent::AskQuit => self.popups.push(Popup::Question(quit_question())),
-            AppIntent::AskBisectReset => self.ask_bisect_reset(),
             AppIntent::ConfirmYes => return self.answer(true),
             AppIntent::ConfirmNo => return self.answer(false),
             AppIntent::OpenPrompt(kind) => {
@@ -647,22 +645,6 @@ impl AppState {
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
             AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
-            AppIntent::CommitsLoaded { tag, skip, result } => {
-                return self.commits_loaded(tag, skip, result);
-            }
-            AppIntent::MarkersLoaded { tag, result } => self.markers_loaded(tag, result),
-            AppIntent::CommitNext => {
-                self.commits.step(1);
-                return self.more_commits();
-            }
-            AppIntent::CommitPrev => self.commits.step(-1),
-            AppIntent::OpenCommitFiles => return self.open_commit_files(),
-            AppIntent::CloseCommitFiles => return self.close_commit_files(),
-            AppIntent::CommitFileNext => return self.move_commit_file(1),
-            AppIntent::CommitFilePrev => return self.move_commit_file(-1),
-            AppIntent::CommitFilesLoaded { tag, result } => {
-                return self.commit_files_loaded(tag, result);
-            }
             AppIntent::StashesLoaded { tag, result } => {
                 self.stash.list.loaded(tag, self.generation, result);
             }
@@ -717,6 +699,7 @@ impl AppState {
                 return self.worktree_removed(tag, result);
             }
             AppIntent::CommandLog(i) => return command_log::update(self, i),
+            AppIntent::Commits(i) => return commits::update(self, i),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -917,26 +900,15 @@ impl AppState {
                 return self.resume(bisect::continue_disabled, GitOp::Continue);
             }
             AppIntent::SkipOperation if bisect::bisect_only(self) => {
-                return self.update(AppIntent::BisectHead(BisectMark::Skip));
+                return self.update(AppIntent::Commits(CommitsIntent::Bisect(
+                    BisectIntent::MarkHead(BisectMark::Skip),
+                )));
             }
             AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
             AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
             AppIntent::ConfirmAbort(operation) => {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
-            }
-            AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
-            AppIntent::RevertCommit => return self.revert_commit(),
-            AppIntent::CopyCommit if self.commits.range_anchor.is_some() => self.copy_range(),
-            AppIntent::CopyCommit => self.copy_commit(),
-            AppIntent::ClearCopied => {
-                self.copied.clear();
-                self.notice = Some("Cleared copied commits".into());
-            }
-            AppIntent::PasteCommits => return self.paste_commits(),
-            AppIntent::CopyCommitText(what) => return self.copy_commit_text(what),
-            AppIntent::CommitMessageLoaded { tag, oid, result } => {
-                return self.commit_message_loaded(tag, oid, result);
             }
             AppIntent::CopyFailed(why) => {
                 self.notice_text = None;
@@ -949,63 +921,6 @@ impl AppState {
             AppIntent::OpenIgnore => self.open_ignore(),
             AppIntent::IgnorePatternAnswered(text) => return self.ignore_answered(text),
             AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
-            AppIntent::ResetTo(mode) => return self.reset_to(mode),
-            AppIntent::ConfirmResetHard => {
-                return self.answer_question(KeyScope::ResetHard, Answer::YOnly);
-            }
-            AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head,
-                result,
-            } => return self.left_behind_checked(tag, op, head, result),
-            AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
-            AppIntent::RewriteCommit(
-                edit @ (rebase_plan::Edit::Squash
-                | rebase_plan::Edit::Fixup
-                | rebase_plan::Edit::Drop),
-            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
-            AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
-            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
-            AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
-            AppIntent::CreateFixup => return self.create_fixup(),
-            AppIntent::Autosquash => self.ask_autosquash(),
-            AppIntent::ConfirmAutosquash => return self.autosquash(),
-            AppIntent::FindFixupBase => return self.find_fixup_base(),
-            AppIntent::FixupBaseFound { tag, result } => self.fixup_base_found(tag, result),
-            AppIntent::PatchToggleFile => self.patch_toggle_file(),
-            AppIntent::OpenPatchMenu => {
-                if self.context == Context::Workspace {
-                    self.popups.push(Popup::Menu {
-                        id: menu::MenuId::CustomPatch,
-                        cursor: 0,
-                    });
-                }
-            }
-            AppIntent::ChoosePatchAction(choice) => self.choose_patch_action(choice),
-            AppIntent::PatchCommitMessage(message) => self.patch_commit_message(message),
-            AppIntent::ConfirmPatchAction(action) => return self.run_patch_action(action),
-            AppIntent::ResetPatch => {
-                if self.custom_patch.take().is_none() {
-                    self.notice = Some(NO_PATCH.into());
-                }
-            }
-            AppIntent::InsertBreak => return self.rewrite(Rewrite::Break),
-            AppIntent::BranchTipsLoaded { tag, result } => self.branch_tips_loaded(tag, result),
-            AppIntent::RebaseTodoLoaded { tag, result } => self.rebase_todo_loaded(tag, result),
-            AppIntent::RebaseTodoWritten { tag, result } => {
-                return self.rebase_todo_written(tag, result);
-            }
-            AppIntent::BisectSelected(mark) => return self.bisect_selected(mark),
-            AppIntent::BisectHead(mark) => return self.bisect_head(mark),
-            AppIntent::ConfirmBisectReset => return self.bisect_reset(),
-            AppIntent::SwitchCommitsTab => return self.switch_commits_tab(),
-            AppIntent::ReflogNext => self.commits.reflog.move_by(1),
-            AppIntent::ReflogPrev => self.commits.reflog.move_by(-1),
-            AppIntent::ReflogLoaded { tag, result } => return self.reflog_loaded(tag, result),
-            AppIntent::Undo => return self.travel(reflog::Direction::Undo),
-            AppIntent::Redo => return self.travel(reflog::Direction::Redo),
-            AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
             AppIntent::OpenSearch if self.review_files_shown() => {
                 self.input = Some(search_input(InputTarget::PreviewSearch, &self.diff.search));
@@ -1033,11 +948,6 @@ impl AppState {
             AppIntent::PaneEscape => return self.pane_escape(),
             AppIntent::SearchNext => return self.step_search(false),
             AppIntent::SearchPrev => return self.step_search(true),
-            AppIntent::OpenLogFilter(field) => self.open_log_filter(field),
-            AppIntent::LogOfFile => return self.log_of_file(),
-            AppIntent::ToggleDiffMark => self.toggle_diff_mark(),
-            AppIntent::OpenDiff => return self.open_branch_diff(),
-            AppIntent::DiffResolved { tag, result } => return self.diff_resolved(tag, result),
         }
         vec![]
     }
@@ -2056,7 +1966,7 @@ impl AppState {
     /// Copy the selected commit's hash, short hash or subject now, or
     /// read its full message first. Pure, so it works while an operation
     /// runs.
-    fn copy_commit_text(&mut self, what: CopyWhat) -> Vec<Effect> {
+    pub(crate) fn copy_commit_text(&mut self, what: CopyWhat) -> Vec<Effect> {
         let Some((id, short)) = self.commit_for_action(keymap::no_commit_selected) else {
             return vec![];
         };
@@ -2099,7 +2009,7 @@ impl AppState {
     }
 
     /// Copy the message read for the last request; an older one is dropped.
-    fn commit_message_loaded(
+    pub(crate) fn commit_message_loaded(
         &mut self,
         tag: Tag,
         oid: CommitId,
@@ -2151,15 +2061,17 @@ mod confirm_guard;
 pub(crate) use crate::op_slot::failure_next;
 pub(crate) use crate::op_slot::failure_title;
 
-use crate::features::commits::custom_patch::NO_PATCH;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::custom_patch::CustomPatchIntent;
+    use crate::features::commits::rewrite::RewriteIntent;
     use crate::features::operation::abort_question;
     use crate::git::diff::DiffSide;
+    use crate::git::rebase_plan;
     use crate::git::status::{EntryKind, RepoStatus};
     use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
@@ -3746,7 +3658,7 @@ mod tests {
         state.files.clear();
         state.selected = None;
         assert_eq!(
-            state.update(AppIntent::CloseCommitFiles),
+            state.update(AppIntent::Commits(CommitsIntent::CloseFiles)),
             vec![Effect::CancelDiff]
         );
         assert_eq!(state.diff, DiffPane::default());
@@ -4453,22 +4365,26 @@ mod tests {
         let mut questions = vec![
             (
                 "checkout on a branch".to_string(),
-                on_main(AppIntent::CheckoutCommit),
+                on_main(AppIntent::Commits(CommitsIntent::Checkout)),
                 checkout.clone(),
             ),
             (
                 "checkout from a detached HEAD".to_string(),
-                checked(AppIntent::CheckoutCommit, Ok(vec![])).0,
+                checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(vec![])).0,
                 checkout,
             ),
             (
                 "hard reset on a branch".to_string(),
-                on_main(AppIntent::ResetTo(ResetMode::Hard)),
+                on_main(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard))),
                 hard.clone(),
             ),
             (
                 "hard reset from a detached HEAD".to_string(),
-                checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![])).0,
+                checked(
+                    AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
+                    Ok(vec![]),
+                )
+                .0,
                 hard,
             ),
         ];
@@ -4486,9 +4402,9 @@ mod tests {
     /// Answer the open question with `y`, as the key does.
     fn answer_yes(state: &mut AppState) -> Vec<Effect> {
         match state.popups.last() {
-            Some(Popup::Question(q)) if q.scope == KeyScope::LeaveCommits => {
-                state.update(AppIntent::ConfirmLeaveCommits)
-            }
+            Some(Popup::Question(q)) if q.scope == KeyScope::LeaveCommits => state.update(
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits)),
+            ),
             _ => press_char(state, 'y'),
         }
     }
@@ -4563,10 +4479,10 @@ mod tests {
         let mut state = on_commit();
         state.commits.rows[1].oid = "--upload-pack=x".into();
         for intent in [
-            AppIntent::CheckoutCommit,
-            AppIntent::RevertCommit,
-            AppIntent::ResetTo(ResetMode::Soft),
-            AppIntent::ResetTo(ResetMode::Hard),
+            AppIntent::Commits(CommitsIntent::Checkout),
+            AppIntent::Commits(CommitsIntent::Revert),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
@@ -4878,25 +4794,45 @@ mod tests {
                 "checkout commit",
                 on_commit,
                 vec![],
-                AppIntent::CheckoutCommit,
+                AppIntent::Commits(CommitsIntent::Checkout),
             ),
-            ("revert", on_commit, vec![], AppIntent::RevertCommit),
+            (
+                "revert",
+                on_commit,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Revert),
+            ),
             ("reset menu", on_commit, vec![], key('X')),
-            ("paste", one_copied, vec![], AppIntent::PasteCommits),
+            (
+                "paste",
+                one_copied,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Paste)),
+            ),
             (
                 "move up",
                 on_linear_log,
                 vec![],
-                AppIntent::MoveCommit(Direction::Up),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Up))),
             ),
             (
                 "move down",
                 on_linear_log,
                 vec![],
-                AppIntent::MoveCommit(Direction::Down),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Down))),
             ),
-            ("autosquash", with_a_fixup, vec![], AppIntent::Autosquash),
-            ("create fixup", with_a_fixup, vec![], AppIntent::CreateFixup),
+            (
+                "autosquash",
+                with_a_fixup,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash)),
+            ),
+            (
+                "create fixup",
+                with_a_fixup,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup)),
+            ),
             (
                 "checkout branch",
                 with_branches,
@@ -4936,14 +4872,19 @@ mod tests {
             ),
         ];
         for mode in [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard] {
-            cases.push(("reset to", on_commit, vec![], AppIntent::ResetTo(mode)));
+            cases.push((
+                "reset to",
+                on_commit,
+                vec![],
+                AppIntent::Commits(CommitsIntent::ResetTo(mode)),
+            ));
         }
         for edit in [Edit::Squash, Edit::Fixup, Edit::Drop, Edit::Reword] {
             cases.push((
                 "rewrite",
                 on_linear_log,
                 vec![],
-                AppIntent::RewriteCommit(edit),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(edit))),
             ));
         }
         for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
@@ -4951,7 +4892,7 @@ mod tests {
                 "range rewrite",
                 on_linear_log,
                 range(),
-                AppIntent::RewriteCommit(edit),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(edit))),
             ));
         }
         for strategy in [
@@ -5033,14 +4974,22 @@ mod tests {
     #[test]
     fn marks_and_reset_still_run_during_a_bisect() {
         let mut state = testing_c1(&[Operation::Bisect]);
-        let (_, op) = op_of(&state.update(AppIntent::BisectHead(BisectMark::Good)));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::MarkHead(BisectMark::Good),
+        ))));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
         state.free_op();
-        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Bad)));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::MarkSelected(BisectMark::Bad),
+        ))));
         assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", false));
         state.free_op();
-        state.update(AppIntent::AskBisectReset);
-        let (_, op) = op_of(&state.update(AppIntent::ConfirmBisectReset));
+        state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::AskReset,
+        )));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::ConfirmReset,
+        ))));
         assert_eq!(op, GitOp::BisectReset);
         assert_eq!(state.notice, None);
     }
@@ -5061,12 +5010,15 @@ mod tests {
         }
         let mut state = ready_to_bisect();
         state.commits.selected = 1;
-        state.update(AppIntent::CheckoutCommit);
+        state.update(AppIntent::Commits(CommitsIntent::Checkout));
         assert_eq!(state.notice, None);
         assert_ne!(state.popups, []);
         let mut state = ready_to_bisect();
         state.commits.selected = 1;
-        assert_ne!(state.update(AppIntent::ResetTo(ResetMode::Soft)), vec![]);
+        assert_ne!(
+            state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft))),
+            vec![]
+        );
         assert_eq!(state.notice, None);
     }
 
@@ -5077,9 +5029,11 @@ mod tests {
             SidePanel::Commits,
         )));
         for action in [
-            AppIntent::RevertCommit,
-            AppIntent::ResetTo(ResetMode::Soft),
-            AppIntent::RewriteCommit(rebase_plan::Edit::Drop),
+            AppIntent::Commits(CommitsIntent::Revert),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(
+                rebase_plan::Edit::Drop,
+            ))),
         ] {
             state.notice = None;
             assert_eq!(state.update(action.clone()), vec![], "{action:?}");
@@ -5282,7 +5236,12 @@ mod tests {
             crate::features::commits::custom_patch::keys::patch_file_disabled(&state).as_deref(),
             Some(crate::keymap::FILTER_HIDES_ROW)
         );
-        assert_eq!(state.update(AppIntent::PatchToggleFile), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::ToggleFile
+            ))),
+            vec![]
+        );
         assert_eq!(state.custom_patch, None);
         assert_eq!(state.notice, Some(crate::keymap::FILTER_HIDES_ROW.into()));
         state.notice = None;
@@ -5371,7 +5330,9 @@ mod tests {
             (CopyWhat::Subject, "commit 1", "subject"),
         ];
         for (what, text, label) in cases {
-            let effects = state.update(AppIntent::CopyCommitText(what));
+            let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::CopyText(what),
+            )));
             assert_eq!(effects, [Effect::Clipboard(text.into())], "{what:?}");
             assert_eq!(
                 state.notice_text,
@@ -5381,7 +5342,9 @@ mod tests {
         }
         // The notice keeps the first 40 characters; the copy has them all.
         state.commits.rows[1].subject = "s".repeat(41);
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Subject));
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Subject),
+        )));
         assert_eq!(effects, [Effect::Clipboard("s".repeat(41))]);
         assert_eq!(
             state.notice_text,
@@ -5394,7 +5357,9 @@ mod tests {
         let mut state = copy_ready();
         state.commits.rows[1].short_oid = "-x".into();
         assert_eq!(
-            state.update(AppIntent::CopyCommitText(CopyWhat::ShortHash)),
+            state.update(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::CopyText(CopyWhat::ShortHash)
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some("Not a commit id git can use".into()));
@@ -5404,14 +5369,23 @@ mod tests {
     fn with_no_commit_selected_nothing_is_copied() {
         let mut state = AppState::new(Context::Workspace);
         for what in [CopyWhat::Hash, CopyWhat::Message] {
-            assert_eq!(state.update(AppIntent::CopyCommitText(what)), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::Copy(
+                    CopyIntent::CopyText(what)
+                ))),
+                vec![]
+            );
             assert_eq!(state.notice, Some("No commit selected".into()));
         }
         for item in menu::items(MenuId::Copy) {
             assert_eq!((item.disabled)(&state), Some("No commit selected".into()));
             // A forge URL needs a remote on a forge host as well.
             let ready = (item.disabled)(&copy_ready());
-            if item.intent == AppIntent::CopyCommitText(CopyWhat::ForgeUrl) {
+            if item.intent
+                == AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+                    CopyWhat::ForgeUrl,
+                )))
+            {
                 assert!(
                     ready.is_some_and(|r| r.contains("forge host")),
                     "{}",
@@ -5427,31 +5401,39 @@ mod tests {
     fn the_full_message_is_read_first_and_only_the_latest_read_is_copied() {
         let mut state = copy_ready();
         let busy = state.busy_count();
-        let first = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let first = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag: old, oid }] = first.as_slice() else {
             panic!("expected a message load, got {first:?}");
         };
         assert_eq!(oid, &cid(COPIED_OID));
         assert!(old.user);
         assert_eq!(state.busy_count(), busy + 1);
-        let second = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let second = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag: new, .. }] = second.as_slice() else {
             panic!("expected a message load, got {second:?}");
         };
         assert_eq!(state.busy_count(), busy + 2);
 
-        let stale = state.update(AppIntent::CommitMessageLoaded {
-            tag: *old,
-            oid: cid(COPIED_OID),
-            result: Ok("old".into()),
-        });
+        let stale = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::MessageLoaded {
+                tag: *old,
+                oid: cid(COPIED_OID),
+                result: Ok("old".into()),
+            },
+        )));
         assert_eq!(stale, vec![]);
         assert_eq!(state.busy_count(), busy + 1);
-        let effects = state.update(AppIntent::CommitMessageLoaded {
-            tag: *new,
-            oid: cid(COPIED_OID),
-            result: Ok("subj\n\nbody".into()),
-        });
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::MessageLoaded {
+                tag: *new,
+                oid: cid(COPIED_OID),
+                result: Ok("subj\n\nbody".into()),
+            },
+        )));
         assert_eq!(effects, [Effect::Clipboard("subj\n\nbody".into())]);
         assert_eq!(
             state.notice_text.as_deref(),
@@ -5466,20 +5448,24 @@ mod tests {
     #[test]
     fn a_failed_read_or_copy_shows_an_error() {
         let mut state = copy_ready();
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag, oid }] = effects.as_slice() else {
             panic!("expected a message load, got {effects:?}");
         };
-        let failed = AppIntent::CommitMessageLoaded {
+        let failed = AppIntent::Commits(CommitsIntent::Copy(CopyIntent::MessageLoaded {
             tag: *tag,
             oid: oid.clone(),
             result: Err("bad object".into()),
-        };
+        }));
         assert_eq!(state.update(failed), vec![]);
         assert!(matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == "bad object"));
 
         let mut state = copy_ready();
-        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Hash),
+        )));
         state.update(AppIntent::CopyFailed(clipboard::TOO_LONG.into()));
         assert_eq!(state.notice_text, None);
         assert!(
@@ -5488,7 +5474,9 @@ mod tests {
 
         // A clipboard program's failure arrives after "Copied …" is shown.
         let mut state = copy_ready();
-        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Hash),
+        )));
         assert!(state.notice_text.is_some());
         let late = "false failed: exit status: 1. Check clipboard.command in the global config.";
         state.update(AppIntent::CopyFailed(late.into()));
@@ -5876,18 +5864,24 @@ mod tests {
             ),
             (
                 state.bisect_reset_question(),
-                AppIntent::ConfirmBisectReset,
+                AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::ConfirmReset)),
                 false,
             ),
-            (autosquash_question(), AppIntent::ConfirmAutosquash, false),
+            (
+                autosquash_question(),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmAutosquash)),
+                false,
+            ),
             (
                 drop_range_question(ids.clone()),
-                AppIntent::ConfirmDropRange(ids),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmDropRange(ids))),
                 false,
             ),
             (
                 state.patch_action_question(PatchAction::Remove),
-                AppIntent::ConfirmPatchAction(PatchAction::Remove),
+                AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Confirm(
+                    PatchAction::Remove,
+                ))),
                 false,
             ),
             (
@@ -5953,7 +5947,12 @@ mod tests {
         assert_eq!(state.popups, [Popup::Question(quit_question())]);
 
         let mut state = testing_c1(&[Operation::Bisect]);
-        assert_eq!(state.update(AppIntent::AskBisectReset), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::AskReset
+            ))),
+            vec![]
+        );
         assert_eq!(
             state.popups,
             [Popup::Question(state.bisect_reset_question())]

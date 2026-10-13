@@ -6,6 +6,8 @@
 //! key bindings, and it does the I/O behind `Effect::ResolveDiff`.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `CompareIntent`, nested in `CommitsIntent::Compare`,
+//!   and the free function `update` that `commits::update` passes it to;
 //! - `PendingDiff`, the comparison `AppState.pending_diff` holds;
 //! - `MARK_CLEARED`, which core's Esc chain shows too;
 //! - `keys::{COMPARE_COMMITS, COMPARE_BRANCHES}` and
@@ -36,9 +38,11 @@
 //!   that name other features' ids and guards.
 
 pub(crate) mod effects;
+mod intent;
 pub(crate) mod keys;
 mod pending;
 mod update;
 
+pub(crate) use intent::CompareIntent;
 pub(crate) use pending::PendingDiff;
-pub(crate) use update::MARK_CLEARED;
+pub(crate) use update::{MARK_CLEARED, update};

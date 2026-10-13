@@ -6,8 +6,11 @@
 //! questions, and the rewrite that runs in the terminal.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `CustomPatchIntent`, nested in
+//!   `CommitsIntent::CustomPatch`, and the free function `update` that
+//!   `commits::update` passes it to;
 //! - the state types `CustomPatch`, `FilePick`, `PatchAction` and
-//!   `PatchChoice`, and `NO_PATCH`;
+//!   `PatchChoice`;
 //! - `keys::` predicates and constants (`patch_file_disabled`,
 //!   `patch_rewrite_disabled`, `patch_plan`, `PATCH_EMPTY`,
 //!   `TARGET_IS_SOURCE`, ...) and the three chunks;
@@ -33,10 +36,12 @@
 //! The pick marks are drawn by the parent's `view.rs`.
 
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod state;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use intent::CustomPatchIntent;
 pub(crate) use state::{CustomPatch, FilePick, PatchAction, PatchChoice};
-pub(crate) use update::NO_PATCH;
+pub(crate) use update::update;

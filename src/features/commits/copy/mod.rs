@@ -6,6 +6,8 @@
 //! `Effect::LoadCommitMessage`. Its git ops run through the core op slot.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `CopyIntent`, nested in `CommitsIntent::Copy`, and
+//!   the free function `update` that `commits::update` passes it to;
 //! - `CopiedCommits`, the set `AppState.copied` holds;
 //! - `keys::COPY_COMMITS`;
 //! - the handlers in `update.rs`: `copy_commit`, `copy_range` and
@@ -33,7 +35,10 @@
 pub(crate) mod copied;
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod update;
 
 pub(crate) use copied::CopiedCommits;
+pub(crate) use intent::CopyIntent;
+pub(crate) use update::update;

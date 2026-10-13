@@ -141,6 +141,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::rewrite::RewriteIntent;
     use crossterm::event::KeyCode;
 
     use crate::confirm_question::quit_question;
@@ -174,7 +176,10 @@ mod tests {
     fn on_a_branch_nothing_is_checked_first() {
         let mut state = on_commit();
         state.branch = Some(on_branch("main"));
-        assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Checkout)),
+            vec![]
+        );
         assert_eq!(
             state.popups,
             [Popup::Question(checkout_question("c1".into(), cid("c1")))]
@@ -182,13 +187,14 @@ mod tests {
 
         let mut state = on_commit();
         state.branch = Some(on_branch("main"));
-        let (_, op) = op_of(&state.update(AppIntent::ResetTo(ResetMode::Mixed)));
+        let (_, op) =
+            op_of(&state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Mixed))));
         assert_eq!(op, reset_op(ResetMode::Mixed));
     }
 
     #[test]
     fn with_nothing_left_behind_each_move_goes_on_as_before() {
-        let (state, effects) = checked(AppIntent::CheckoutCommit, Ok(vec![]));
+        let (state, effects) = checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(vec![]));
         assert_eq!(effects, vec![]);
         assert_eq!(
             state.popups,
@@ -196,13 +202,17 @@ mod tests {
         );
 
         for mode in [ResetMode::Soft, ResetMode::Mixed] {
-            let (state, effects) = checked(AppIntent::ResetTo(mode), Ok(vec![]));
+            let (state, effects) =
+                checked(AppIntent::Commits(CommitsIntent::ResetTo(mode)), Ok(vec![]));
             let (tag, op) = op_of(&effects);
             assert_eq!(op, reset_op(mode));
             assert_eq!(state.held_seq(), Some(tag.seq));
         }
 
-        let (state, effects) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
+        let (state, effects) = checked(
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
+            Ok(vec![]),
+        );
         assert_eq!(effects, vec![]);
         assert_eq!(
             state.popups,
@@ -248,7 +258,7 @@ mod tests {
             assert!(question.contains("(a0, a1, a2)"), "{question}");
         }
 
-        let (state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(7)));
+        let (state, _) = checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(ids(7)));
         let Some(Popup::Question(ask)) = state.popups.last() else {
             panic!("{:?}", state.popups)
         };
@@ -276,7 +286,7 @@ mod tests {
         }
 
         for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            let (mut state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(2)));
+            let (mut state, _) = checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(ids(2)));
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
             assert_eq!(state.held_seq(), None, "{code:?}");
@@ -286,9 +296,19 @@ mod tests {
     #[test]
     fn confirm_leave_commits_does_nothing_without_the_question() {
         let mut state = detached_on_commit();
-        assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmLeaveCommits
+            ))),
+            vec![]
+        );
         state.popups.push(Popup::Question(quit_question()));
-        assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmLeaveCommits
+            ))),
+            vec![]
+        );
         assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
@@ -297,14 +317,16 @@ mod tests {
     fn a_check_for_a_head_that_moved_runs_nothing() {
         for result in [Ok(vec![]), Ok(ids(2))] {
             let mut state = detached_on_commit();
-            let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+            let (tag, op) = check_of(&state.update(AppIntent::Commits(CommitsIntent::Checkout)));
             state.branch.as_mut().unwrap().head = Head::Detached("c2".into());
-            let effects = state.update(AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head: cid("c0"),
-                result,
-            });
+            let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::LeftBehindChecked {
+                    tag,
+                    op,
+                    head: cid("c0"),
+                    result,
+                },
+            )));
             assert_eq!(effects, vec![]);
             assert_eq!(state.popups, []);
             assert_eq!(state.notice, Some("HEAD moved; try again".into()));
@@ -313,14 +335,16 @@ mod tests {
 
         // Back on a branch is a move too.
         let mut state = detached_on_commit();
-        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+        let (tag, op) = check_of(&state.update(AppIntent::Commits(CommitsIntent::Checkout)));
         state.branch = Some(on_branch("main"));
-        state.update(AppIntent::LeftBehindChecked {
-            tag,
-            op,
-            head: cid("c0"),
-            result: Ok(vec![]),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::LeftBehindChecked {
+                tag,
+                op,
+                head: cid("c0"),
+                result: Ok(vec![]),
+            },
+        )));
         assert_eq!(state.popups, []);
     }
 
@@ -352,12 +376,14 @@ mod tests {
                 Some("Still checking for commits left behind".into()),
                 "{intent:?}"
             );
-            state.update(AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head: cid("c0"),
-                result: Ok(ids(2)),
-            });
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::LeftBehindChecked {
+                    tag,
+                    op,
+                    head: cid("c0"),
+                    result: Ok(ids(2)),
+                },
+            )));
             assert!(
                 matches!(state.popups.as_slice(), [Popup::Question(_)]),
                 "{intent:?}: {:?}",
@@ -371,37 +397,45 @@ mod tests {
     fn once_a_check_is_answered_the_next_press_checks_again() {
         // After the question, and after the error.
         for result in [Ok(ids(2)), Err("fatal: bad".to_string())] {
-            let (mut state, _) = checked(AppIntent::CheckoutCommit, result.clone());
+            let (mut state, _) =
+                checked(AppIntent::Commits(CommitsIntent::Checkout), result.clone());
             state.popups.clear();
-            check_of(&state.update(AppIntent::CheckoutCommit));
+            check_of(&state.update(AppIntent::Commits(CommitsIntent::Checkout)));
         }
 
         // An answer for an older repository clears it too.
         let mut state = detached_on_commit();
-        let (tag, op) = check_of(&state.update(AppIntent::CheckoutCommit));
+        let (tag, op) = check_of(&state.update(AppIntent::Commits(CommitsIntent::Checkout)));
         state.generation += 1;
-        state.update(AppIntent::LeftBehindChecked {
-            tag,
-            op: op.clone(),
-            head: cid("c0"),
-            result: Ok(ids(2)),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::LeftBehindChecked {
+                tag,
+                op: op.clone(),
+                head: cid("c0"),
+                result: Ok(ids(2)),
+            },
+        )));
         assert_eq!(state.popups, []);
-        check_of(&state.update(AppIntent::CheckoutCommit));
+        check_of(&state.update(AppIntent::Commits(CommitsIntent::Checkout)));
 
         // An answer to some other check does not.
         let stale = Tag {
             seq: tag.seq + 1000,
             ..tag
         };
-        state.update(AppIntent::LeftBehindChecked {
-            tag: stale,
-            op,
-            head: cid("c0"),
-            result: Ok(ids(2)),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::LeftBehindChecked {
+                tag: stale,
+                op,
+                head: cid("c0"),
+                result: Ok(ids(2)),
+            },
+        )));
         assert_eq!(state.popups, []);
-        assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Checkout)),
+            vec![]
+        );
     }
 
     #[test]
@@ -418,12 +452,14 @@ mod tests {
                         assert_eq!(state.key_focus(), KeyScope::Input);
                     }
                     let popups = state.popups.clone();
-                    let effects = state.update(AppIntent::LeftBehindChecked {
-                        tag,
-                        op,
-                        head: cid("c0"),
-                        result,
-                    });
+                    let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                        RewriteIntent::LeftBehindChecked {
+                            tag,
+                            op,
+                            head: cid("c0"),
+                            result,
+                        },
+                    )));
                     let case = format!("{name} {intent:?}");
                     assert_eq!(effects, vec![], "{case}");
                     assert_eq!(state.popups, popups, "{case}");
@@ -433,8 +469,16 @@ mod tests {
                         Some("Not asked: focus moved; try again".into()),
                         "{case}"
                     );
-                    assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
-                    assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+                    assert_eq!(
+                        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                            RewriteIntent::ConfirmLeaveCommits
+                        ))),
+                        vec![]
+                    );
+                    assert_eq!(
+                        state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)),
+                        vec![]
+                    );
                     assert_eq!(state.held_seq(), None, "{case}");
                 }
             }
@@ -448,7 +492,9 @@ mod tests {
             let mut moved = state.clone();
             moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
             assert_eq!(
-                moved.update(AppIntent::ConfirmLeaveCommits),
+                moved.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                    RewriteIntent::ConfirmLeaveCommits
+                ))),
                 vec![],
                 "{intent:?}"
             );
@@ -456,7 +502,9 @@ mod tests {
             assert_eq!(moved.held_seq(), None, "{intent:?}");
             assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
 
-            let (_, op) = op_of(&state.update(AppIntent::ConfirmLeaveCommits));
+            let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmLeaveCommits,
+            ))));
             assert_eq!(op, planned, "{intent:?}");
         }
     }

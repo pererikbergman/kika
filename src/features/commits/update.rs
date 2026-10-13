@@ -1,16 +1,63 @@
-//! The Commits panel's `update` handlers: paging the log, the markers and
-//! branch tips that land beside it, switching to the Reflog tab, and the
-//! selected commit's files opened in place of the log.
+//! The commits subtree's `update`, which core's one `AppIntent::Commits`
+//! arm calls, and the Commits panel's handlers: paging the log, the
+//! markers and branch tips that land beside it, switching to the Reflog
+//! tab, and the selected commit's files opened in place of the log.
 
 use super::git::Tip;
-use super::{CommitFilesList, CommitsTab};
+use super::{
+    CommitFilesList, CommitsIntent, CommitsTab, bisect, compare, copy, custom_patch, reflog,
+    rewrite,
+};
+use crate::confirm_question::Answer;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
 use crate::git::diff::DiffRequest;
 use crate::git::log::{LogPage, Markers};
+use crate::keymap::KeyScope;
 use crate::model::{AppState, Context, Focus};
+
+/// The commits subtree's half of `update`: core's one `AppIntent::Commits`
+/// arm lands here, and each sub-feature's intent goes on to its own
+/// `update`. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CommitsIntent) -> Vec<Effect> {
+    match intent {
+        CommitsIntent::PageLoaded { tag, skip, result } => {
+            return state.commits_loaded(tag, skip, result);
+        }
+        CommitsIntent::MarkersLoaded { tag, result } => state.markers_loaded(tag, result),
+        CommitsIntent::TipsLoaded { tag, result } => state.branch_tips_loaded(tag, result),
+        CommitsIntent::Next => {
+            state.commits.step(1);
+            return state.more_commits();
+        }
+        CommitsIntent::Prev => state.commits.step(-1),
+        CommitsIntent::OpenFiles => return state.open_commit_files(),
+        CommitsIntent::CloseFiles => return state.close_commit_files(),
+        CommitsIntent::FileNext => return state.move_commit_file(1),
+        CommitsIntent::FilePrev => return state.move_commit_file(-1),
+        CommitsIntent::FilesLoaded { tag, result } => {
+            return state.commit_files_loaded(tag, result);
+        }
+        CommitsIntent::SwitchTab => return state.switch_commits_tab(),
+        CommitsIntent::OpenLogFilter(field) => state.open_log_filter(field),
+        CommitsIntent::LogOfFile => return state.log_of_file(),
+        CommitsIntent::Checkout => return state.ask_checkout_commit(),
+        CommitsIntent::Revert => return state.revert_commit(),
+        CommitsIntent::ResetTo(mode) => return state.reset_to(mode),
+        CommitsIntent::ConfirmResetHard => {
+            return state.answer_question(KeyScope::ResetHard, Answer::YOnly);
+        }
+        CommitsIntent::Reflog(i) => return reflog::update(state, i),
+        CommitsIntent::Rewrite(i) => return rewrite::update(state, i),
+        CommitsIntent::Copy(i) => return copy::update(state, i),
+        CommitsIntent::CustomPatch(i) => return custom_patch::update(state, i),
+        CommitsIntent::Bisect(i) => return bisect::update(state, i),
+        CommitsIntent::Compare(i) => return compare::update(state, i),
+    }
+    Vec::new()
+}
 
 /// The Commits panel: its log pages, markers and branch tips, and its tabs.
 impl AppState {
@@ -236,14 +283,20 @@ mod tests {
     fn nearing_the_end_loads_the_next_page_once_from_the_same_tip() {
         let mut state = with_commits(PAGE, false);
         state.commits.selected = PAGE - PREFETCH - 2;
-        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Next)),
+            vec![]
+        );
 
-        let effects = state.update(AppIntent::CommitNext);
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Next));
         let (tag, tip, skip) = commits_load(&effects);
         assert_eq!((tip.as_deref(), skip), (Some("c0"), PAGE));
         assert_eq!(effects.len(), 1);
         // Not again while that page is on its way.
-        assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Next)),
+            vec![]
+        );
         assert!(state.commits.more_in_flight);
 
         state.update(commits_loaded(tag, PAGE, page(PAGE, 10, true)));
@@ -257,7 +310,10 @@ mod tests {
     fn a_done_page_stops_further_loads() {
         let mut state = with_commits(10, true);
         for _ in 0..20 {
-            assert_eq!(state.update(AppIntent::CommitNext), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::Next)),
+                vec![]
+            );
         }
         assert_eq!(state.commits.selected, 9);
     }
@@ -277,10 +333,10 @@ mod tests {
             unpushed: Some(["c0".to_string()].into()),
             ..Markers::default()
         };
-        state.update(AppIntent::MarkersLoaded {
+        state.update(AppIntent::Commits(CommitsIntent::MarkersLoaded {
             tag: old_markers,
             result: Ok(unpushed.clone()),
-        });
+        }));
         assert_eq!(
             state.commits.rows[0].oid, "c0",
             "the superseded page is dropped"
@@ -291,18 +347,18 @@ mod tests {
         let mut other = state.clone();
         other.generation += 1;
         other.update(commits_loaded(new, 0, page(50, 3, true)));
-        other.update(AppIntent::MarkersLoaded {
+        other.update(AppIntent::Commits(CommitsIntent::MarkersLoaded {
             tag: new_markers,
             result: Ok(unpushed.clone()),
-        });
+        }));
         assert_eq!(other.commits.rows[0].oid, "c0");
         assert_eq!(other.commits.markers, Markers::default());
 
         state.update(commits_loaded(new, 0, page(50, 3, true)));
-        state.update(AppIntent::MarkersLoaded {
+        state.update(AppIntent::Commits(CommitsIntent::MarkersLoaded {
             tag: new_markers,
             result: Ok(unpushed.clone()),
-        });
+        }));
         assert_eq!(state.commits.rows[0].oid, "c50");
         assert_eq!(state.commits.markers, unpushed);
     }
@@ -354,7 +410,10 @@ mod tests {
             state.commits.rows[5].oid = oid.into();
             state.commits.rows[5].parents = vec![parent.into()];
 
-            assert_eq!(state.update(AppIntent::OpenCommitFiles), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::OpenFiles)),
+                vec![]
+            );
 
             assert_eq!(state.commits.open, None);
             let error = state.commits.error.as_deref().unwrap();
@@ -392,7 +451,7 @@ mod tests {
         );
         // The ends of the list load nothing more.
         assert_eq!(press(&mut state, KeyCode::Down), vec![]);
-        let request = diff_request(&state.update(AppIntent::CommitFilePrev));
+        let request = diff_request(&state.update(AppIntent::Commits(CommitsIntent::FilePrev)));
         assert_eq!(request.path, "src/lib.rs".into());
     }
 
@@ -412,10 +471,10 @@ mod tests {
             let mut state = on_commit_five();
             let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
             let busy = state.busy_count();
-            let effects = state.update(AppIntent::CommitFilesLoaded {
+            let effects = state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
                 tag: stale(tag),
                 result: Ok(two_commit_files()),
-            });
+            }));
             assert_eq!(effects, vec![]);
             assert_eq!(state.busy_count(), busy - 1);
             assert!(!state.commits.open.as_ref().unwrap().loaded);
@@ -427,7 +486,10 @@ mod tests {
         for result in [Ok(vec![]), Err("bad object".to_string())] {
             let mut state = on_commit_five();
             let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
-            let effects = state.update(AppIntent::CommitFilesLoaded { tag, result });
+            let effects = state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
+                tag,
+                result,
+            }));
             assert_eq!(effects, vec![Effect::CancelDiff]);
             assert_eq!(state.diff, DiffPane::default());
         }

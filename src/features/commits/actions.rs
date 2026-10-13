@@ -119,6 +119,7 @@ mod tests {
 
     use super::*;
     use crate::confirm_question::quit_question;
+    use crate::features::commits::CommitsIntent;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::keymap;
@@ -183,14 +184,20 @@ mod tests {
         merge.commits.rows[1].parents = vec!["c2".into(), "d0".into()];
         assert_eq!(press_char(&mut merge, 'R'), vec![]);
         assert_eq!(merge.notice, Some("Cannot revert a merge commit".into()));
-        assert_eq!(merge.update(AppIntent::RevertCommit), vec![]);
+        assert_eq!(
+            merge.update(AppIntent::Commits(CommitsIntent::Revert)),
+            vec![]
+        );
         assert_eq!(merge.held_seq(), None);
 
         let mut running = on_commit();
         running.hold_op(9);
         assert_eq!(press_char(&mut running, 'R'), vec![]);
         assert_eq!(running.notice, Some(keymap::OP_RUNNING.into()));
-        assert_eq!(running.update(AppIntent::RevertCommit), vec![]);
+        assert_eq!(
+            running.update(AppIntent::Commits(CommitsIntent::Revert)),
+            vec![]
+        );
 
         let mut reverting = on_commit();
         let mut branch = on_branch("main");
@@ -201,7 +208,10 @@ mod tests {
             reverting.notice,
             Some("Finish or abort the operation in progress".into())
         );
-        assert_eq!(reverting.update(AppIntent::RevertCommit), vec![]);
+        assert_eq!(
+            reverting.update(AppIntent::Commits(CommitsIntent::Revert)),
+            vec![]
+        );
         assert_eq!(reverting.held_seq(), None);
     }
 
@@ -268,7 +278,7 @@ mod tests {
     fn n_or_esc_closes_the_hard_reset_question() {
         for code in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = on_commit();
-            state.update(AppIntent::ResetTo(ResetMode::Hard));
+            state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)));
             assert_eq!(state.popups.len(), 1, "{code:?}");
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
@@ -284,13 +294,19 @@ mod tests {
             vec![]
         );
         assert_eq!(state.popups, []);
-        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)),
+            vec![]
+        );
         state.popups.push(Popup::Question(quit_question()));
         assert_eq!(
             state.answer_question(KeyScope::ResetHard, Answer::YOnly),
             vec![]
         );
-        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)),
+            vec![]
+        );
         assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
@@ -308,7 +324,10 @@ mod tests {
             Some("Finish or abort the operation in progress".into())
         );
         for mode in [ResetMode::Soft, ResetMode::Hard] {
-            assert_eq!(state.update(AppIntent::ResetTo(mode)), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::ResetTo(mode))),
+                vec![]
+            );
         }
         assert_eq!(state.popups, []);
         assert_eq!(state.held_seq(), None);

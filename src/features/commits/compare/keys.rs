@@ -4,6 +4,8 @@
 //! there are behaviour.
 
 use crate::diff_mark::DiffMark;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::compare::CompareIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, Reason, commits_range_disabled, list_guard, no_branch_selected,
@@ -42,7 +44,7 @@ pub(crate) static COMPARE_COMMITS: &[Binding] = &[
         id: "commits.mark",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::ToggleDiffMark,
+        intent: AppIntent::Commits(CommitsIntent::Compare(CompareIntent::ToggleMark)),
         description: "Mark the selected commit to diff against (enter on another); again to clear",
         label: "mark for diff",
         bar: false,
@@ -56,7 +58,7 @@ pub(crate) static COMPARE_BRANCHES: &[Binding] = &[
         id: "branches.mark",
         keys: &[KeyPattern::any(KeyCode::Char('M'))],
         scope: KeyScope::Branches,
-        intent: AppIntent::ToggleDiffMark,
+        intent: AppIntent::Commits(CommitsIntent::Compare(CompareIntent::ToggleMark)),
         description: "Mark the selected branch to diff against (enter on another); again to clear",
         label: "mark for diff",
         bar: false,
@@ -66,7 +68,7 @@ pub(crate) static COMPARE_BRANCHES: &[Binding] = &[
         id: "branches.diff",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Branches,
-        intent: AppIntent::OpenDiff,
+        intent: AppIntent::Commits(CommitsIntent::Compare(CompareIntent::Open)),
         description: "Show what changed from the diff mark to the selected branch",
         label: "diff with mark",
         bar: false,

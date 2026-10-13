@@ -10,9 +10,17 @@
 //! detached checkout's argv (`git.rs`). Its children own the reflog, copy,
 //! custom patch, compare, rewrite and bisect.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`CommitsIntent`] in
+//! `AppIntent::Commits`, and its one `update` arm calls [`update`] here,
+//! which handles the panel's own variants and passes each child's enum
+//! (`CommitsIntent::Reflog(ReflogIntent)` and so on) to that child's
+//! `update`. A child may build its parent's intents; none builds a
+//! sibling's.
+//!
 //! Its `pub(crate)` API:
 //! - the types [`CommitsPanel`], [`CommitsTab`] and [`CommitFilesList`],
 //!   and [`PAGE`];
+//! - the intent enum [`CommitsIntent`] and the free function [`update`];
 //! - the handlers in `update.rs`: `first_commits_page`, `more_commits`,
 //!   `switch_commits_tab`, `commits_loaded`, `markers_loaded`,
 //!   `branch_tips_loaded`, `open_commit_files`, `commit_files_loaded`,
@@ -70,6 +78,7 @@ pub(crate) mod custom_patch;
 pub(crate) mod effects;
 pub(crate) mod git;
 mod graph;
+mod intent;
 pub(crate) mod keys;
 mod log_query;
 mod panel;
@@ -80,7 +89,9 @@ pub(crate) mod view;
 
 pub(crate) use actions::{checkout_question, reset_hard_question};
 pub(crate) use commit_files::CommitFilesList;
+pub(crate) use intent::CommitsIntent;
 pub(crate) use panel::{CommitsPanel, CommitsTab, PAGE};
+pub(crate) use update::update;
 
 use crate::git::rebase_plan::{self, RebasePlan};
 use crate::git::status::Head;

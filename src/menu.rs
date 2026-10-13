@@ -5,6 +5,10 @@ use crate::bisect;
 use crate::clipboard::CopyWhat;
 use crate::features::command_log::CommandLogIntent;
 use crate::features::commit::keys::{amend_disabled, commit_disabled};
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::bisect::BisectIntent;
+use crate::features::commits::copy::CopyIntent;
+use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
 use crate::features::commits::keys::reset_disabled;
@@ -153,27 +157,35 @@ fn no_patch(state: &AppState) -> Option<Reason> {
 static CUSTOM_PATCH: &[MenuItem] = &[
     MenuItem {
         label: "Remove from commit",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::Remove),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::Remove,
+        ))),
         disabled: remove_disabled,
     },
     MenuItem {
         label: "Move to selected commit",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::MoveToSelected),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::MoveToSelected,
+        ))),
         disabled: move_disabled,
     },
     MenuItem {
         label: "Move to index",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::ToIndex),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::ToIndex,
+        ))),
         disabled: to_index_disabled,
     },
     MenuItem {
         label: "New commit after source…",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::NewCommit),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::NewCommit,
+        ))),
         disabled: new_commit_disabled,
     },
     MenuItem {
         label: "Reset patch",
-        intent: AppIntent::ResetPatch,
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Reset)),
         disabled: no_patch,
     },
 ];
@@ -217,17 +229,17 @@ static MERGE: &[MenuItem] = &[
 static RESET: &[MenuItem] = &[
     MenuItem {
         label: "Soft: keep index and worktree",
-        intent: AppIntent::ResetTo(ResetMode::Soft),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
         disabled: reset_disabled,
     },
     MenuItem {
         label: "Mixed: keep worktree, reset index",
-        intent: AppIntent::ResetTo(ResetMode::Mixed),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Mixed)),
         disabled: reset_disabled,
     },
     MenuItem {
         label: "Hard: discard all changes…",
-        intent: AppIntent::ResetTo(ResetMode::Hard),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
         disabled: reset_disabled,
     },
 ];
@@ -258,22 +270,28 @@ static STASH: &[MenuItem] = &[
 static BISECT: &[MenuItem] = &[
     MenuItem {
         label: "Mark selected bad (starts a bisect)",
-        intent: AppIntent::BisectSelected(BisectMark::Bad),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Bad,
+        ))),
         disabled: bisect::selected_bad_disabled,
     },
     MenuItem {
         label: "Mark selected good (starts a bisect)",
-        intent: AppIntent::BisectSelected(BisectMark::Good),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Good,
+        ))),
         disabled: bisect::selected_good_disabled,
     },
     MenuItem {
         label: "Skip selected",
-        intent: AppIntent::BisectSelected(BisectMark::Skip),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Skip,
+        ))),
         disabled: bisect::selected_skip_disabled,
     },
     MenuItem {
         label: "Reset bisect…",
-        intent: AppIntent::AskBisectReset,
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::AskReset)),
         disabled: bisect::reset_disabled,
     },
 ];
@@ -281,27 +299,31 @@ static BISECT: &[MenuItem] = &[
 static COPY: &[MenuItem] = &[
     MenuItem {
         label: "Full hash",
-        intent: AppIntent::CopyCommitText(CopyWhat::Hash),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Hash))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Short hash",
-        intent: AppIntent::CopyCommitText(CopyWhat::ShortHash),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+            CopyWhat::ShortHash,
+        ))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Subject",
-        intent: AppIntent::CopyCommitText(CopyWhat::Subject),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Subject))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Full message",
-        intent: AppIntent::CopyCommitText(CopyWhat::Message),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Message))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Forge URL",
-        intent: AppIntent::CopyCommitText(CopyWhat::ForgeUrl),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+            CopyWhat::ForgeUrl,
+        ))),
         disabled: commit_url_disabled,
     },
 ];

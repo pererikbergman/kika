@@ -10,13 +10,14 @@ use super::PAGE;
 use super::git::read_tips;
 use crate::background;
 use crate::effect::{Tag, unix_now};
+use crate::features::commits::CommitsIntent;
 use crate::git::GitRunner;
 use crate::git::commit_files::{CommitRange, commit_files};
 use crate::git::log::{LogQuery, log_page, markers};
 use crate::intent::AppIntent;
 
 /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to `query`,
-/// and report it as `CommitsLoaded`.
+/// and report it as `CommitsIntent::PageLoaded`.
 pub(crate) fn load(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -33,35 +34,35 @@ pub(crate) fn load(
         },
         // A panic still reports back, or the panel would wait forever.
         background::crashed("git log"),
-        move |result| AppIntent::CommitsLoaded { tag, skip, result },
+        move |result| AppIntent::Commits(CommitsIntent::PageLoaded { tag, skip, result }),
     );
 }
 
 /// Read which commits are unpushed or unmerged and report them as
-/// `MarkersLoaded`.
+/// `CommitsIntent::MarkersLoaded`.
 pub(crate) fn load_markers(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || markers(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
         background::crashed("git rev-list"),
-        move |result| AppIntent::MarkersLoaded { tag, result },
+        move |result| AppIntent::Commits(CommitsIntent::MarkersLoaded { tag, result }),
     );
 }
 
 /// Read where every local branch points and report it as
-/// `BranchTipsLoaded`.
+/// `CommitsIntent::TipsLoaded`.
 pub(crate) fn load_tips(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || read_tips(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
         background::crashed("git for-each-ref"),
-        move |result| AppIntent::BranchTipsLoaded { tag, result },
+        move |result| AppIntent::Commits(CommitsIntent::TipsLoaded { tag, result }),
     );
 }
 
-/// List the files `range` changed and report them as `CommitFilesLoaded`.
+/// List the files `range` changed and report them as `CommitsIntent::FilesLoaded`.
 pub(crate) fn load_files(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -73,12 +74,13 @@ pub(crate) fn load_files(
         move || commit_files(runner.as_ref(), &range),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git diff-tree"),
-        move |result| AppIntent::CommitFilesLoaded { tag, result },
+        move |result| AppIntent::Commits(CommitsIntent::FilesLoaded { tag, result }),
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::features::commits::CommitsIntent;
     use std::sync::Arc;
 
     use tokio::sync::mpsc;
@@ -118,11 +120,11 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::CommitsLoaded {
+            Some(AppIntent::Commits(CommitsIntent::PageLoaded {
                 tag,
                 skip,
                 result: Ok((page, now)),
-            }) => {
+            })) => {
                 assert_eq!((tag, skip), (background(5), 200));
                 assert_eq!(page.rows[0].subject, "subj");
                 assert!(page.done);
@@ -167,7 +169,10 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::CommitsLoaded { result: Ok(_), .. })
+            Some(AppIntent::Commits(CommitsIntent::PageLoaded {
+                result: Ok(_),
+                ..
+            }))
         ));
         runner.assert_done();
     }
@@ -184,11 +189,11 @@ mod tests {
             query: LogQuery::default(),
         });
         match rx.recv().await {
-            Some(AppIntent::CommitsLoaded {
+            Some(AppIntent::Commits(CommitsIntent::PageLoaded {
                 tag,
                 result: Err(message),
                 ..
-            }) => {
+            })) => {
                 assert_eq!(tag, background(6));
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
@@ -197,10 +202,10 @@ mod tests {
 
         runtime.spawn(Effect::LoadMarkers { tag: background(7) });
         match rx.recv().await {
-            Some(AppIntent::MarkersLoaded {
+            Some(AppIntent::Commits(CommitsIntent::MarkersLoaded {
                 tag,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(tag, background(7));
                 assert!(!message.contains(char::is_control), "{message:?}");
             }
@@ -249,10 +254,10 @@ mod tests {
         };
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommitFilesLoaded {
+            Some(AppIntent::Commits(CommitsIntent::FilesLoaded {
                 tag,
                 result: Ok(vec![new])
-            })
+            }))
         );
         runner.assert_done();
 
@@ -260,10 +265,10 @@ mod tests {
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
         runtime.spawn(Effect::LoadCommitFiles { tag, range });
         match rx.recv().await {
-            Some(AppIntent::CommitFilesLoaded {
+            Some(AppIntent::Commits(CommitsIntent::FilesLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(
                     message.starts_with("git diff-tree crashed: "),

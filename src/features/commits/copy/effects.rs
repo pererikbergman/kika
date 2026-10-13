@@ -7,13 +7,15 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::Tag;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::copy::CopyIntent;
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
 use crate::git::head::read_commit_message;
 use crate::intent::AppIntent;
 
 /// Read commit `oid`'s full message and send it back as
-/// `CommitMessageLoaded`.
+/// `CopyIntent::MessageLoaded`.
 pub(crate) fn load_message(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -26,6 +28,12 @@ pub(crate) fn load_message(
         move || read_commit_message(runner.as_ref(), &read),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git log"),
-        move |result| AppIntent::CommitMessageLoaded { tag, oid, result },
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Copy(CopyIntent::MessageLoaded {
+                tag,
+                oid,
+                result,
+            }))
+        },
     );
 }

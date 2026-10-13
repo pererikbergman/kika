@@ -8,6 +8,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{PatchAction, PatchChoice};
 use crate::confirm_question::Answer;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::commits::with_stacked_branches;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::patch::PatchError;
@@ -154,7 +156,7 @@ pub(crate) static CUSTOM_PATCH_WORKSPACE: &[Binding] = &[
         id: "workspace.patch_menu",
         keys: &[KeyPattern::exact(KeyCode::Char('p'), KeyModifiers::CONTROL)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::OpenPatchMenu,
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::OpenMenu)),
         description: "Show what can be done with the custom patch: remove, move or split it off",
         label: "patch",
         bar: false,
@@ -169,7 +171,7 @@ pub(crate) static CUSTOM_PATCH_COMMIT_FILES: &[Binding] = &[
         id: "commit_files.patch",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::CommitFiles,
-        intent: AppIntent::PatchToggleFile,
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::ToggleFile)),
         description: "Pick the selected file's whole change for the custom patch, or drop it",
         label: "patch",
         bar: true,
