@@ -6,25 +6,26 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::BranchesIntent;
 use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::branches::{branch_log, list_branches};
 use crate::intent::AppIntent;
 
-/// List the local branches and report them as `BranchesLoaded`.
+/// List the local branches and report them as `BranchesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || list_branches(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git for-each-ref"),
-        move |result| AppIntent::BranchesLoaded { tag, result },
+        move |result| AppIntent::Branches(BranchesIntent::Loaded { tag, result }),
     );
 }
 
-/// Read `refname`'s log and report it as `BranchLogLoaded`, naming the
-/// ref so a log for a branch no longer selected is dropped.
+/// Read `refname`'s log and report it as `BranchesIntent::LogLoaded`,
+/// naming the ref so a log for a branch no longer selected is dropped.
 pub(crate) fn load_log(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -37,10 +38,12 @@ pub(crate) fn load_log(
         move || branch_log(runner.as_ref(), &read),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git log"),
-        move |result| AppIntent::BranchLogLoaded {
-            tag,
-            refname,
-            result,
+        move |result| {
+            AppIntent::Branches(BranchesIntent::LogLoaded {
+                tag,
+                refname,
+                result,
+            })
         },
     );
 }
@@ -52,6 +55,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
+    use crate::features::branches::tags::TagsIntent;
     use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::test_support::HostilePanic;
@@ -93,10 +99,10 @@ mod tests {
         runtime.spawn(Effect::LoadBranches { tag });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::BranchesLoaded {
+            Some(AppIntent::Branches(BranchesIntent::Loaded {
                 tag,
                 result: Ok(vec![]),
-            })
+            }))
         );
         runtime.spawn(Effect::LoadBranchLog {
             tag,
@@ -104,7 +110,7 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::BranchLogLoaded {
+            Some(AppIntent::Branches(BranchesIntent::LogLoaded {
                 tag,
                 refname: b"refs/heads/main".to_vec(),
                 result: Ok(vec![crate::git::branches::LogRow {
@@ -113,7 +119,7 @@ mod tests {
                     author: "Ann".into(),
                     subject: "Work".into(),
                 }]),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -130,7 +136,10 @@ mod tests {
         runtime.spawn(Effect::LoadBranches { tag });
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::BranchesLoaded { result: Err(_), .. })
+            Some(AppIntent::Branches(BranchesIntent::Loaded {
+                result: Err(_),
+                ..
+            }))
         ));
         runtime.spawn(Effect::LoadBranchLog {
             tag,
@@ -138,17 +147,24 @@ mod tests {
         });
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::BranchLogLoaded { result: Err(_), .. })
+            Some(AppIntent::Branches(BranchesIntent::LogLoaded {
+                result: Err(_),
+                ..
+            }))
         ));
         runtime.spawn(Effect::LoadRemotes { tag });
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::RemotesLoaded { result: Err(_), .. })
+            Some(AppIntent::Branches(BranchesIntent::Remotes(
+                RemotesIntent::Loaded { result: Err(_), .. }
+            )))
         ));
         runtime.spawn(Effect::LoadTags { tag });
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::TagsLoaded { result: Err(_), .. })
+            Some(AppIntent::Branches(BranchesIntent::Tags(
+                TagsIntent::Loaded { result: Err(_), .. }
+            )))
         ));
     }
 }

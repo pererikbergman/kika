@@ -57,6 +57,7 @@ mod tests {
 
     use super::{crashed, run, run_with};
     use crate::effect::Tag;
+    use crate::features::branches::BranchesIntent;
     use crate::intent::AppIntent;
 
     const TAG: Tag = Tag {
@@ -66,7 +67,7 @@ mod tests {
     };
 
     fn loaded(result: Result<Vec<crate::git::branches::Branch>, String>) -> AppIntent {
-        AppIntent::BranchesLoaded { tag: TAG, result }
+        AppIntent::Branches(BranchesIntent::Loaded { tag: TAG, result })
     }
 
     #[tokio::test]
@@ -79,10 +80,10 @@ mod tests {
             loaded,
         );
         match rx.recv().await {
-            Some(AppIntent::BranchesLoaded {
+            Some(AppIntent::Branches(BranchesIntent::Loaded {
                 result: Err(message),
                 ..
-            }) => assert!(message.starts_with("git x crashed: "), "{message}"),
+            })) => assert!(message.starts_with("git x crashed: "), "{message}"),
             other => panic!("unexpected {other:?}"),
         }
         // The sender went with the task: exactly one intent was sent.
@@ -115,10 +116,10 @@ mod tests {
             loaded,
         );
         match rx.recv().await {
-            Some(AppIntent::BranchesLoaded {
+            Some(AppIntent::Branches(BranchesIntent::Loaded {
                 result: Err(message),
                 ..
-            }) => {
+            })) => {
                 assert!(message.starts_with("git x crashed: "), "{message}");
                 assert!(!message.contains('\x1b'), "{message:?}");
             }

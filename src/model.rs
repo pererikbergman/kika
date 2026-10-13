@@ -12,7 +12,7 @@ use crate::effect::{Effect, Tag};
 use crate::features::blame::BlameView;
 use crate::features::branches::remotes::RemotePending;
 use crate::features::branches::tags::PendingTag;
-use crate::features::branches::{BranchesPanel, BranchesTab};
+use crate::features::branches::{self, BranchesPanel, BranchesTab};
 use crate::features::command_log::{self, CommandLog};
 use crate::features::commit::CommitEditor;
 use crate::features::commits::bisect::BisectIntent;
@@ -700,6 +700,7 @@ impl AppState {
             }
             AppIntent::CommandLog(i) => return command_log::update(self, i),
             AppIntent::Commits(i) => return commits::update(self, i),
+            AppIntent::Branches(i) => return branches::update(self, i),
             AppIntent::OpenBlame => return self.open_blame(),
             AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
             AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
@@ -741,7 +742,6 @@ impl AppState {
             AppIntent::RepoInitialised { tag, result } => {
                 return self.repo_initialised(tag, result);
             }
-            AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
             AppIntent::ForgeRepoNone { tag } => {
                 if tag.generation == self.generation {
                     self.forge.repo_none(tag);
@@ -812,57 +812,7 @@ impl AppState {
                 repo,
                 result,
             } => self.pr_detail_loaded(tag, number, repo, result),
-            AppIntent::BranchLogLoaded {
-                tag,
-                refname,
-                result,
-            } => self.branch_log_loaded(tag, refname, result),
-            AppIntent::RemotesLoaded { tag, result } => return self.remotes_loaded(tag, result),
-            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(BranchesTab::next),
-            AppIntent::PrevBranchesTab => return self.switch_branches_tab(BranchesTab::prev),
-            AppIntent::TagsLoaded { tag, result } => return self.tags_loaded(tag, result),
-            AppIntent::TagNext => return self.move_tag(1),
-            AppIntent::TagPrev => return self.move_tag(-1),
-            AppIntent::NewTag => self.ask_tag_name(false),
-            AppIntent::NewAnnotatedTag => self.ask_tag_name(true),
-            AppIntent::TagNamed(text) => return self.tag_named(text),
-            AppIntent::TagMessaged(text) => return self.tag_messaged(&text),
-            AppIntent::DeleteTag if self.branches.tags.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Tags)
-            }
-            AppIntent::DeleteTag => self.ask_delete_tag(),
-            AppIntent::ConfirmDeleteTag => return self.confirm_delete_tag(),
-            AppIntent::PushTag => return self.push_tag(),
-            AppIntent::RemoteNext => return self.move_remote(1),
-            AppIntent::RemotePrev => return self.move_remote(-1),
-            AppIntent::TrackRemoteBranch => self.ask_track_name(),
-            AppIntent::TrackRemoteBranchNamed(text) => return self.track_named(&text),
-            AppIntent::AddRemote => self.ask_remote_name(),
-            AppIntent::AddRemoteNamed(text) => self.remote_named(&text),
-            AppIntent::AddRemoteUrl(text) => return self.remote_url(&text),
-            AppIntent::RenameRemote => self.ask_remote_rename(),
-            AppIntent::RenameRemoteTo(text) => return self.rename_remote_to(&text),
-            AppIntent::RemoveRemote if self.branches.remotes.list.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Remotes)
-            }
-            AppIntent::RemoveRemote => self.ask_remove_remote(),
-            AppIntent::ConfirmRemoveRemote => return self.confirm_remove_remote(),
             AppIntent::ConfirmDeleteRange => return self.confirm_delete_range(),
-            AppIntent::SetUpstream => self.ask_upstream(),
-            AppIntent::SetUpstreamTo(text) => return self.set_upstream_to(&text),
-            AppIntent::UnsetUpstream => return self.unset_upstream(),
-            AppIntent::BranchNext => return self.move_branch(1),
-            AppIntent::BranchPrev => return self.move_branch(-1),
-            AppIntent::CheckoutBranch => return self.checkout_branch(),
-            AppIntent::NewBranch => self.ask_branch_name(PromptKind::NewBranch),
-            AppIntent::RenameBranch => self.ask_branch_name(PromptKind::RenameBranch),
-            AppIntent::DeleteBranch if self.branches.list.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Branches)
-            }
-            AppIntent::DeleteBranch => self.ask_delete_branch(),
-            AppIntent::CreateBranchNamed(text) => return self.create_branch_named(&text),
-            AppIntent::RenameBranchTo(text) => return self.rename_branch_to(&text),
-            AppIntent::ConfirmDeleteBranch { force } => return self.confirm_delete_branch(force),
             AppIntent::Fetch => return self.start_remote(RemoteOp::Fetch),
             AppIntent::Pull => return self.start_remote(RemoteOp::Pull),
             AppIntent::Push => {
@@ -1228,8 +1178,9 @@ impl AppState {
     /// stage resolved and the detached checkout) and the `y`-only
     /// questions whose binding sends `ConfirmYes` (abort, bisect reset,
     /// autosquash, custom patch and drop range). Every other question
-    /// answers only to its own intent (such as `ConfirmDeleteBranch` or
-    /// `ConfirmCreatePullRequest`), so yes here keeps it open.
+    /// answers only to its own intent (such as
+    /// `BranchesIntent::ConfirmDelete` or `ConfirmCreatePullRequest`), so
+    /// yes here keeps it open.
     fn answer_confirm_question(&mut self, scope: KeyScope, yes: bool) -> Vec<Effect> {
         if !yes {
             if let Some(closed) = self.popups.pop() {
@@ -2066,6 +2017,9 @@ mod tests {
     use super::*;
     use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
+    use crate::features::branches::tags::TagsIntent;
     use crate::features::commits::copy::CopyIntent;
     use crate::features::commits::custom_patch::CustomPatchIntent;
     use crate::features::commits::rewrite::RewriteIntent;
@@ -4012,18 +3966,22 @@ mod tests {
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
-        state.update(AppIntent::BranchesLoaded {
+        state.update(AppIntent::Branches(BranchesIntent::Loaded {
             tag: list,
             result: Ok(vec![]),
-        });
-        state.update(AppIntent::RemotesLoaded {
-            tag: remotes,
-            result: Ok(vec![]),
-        });
-        state.update(AppIntent::TagsLoaded {
-            tag: tags,
-            result: Ok(vec![]),
-        });
+        }));
+        state.update(AppIntent::Branches(BranchesIntent::Remotes(
+            RemotesIntent::Loaded {
+                tag: remotes,
+                result: Ok(vec![]),
+            },
+        )));
+        state.update(AppIntent::Branches(BranchesIntent::Tags(
+            TagsIntent::Loaded {
+                tag: tags,
+                result: Ok(vec![]),
+            },
+        )));
         assert_eq!(state.busy_count(), 0);
 
         let refs = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
@@ -4269,7 +4227,7 @@ mod tests {
     #[test]
     fn a_bisect_alone_stops_a_merge_until_it_is_reset() {
         let mut state = in_progress(&[Operation::Bisect]);
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         assert_eq!(
             state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)),
             vec![]
@@ -4290,7 +4248,7 @@ mod tests {
     #[test]
     fn a_finished_squash_says_the_changes_wait_to_be_committed() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         let (tag, op) = op_of(&state.update(AppIntent::Merge(MergeStrategy::Squash)));
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(
@@ -4836,38 +4794,47 @@ mod tests {
             (
                 "checkout branch",
                 with_branches,
-                vec![AppIntent::BranchNext],
-                AppIntent::CheckoutBranch,
+                vec![AppIntent::Branches(BranchesIntent::Next)],
+                AppIntent::Branches(BranchesIntent::Checkout),
             ),
-            ("new branch", with_branches, vec![], AppIntent::NewBranch),
+            (
+                "new branch",
+                with_branches,
+                vec![],
+                AppIntent::Branches(BranchesIntent::New),
+            ),
             (
                 "new branch named",
                 with_branches,
-                vec![AppIntent::NewBranch],
-                AppIntent::CreateBranchNamed("x".into()),
+                vec![AppIntent::Branches(BranchesIntent::New)],
+                AppIntent::Branches(BranchesIntent::CreateNamed("x".into())),
             ),
             (
                 "track",
                 on_remote_topic,
                 vec![],
-                AppIntent::TrackRemoteBranch,
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track)),
             ),
             (
                 "track named",
                 on_remote_topic,
-                vec![AppIntent::TrackRemoteBranch],
-                AppIntent::TrackRemoteBranchNamed("x".into()),
+                vec![AppIntent::Branches(BranchesIntent::Remotes(
+                    RemotesIntent::Track,
+                ))],
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(
+                    "x".into(),
+                ))),
             ),
             (
                 "merge key",
                 with_branches,
-                vec![AppIntent::BranchNext],
+                vec![AppIntent::Branches(BranchesIntent::Next)],
                 key('m'),
             ),
             (
                 "rebase onto",
                 with_branches,
-                vec![AppIntent::BranchNext],
+                vec![AppIntent::Branches(BranchesIntent::Next)],
                 AppIntent::RebaseOnto,
             ),
         ];
@@ -4903,7 +4870,7 @@ mod tests {
             cases.push((
                 "merge",
                 with_branches,
-                vec![AppIntent::BranchNext],
+                vec![AppIntent::Branches(BranchesIntent::Next)],
                 AppIntent::Merge(strategy),
             ));
         }

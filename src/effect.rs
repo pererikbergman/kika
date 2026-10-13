@@ -374,13 +374,14 @@ pub enum Effect {
     },
 
     // --- branches ---
-    /// List the local branches; always answered by one `BranchesLoaded`.
+    /// List the local branches; always answered by one
+    /// `BranchesIntent::Loaded`.
     LoadBranches {
         tag: Tag,
     },
     /// Read the newest commits of the full ref `refname`, local or
-    /// remote-tracking; always answered by one `BranchLogLoaded` for the
-    /// same `refname`.
+    /// remote-tracking; always answered by one `BranchesIntent::LogLoaded`
+    /// for the same `refname`.
     LoadBranchLog {
         tag: Tag,
         refname: Vec<u8>,
@@ -388,13 +389,13 @@ pub enum Effect {
 
     // --- branches/remotes ---
     /// List the remotes and their remote-tracking branches; always
-    /// answered by one `RemotesLoaded`.
+    /// answered by one `RemotesIntent::Loaded`.
     LoadRemotes {
         tag: Tag,
     },
 
     // --- branches/tags ---
-    /// List the tags; always answered by one `TagsLoaded`.
+    /// List the tags; always answered by one `TagsIntent::Loaded`.
     LoadTags {
         tag: Tag,
     },

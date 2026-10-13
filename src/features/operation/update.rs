@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn m_on_another_branch_opens_the_merge_menu() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         assert_eq!(press_char(&mut state, 'm'), vec![]);
         assert_eq!(
             state.popups,
@@ -119,7 +119,7 @@ mod tests {
     fn fast_forward_and_squash_run_detached_on_the_selected_branch() {
         for strategy in [MergeStrategy::FastForwardOnly, MergeStrategy::Squash] {
             let mut state = in_progress(&[]);
-            state.update(AppIntent::BranchNext);
+            next_branch(&mut state);
             let (_, op) = op_of(&state.update(AppIntent::Merge(strategy)));
             assert_eq!(
                 op,
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn a_merge_commit_and_a_rebase_run_on_the_terminal() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         let (tag, op) = attached_of(&state.update(AppIntent::Merge(MergeStrategy::NoFastForward)));
         assert_eq!(
             op,
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn the_merge_menu_runs_the_chosen_item() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         press_char(&mut state, 'm');
         press_char(&mut state, 'j');
         let (_, op) = attached_of(&press(&mut state, KeyCode::Enter));
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(state.notice, Some("Already on this branch".into()));
 
         let mut merging = in_progress(&[Operation::Merge]);
-        merging.update(AppIntent::BranchNext);
+        next_branch(&mut merging);
         assert_eq!(press_char(&mut merging, 'm'), vec![]);
         assert_eq!(
             merging.notice,
