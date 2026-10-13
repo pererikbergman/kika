@@ -93,9 +93,7 @@ impl AppState {
         head: CommitId,
         result: Result<Vec<CommitId>, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         // Taken before the generation check, so a stale answer cannot
         // leave the guard stuck.
         let Some(check) = self.left_behind_check.take_if(|check| check.seq == tag.seq) else {
@@ -193,14 +191,14 @@ mod tests {
     fn a_detached_head_checks_for_commits_left_behind_before_anything_else() {
         for (intent, planned) in moves() {
             let mut state = detached_on_commit();
-            let busy = state.busy;
+            let busy = state.busy_count();
             let (tag, op) = check_of(&state.update(intent.clone()));
             assert_eq!(op, planned, "{intent:?}");
             assert!(tag.user, "{intent:?}");
-            assert_eq!(state.busy, busy + 1, "{intent:?}");
+            assert_eq!(state.busy_count(), busy + 1, "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
             assert_eq!(state.commits.pending, None, "{intent:?}");
-            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(state.held_seq(), None, "{intent:?}");
         }
     }
 
@@ -234,7 +232,7 @@ mod tests {
             let (state, effects) = checked(AppIntent::ResetTo(mode), Ok(vec![]));
             let (tag, op) = op_of(&effects);
             assert_eq!(op, reset_op(mode));
-            assert_eq!(state.op_seq, Some(tag.seq));
+            assert_eq!(state.held_seq(), Some(tag.seq));
         }
 
         let (state, effects) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
@@ -254,8 +252,12 @@ mod tests {
         for (intent, planned) in moves() {
             let (state, effects) = checked(intent.clone(), Ok(ids(3)));
             assert_eq!(effects, vec![], "{intent:?}");
-            assert_eq!(state.busy, detached_on_commit().busy, "{intent:?}");
-            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(
+                state.busy_count(),
+                detached_on_commit().busy_count(),
+                "{intent:?}"
+            );
+            assert_eq!(state.held_seq(), None, "{intent:?}");
             assert_eq!(
                 state.popups,
                 [Popup::LeaveCommits(LeaveCommitsConfirm {
@@ -295,11 +297,11 @@ mod tests {
             assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{intent:?}");
             assert_eq!(state.update(AppIntent::ConfirmYes), vec![], "{intent:?}");
             assert_eq!(state.popups.len(), 1, "{intent:?}");
-            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(state.held_seq(), None, "{intent:?}");
 
             let (tag, op) = op_of(&press_char(&mut state, 'y'));
             assert_eq!(op, planned, "{intent:?}");
-            assert_eq!(state.op_seq, Some(tag.seq), "{intent:?}");
+            assert_eq!(state.held_seq(), Some(tag.seq), "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
         }
 
@@ -307,7 +309,7 @@ mod tests {
             let (mut state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(2)));
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
 
@@ -318,7 +320,7 @@ mod tests {
         state.popups.push(Popup::Confirm(ConfirmKind::Quit));
         assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -336,7 +338,7 @@ mod tests {
             assert_eq!(effects, vec![]);
             assert_eq!(state.popups, []);
             assert_eq!(state.notice, Some("HEAD moved; try again".into()));
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
             assert_eq!(state.commits.pending, None);
         }
 
@@ -358,7 +360,7 @@ mod tests {
         for (intent, _) in moves() {
             let (state, effects) = checked(intent.clone(), Err("fatal: bad".into()));
             assert_eq!(effects, vec![], "{intent:?}");
-            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(state.held_seq(), None, "{intent:?}");
             let [Popup::Error(error)] = state.popups.as_slice() else {
                 panic!("{intent:?}: {:?}", state.popups)
             };
@@ -372,10 +374,10 @@ mod tests {
     fn a_second_press_while_a_check_runs_asks_only_once() {
         for (intent, _) in moves() {
             let mut state = detached_on_commit();
-            let busy = state.busy;
+            let busy = state.busy_count();
             let (tag, op) = check_of(&state.update(intent.clone()));
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
-            assert_eq!(state.busy, busy + 1, "{intent:?}");
+            assert_eq!(state.busy_count(), busy + 1, "{intent:?}");
             assert_eq!(
                 state.notice,
                 Some("Still checking for commits left behind".into()),
@@ -392,7 +394,7 @@ mod tests {
                 "{intent:?}: {:?}",
                 state.popups
             );
-            assert_eq!(state.busy, busy, "{intent:?}");
+            assert_eq!(state.busy_count(), busy, "{intent:?}");
         }
     }
 
@@ -457,7 +459,7 @@ mod tests {
                     assert_eq!(effects, vec![], "{case}");
                     assert_eq!(state.popups, popups, "{case}");
                     assert_eq!(state.commits.pending, None, "{case}");
-                    assert_eq!(state.op_seq, None, "{case}");
+                    assert_eq!(state.held_seq(), None, "{case}");
                     assert_eq!(
                         state.notice,
                         Some("Not asked: focus moved; try again".into()),
@@ -465,7 +467,7 @@ mod tests {
                     );
                     assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
                     assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
-                    assert_eq!(state.op_seq, None, "{case}");
+                    assert_eq!(state.held_seq(), None, "{case}");
                 }
             }
         }
@@ -483,7 +485,7 @@ mod tests {
                 "{intent:?}"
             );
             assert_eq!(moved.popups, [], "{intent:?}");
-            assert_eq!(moved.op_seq, None, "{intent:?}");
+            assert_eq!(moved.held_seq(), None, "{intent:?}");
             assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
 
             let (_, op) = op_of(&state.update(AppIntent::ConfirmLeaveCommits));
@@ -498,14 +500,14 @@ mod tests {
         moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
         assert_eq!(moved.update(AppIntent::ConfirmResetHard), vec![]);
         assert_eq!(moved.popups, []);
-        assert_eq!(moved.op_seq, None);
+        assert_eq!(moved.held_seq(), None);
         assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
 
         // Back on a branch is a move too.
         let mut on_main = state.clone();
         on_main.branch = Some(on_branch("main"));
         assert_eq!(on_main.update(AppIntent::ConfirmResetHard), vec![]);
-        assert_eq!(on_main.op_seq, None);
+        assert_eq!(on_main.held_seq(), None);
 
         let (_, op) = op_of(&state.update(AppIntent::ConfirmResetHard));
         assert_eq!(op, reset_op(ResetMode::Hard));

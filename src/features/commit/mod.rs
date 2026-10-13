@@ -24,9 +24,10 @@
 //!   terminal hand-off (`handoff.rs`) build the commit with.
 //!
 //! Kept cross-feature and core reads: the handlers read `files` (whether
-//! anything is staged), `context`, `generation`, `op_seq` and
-//! `commit_hooks_detached`, and write `busy`, `op_seq` (a stale probe frees
-//! it), `commit_on_terminal`, `notice` and `popups` (the error popup).
+//! anything is staged), `context`, `generation`, the op slot and
+//! `commit_hooks_detached`, and change the op slot through its methods (a
+//! stale probe frees it), `commit_on_terminal`, `notice` and `popups` (the
+//! error popup).
 //!
 //! What stays in core, and why:
 //! - `CommitFlow` (`model.rs`): `AppState` holds it, and tests in

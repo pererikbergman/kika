@@ -79,13 +79,8 @@ impl AppState {
         }
         let seq = self.take_seq();
         self.commits.fixup_base_seq = Some(seq);
-        self.busy += 1;
         vec![Effect::FindFixupBase {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user: true,
-            },
+            tag: self.user_tag(seq),
         }]
     }
 
@@ -93,9 +88,7 @@ impl AppState {
     /// say which commits they come from when there are several, since
     /// picking one would be a guess.
     pub(crate) fn fixup_base_found(&mut self, tag: Tag, result: Result<FixupBase, String>) {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation || self.commits.fixup_base_seq != Some(tag.seq) {
             return;
         }

@@ -1,15 +1,15 @@
 //! The op slot: one git mutation at a time, so two quick presses never
-//! race for `index.lock`. A running op holds `op_seq`, the sequence of
-//! its effect, until its result comes back.
+//! race for `index.lock`. A running op holds the slot with the sequence
+//! of its effect until its result comes back.
 //!
 //! The slot also keeps the busy count, the user effects still in flight
-//! that the status bar shows as loading, and `op_error`, why the last op
+//! that the status bar shows as loading, and the op error, why the last op
 //! was refused. A fetch, pull, push or review fetch holds the slot while
 //! git or ssh may ask for a credential, so the credential question lives
 //! here too, and quitting answers it and stops git.
 //!
-//! The fields stay on `AppState` until #377, and some features still
-//! write them directly. Core goes through the methods here.
+//! [`OpSlot`]'s fields are private to this file, so features and tests go
+//! through the methods here and cannot hand-copy a take or a release.
 
 use crate::effect::{Effect, Tag};
 use crate::features::commits::reflog;
@@ -21,26 +21,39 @@ use crate::op::{GitOp, MergeStrategy};
 use crate::popup::{CredentialPrompt, ErrorPopup, Popup};
 use crate::refresh;
 
+/// The state behind the op slot, held by `AppState`. Its fields are
+/// private so only this file can change them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OpSlot {
+    /// Sequence of the git op in flight. Ops run one at a time so two
+    /// quick presses never race for `index.lock`.
+    seq: Option<u64>,
+    /// User-started effects still in flight, for the loading indicator.
+    busy: u32,
+    /// The last op's failure, or why one was refused.
+    error: Option<String>,
+}
+
 /// What the slot holds: queries for guards and views.
 impl AppState {
     /// Whether a git op holds the slot, so no other may start.
     pub(crate) fn op_is_running(&self) -> bool {
-        self.op_seq.is_some()
+        self.op_slot.seq.is_some()
     }
 
     /// Whether `tag`'s effect is the op holding the slot.
     pub(crate) fn holds_op(&self, tag: Tag) -> bool {
-        self.op_seq == Some(tag.seq)
+        self.op_slot.seq == Some(tag.seq)
     }
 
     /// Whether a user effect is still in flight, for the loading indicator.
     pub(crate) fn is_busy(&self) -> bool {
-        self.busy > 0
+        self.op_slot.busy > 0
     }
 
     /// Why the last op was refused, for the status bar.
     pub(crate) fn op_error(&self) -> Option<&str> {
-        self.op_error.as_deref()
+        self.op_slot.error.as_deref()
     }
 }
 
@@ -53,7 +66,7 @@ impl AppState {
             return None;
         }
         let seq = self.take_seq();
-        self.op_seq = Some(seq);
+        self.op_slot.seq = Some(seq);
         Some(self.user_tag(seq))
     }
 
@@ -62,13 +75,13 @@ impl AppState {
     pub(crate) fn release_op(&mut self, tag: Tag) {
         self.user_done(tag);
         if self.holds_op(tag) {
-            self.op_seq = None;
+            self.op_slot.seq = None;
         }
     }
 
     /// A tag counted as busy until its answer lands.
     pub(crate) fn user_tag(&mut self, seq: u64) -> Tag {
-        self.busy += 1;
+        self.raise_busy();
         Tag {
             generation: self.generation,
             seq,
@@ -76,16 +89,45 @@ impl AppState {
         }
     }
 
+    /// A tag for a load that a user may or may not have asked for: only a
+    /// user's counts as busy.
+    pub(crate) fn effect_tag(&mut self, seq: u64, user: bool) -> Tag {
+        if user {
+            return self.user_tag(seq);
+        }
+        Tag {
+            generation: self.generation,
+            seq,
+            user: false,
+        }
+    }
+
     /// A user effect's answer landed, stale or not.
     pub(crate) fn user_done(&mut self, tag: Tag) {
         if tag.user {
-            self.busy = self.busy.saturating_sub(1);
+            self.lower_busy();
         }
+    }
+
+    /// Count a user effect that carries no tag, a custom command with
+    /// captured output, as busy until [`Self::lower_busy`].
+    pub(crate) fn raise_busy(&mut self) {
+        self.op_slot.busy += 1;
+    }
+
+    /// The untagged user effect [`Self::raise_busy`] counted is done.
+    pub(crate) fn lower_busy(&mut self) {
+        self.op_slot.busy = self.op_slot.busy.saturating_sub(1);
     }
 
     /// Forget a refusal; it named something no longer on screen.
     pub(crate) fn clear_op_error(&mut self) {
-        self.op_error = None;
+        self.op_slot.error = None;
+    }
+
+    /// Say why an op a feature checked itself cannot go ahead.
+    pub(crate) fn set_op_error(&mut self, message: String) {
+        self.op_slot.error = Some(message);
     }
 
     /// What quitting tells git: no to an open credential question first,
@@ -118,12 +160,12 @@ impl AppState {
         if self.context != Context::Workspace || self.op_is_running() {
             return vec![];
         }
-        self.op_error = None;
+        self.clear_op_error();
         let op = match op {
             Ok(Some(op)) => op,
             Ok(None) => return vec![],
             Err(message) => {
-                self.op_error = Some(message);
+                self.set_op_error(message);
                 return vec![];
             }
         };
@@ -167,8 +209,8 @@ impl AppState {
             // A commit's failure shows in its own popup, not the status bar.
             self.end_commit(Some(result));
         } else {
-            // A failed git command gets a popup; `op_error` is for refusals.
-            self.op_error = None;
+            // A failed git command gets a popup; the op error is for refusals.
+            self.clear_op_error();
             match result {
                 // Git stops before committing a squash, so say what is left.
                 Ok(())
@@ -238,6 +280,35 @@ impl AppState {
         self.popups
             .retain(|popup| !matches!(popup, Popup::Credential(_)));
         self.popups.len() != before
+    }
+}
+
+/// Test helpers that set up or read the slot without running an op.
+#[cfg(test)]
+impl AppState {
+    /// Pretend the op with sequence `seq` holds the slot.
+    pub(crate) fn hold_op(&mut self, seq: u64) {
+        self.op_slot.seq = Some(seq);
+    }
+
+    /// Pretend no op holds the slot.
+    pub(crate) fn free_op(&mut self) {
+        self.op_slot.seq = None;
+    }
+
+    /// Pretend `n` user effects are in flight.
+    pub(crate) fn set_busy(&mut self, n: u32) {
+        self.op_slot.busy = n;
+    }
+
+    /// How many user effects are in flight.
+    pub(crate) fn busy_count(&self) -> u32 {
+        self.op_slot.busy
+    }
+
+    /// The sequence of the op holding the slot.
+    pub(crate) fn held_seq(&self) -> Option<u64> {
+        self.op_slot.seq
     }
 }
 
@@ -400,13 +471,16 @@ mod tests {
         let tag = state.take_op().expect("the slot is free");
 
         assert_eq!((tag.generation, tag.user), (3, true));
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         assert!(state.holds_op(tag) && state.op_is_running());
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
 
-        let before = (state.op_seq, state.busy, state.next_seq);
+        let before = (state.held_seq(), state.busy_count(), state.next_seq);
         assert_eq!(state.take_op(), None);
-        assert_eq!((state.op_seq, state.busy, state.next_seq), before);
+        assert_eq!(
+            (state.held_seq(), state.busy_count(), state.next_seq),
+            before
+        );
     }
 
     #[test]
@@ -444,7 +518,7 @@ mod tests {
             }
             other => panic!("expected one RunOp, got {other:?}"),
         }
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         assert_eq!(state.start_op(Ok(Some(stage_a()))), vec![]);
     }
 
@@ -454,20 +528,24 @@ mod tests {
         let tag = state.take_op().unwrap();
 
         state.release_op(user(tag.generation, tag.seq + 1));
-        assert_eq!(state.op_seq, Some(tag.seq), "another seq leaves the slot");
-        assert_eq!(state.busy, 0, "a user tag still lowers busy");
+        assert_eq!(
+            state.held_seq(),
+            Some(tag.seq),
+            "another seq leaves the slot"
+        );
+        assert_eq!(state.busy_count(), 0, "a user tag still lowers busy");
 
         state.release_op(tag);
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.busy, 0, "busy never underflows");
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.busy_count(), 0, "busy never underflows");
 
-        state.busy = 2;
+        state.set_busy(2);
         let background = Tag {
             user: false,
             ..user(0, 99)
         };
         state.release_op(background);
-        assert_eq!(state.busy, 2, "a background tag leaves busy alone");
+        assert_eq!(state.busy_count(), 2, "a background tag leaves busy alone");
     }
 
     #[test]
@@ -479,8 +557,50 @@ mod tests {
 
         state.user_done(tag);
         state.user_done(tag);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert!(!state.op_is_running(), "a user tag is not the slot");
+    }
+
+    #[test]
+    fn a_user_effect_tag_counts_as_busy_and_a_background_one_does_not() {
+        let mut state = workspace();
+        state.generation = 5;
+
+        assert_eq!(state.effect_tag(3, true), user(5, 3));
+        assert_eq!(state.busy_count(), 1);
+
+        let background = state.effect_tag(4, false);
+        assert_eq!(
+            background,
+            Tag {
+                user: false,
+                ..user(5, 4)
+            }
+        );
+        assert_eq!(state.busy_count(), 1);
+        assert!(!state.op_is_running(), "neither tag is the slot");
+    }
+
+    #[test]
+    fn a_feature_can_say_why_an_op_was_refused() {
+        let mut state = workspace();
+
+        state.set_op_error("Nothing to undo".into());
+        assert_eq!(state.op_error(), Some("Nothing to undo"));
+
+        state.clear_op_error();
+        assert_eq!(state.op_error(), None);
+    }
+
+    #[test]
+    fn untagged_busy_counts_up_and_down_without_underflow() {
+        let mut state = workspace();
+
+        state.raise_busy();
+        assert!(state.is_busy());
+        state.lower_busy();
+        state.lower_busy();
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -504,12 +624,12 @@ mod tests {
     fn an_older_generations_result_frees_the_slot_and_shows_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
         let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.generation += 1;
 
         assert_eq!(state.update(finished(tag, op, Err("boom".into()))), vec![]);
         assert!(!state.op_is_running());
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         assert_eq!(state.popups, vec![]);
     }
 

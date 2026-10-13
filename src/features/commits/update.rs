@@ -121,12 +121,7 @@ impl AppState {
         let short_oid = row.short_oid.clone();
         let seq = self.take_seq();
         self.commits.open = Some(CommitFilesList::begin(range.clone(), short_oid, seq));
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadCommitFiles { tag, range }]
     }
 
@@ -137,9 +132,7 @@ impl AppState {
         result: Result<Vec<CommitFile>, String>,
     ) -> Vec<Effect> {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -341,13 +334,13 @@ mod tests {
     #[test]
     fn enter_opens_the_commit_against_its_first_parent_as_a_user_load() {
         let mut state = on_commit_five();
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let (tag, range) = files_load(&press(&mut state, KeyCode::Enter));
 
         assert_eq!(range, range_of("c5", "c6"));
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         let open = state.commits.open.as_ref().unwrap();
         assert_eq!((open.short_oid.as_str(), open.loaded), ("c5", false));
         assert_eq!(state.key_focus(), KeyScope::CommitFiles);
@@ -380,12 +373,12 @@ mod tests {
     #[test]
     fn the_loaded_files_show_the_first_ones_diff_in_that_commit_and_j_the_next() {
         let mut state = on_commit_five();
-        let busy = state.busy;
+        let busy = state.busy_count();
         let range = range_of("c5", "c6");
 
         let effects = opened(&mut state, two_commit_files());
 
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         let request = diff_request(&effects);
         assert_eq!(request.commit, Some(range.clone()));
         assert_eq!(request.path, "src/lib.rs".into());
@@ -418,13 +411,13 @@ mod tests {
         for stale in stale {
             let mut state = on_commit_five();
             let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
-            let busy = state.busy;
+            let busy = state.busy_count();
             let effects = state.update(AppIntent::CommitFilesLoaded {
                 tag: stale(tag),
                 result: Ok(two_commit_files()),
             });
             assert_eq!(effects, vec![]);
-            assert_eq!(state.busy, busy - 1);
+            assert_eq!(state.busy_count(), busy - 1);
             assert!(!state.commits.open.as_ref().unwrap().loaded);
         }
     }

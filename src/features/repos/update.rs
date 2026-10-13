@@ -99,13 +99,8 @@ impl AppState {
             return vec![];
         }
         let seq = self.take_seq();
-        self.busy += 1;
         vec![Effect::InitRepo {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user: true,
-            },
+            tag: self.user_tag(seq),
         }]
     }
 
@@ -114,9 +109,7 @@ impl AppState {
         tag: Tag,
         result: Result<PathBuf, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -140,7 +133,7 @@ impl AppState {
         if self.context != Context::Workspace {
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some("Wait for the operation to finish".into());
             return vec![];
         }
@@ -274,7 +267,7 @@ mod tests {
         assert!(matches!(effects[..], [Effect::LoadRecent { .. }]));
         assert_eq!(*recent_list(&state), RecentList::new(true));
         assert_eq!(state.key_focus(), KeyScope::Recent);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -404,7 +397,7 @@ mod tests {
         state.update(AppIntent::Start);
         let tag = init_tag(&press_char(&mut state, 'i'));
         assert!(tag.user);
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         // Enter on the init row asks the same, once git is done.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some("Loading…".into()));
@@ -415,7 +408,8 @@ mod tests {
         });
 
         assert_eq!(
-            state.busy, 4,
+            state.busy_count(),
+            4,
             "only the status, branch, remotes and tags loads are left"
         );
         assert_eq!(state.repo, Some("/w".into()));
@@ -461,7 +455,7 @@ mod tests {
             result: Err("fatal: cannot mkdir".into()),
         });
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert_eq!(state.repo, None);
         match state.popups.last() {
             Some(Popup::Error(error)) => assert_eq!(error.message, "fatal: cannot mkdir"),
@@ -655,7 +649,7 @@ mod tests {
     #[test]
     fn open_repo_waits_for_a_running_op() {
         let mut state = in_repo_a();
-        state.op_seq = Some(9);
+        state.hold_op(9);
         assert_eq!(state.update(AppIntent::OpenRepo("/r/b".into())), vec![]);
         assert_eq!(
             state.notice,
@@ -678,7 +672,7 @@ mod tests {
             result: Ok("/w".into()),
         });
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert_eq!(state.repo, None);
     }
 }

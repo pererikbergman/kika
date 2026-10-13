@@ -112,9 +112,7 @@ impl AppState {
         tag: Tag,
         result: Result<IgnoreAdded, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -451,11 +449,11 @@ mod tests {
     #[test]
     fn space_while_an_op_runs_shows_why_and_does_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
-        state.op_seq = Some(99);
-        let busy = state.busy;
+        state.hold_op(99);
+        let busy = state.busy_count();
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
         assert_eq!(state.notice, Some("An operation is running".into()));
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
@@ -477,8 +475,8 @@ mod tests {
             state.notice,
             Some("Resolve conflicts before staging everything".into())
         );
-        assert_eq!(state.op_error, None);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.op_error(), None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -492,15 +490,15 @@ mod tests {
     #[test]
     fn toggle_stage_on_an_unstaged_file_runs_one_user_op_and_raises_busy() {
         let (mut state, _) = with_files(three_files(), 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
 
         assert_eq!(op, GitOp::Stage(vec!["a.rs".into()]));
         assert!(tag.user);
         assert_eq!(tag.generation, state.generation);
-        assert_eq!(state.op_seq, Some(tag.seq));
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.held_seq(), Some(tag.seq));
+        assert_eq!(state.busy_count(), busy + 1);
     }
 
     #[test]
@@ -529,16 +527,16 @@ mod tests {
             ..changed("both.rs", 'U', 'U')
         };
         let (mut state, _) = with_files(vec![changed("a.rs", '.', 'M'), conflict], 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
 
         assert_eq!(
-            state.op_error.as_deref(),
+            state.op_error(),
             Some("Resolve conflicts before staging everything")
         );
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
@@ -549,18 +547,18 @@ mod tests {
         };
         let (mut state, _) = with_files(vec![conflict], 24);
         assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn a_second_toggle_while_one_is_in_flight_does_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
         op_of(&state.update(AppIntent::ToggleStage));
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
         assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
@@ -572,17 +570,17 @@ mod tests {
         for state in [&mut review, &mut clean] {
             assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
             assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
-            assert_eq!(state.op_seq, None);
-            assert_eq!(state.op_error, None);
+            assert_eq!(state.held_seq(), None);
+            assert_eq!(state.op_error(), None);
         }
     }
 
     #[test]
     fn the_next_stage_key_clears_an_old_error() {
         let (mut state, _) = with_files(three_files(), 24);
-        state.op_error = Some("old".into());
+        state.set_op_error("old".into());
         op_of(&state.update(AppIntent::ToggleStage));
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
     }
 
     #[test]

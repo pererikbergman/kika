@@ -46,7 +46,7 @@ fn files_log_disabled(state: &AppState) -> Option<Reason> {
 /// Why no action can run on the selected commit now: git runs one
 /// operation at a time, and the log needs a commit.
 pub(crate) fn commit_action_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else {
         no_commit(state)
@@ -382,7 +382,7 @@ mod tests {
         // Git refuses a checkout that would lose work; it may go ahead.
         assert_eq!(checkout_commit_disabled(&state), None);
 
-        state.op_seq = Some(1);
+        state.hold_op(1);
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
             assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
         }

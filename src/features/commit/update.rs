@@ -42,21 +42,14 @@ impl AppState {
             return vec![];
         }
         let seq = self.take_seq();
-        self.busy += 1;
         self.commit = CommitFlow::LoadingAmend { seq };
         vec![Effect::LoadHeadMessage {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user: true,
-            },
+            tag: self.user_tag(seq),
         }]
     }
 
     pub(crate) fn head_message_loaded(&mut self, tag: Tag, result: Result<String, String>) {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let current = CommitFlow::LoadingAmend { seq: tag.seq };
         if tag.generation != self.generation || self.commit != current {
             return;
@@ -114,7 +107,7 @@ impl AppState {
     }
 
     /// Run the probed commit on the terminal when it may ask something,
-    /// else detached. `busy` and `op_seq` stay as they are until
+    /// else detached. The op slot and busy count stay as they are until
     /// `OpFinished`; a probe for another repository or op ends the commit
     /// here, giving the message back.
     pub(crate) fn commit_probed(
@@ -123,13 +116,8 @@ impl AppState {
         op: GitOp,
         facts: Option<PromptFacts>,
     ) -> Vec<Effect> {
-        if tag.generation != self.generation || self.op_seq != Some(tag.seq) {
-            if tag.user {
-                self.busy = self.busy.saturating_sub(1);
-            }
-            if self.op_seq == Some(tag.seq) {
-                self.op_seq = None;
-            }
+        if tag.generation != self.generation || !self.holds_op(tag) {
+            self.release_op(tag);
             self.end_commit(None);
             return vec![];
         }
@@ -255,7 +243,7 @@ mod tests {
     #[test]
     fn typing_a_message_and_ctrl_s_runs_the_commit() {
         let mut state = editing();
-        let busy = state.busy;
+        let busy = state.busy_count();
         type_text(&mut state, "subj\nline 1\nline 2");
 
         let (tag, op) = probe_of(&ctrl(&mut state, 's'));
@@ -271,8 +259,8 @@ mod tests {
             }
         );
         assert!(tag.user);
-        assert_eq!(state.op_seq, Some(tag.seq));
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.held_seq(), Some(tag.seq));
+        assert_eq!(state.busy_count(), busy + 1);
         assert!(matches!(&state.commit, CommitFlow::Running(e) if e.subject == "subj"));
     }
 
@@ -282,7 +270,7 @@ mod tests {
         type_text(&mut state, "  ");
         assert_eq!(ctrl(&mut state, 's'), vec![]);
         assert_eq!(state.notice, Some("Write a subject first".into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(editor(&state).subject, "  ");
     }
 
@@ -355,7 +343,7 @@ mod tests {
         assert_eq!(state.notice, Some("Nothing to commit".into()));
 
         let (mut state, _) = with_files(three_files(), 24);
-        state.op_seq = Some(5);
+        state.hold_op(5);
         press(&mut state, KeyCode::Char('c'));
         assert_eq!(state.notice, Some("An operation is running".into()));
         assert_eq!(state.commit, CommitFlow::Closed);
@@ -478,7 +466,7 @@ mod tests {
         let (mut state, tag, op) = submitted();
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(state.commit, CommitFlow::Closed);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert!(
             matches!(
                 effects.as_slice(),
@@ -501,7 +489,7 @@ mod tests {
         let (mut state, tag, op) = submitted();
         let effects = state.update(finished(tag, op, Err("lint failed".into())));
 
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
         assert!(
             matches!(
                 effects.as_slice(),
@@ -546,12 +534,12 @@ mod tests {
     #[test]
     fn a_stale_commit_result_returns_to_editing_without_a_refresh() {
         let (mut state, tag, op) = submitted();
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.generation += 1;
         let effects = state.update(finished(tag, op, Err("boom".into())));
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, busy - 1);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.busy_count(), busy - 1);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(editor(&state).subject, "subj");
     }
 
@@ -598,7 +586,7 @@ mod tests {
         for (state, tag, op) in submissions() {
             assert!(matches!(op, GitOp::Commit { .. }), "{op:?}");
             assert!(tag.user);
-            assert_eq!(state.op_seq, Some(tag.seq));
+            assert_eq!(state.held_seq(), Some(tag.seq));
             assert!(matches!(state.commit, CommitFlow::Running(_)));
         }
     }
@@ -606,7 +594,7 @@ mod tests {
     #[test]
     fn a_commit_that_signs_is_handed_the_terminal() {
         for (mut state, tag, op) in submissions() {
-            let busy = state.busy;
+            let busy = state.busy_count();
             let effects = state.update(probed(tag, &op, signing()));
             assert_eq!(
                 effects,
@@ -615,8 +603,8 @@ mod tests {
                     op: op.clone()
                 })]
             );
-            assert_eq!(state.busy, busy, "OpFinished still settles busy");
-            assert_eq!(state.op_seq, Some(tag.seq));
+            assert_eq!(state.busy_count(), busy, "OpFinished still settles busy");
+            assert_eq!(state.held_seq(), Some(tag.seq));
             assert!(matches!(state.commit, CommitFlow::Running(_)));
         }
     }
@@ -676,11 +664,11 @@ mod tests {
     #[test]
     fn a_commit_with_no_signing_and_no_hooks_runs_detached() {
         for (mut state, tag, op) in submissions() {
-            let busy = state.busy;
+            let busy = state.busy_count();
             let effects = state.update(probed(tag, &op, Some(PromptFacts::default())));
             assert_eq!(effects, vec![Effect::RunOp { tag, op }]);
-            assert_eq!(state.busy, busy);
-            assert_eq!(state.op_seq, Some(tag.seq));
+            assert_eq!(state.busy_count(), busy);
+            assert_eq!(state.held_seq(), Some(tag.seq));
         }
     }
 
@@ -699,7 +687,7 @@ mod tests {
         state.update(probed(tag, &op, signing()));
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(state.commit, CommitFlow::Closed);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert!(!effects.is_empty(), "the status is reloaded");
     }
 
@@ -709,8 +697,8 @@ mod tests {
             state.generation += 1;
             let effects = state.update(probed(tag, &op, signing()));
             assert_eq!(effects, vec![]);
-            assert_eq!(state.busy, 0);
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.busy_count(), 0);
+            assert_eq!(state.held_seq(), None);
             editor(&state);
         }
     }
@@ -718,10 +706,10 @@ mod tests {
     /// `A` on a clean tree with commits: the popup is loading HEAD's message.
     fn loading_amend() -> (AppState, Tag) {
         let (mut state, _) = with_files(vec![], 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let tag = head_load(&press(&mut state, KeyCode::Char('A')));
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.commit, CommitFlow::LoadingAmend { seq: tag.seq });
         assert_eq!(state.key_focus(), KeyScope::CommitLoading);
         (state, tag)
@@ -737,9 +725,9 @@ mod tests {
     /// Amending HEAD's "subj\n\nbody", the popup open on it.
     fn amending() -> AppState {
         let (mut state, tag) = loading_amend();
-        let busy = state.busy;
+        let busy = state.busy_count();
         assert_eq!(state.update(head_loaded(tag, Ok("subj\n\nbody"))), vec![]);
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         state
     }
 
@@ -804,22 +792,22 @@ mod tests {
     #[test]
     fn esc_while_loading_closes_and_the_late_result_is_ignored() {
         let (mut state, tag) = loading_amend();
-        let busy = state.busy;
+        let busy = state.busy_count();
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
         assert_eq!(state.commit, CommitFlow::Closed);
         assert!(!state.should_quit);
 
         state.update(head_loaded(tag, Ok("late")));
         assert_eq!(state.commit, CommitFlow::Closed);
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
     }
 
     #[test]
     fn a_stale_head_load_is_ignored_but_still_lowers_busy() {
         let (mut state, tag) = loading_amend();
         // Another user load in flight, so two decrements stay above zero.
-        state.busy += 1;
-        let busy = state.busy;
+        state.set_busy(state.busy_count() + 1);
+        let busy = state.busy_count();
         state.update(head_loaded(
             Tag {
                 seq: tag.seq + 99,
@@ -836,7 +824,7 @@ mod tests {
             Ok("other"),
         ));
         assert_eq!(state.commit, CommitFlow::LoadingAmend { seq: tag.seq });
-        assert_eq!(state.busy, busy - 2);
+        assert_eq!(state.busy_count(), busy - 2);
     }
 
     #[test]
@@ -858,7 +846,7 @@ mod tests {
         assert_eq!(state.commit, CommitFlow::Closed);
 
         let (mut state, _) = with_files(three_files(), 24);
-        state.op_seq = Some(7);
+        state.hold_op(7);
         assert_eq!(press(&mut state, KeyCode::Char('A')), vec![]);
         assert_eq!(state.notice, Some("An operation is running".into()));
         assert_eq!(state.commit, CommitFlow::Closed);
@@ -924,7 +912,7 @@ mod tests {
     fn a_message_from_the_editor_commits_right_away_keeping_the_choices() {
         let mut state = amending();
         ctrl(&mut state, 'n');
-        let busy = state.busy;
+        let busy = state.busy_count();
         let effects = state.update(AppIntent::CommitMessageEdited {
             result: Ok(Some("x\n\ny\n".into())),
         });
@@ -939,8 +927,8 @@ mod tests {
                 fixup: None,
             }
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.held_seq(), Some(tag.seq));
+        assert_eq!(state.busy_count(), busy + 1);
         match &state.commit {
             CommitFlow::Running(editor) => {
                 assert_eq!(editor.subject, "x");
@@ -960,7 +948,7 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(state.commit, before);
         assert_eq!(state.notice, Some("Empty message; commit aborted".into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -984,6 +972,6 @@ mod tests {
         });
         assert_eq!(effects, vec![]);
         assert_eq!(state.commit, CommitFlow::Closed);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 }

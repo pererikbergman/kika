@@ -181,13 +181,13 @@ mod tests {
         let mut state = testing_c1(&[Operation::Bisect]);
         let (_, op) = op_of(&press_char(&mut state, 'g'));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
-        state.op_seq = None;
+        state.free_op();
         let (_, op) = op_of(&press_char(&mut state, 'b'));
         assert_eq!(op, bisect_mark(BisectMark::Bad, "c1", false));
-        state.op_seq = None;
+        state.free_op();
         let (_, op) = op_of(&press_char(&mut state, 's'));
         assert_eq!(op, bisect_mark(BisectMark::Skip, "c1", false));
-        state.op_seq = None;
+        state.free_op();
         let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Good)));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c0", false));
     }
@@ -224,7 +224,7 @@ mod tests {
                 vec![]
             );
             assert_eq!(state.notice, Some(reason.into()));
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
         }
         let mut untracked_only = ready_to_bisect();
         untracked_only.files = vec![untracked("new.txt")];
@@ -249,7 +249,7 @@ mod tests {
             state.update(AppIntent::BisectSelected(BisectMark::Bad)),
             vec![]
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,

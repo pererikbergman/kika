@@ -672,7 +672,7 @@ mod tests {
             Some("GitHub: rate limited")
         );
         assert!(state.popups.is_empty());
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
         // Midnight and the last minute of a day.
         state.forge.limited_until = Some(1_699_920_000);
         state.now = 1_699_920_000 - 1;
@@ -933,7 +933,7 @@ mod tests {
             force_with_lease: false,
         };
         state.remote = Some(RemoteRun::new(push, 1, Some("main".into())));
-        state.busy = 1;
+        state.set_busy(1);
 
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "| main"), "{rows:#?}");

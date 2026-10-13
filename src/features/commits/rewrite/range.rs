@@ -199,7 +199,7 @@ mod tests {
                 "{key}"
             );
             assert_eq!(state.commits.range_anchor, None, "{key}");
-            assert!(state.op_seq.is_some(), "{key}");
+            assert!(state.op_is_running(), "{key}");
             assert_eq!(state.notice, None, "{key}");
         }
     }
@@ -228,7 +228,7 @@ mod tests {
         let mut state = asked_to_drop_three();
         let kind = ConfirmKind::DropRange(vec![id(0), id(1), id(2)]);
         assert_eq!(state.popups, [Popup::Confirm(kind.clone())]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(state.key_focus(), KeyScope::DropRangeConfirm);
         assert_eq!(kind.title(), "Drop commits");
         assert!(state.confirm_question(&kind).contains("Drop 3 commits"));
@@ -237,10 +237,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(kind.clone())]);
         assert_eq!(keys(&mut state, "n"), vec![]);
-        assert_eq!((state.popups.len(), state.op_seq), (0, None));
+        assert_eq!((state.popups.len(), state.held_seq()), (0, None));
         assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!((state.popups.len(), state.op_seq), (0, None));
+        assert_eq!((state.popups.len(), state.held_seq()), (0, None));
         assert!(state.commits.range_anchor.is_some(), "kept for another try");
 
         keys(&mut state, "d");
@@ -267,16 +267,16 @@ mod tests {
         for mut state in [moved, gone, shrunk] {
             assert_eq!(keys(&mut state, "y"), vec![]);
             assert_eq!(state.notice, Some(SELECTION_CHANGED.into()));
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
             assert_eq!(state.popups, []);
         }
 
         // The same commits, but an op started meanwhile: still nothing.
         let mut busy = asked_to_drop_three();
-        busy.op_seq = Some(7);
+        busy.hold_op(7);
         assert_eq!(keys(&mut busy, "y"), vec![]);
         assert_eq!(busy.notice, Some(OP_RUNNING.into()));
-        assert_eq!(busy.op_seq, Some(7));
+        assert_eq!(busy.held_seq(), Some(7));
 
         // Sent without the question, ids that are not the range do nothing.
         let mut state = on_log(0);
@@ -286,7 +286,7 @@ mod tests {
             vec![]
         );
         assert_eq!(state.notice, Some(SELECTION_CHANGED.into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
             let mut state = state.clone();
             assert_eq!(keys(&mut state, key), vec![], "{key}");
             assert_eq!(state.notice, Some(RANGE_GAP.into()), "{key}");
-            assert_eq!((state.popups.len(), state.op_seq), (0, None), "{key}");
+            assert_eq!((state.popups.len(), state.held_seq()), (0, None), "{key}");
             assert!(state.commits.range_anchor.is_some(), "{key}");
         }
     }
@@ -355,7 +355,7 @@ mod tests {
                 Some(keymap::CLEAR_RANGE_FIRST.into()),
                 "{intent:?}"
             );
-            assert_eq!(state.op_seq, None, "{intent:?}");
+            assert_eq!(state.held_seq(), None, "{intent:?}");
         }
     }
 }

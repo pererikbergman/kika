@@ -179,7 +179,7 @@ pub(crate) static FILES_DISCARD_CONFIRM: &[Binding] = &[
 ];
 
 fn stage_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     match state.selected.and_then(|i| state.files.get(i)) {
@@ -192,7 +192,7 @@ fn stage_disabled(state: &AppState) -> Option<Reason> {
 }
 
 pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.files.is_empty() {
         Some("No changes to stage".into())
@@ -211,7 +211,7 @@ pub(crate) fn files_stage_disabled(state: &AppState) -> Option<Reason> {
             return stage_disabled(state);
         }
         let range = state.files_range();
-        if state.op_seq.is_some() {
+        if state.op_is_running() {
             Some(OP_RUNNING.into())
         } else if range
             .iter()

@@ -61,7 +61,7 @@ async fn space_stages_the_selected_file_in_git() {
     assert_eq!((entry.index, entry.worktree), ('M', '.'));
     let selected = app.selected_line().expect("a file is selected");
     assert!(selected.contains("a.txt"), "selected: {selected:?}");
-    assert_eq!(app.state().busy, 0);
+    assert_eq!(app.state().busy_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1214,7 +1214,7 @@ async fn a_file_edited_outside_appears_on_the_next_files_poll() {
     app.intent(AppIntent::Watch(WatchEvent::PollFiles)).await;
 
     app.assert_screen_contains("outside.txt");
-    assert_eq!(app.state().busy, 0);
+    assert_eq!(app.state().busy_count(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

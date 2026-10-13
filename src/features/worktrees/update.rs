@@ -58,9 +58,7 @@ impl AppState {
     }
 
     pub(crate) fn worktrees_loaded(&mut self, tag: Tag, result: Result<Vec<Worktree>, String>) {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return;
         }
@@ -150,9 +148,7 @@ impl AppState {
     /// Whether an add or remove result is for the open popup's last ask,
     /// in this repository. Lowers busy either way.
     fn worktree_action_current(&mut self, tag: Tag) -> bool {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         tag.generation == self.generation
             && self
                 .worktree_list()
@@ -210,7 +206,7 @@ impl AppState {
         if !matches!(self.popups.last(), Some(Popup::RemoveWorktree(_))) {
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -313,17 +309,17 @@ mod tests {
     fn w_opens_the_worktrees_popup_and_loads_it() {
         let mut state = with_branches();
         state.repo = Some("/r/a".into());
-        let busy = state.busy;
+        let busy = state.busy_count();
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
         assert_eq!((tag.generation, tag.user), (state.generation, true));
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
         assert_eq!(*the_worktree_list(&state), WorktreeList::loading(tag.seq));
         state.update(AppIntent::WorktreesLoaded {
             tag,
             result: Ok(four_worktrees()),
         });
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         assert_eq!(the_worktree_list(&state).items, Some(four_worktrees()));
     }
 
@@ -619,7 +615,7 @@ mod tests {
         let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
         state.update(branches_loaded(tag, three_branches()));
         state.branches.selected = Some(0);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let effects = state.update(AppIntent::SubmitPrompt);
         match &effects[..] {
             [Effect::AddWorktree { tag, path, branch }] => {
@@ -630,7 +626,7 @@ mod tests {
             }
             other => panic!("expected one AddWorktree, got {other:?}"),
         }
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
     }
 
@@ -755,7 +751,7 @@ mod tests {
         assert_eq!(state.notice, Some("Worktree is missing".into()));
 
         let mut state = with_worktrees(four_worktrees(), 1);
-        state.op_seq = Some(99);
+        state.hold_op(99);
         press_char(&mut state, 'd');
         assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
@@ -847,7 +843,7 @@ mod tests {
         state.repo = Some("/r/a".into());
         let old = worktrees_tag(&press_char(&mut state, 'W'));
         let new = worktrees_tag(&state.update(AppIntent::OpenWorktrees));
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.update(AppIntent::WorktreesLoaded {
             tag: old,
             result: Ok(four_worktrees()),
@@ -861,12 +857,12 @@ mod tests {
             result: Ok(four_worktrees()),
         });
         assert_eq!(the_worktree_list(&state).items, None);
-        assert_eq!(state.busy, busy - 2);
+        assert_eq!(state.busy_count(), busy - 2);
 
         // An add whose popup was closed, and a remove from an older ask.
         let (mut state, tag) = adding();
         state.update(AppIntent::PopPopup);
-        let busy = state.busy;
+        let busy = state.busy_count();
         assert_eq!(
             state.update(AppIntent::WorktreeAdded {
                 tag,
@@ -875,7 +871,7 @@ mod tests {
             vec![]
         );
         assert!(state.popups.is_empty());
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
 
         let mut state = with_worktrees(four_worktrees(), 1);
         press_char(&mut state, 'd');

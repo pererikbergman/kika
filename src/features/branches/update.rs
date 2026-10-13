@@ -34,43 +34,32 @@ impl AppState {
         }
         let seq = self.take_seq();
         self.branches.list_seq = Some(seq);
-        self.start_branch_load(user);
+        let branches = self.start_branch_load(seq, user);
         let remotes = self.take_seq();
         self.branches.remotes.list_seq = Some(remotes);
-        if user {
-            self.busy += 1;
-        }
+        let remotes = self.effect_tag(remotes, user);
         let tags = self.take_seq();
         self.branches.tags.list_seq = Some(tags);
-        if user {
-            self.busy += 1;
-        }
-        let tag = |seq| Tag {
-            generation: self.generation,
-            seq,
-            user,
-        };
+        let tags = self.effect_tag(tags, user);
         vec![
-            Effect::LoadBranches { tag: tag(seq) },
-            Effect::LoadRemotes { tag: tag(remotes) },
-            Effect::LoadTags { tag: tag(tags) },
+            Effect::LoadBranches { tag: branches },
+            Effect::LoadRemotes { tag: remotes },
+            Effect::LoadTags { tag: tags },
         ]
     }
 
     /// A user load raises the busy count; a background one the watch's flag.
-    fn start_branch_load(&mut self, user: bool) {
-        if user {
-            self.busy += 1;
-        } else {
+    fn start_branch_load(&mut self, seq: u64, user: bool) -> Tag {
+        if !user {
             self.watch.branches_pending = true;
         }
+        self.effect_tag(seq, user)
     }
 
     /// Every branch load reports back once, stale or not.
-    fn end_branch_load(&mut self, user: bool) {
-        if user {
-            self.busy = self.busy.saturating_sub(1);
-        } else {
+    fn end_branch_load(&mut self, tag: Tag) {
+        self.user_done(tag);
+        if !tag.user {
             self.watch.branches_pending = false;
         }
     }
@@ -82,7 +71,7 @@ impl AppState {
         tag: Tag,
         result: Result<Vec<Branch>, String>,
     ) -> Vec<Effect> {
-        self.end_branch_load(tag.user);
+        self.end_branch_load(tag);
         if tag.generation != self.generation || self.branches.list_seq != Some(tag.seq) {
             return vec![];
         }
@@ -126,12 +115,7 @@ impl AppState {
         };
         let seq = self.take_seq();
         self.branches.log.begin(seq, refname.clone());
-        self.start_branch_load(user);
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user,
-        };
+        let tag = self.start_branch_load(seq, user);
         vec![Effect::LoadBranchLog { tag, refname }]
     }
 
@@ -141,7 +125,7 @@ impl AppState {
         refname: Vec<u8>,
         result: Result<Vec<LogRow>, String>,
     ) {
-        self.end_branch_load(tag.user);
+        self.end_branch_load(tag);
         let log = &mut self.branches.log;
         if tag.generation != self.generation || log.for_ref.as_ref() != Some(&refname) {
             return;
@@ -207,7 +191,7 @@ impl AppState {
             self.notice = Some("A branch needs a name".into());
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -309,7 +293,7 @@ impl AppState {
             self.notice = Some("No such remote branch; fetch, or check the name".into());
             return vec![];
         };
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -466,14 +450,14 @@ mod tests {
             Some("Cannot delete the current branch".into())
         );
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn branch_actions_are_refused_while_an_op_runs_or_with_nothing_selected() {
         let mut state = with_branches();
         state.update(AppIntent::BranchNext);
-        state.op_seq = Some(99);
+        state.hold_op(99);
         for intent in [
             AppIntent::CheckoutBranch,
             AppIntent::NewBranch,
@@ -506,7 +490,7 @@ mod tests {
             KeyCode::Char('D'),
             KeyModifiers::SHIFT,
         )));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(state.popups.len(), 1);
 
         let (_, op) = op_of(&press_char(&mut state, 'y'));
@@ -534,7 +518,7 @@ mod tests {
 
         assert_eq!(press_char(&mut state, 'y'), vec![]);
         assert_eq!(state.popups.len(), 1, "y leaves the question open");
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (_, op) = op_of(&state.update(AppIntent::Key(KeyPress::new(
             KeyCode::Char('D'),
@@ -558,7 +542,7 @@ mod tests {
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, []);
             assert!(!state.should_quit);
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
         }
     }
 
@@ -623,7 +607,7 @@ mod tests {
         type_text(&mut state, "  ");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some("A branch needs a name".into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         press_char(&mut state, 'n');
         assert!(state.branches.pending.is_some());

@@ -368,7 +368,7 @@ mod tests {
             lines(&[LineId::removed(1), LineId::added(1), LineId::added(2)])
         );
         assert_eq!(state.custom_patch.as_ref().unwrap().source.oid, id(2));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         assert_eq!(press(&mut state, KeyCode::Char(' ')), vec![]);
         assert_eq!(state.custom_patch, None);
@@ -388,7 +388,7 @@ mod tests {
             picked(&state, "a.rs"),
             lines(&[LineId::removed(1), LineId::added(1)])
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -572,7 +572,7 @@ mod tests {
             assert_eq!(effects, vec![], "{choice:?}");
             assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()), "{choice:?}");
             assert_eq!(state.popups, [], "{choice:?}");
-            assert_eq!(state.op_seq, None, "{choice:?}");
+            assert_eq!(state.held_seq(), None, "{choice:?}");
         }
     }
 
@@ -672,7 +672,7 @@ mod tests {
         };
         let mut state = with_patch(2);
         let picks = state.custom_patch.take();
-        state.op_seq = Some(1);
+        state.hold_op(1);
         state.branch.as_mut().unwrap().in_progress = vec![Operation::Rebase];
         state.files.push(changed("t.rs", '.', 'M'));
         state.commits.filter = "x".into();
@@ -682,7 +682,7 @@ mod tests {
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         state.custom_patch = picks;
         reasons.push(why(&state, PatchChoice::MoveToSelected));
-        state.op_seq = None;
+        state.free_op();
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         state.branch.as_mut().unwrap().in_progress.clear();
         reasons.push(why(&state, PatchChoice::MoveToSelected));

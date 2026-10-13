@@ -216,7 +216,7 @@ pub(crate) fn remove_worktree_disabled(state: &AppState) -> Option<Reason> {
         Some("Worktree is missing".into())
     } else if worktree.unsure {
         Some(UNSURE.into())
-    } else if state.op_seq.is_some() {
+    } else if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else {
         None

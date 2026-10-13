@@ -33,9 +33,7 @@ impl AppState {
         tag: Tag,
         result: Result<Vec<TagRef>, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let tags = &mut self.branches.tags;
         if tag.generation != self.generation || tags.list_seq != Some(tag.seq) {
             return vec![];
@@ -138,7 +136,7 @@ impl AppState {
     }
 
     pub(crate) fn create_tag(&mut self, op: GitOp) -> Vec<Effect> {
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -369,7 +367,7 @@ mod tests {
     fn a_tag_answer_waits_for_a_running_op_and_no_commit_opens_nothing() {
         let mut state = on_commit();
         press_char(&mut state, 't');
-        state.op_seq = Some(99);
+        state.hold_op(99);
         type_text(&mut state, "v1");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));

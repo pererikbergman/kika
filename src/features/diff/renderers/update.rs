@@ -126,12 +126,7 @@ impl AppState {
             }
             _ => self.rendered = Some(RenderedDiff::new(seq, request.path.clone(), request.side)),
         }
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::RenderDiff {
             tag,
             request,
@@ -142,9 +137,7 @@ impl AppState {
 
     pub(crate) fn diff_rendered(&mut self, tag: Tag, result: Result<Vec<StyledRow>, String>) {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return;
         }
@@ -223,14 +216,14 @@ mod tests {
     #[test]
     fn cycling_renders_the_shown_diff_at_the_pane_width() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let (tag, request, cols) = render_of(&state.update(AppIntent::CycleRenderer));
         assert_eq!(state.renderer, Some(0));
         assert_eq!(cols, state.pane_cols());
         // 80 columns: the Diff pane is 53 wide, less borders and gutter.
         assert_eq!(cols, 50);
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(
             request,
             DiffRequest::for_entry(&state.files[0], state.diff_options)
@@ -330,9 +323,9 @@ mod tests {
         let mut state = with_renderers(three_files(), &["delta"]);
         let (old, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
         let (new, _, _) = render_of(&state.update(AppIntent::SelectNext));
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.update(rendered(old, "old\n"));
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         assert!(state.rendered.as_ref().unwrap().rows.is_empty());
         state.update(rendered(new, "new\n"));
         let shown = state.rendered_shown().expect("rendered rows shown");
