@@ -10,14 +10,19 @@
 //! `Effect::LoadStatus` and `Effect::AppendIgnore`, whose variants stay in
 //! core.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`FilesIntent`] in
+//! `AppIntent::Files`, and its one `update` arm calls [`update`] here.
+//! `Discard` and `OpenInEditor`, which its keys also bind, are shared core
+//! intents.
+//!
 //! Its `pub(crate)` API:
-//! - the handlers (`update.rs`) that core calls: `move_selection` for
-//!   `SelectNext` and `SelectPrev`, `toggle_stage` and `toggle_stage_all`,
-//!   `ask_discard_range` (from core `ask_discard`), `go_to_file`, and
-//!   `open_ignore`, `ignore_answered`, `ignore_written` and
-//!   `files_popup_closed` for the `.gitignore` flow;
+//! - the intent enum [`FilesIntent`] and the free function [`update`];
+//! - the handlers (`update.rs`): `move_selection`, `toggle_stage` and
+//!   `toggle_stage_all`, `ask_discard_range` (from core `ask_discard`),
+//!   `go_to_file`, and `open_ignore`, `ignore_answered`, `ignore_written`
+//!   and `files_popup_closed` for the `.gitignore` flow;
 //! - `IgnoreDraft` (the `ignore_draft` field) and `IgnoreAdded` (the
-//!   `IgnoreWritten` intent);
+//!   `FilesIntent::IgnoreWritten` intent);
 //! - `keys::{FILES_NAV, FILES_STAGE, FILES_DISCARD_OPEN, FILES_IGNORE,
 //!   FILES_MENU, FILES_DISCARD_CONFIRM}` and the guards
 //!   `stage_all_disabled` and `files_stage_disabled`, which the actions
@@ -45,12 +50,10 @@
 //! - `status_unchanged`, `files_range`, `files_range_paths`,
 //!   `RANGE_FILES_CHANGED` and `select_from` (the commit and stash closes
 //!   call it), the files fields of `AppState`, `refresh::Selection`,
-//!   `src/git/status.rs`, the `Effect::LoadStatus` variant, the
-//!   `StatusLoaded`/`SelectNext`/`SelectPrev` intents and their
-//!   `update()` arms;
-//! - the `ignore_draft` field, the `OpenIgnore`, `IgnorePatternAnswered`,
-//!   `IgnoreWritten` and `GoToFile` intents, and the prompt kinds and menu
-//!   item that open them;
+//!   `src/git/status.rs`, the `Effect::LoadStatus` variant, and the
+//!   `StatusLoaded` intent and its `update()` arm;
+//! - the `ignore_draft` field, and the prompt kinds and menu item that
+//!   open the `.gitignore` and go-to-file prompts;
 //! - discard itself: `ask_discard`, `discard_confirm`, the discard
 //!   question's popup and answer, `GitOp::discard_for` and
 //!   `GitOp::discard_many`, and the guards `discard_disabled` and
@@ -60,8 +63,12 @@
 pub(crate) mod effects;
 pub(crate) mod git;
 mod gitignore;
+mod intent;
 pub(crate) mod keys;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::FilesIntent;
+pub(crate) use update::update;
 
 pub(crate) use gitignore::{IgnoreAdded, IgnoreDraft};

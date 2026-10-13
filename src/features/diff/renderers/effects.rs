@@ -11,6 +11,8 @@ use super::external_diff::{discover, read_diff, run_renderer};
 use super::{ExternalRenderer, RendererKind, ansi, diff_tool};
 use crate::background;
 use crate::effect::Tag;
+use crate::features::diff::DiffIntent;
+use crate::features::diff::renderers::RenderersIntent;
 use crate::git::GitRunner;
 use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
@@ -28,7 +30,7 @@ pub(crate) fn find(
         move || discover(runner.as_ref(), pager, tool),
         // A panic finds nothing; the built-in view still works.
         |_| Default::default(),
-        AppIntent::RenderersFound,
+        |renderers| AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Found(renderers))),
     );
 }
 
@@ -60,7 +62,12 @@ pub(crate) fn render(
         },
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed(label),
-        move |result| AppIntent::DiffRendered { tag, result },
+        move |result| {
+            AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Rendered {
+                tag,
+                result,
+            }))
+        },
     );
 }
 
@@ -73,6 +80,8 @@ mod tests {
 
     use super::*;
     use crate::effect::{Effect, Runtime};
+    use crate::features::diff::DiffIntent;
+    use crate::features::diff::renderers::RenderersIntent;
     #[cfg(unix)]
     use crate::git::diff::DiffSide;
     use crate::git::fake::{FakeRunner, ok};
@@ -110,10 +119,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::DiffRendered {
+            Some(AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Rendered {
                 tag: got,
                 result: Ok(rows),
-            }) => {
+            }))) => {
                 assert_eq!(got, tag);
                 let texts: Vec<String> = rows.iter().map(|r| r.text()).collect();
                 assert_eq!(texts, ["-a", "+b"]);
@@ -148,10 +157,10 @@ mod tests {
             cols: 40,
         });
         match rx.recv().await {
-            Some(AppIntent::DiffRendered {
+            Some(AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Rendered {
                 tag: got,
                 result: Ok(rows),
-            }) => {
+            }))) => {
                 assert_eq!(got, tag);
                 assert!(rx.try_recv().is_err(), "one answer only");
                 rows.iter().map(|r| r.text()).collect()
@@ -219,7 +228,7 @@ mod tests {
         runtime.spawn(Effect::FindRenderers);
 
         match rx.recv().await {
-            Some(AppIntent::RenderersFound(found)) => {
+            Some(AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Found(found)))) => {
                 let labels: Vec<&str> = found.iter().map(|r| r.label.as_str()).collect();
                 assert_eq!(labels, ["riff", "delta"]);
             }

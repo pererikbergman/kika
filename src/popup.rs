@@ -15,6 +15,7 @@ use crate::features::command_log::CommandLogView;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::custom_commands::CustomCommandsIntent;
+use crate::features::files::FilesIntent;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
@@ -560,7 +561,7 @@ impl PromptKind {
 
     pub fn submit(self, text: String) -> AppIntent {
         match self {
-            PromptKind::GoToFile => AppIntent::GoToFile(text),
+            PromptKind::GoToFile => AppIntent::Files(FilesIntent::GoToFile(text)),
             PromptKind::Command => {
                 AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered(text))
             }
@@ -588,7 +589,7 @@ impl PromptKind {
             PromptKind::TagMessage => {
                 AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(text)))
             }
-            PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
+            PromptKind::IgnorePattern => AppIntent::Files(FilesIntent::IgnorePatternAnswered(text)),
             PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
             PromptKind::PatchCommitMessage => AppIntent::Commits(CommitsIntent::CustomPatch(
                 CustomPatchIntent::CommitMessage(text),
@@ -680,6 +681,7 @@ impl ErrorPopup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::files::FilesIntent;
     use crate::features::operation::OperationIntent;
     use crate::features::sync::SyncIntent;
 
@@ -1312,7 +1314,7 @@ mod tests {
         assert_eq!(quit.text, "Quit Kika? (y/n)");
         assert_eq!(
             PromptKind::GoToFile.submit("b".into()),
-            AppIntent::GoToFile("b".into())
+            AppIntent::Files(FilesIntent::GoToFile("b".into()))
         );
         assert_eq!(
             PromptKind::Command.submit("c".into()),

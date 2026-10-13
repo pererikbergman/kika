@@ -15,6 +15,8 @@ use crate::features::commits::CommitsIntent;
 use crate::features::commits::reflog::Reflog;
 use crate::features::commits::reflog::ReflogIntent;
 use crate::features::commits::rewrite::RewriteIntent;
+use crate::features::diff::DiffIntent;
+use crate::features::files::FilesIntent;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::features::sync::SyncIntent;
 use crate::filtered_list::{FilteredList, Row};
@@ -208,13 +210,13 @@ pub(crate) fn line(text: &str) -> DiffLine {
 
 /// A `DiffLoaded` chunk of `n` lines for `tag`, each naming its seq.
 pub(crate) fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
-    AppIntent::DiffLoaded {
+    diff_chunk(
         tag,
-        result: Ok(DiffChunk {
+        DiffChunk {
             lines: (0..n).map(|i| line(&format!("{}:{i}", tag.seq))).collect(),
             done,
-        }),
-    }
+        },
+    )
 }
 
 pub(crate) fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
@@ -255,7 +257,7 @@ pub(crate) fn commit_op() -> GitOp {
 
 pub(crate) fn select_path(state: &mut AppState, path: &str) {
     while state.files[state.selected.unwrap()].path != path.into() {
-        state.update(AppIntent::SelectNext);
+        state.update(AppIntent::Files(FilesIntent::Next));
     }
 }
 
@@ -336,10 +338,10 @@ pub(crate) fn view(state: &AppState) -> &HunkView {
 pub(crate) fn focused(files: Vec<FileEntry>, bytes: &[u8]) -> AppState {
     let (mut state, _) = with_files(files, 24);
     let (tag, _) = patch_load(&press(&mut state, KeyCode::Enter));
-    state.update(AppIntent::PatchLoaded {
+    state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
         tag,
         result: Ok(patch_of(bytes)),
-    });
+    }));
     state
 }
 
@@ -426,7 +428,7 @@ pub(crate) fn submodules_tag(effects: &[Effect]) -> Tag {
 pub(crate) fn with_submodules(subs: Vec<Submodule>) -> AppState {
     let (state, _) = with_files(three_files(), 24);
     let mut state = state.with_location(Some(TOP.into()), TOP.into());
-    state.update(AppIntent::SelectNext);
+    state.update(AppIntent::Files(FilesIntent::Next));
     let tag = submodules_tag(&press_char(&mut state, 'S'));
     state.update(AppIntent::SubmodulesLoaded {
         tag,
@@ -1050,6 +1052,55 @@ pub(crate) fn open_commit(state: &mut AppState) -> Vec<Effect> {
 /// tests in other features need not name it.
 pub(crate) fn next_blame_line(state: &mut AppState) -> Vec<Effect> {
     state.update(AppIntent::Blame(BlameIntent::Next))
+}
+
+/// Move the Files panel's selection down one row. Core builds the files
+/// intent, so tests in other features need not name it.
+pub(crate) fn select_next(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Files(FilesIntent::Next))
+}
+
+/// Stage or unstage the selected file, as Space in the Files panel does.
+/// Core builds the files intent, so tests in other features need not name
+/// it.
+pub(crate) fn toggle_stage(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Files(FilesIntent::ToggleStage))
+}
+
+/// Hide or show whitespace-only changes, as `w` does. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn toggle_whitespace(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace))
+}
+
+/// A chunk of the diff stream for `tag`. Core builds the diff intent, so
+/// tests in other features need not name it.
+pub(crate) fn diff_chunk(tag: Tag, chunk: DiffChunk) -> AppIntent {
+    AppIntent::Diff(DiffIntent::Loaded {
+        tag,
+        result: Ok(chunk),
+    })
+}
+
+/// A finished whole-file patch load for `tag`. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn patch_loaded(tag: Tag, patch: FilePatch) -> AppIntent {
+    AppIntent::Diff(DiffIntent::PatchLoaded {
+        tag,
+        result: Ok(patch),
+    })
+}
+
+/// The intent that switches the Diff pane's side. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn toggle_diff_side_intent() -> AppIntent {
+    AppIntent::Diff(DiffIntent::ToggleSide)
+}
+
+/// The intent that edits the selected hunk. Core builds the diff intent,
+/// so tests in other features need not name it.
+pub(crate) fn edit_hunk_intent() -> AppIntent {
+    AppIntent::Diff(DiffIntent::EditHunk)
 }
 
 pub(crate) const PUSH: RemoteOp = RemoteOp::Push {

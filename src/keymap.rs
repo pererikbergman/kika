@@ -2497,6 +2497,9 @@ mod tests {
     };
     use crate::features::conflicts::ConflictsIntent;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
+    use crate::features::diff::DiffIntent;
+    use crate::features::diff::renderers::RenderersIntent;
+    use crate::features::files::FilesIntent;
     use crate::features::repos::ReposIntent;
     use crate::features::sync::SyncIntent;
     use crate::git::bisect::BisectMark;
@@ -2542,12 +2545,12 @@ mod tests {
             bind(V, KeyScope::Global, Quit),
             bind(X, KeyScope::Workspace, RefreshStatus),
             bind(Y, KeyScope::Workspace, RefreshStatus),
-            bind(X, KeyScope::Files, SelectNext),
+            bind(X, KeyScope::Files, Files(FilesIntent::Next)),
             Binding {
                 disabled: off,
-                ..bind(V, KeyScope::Files, SelectPrev)
+                ..bind(V, KeyScope::Files, Files(FilesIntent::Prev))
             },
-            bind(W, KeyScope::Review, ToggleStage),
+            bind(W, KeyScope::Review, Files(FilesIntent::ToggleStage)),
         ]
     }
 
@@ -2565,7 +2568,7 @@ mod tests {
         let files = KeyScope::Files;
         assert_eq!(
             run(&table, files, &state, plain('x')),
-            AppIntent::SelectNext
+            AppIntent::Files(FilesIntent::Next)
         );
         assert_eq!(
             run(&table, files, &state, plain('y')),
@@ -2590,7 +2593,7 @@ mod tests {
         ));
         assert_eq!(
             run(&table, KeyScope::Review, &state, plain('w')),
-            AppIntent::ToggleStage
+            AppIntent::Files(FilesIntent::ToggleStage)
         );
     }
 
@@ -2742,10 +2745,16 @@ mod tests {
             Some(Quit)
         );
         assert_eq!(files(plain('r')), Some(RefreshStatus));
-        assert_eq!(files(plain('j')), Some(SelectNext));
-        assert_eq!(files(key(KeyCode::Down, none)), Some(SelectNext));
-        assert_eq!(files(plain('k')), Some(SelectPrev));
-        assert_eq!(files(key(KeyCode::Up, none)), Some(SelectPrev));
+        assert_eq!(files(plain('j')), Some(Files(FilesIntent::Next)));
+        assert_eq!(
+            files(key(KeyCode::Down, none)),
+            Some(Files(FilesIntent::Next))
+        );
+        assert_eq!(files(plain('k')), Some(Files(FilesIntent::Prev)));
+        assert_eq!(
+            files(key(KeyCode::Up, none)),
+            Some(Files(FilesIntent::Prev))
+        );
         for mods in [none, shift] {
             assert_eq!(
                 files(key(KeyCode::Char('J'), mods)),
@@ -2764,8 +2773,8 @@ mod tests {
             files(key(KeyCode::PageUp, none)),
             Some(ScrollDiff(Scroll::PageUp))
         );
-        assert_eq!(files(plain(' ')), Some(ToggleStage));
-        assert_eq!(files(plain('a')), Some(ToggleStageAll));
+        assert_eq!(files(plain(' ')), Some(Files(FilesIntent::ToggleStage)));
+        assert_eq!(files(plain('a')), Some(Files(FilesIntent::ToggleStageAll)));
         assert_eq!(files(plain('c')), Some(Commit(CommitIntent::Open)));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
@@ -3044,7 +3053,10 @@ mod tests {
                 .find(|b| b.scope == scope && b.matches(k))
                 .map(|b| b.intent.clone())
         };
-        assert_eq!(bound(KeyScope::Diff, plain('e')), Some(EditHunk));
+        assert_eq!(
+            bound(KeyScope::Diff, plain('e')),
+            Some(Diff(DiffIntent::EditHunk))
+        );
         assert_eq!(bound(KeyScope::Files, plain('e')), None);
         assert_eq!(bound(KeyScope::Lines, plain('e')), None);
         assert_eq!(
@@ -4485,7 +4497,10 @@ mod tests {
             assert_eq!(from(scope, key(KeyCode::Left, none)), Some(FocusLeft));
         }
         // List movement stays list movement.
-        assert_eq!(from(KeyScope::Files, plain('j')), Some(SelectNext));
+        assert_eq!(
+            from(KeyScope::Files, plain('j')),
+            Some(Files(FilesIntent::Next))
+        );
         assert_eq!(from(KeyScope::Workspace, plain('j')), None);
         // None of them are in the bar, which is full at 80 columns.
         for c in ['0', '1', '2', '3', '4', '5', 'l', 'z'] {
@@ -4985,6 +5000,8 @@ mod tests {
                 Sync(_) => Some("sync"),
                 Operation(_) => Some("operation"),
                 Repos(_) => Some("repos"),
+                Files(_) => Some("files"),
+                Diff(_) => Some("diff"),
                 _ => None,
             }
         }
@@ -4994,8 +5011,8 @@ mod tests {
                 b.intent,
                 Quit | Commit(CommitIntent::Interrupt)
                     | OpenInEditor
-                    | EditHunk
-                    | CycleRenderer
+                    | Diff(DiffIntent::EditHunk)
+                    | Diff(DiffIntent::Renderers(RenderersIntent::Cycle))
                     | Commit(CommitIntent::EditExternally)
                     | InitSubmodule
                     | UpdateSubmodule
@@ -5150,7 +5167,8 @@ mod tests {
                 "conflict.mergetool",
             ]
         );
-        for feature in ["blame", "custom_commands", "operation"] {
+        assert_eq!(risky_in("diff"), ["diff.edit_hunk", "diff.renderer"]);
+        for feature in ["blame", "custom_commands", "operation", "files"] {
             assert!(risky_in(feature).is_empty(), "{feature}");
         }
     }
@@ -5538,7 +5556,10 @@ mod tests {
             Err("Only untracked files can be ignored".into())
         );
         state.files = vec![file(EntryKind::Untracked, '?', '?')];
-        assert_eq!(resolve_i(&state), Ok(AppIntent::OpenIgnore));
+        assert_eq!(
+            resolve_i(&state),
+            Ok(AppIntent::Files(FilesIntent::OpenIgnore))
+        );
         for id in ["commits.copy_menu", "files.ignore"] {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }

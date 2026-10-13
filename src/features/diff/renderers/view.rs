@@ -140,6 +140,8 @@ mod tests {
     use ratatui::style::{Color, Modifier};
 
     use super::*;
+    use crate::features::diff::DiffIntent;
+    use crate::features::diff::renderers::RenderersIntent;
     use crate::git::diff::{DiffSide, LineKind};
     use crate::layout::SidePanel;
     use crate::model::{AppState, Focus};
@@ -196,7 +198,9 @@ mod tests {
         let (x, y) = find(&buffer, "1 │old one");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::Red));
 
-        state.update(crate::intent::AppIntent::CycleRenderer);
+        state.update(crate::intent::AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "+built in"), "{rows:#?}");
         assert!(contains(&rows, " Diff "), "{rows:#?}");

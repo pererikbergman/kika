@@ -476,6 +476,7 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::effect::Tag;
+    use crate::features::diff::DiffIntent;
     use crate::git::diff::DiffChunk;
     use crate::layout::SidePanel;
     use crate::test_support::*;
@@ -641,10 +642,10 @@ mod tests {
         let lines = (0..60)
             .map(|i| line(if i == 30 || i == 50 { "+foo" } else { " x" }))
             .collect();
-        state.update(AppIntent::DiffLoaded {
+        state.update(AppIntent::Diff(DiffIntent::Loaded {
             tag,
             result: Ok(DiffChunk { lines, done: false }),
-        });
+        }));
     }
 
     fn preview_current(state: &AppState) -> Option<usize> {
