@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use crate::git::commit_files::{
     CommitFile, CommitId, CommitRange, LineCounts, commit_files, numstat,
 };
-use crate::git::diff::terminal_safe;
-use crate::git::remote::{AskpassEnv, askpass_for, safe, with_prompts};
+use crate::git::error::GitError;
+use crate::git::remote::{AskpassEnv, askpass_for, with_prompts};
 use crate::git::remotes::RemoteName;
 use crate::git::runner::{GitCommand, GitRunner};
 
@@ -47,11 +47,10 @@ pub struct PrFileRow {
 
 /// A read-only query: no lock, git's text in English, and in a partial
 /// clone no object fetched behind the user's back (`GIT_NO_LAZY_FETCH`,
-/// which git before 2.44 ignores).
+/// which git before 2.44 ignores). It names no path, so literal pathspecs
+/// change nothing.
 fn query(cmd: GitCommand) -> GitCommand {
-    cmd.env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .env("GIT_NO_LAZY_FETCH", "1")
+    cmd.standard_env().env("GIT_NO_LAZY_FETCH", "1")
 }
 
 /// `git cat-file -e <oid>^{commit}`: succeeds only when the commit is here.
@@ -78,6 +77,8 @@ pub fn merge_base_command(base: &CommitId, head: &CommitId) -> GitCommand {
 /// 2.29 and later, and older git ignores it (`--no-write-fetch-head`
 /// would fail there). No tags and no submodules: only the forge's host is
 /// reached. `--` ends the options, as git 2.15's fetch already allows.
+/// English and no optional locks, but not literal pathspecs: a fetch may gc
+/// and run the `pre-auto-gc` hook, which keeps the user's.
 pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitCommand {
     let cmd = GitCommand::new("-c")
         .arg("fetch.writeFetchHEAD=false")
@@ -90,8 +91,8 @@ pub fn fetch_commits_command(remote: &RemoteName, oids: &[CommitId]) -> GitComma
         .arg(remote.as_os_string());
     oids.iter()
         .fold(cmd, |cmd, oid| cmd.arg(oid.as_str()))
+        .locale_env()
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
 }
 
 /// Which of `oids` are not commits here, in order. A failure to run git at
@@ -104,7 +105,7 @@ pub fn missing_commits(
     for oid in oids {
         let output = runner
             .run(&has_commit_command(oid))
-            .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+            .map_err(|e| GitError::io(&e).to_string())?;
         if !output.success && !missing.contains(*oid) {
             missing.push((*oid).clone());
         }
@@ -126,18 +127,10 @@ pub fn fetch_commits(
     }
     let askpass = askpass_for(runner, askpass, &|key| std::env::var_os(key).is_some());
     let cmd = with_prompts(fetch_commits_command(remote, oids), askpass.as_ref());
-    let output = runner
-        .run(&cmd)
-        .map_err(|e| safe(e.to_string().as_bytes()))?;
-    if output.success {
-        return Ok(());
-    }
-    let message = safe(&output.stderr);
-    Err(if message.is_empty() {
-        "git fetch failed".into()
-    } else {
-        message
-    })
+    runner
+        .run_checked(&cmd)
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 /// The merge base of `base` and `head`.
@@ -147,16 +140,8 @@ pub fn merge_base(
     head: &CommitId,
 ) -> Result<CommitId, String> {
     let output = runner
-        .run(&merge_base_command(base, head))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "The pull request's head and base share no history".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&merge_base_command(base, head))
+        .map_err(|e| e.message_or("The pull request's head and base share no history"))?;
     let text = String::from_utf8_lossy(&output.stdout);
     CommitId::parse(text.trim())
         .ok_or_else(|| "git merge-base gave an answer Kika could not read".into())
@@ -200,6 +185,8 @@ pub fn pr_files(
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::env_list;
 
     fn id(hex: &str) -> CommitId {
         CommitId::parse(hex).unwrap()
@@ -210,10 +197,6 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
-    }
-
-    fn has_env(cmd: &GitCommand, key: &str, value: &str) -> bool {
-        cmd.envs().iter().any(|(k, v)| k == key && v == value)
     }
 
     #[test]
@@ -244,14 +227,25 @@ mod tests {
                 "b0",
             ]
         );
+        let query = env_list(&[
+            ("LC_ALL", "C"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_LITERAL_PATHSPECS", "1"),
+            ("GIT_NO_LAZY_FETCH", "1"),
+        ]);
         for cmd in [
             has_commit_command(&id("a1")),
             merge_base_command(&id("b0"), &id("a1")),
-            fetch_commits_command(&RemoteName::from("origin"), &[id("a1")]),
         ] {
-            assert!(has_env(&cmd, "GIT_OPTIONAL_LOCKS", "0"), "{cmd:?}");
-            assert!(has_env(&cmd, "LC_ALL", "C"), "{cmd:?}");
+            assert_eq!(cmd.env_profile(), EnvProfile::Standard, "{cmd:?}");
+            assert_eq!(cmd.process_env(), query, "{cmd:?}");
         }
+        let fetch = fetch_commits_command(&RemoteName::from("origin"), &[id("a1")]);
+        assert_eq!(fetch.env_profile(), EnvProfile::Locale);
+        assert_eq!(
+            fetch.process_env(),
+            env_list(&[("LC_ALL", "C"), ("GIT_OPTIONAL_LOCKS", "0")])
+        );
         assert_eq!(
             fetch_commits_command(&RemoteName::from("o"), &[]).subcommand(),
             "fetch"
@@ -269,6 +263,8 @@ mod tests {
             Ok(vec![id("a1")])
         );
         fake.assert_done();
+        let query = has_commit_command(&id("a1")).process_env();
+        assert_eq!(fake.process_envs(), vec![query; 3]);
     }
 
     #[test]
@@ -303,7 +299,7 @@ mod tests {
             ),
             Ok(())
         );
-        let env = fake.envs().pop().unwrap();
+        let env = fake.process_envs().pop().unwrap();
         for key in ["GIT_TERMINAL_PROMPT", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"] {
             assert!(env.iter().any(|(k, _)| k == key), "{key} missing: {env:?}");
         }

@@ -80,6 +80,7 @@ pub(crate) fn detached_checkout(oid: &CommitId) -> GitCommand {
         .arg("--detach")
         .arg(oid.as_str())
         .arg("--")
+        .write_env()
 }
 
 #[cfg(test)]
@@ -234,14 +235,21 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
             let envs: Vec<_> = cmd
-                .envs()
+                .process_env()
                 .iter()
-                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .map(|(k, v)| {
+                    (
+                        k.to_str().unwrap().to_owned(),
+                        v.to_str().unwrap().to_owned(),
+                    )
+                })
                 .collect();
             assert_eq!(
                 envs,
-                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")],
+                [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")]
+                    .map(|(k, v)| (k.to_owned(), v.to_owned())),
                 "{op:?}"
             );
         }

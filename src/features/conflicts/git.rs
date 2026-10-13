@@ -1,37 +1,26 @@
 //! Git attributes Kika reads for one file.
 
 use super::state::DEFAULT_MARKER_SIZE;
-use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::git::runner::{GitCommand, GitRunner};
 
-/// `git check-attr -z conflict-marker-size -- <path>`. The path is read
-/// literally, never as a pattern.
+/// `git check-attr -z conflict-marker-size -- <path>`, a read. The path is
+/// read literally, never as a pattern.
 pub fn marker_size_command(path: &RepoPath) -> GitCommand {
     GitCommand::new("check-attr")
         .arg("-z")
         .arg("conflict-marker-size")
         .arg("--")
         .arg(path.as_os_str())
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// How long `path`'s conflict markers are: its `conflict-marker-size`
 /// attribute, or git's default when that is unset or not a positive number.
 pub fn conflict_marker_size(runner: &dyn GitRunner, path: &RepoPath) -> Result<usize, String> {
     let output = runner
-        .run(&marker_size_command(path))
+        .run_checked(&marker_size_command(path))
         .map_err(|e| e.to_string())?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git check-attr failed".to_string()
-        } else {
-            message
-        });
-    }
     Ok(parse_marker_size(&output.stdout))
 }
 
@@ -50,6 +39,8 @@ fn parse_marker_size(stdout: &[u8]) -> usize {
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::env_list;
 
     #[test]
     fn the_command_is_literal_and_names_the_path_after_the_separator() {
@@ -59,9 +50,14 @@ mod tests {
             args,
             ["check-attr", "-z", "conflict-marker-size", "--", "-x"]
         );
-        assert!(
-            cmd.envs()
-                .contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into()))
+        assert_eq!(cmd.env_profile(), EnvProfile::Standard);
+        assert_eq!(
+            cmd.process_env(),
+            env_list(&[
+                ("LC_ALL", "C"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_LITERAL_PATHSPECS", "1"),
+            ])
         );
     }
 
@@ -98,6 +94,15 @@ mod tests {
         assert_eq!(
             conflict_marker_size(&runner, &"a.txt".into()),
             Err("fatal: bad".into())
+        );
+        // The read the runner was given runs as a read.
+        assert_eq!(
+            runner.process_envs(),
+            [env_list(&[
+                ("LC_ALL", "C"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_LITERAL_PATHSPECS", "1"),
+            ])]
         );
     }
 

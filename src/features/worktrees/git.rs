@@ -9,7 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use super::trust::mark_untrusted;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
+use crate::git::error::GitError;
 use crate::git::path::{RepoPath, os_string};
 use crate::git::runner::{GitCommand, GitRunner};
 
@@ -56,13 +56,14 @@ impl Worktree {
 }
 
 /// A read: no optional locks, and English output so the keys are fixed.
+/// It names no path and runs no hook, so literal pathspecs change nothing.
 /// `-z` (git 2.36+) ends fields with NUL, so any path survives whole.
 pub fn list_command(z: bool) -> GitCommand {
     let mut cmd = GitCommand::new("worktree").arg("list").arg("--porcelain");
     if z {
         cmd = cmd.arg("-z");
     }
-    cmd.env("LC_ALL", "C").env("GIT_OPTIONAL_LOCKS", "0")
+    cmd.standard_env()
 }
 
 /// Every worktree, the main one first. `-z` is tried first; a git too old
@@ -76,16 +77,8 @@ pub fn read_worktrees(runner: &dyn GitRunner) -> Result<Vec<Worktree>, String> {
         return Ok(parse_list(&output.stdout, 0));
     }
     let output = runner
-        .run(&list_command(false))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git worktree list failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&list_command(false))
+        .map_err(|e| e.message_or("git worktree list failed"))?;
     let mut list = parse_list(&output.stdout, b'\n');
     match git_dirs(runner, &runner.workdir()) {
         Ok((_, common)) => mark_untrusted(&mut list, &common),
@@ -183,7 +176,8 @@ fn apply_field(worktree: &mut Worktree, field: &[u8]) -> bool {
 
 /// `git worktree add -- <abs path> <branch>`. The short name is passed,
 /// since `refs/heads/x` would make git detach. A name that git could read
-/// as an option, or `-` (git's `@{-1}`), is refused.
+/// as an option, or `-` (git's `@{-1}`), is refused. Only the locale: it
+/// takes a path and runs the `post-checkout` hook.
 pub fn add_command(abs_path: &Path, branch: &BranchName) -> Result<GitCommand, String> {
     if branch.0.is_empty() || branch.0.starts_with(b"-") {
         return Err(format!(
@@ -196,31 +190,28 @@ pub fn add_command(abs_path: &Path, branch: &BranchName) -> Result<GitCommand, S
         .arg("--")
         .arg(abs_path.as_os_str())
         .arg(branch.as_os_string())
-        .env("LC_ALL", "C"))
+        .locale_env())
 }
 
 /// `git worktree remove -- <path>`. Never forced: git refuses a worktree
-/// with changes or a lock, and that refusal is what the user sees.
+/// with changes or a lock, and that refusal is what the user sees. Only
+/// the locale, since it takes a path.
 pub fn remove_command(path: &RepoPath) -> GitCommand {
     GitCommand::new("worktree")
         .arg("remove")
         .arg("--")
         .arg(path.as_os_str())
-        .env("LC_ALL", "C")
+        .locale_env()
 }
 
 /// What a failed `worktree remove` says. Before git 2.17 there is no
 /// `remove`, and git answers with its usage text.
-pub fn remove_error(stderr: &[u8]) -> String {
-    if stderr.starts_with(b"usage: git worktree") {
+pub fn remove_error(error: &GitError) -> String {
+    let message = error.message_or("git worktree remove failed");
+    if message.starts_with("usage: git worktree") {
         return "Removing a worktree needs Git 2.17 or newer".into();
     }
-    let message = terminal_safe(stderr);
-    if message.is_empty() {
-        "git worktree remove failed".into()
-    } else {
-        message
-    }
+    message
 }
 
 /// Remove the linked worktree at `path`.
@@ -233,14 +224,10 @@ pub fn remove_worktree(runner: &dyn GitRunner, path: &RepoPath) -> Result<(), St
     {
         return Err("Switch to another worktree first".into());
     }
-    let output = runner
-        .run(&remove_command(path))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if output.success {
-        Ok(())
-    } else {
-        Err(remove_error(&output.stderr))
-    }
+    runner
+        .run_checked(&remove_command(path))
+        .map(drop)
+        .map_err(|e| remove_error(&e))
 }
 
 /// Check the typed target, then add a worktree for `branch` there.
@@ -253,33 +240,21 @@ pub fn add_worktree(
     let workdir = runner.workdir();
     let (git_dir, common_dir) = git_dirs(runner, &workdir)?;
     let path = prepare_add(&workdir, &git_dir, &common_dir, typed)?;
-    let output = runner
-        .run(&add_command(&path, branch)?)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git worktree add failed".into()
-        } else {
-            message
-        });
-    }
+    runner
+        .run_checked(&add_command(&path, branch)?)
+        .map_err(|e| e.message_or("git worktree add failed"))?;
     Ok(path)
 }
 
 /// This worktree's git directory and the one all worktrees share, with
-/// relative output taken from `workdir`, where the command ran.
+/// relative output taken from `workdir`, where the command ran. A plumbing
+/// read that names no path.
 fn git_dirs(runner: &dyn GitRunner, workdir: &Path) -> Result<(PathBuf, PathBuf), String> {
     let cmd = GitCommand::new("rev-parse")
         .arg("--git-dir")
         .arg("--git-common-dir")
-        .env("LC_ALL", "C");
-    let output = runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        return Err(terminal_safe(&output.stderr));
-    }
+        .standard_env();
+    let output = runner.run_checked(&cmd).map_err(|e| e.to_string())?;
     let stdout = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
     let mut lines = stdout.split(|&b| b == b'\n');
     match (lines.next(), lines.next(), lines.next()) {
@@ -398,6 +373,25 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{self, FakeRunner, TempDir, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::env_list;
+
+    /// The env of a read.
+    const STANDARD: [(&str, &str); 3] = [
+        ("LC_ALL", "C"),
+        ("GIT_OPTIONAL_LOCKS", "0"),
+        ("GIT_LITERAL_PATHSPECS", "1"),
+    ];
+
+    /// `stderr` as a failed `worktree remove` returns it.
+    fn removal_failed(stderr: &[u8]) -> GitError {
+        let output = crate::git::runner::GitOutput {
+            success: false,
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        };
+        GitError::failed(&remove_command(&"/r/x".into()), &output)
+    }
 
     const A: &str = "1111111111111111111111111111111111111111";
     const B: &str = "2222222222222222222222222222222222222222";
@@ -596,13 +590,8 @@ mod tests {
             let cmd = list_command(z);
             let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
             assert_eq!(args, if z { LIST_Z } else { LIST });
-            assert_eq!(
-                cmd.envs(),
-                [
-                    ("LC_ALL".into(), "C".into()),
-                    ("GIT_OPTIONAL_LOCKS".into(), "0".into())
-                ]
-            );
+            assert_eq!(cmd.env_profile(), EnvProfile::Standard);
+            assert_eq!(cmd.process_env(), env_list(&STANDARD));
         }
     }
 
@@ -657,7 +646,7 @@ mod tests {
             .collect();
         assert_eq!(unsure, [false, true]);
         runner.assert_done();
-        assert_eq!(runner.envs()[2], [("LC_ALL".into(), "C".into())]);
+        assert_eq!(runner.process_envs()[2], env_list(&STANDARD));
 
         let runner = FakeRunner::new()
             .expect(LIST_Z, fail("error: unknown switch `z'\n"))
@@ -673,7 +662,17 @@ mod tests {
         let runner = FakeRunner::new().expect(LIST_Z, ok(nul.as_bytes()));
         let list = read_worktrees(&runner).unwrap();
         assert!(list.iter().all(|w| !w.unsure), "{list:#?}");
-        assert_eq!(runner.envs().len(), 1);
+        assert_eq!(runner.process_envs().len(), 1);
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_silent_git_dirs_failure_names_the_command() {
+        let runner = FakeRunner::new().expect(GIT_DIRS, fail(""));
+        assert_eq!(
+            git_dirs(&runner, Path::new("/r")),
+            Err("git rev-parse failed".into())
+        );
         runner.assert_done();
     }
 
@@ -738,24 +737,28 @@ mod tests {
         let raw: Vec<&[u8]> = cmd.args().iter().map(|a| a.as_bytes()).collect();
         assert_eq!(raw, [&b"worktree"[..], b"remove", b"--", b"/r/-f\xff"]);
         assert!(!raw.iter().any(|a| *a == b"--force" || *a == b"-f"));
-        assert_eq!(cmd.envs(), [("LC_ALL".into(), "C".into())]);
+        assert_eq!(cmd.env_profile(), EnvProfile::Locale);
+        assert_eq!(cmd.process_env(), env_list(&[("LC_ALL", "C")]));
     }
 
     #[test]
     fn an_old_git_without_remove_says_which_git_is_needed() {
         let usage = b"usage: git worktree add [<options>] <path> [<commit-ish>]\n   or: git worktree list\n";
         assert_eq!(
-            remove_error(usage),
+            remove_error(&removal_failed(usage)),
             "Removing a worktree needs Git 2.17 or newer"
         );
         let dirty =
             b"fatal: '/r/x' contains modified or untracked files, use --force to delete it\n";
         assert_eq!(
-            remove_error(dirty),
+            remove_error(&removal_failed(dirty)),
             "fatal: '/r/x' contains modified or untracked files, use --force to delete it"
         );
-        assert_eq!(remove_error(b"\x1b[2J"), "\u{FFFD}[2J");
-        assert_eq!(remove_error(b""), "git worktree remove failed");
+        assert_eq!(remove_error(&removal_failed(b"\x1b[2J")), "\u{FFFD}[2J");
+        assert_eq!(
+            remove_error(&removal_failed(b"")),
+            "git worktree remove failed"
+        );
     }
 
     /// A work tree with its `.git` directory, canonical, in a temp dir.
@@ -857,6 +860,11 @@ mod tests {
             Ok(target)
         );
         runner.fake.assert_done();
+        // The rev-parse is a read; the add takes a path and runs a hook.
+        assert_eq!(
+            runner.fake.process_envs(),
+            [env_list(&STANDARD), env_list(&[("LC_ALL", "C")])]
+        );
 
         let runner = WorkdirRunner {
             fake: FakeRunner::new().expect(GIT_DIRS, ok(b".git\n.git\n")),

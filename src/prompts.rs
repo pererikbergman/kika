@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use crate::git::diff::terminal_safe;
+use crate::git::error::GitError;
 use crate::git::runner::{GitCommand, GitRunner};
 use crate::op::{GitOp, MergeStrategy};
 
@@ -90,11 +90,10 @@ pub fn read_prompt_facts(runner: &dyn GitRunner) -> Result<PromptFacts, String> 
     Ok(PromptFacts { signs, hooks })
 }
 
-/// A read that takes no lock and whose messages are in English.
+/// A read that takes no lock and whose messages are in English. Neither
+/// read names a path, so literal pathspecs change nothing.
 fn read_command(subcommand: &str) -> GitCommand {
-    GitCommand::new(subcommand)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+    GitCommand::new(subcommand).standard_env()
 }
 
 fn read_gpgsign(runner: &dyn GitRunner) -> Result<bool, String> {
@@ -102,7 +101,7 @@ fn read_gpgsign(runner: &dyn GitRunner) -> Result<bool, String> {
         .arg("--type=bool")
         .arg("--get")
         .arg("commit.gpgsign");
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if output.success {
         return Ok(output.stdout.trim_ascii() == b"true");
     }
@@ -110,21 +109,15 @@ fn read_gpgsign(runner: &dyn GitRunner) -> Result<bool, String> {
     if output.stderr.is_empty() {
         return Ok(false);
     }
-    Err(terminal_safe(&output.stderr))
+    Err(GitError::failed(&cmd, &output).to_string())
 }
 
 /// Where git looks for hooks, `core.hooksPath` included, as an absolute path.
 fn read_hooks_dir(runner: &dyn GitRunner) -> Result<std::path::PathBuf, String> {
     let cmd = read_command("rev-parse").arg("--git-path").arg("hooks");
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git rev-parse --git-path hooks failed".into()
-        } else {
-            message
-        });
-    }
+    let output = runner
+        .run_checked(&cmd)
+        .map_err(|e| e.message_or("git rev-parse --git-path hooks failed"))?;
     let dir = path_from_bytes(output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout));
     // Relative paths are relative to where git ran.
     Ok(runner.workdir().join(dir))
@@ -465,13 +458,14 @@ mod tests {
         );
         assert_eq!(read_prompt_facts(&runner), Ok(PromptFacts::default()));
         runner.assert_done();
-        for env in runner.envs() {
-            assert!(
-                env.contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into())),
-                "{env:?}"
-            );
-            assert!(env.contains(&("LC_ALL".into(), "C".into())), "{env:?}");
-        }
+        let read: Vec<(std::ffi::OsString, std::ffi::OsString)> = [
+            ("LC_ALL", "C"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_LITERAL_PATHSPECS", "1"),
+        ]
+        .map(|(k, v)| (k.into(), v.into()))
+        .into();
+        assert_eq!(runner.process_envs(), [read.clone(), read]);
 
         let runner = FakeRunner::new().expect(&config, fail("fatal: bad boolean \x1b[2J\n"));
         assert_eq!(
