@@ -5,10 +5,10 @@
 
 use std::path::Path;
 
-use super::git::StashMode;
+use super::git::{StashMode, checked};
 use crate::git::commit_files::CommitId;
 use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner, run_checked};
+use crate::git::runner::{GitCommand, GitRunner};
 use crate::git::status::{EntryKind, FileEntry};
 use crate::op::{GitOp, op_command};
 
@@ -120,8 +120,7 @@ pub(super) fn with_literal_paths(cmd: GitCommand, paths: &[RepoPath]) -> GitComm
     paths
         .iter()
         .fold(cmd.arg("--"), |cmd, p| cmd.arg(p.as_os_str()))
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .env("LC_ALL", "C")
+        .write_env()
 }
 
 /// Put the old sides of stashed renames back as they are at `head`, the
@@ -157,7 +156,7 @@ pub(crate) fn leading_dirs(path: &RepoPath) -> Vec<RepoPath> {
 /// old path or under it, or exactly at one of its leading directories. A
 /// file under a leading directory is fine; that directory is real.
 fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, String> {
-    let at_old = run_checked(runner, &restore_taken_command(restore))?;
+    let at_old = checked(runner, &restore_taken_command(restore))?;
     if !at_old.stdout.is_empty() {
         return Ok(true);
     }
@@ -170,7 +169,7 @@ fn restore_taken(runner: &dyn GitRunner, restore: &[RepoPath]) -> Result<bool, S
     if dirs.is_empty() {
         return Ok(false);
     }
-    let found = run_checked(runner, &restore_taken_command(&dirs))?;
+    let found = checked(runner, &restore_taken_command(&dirs))?;
     Ok((found.stdout.split(|&b| b == 0)).any(|name| dirs.iter().any(|d| d.as_bytes() == name)))
 }
 
@@ -197,14 +196,19 @@ fn restore_blocked_on_disk(top: &Path, restore: &[RepoPath]) -> bool {
 /// `HEAD` as a commit id, for a restore that must use the tree the push
 /// was made on.
 fn head_commit(runner: &dyn GitRunner) -> Result<CommitId, String> {
-    let cmd = GitCommand::new("rev-parse")
+    let output = checked(runner, &head_command())?;
+    CommitId::parse(String::from_utf8_lossy(&output.stdout).trim())
+        .ok_or_else(|| "Could not read HEAD".to_string())
+}
+
+/// `HEAD`'s commit. A read with no paths, so taking no optional lock and
+/// reading pathspecs literally change nothing.
+fn head_command() -> GitCommand {
+    GitCommand::new("rev-parse")
         .arg("--verify")
         .arg("-q")
         .arg("HEAD^{commit}")
-        .env("LC_ALL", "C");
-    let output = run_checked(runner, &cmd)?;
-    CommitId::parse(String::from_utf8_lossy(&output.stdout).trim())
-        .ok_or_else(|| "Could not read HEAD".to_string())
+        .standard_env()
 }
 
 /// Put staged deletions back in the index as they are at `head`, so git
@@ -250,13 +254,13 @@ pub(crate) fn push_with_fixups(
         return Err(STASH_DELETED_TAKEN.into());
     }
     if !unstage.is_empty() {
-        run_checked(runner, &unstage_command(&head, unstage))?;
+        checked(runner, &unstage_command(&head, unstage))?;
     }
-    if let Err(why) = run_checked(runner, &op_command(op)) {
+    if let Err(why) = checked(runner, &op_command(op)) {
         if unstage.is_empty() {
             return Err(why);
         }
-        return match run_checked(runner, &restage_command(unstage)) {
+        return match checked(runner, &restage_command(unstage)) {
             Ok(_) => Err(why),
             Err(also) => {
                 let names = listed(unstage);
@@ -270,7 +274,7 @@ pub(crate) fn push_with_fixups(
     if restore.is_empty() {
         return Ok(());
     }
-    run_checked(runner, &restore_command(&head, restore))
+    checked(runner, &restore_command(&head, restore))
         .map(|_| ())
         .map_err(|why| {
             format!(
@@ -290,7 +294,7 @@ fn listed(paths: &[RepoPath]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::stash::git::tests::{literal_env, set_push};
+    use crate::features::stash::git::tests::{WRITE, env_of, literal_env, set_push};
     use crate::git::fake::{FakeRunner, ok};
     use crate::git::runner::GitOutput;
     use crate::op::run_op;
@@ -332,12 +336,39 @@ mod tests {
             let op = set_push(stash_file_for(entry).unwrap(), Some("m"));
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(
-                literal_env(&cmd),
-                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")]
-            );
+            assert_eq!(literal_env(&cmd), env_of(&WRITE));
         }
         assert_eq!(stash_file_for(&conflicted), None);
+    }
+
+    #[test]
+    fn the_path_commands_take_the_lock_and_the_head_read_does_not() {
+        use crate::git::runner::EnvProfile;
+        let paths: [RepoPath; 1] = ["-a.rs".into()];
+        let head = oid(&"ab".repeat(20));
+        for cmd in [
+            restore_command(&head, &paths),
+            restore_taken_command(&paths),
+            unstage_command(&head, &paths),
+            restage_command(&paths),
+        ] {
+            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{cmd:?}");
+            assert_eq!(literal_env(&cmd), env_of(&WRITE), "{cmd:?}");
+        }
+        let read = head_command();
+        assert_eq!(
+            argv(&read),
+            ["rev-parse", "--verify", "-q", "HEAD^{commit}"]
+        );
+        assert_eq!(read.env_profile(), EnvProfile::Standard);
+        assert_eq!(
+            literal_env(&read),
+            env_of(&[
+                ("LC_ALL", "C"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_LITERAL_PATHSPECS", "1")
+            ])
+        );
     }
 
     #[test]
@@ -437,7 +468,7 @@ mod tests {
             argv(&push),
             ["stash", "push", "-u", "-m", "m", "--", "new.rs", "u.rs"]
         );
-        let literal = [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")];
+        let literal = env_of(&WRITE);
         assert_eq!(literal_env(&push), literal);
         let restore = restore_command(&oid(&head), &["-old.rs".into()]);
         assert_eq!(argv(&restore), ["checkout", "-q", &head, "--", "-old.rs"]);
@@ -520,7 +551,7 @@ mod tests {
         let empty_top = EmptyTop::new();
         let gone = entry("-gone.rs", 'D', '.', EntryKind::Changed);
         let op = set_push(stash_file_for(&gone).unwrap(), None);
-        let literal = [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")];
+        let literal = env_of(&WRITE);
         let reset = unstage_command(&oid(&head), &["-gone.rs".into()]);
         assert_eq!(argv(&reset), ["reset", "-q", &head, "--", "-gone.rs"]);
         assert_eq!(literal_env(&reset), literal);
@@ -1008,10 +1039,7 @@ mod tests {
             argv(&cmd),
             ["stash", "push", "-u", "-m", "m", "--", "-a.rs", "*.txt"]
         );
-        assert_eq!(
-            literal_env(&cmd),
-            [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")]
-        );
+        assert_eq!(literal_env(&cmd), env_of(&WRITE));
     }
 
     #[cfg(unix)]

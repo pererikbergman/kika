@@ -3,12 +3,12 @@
 //! moves away only the reflog still has them.
 
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::runner::{GitCommand, GitRunner};
 
 /// List the commits reachable from `head` but not from `target` or any
 /// branch, tag or remote-tracking branch. A read: no optional locks, and
-/// the C locale. Both ids are hex, so neither can be read as an option.
+/// the C locale. Both ids are hex, so neither can be read as an option,
+/// and no path follows `--`, so literal pathspecs change nothing.
 pub fn left_behind_command(head: &CommitId, target: &CommitId) -> GitCommand {
     GitCommand::new("rev-list")
         .arg(head.as_str())
@@ -18,8 +18,7 @@ pub fn left_behind_command(head: &CommitId, target: &CommitId) -> GitCommand {
         .arg("--tags")
         .arg("--remotes")
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// [`left_behind_command`]'s output, one id per line. A line that is not
@@ -38,16 +37,8 @@ pub fn read_left_behind(
     target: &CommitId,
 ) -> Result<Vec<CommitId>, String> {
     let output = runner
-        .run(&left_behind_command(head, target))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git rev-list failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&left_behind_command(head, target))
+        .map_err(|e| e.to_string())?;
     Ok(parse_left_behind(&output.stdout))
 }
 
@@ -58,6 +49,7 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git};
+    use crate::git::runner::EnvProfile;
 
     fn id(text: &str) -> CommitId {
         CommitId::parse(text).unwrap()
@@ -102,11 +94,13 @@ mod tests {
             ]
         );
         assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
+        assert_eq!(cmd.env_profile(), EnvProfile::Standard);
         assert_eq!(
-            cmd.envs(),
+            cmd.process_env(),
             [
+                ("LC_ALL".into(), "C".into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-                ("LC_ALL".into(), "C".into())
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into())
             ]
         );
     }
@@ -142,6 +136,8 @@ mod tests {
             read_left_behind(&fake, &id("aa"), &id("bb")).unwrap_err(),
             "git rev-list failed"
         );
+        let read = left_behind_command(&id("aa"), &id("bb")).process_env();
+        assert_eq!(fake.process_envs(), [read]);
     }
 
     #[test]

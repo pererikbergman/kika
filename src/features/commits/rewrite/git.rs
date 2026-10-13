@@ -13,9 +13,10 @@ use crate::sequence_editor::PLAN_ENV;
 /// todo use `#`, which the sequence editor reads them by, whatever
 /// the user's `core.commentChar` or `core.commentString`; the
 /// command line's `-c` wins over every config file. A stopped
-/// rebase's todo is read with the user's own prefix, as git will.
+/// rebase's todo is read with the user's own prefix, as git will. Its
+/// hooks and editor see the user's env, with only the plan added.
 pub(crate) fn rebase_command(plan: &RebasePlan) -> GitCommand {
-    let mut cmd = GitCommand::new("-c");
+    let mut cmd = GitCommand::new("-c").user_env();
     if !plan.update_refs {
         cmd = cmd.arg("rebase.updateRefs=false").arg("-c");
     }
@@ -70,6 +71,19 @@ mod tests {
         assert_eq!(envs, [("KIKA_REBASE_PLAN", encoded.as_str())]);
         assert_eq!(cmd.input(), None);
         assert_eq!(cmd.subcommand(), "rebase");
+    }
+
+    #[test]
+    fn an_interactive_rebase_runs_in_the_user_s_env_plus_the_plan() {
+        use crate::git::runner::EnvProfile;
+        let plan = crate::git::rebase_plan::sample();
+        let cmd = op_command(&GitOp::InteractiveRebase(plan.clone()));
+        assert_eq!(cmd.env_profile(), EnvProfile::UserEnv);
+        let encoded = crate::git::rebase_plan::encode(&plan.steps);
+        assert_eq!(
+            cmd.process_env(),
+            [("KIKA_REBASE_PLAN".into(), encoded.into())]
+        );
     }
 
     #[test]

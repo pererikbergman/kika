@@ -3,7 +3,6 @@
 //! out a commit with no branch.
 
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::log::CommitRow;
 use crate::git::rebase_plan::branch_name;
 use crate::git::runner::{GitCommand, GitRunner};
@@ -13,13 +12,13 @@ use crate::git::runner::{GitCommand, GitRunner};
 pub type Tip = (CommitId, Vec<u8>);
 
 /// List every local branch with its commit, one `<oid>NUL<ref>` line each.
-/// A read: no optional locks, and the C locale.
+/// A read: no optional locks, and the C locale. `refs/heads/` is a ref
+/// pattern, not a pathspec, so literal pathspecs change nothing.
 pub fn tips_command() -> GitCommand {
     GitCommand::new("for-each-ref")
         .arg("--format=%(objectname)%00%(refname)")
         .arg("refs/heads/")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// [`tips_command`]'s output as tips. A line that is not an id and a ref
@@ -42,16 +41,8 @@ pub fn parse_tips(stdout: &[u8]) -> Vec<Tip> {
 /// Read the branch tips.
 pub fn read_tips(runner: &dyn GitRunner) -> Result<Vec<Tip>, String> {
     let output = runner
-        .run(&tips_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git for-each-ref failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&tips_command())
+        .map_err(|e| e.to_string())?;
     Ok(parse_tips(&output.stdout))
 }
 
@@ -94,6 +85,7 @@ pub(crate) fn detached_checkout(oid: &CommitId) -> GitCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::runner::EnvProfile;
     use crate::op::{GitOp, ResetMode, op_command, run_op};
     use crate::test_support::{argv, rev_parse, two_commit_repo};
 
@@ -127,13 +119,36 @@ mod tests {
                 "refs/heads/"
             ]
         );
+        assert_eq!(cmd.env_profile(), EnvProfile::Standard);
         assert_eq!(
-            cmd.envs(),
+            cmd.process_env(),
             [
+                ("LC_ALL".into(), "C".into()),
                 ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-                ("LC_ALL".into(), "C".into())
+                ("GIT_LITERAL_PATHSPECS".into(), "1".into())
             ]
         );
+    }
+
+    #[test]
+    fn reading_tips_runs_the_read_and_names_a_silent_failure() {
+        use crate::git::fake::{FakeRunner, fail, ok};
+        let argv = [
+            "for-each-ref",
+            "--format=%(objectname)%00%(refname)",
+            "refs/heads/",
+        ];
+        let oid = "a".repeat(40);
+        let line = format!("{oid}\0refs/heads/main\n");
+        let runner = FakeRunner::new().expect(&argv, ok(line.as_bytes()));
+        assert_eq!(read_tips(&runner), Ok(vec![tip('a', "refs/heads/main")]));
+        assert_eq!(runner.process_envs(), [tips_command().process_env()]);
+
+        let runner = FakeRunner::new()
+            .expect(&argv, fail(""))
+            .expect(&argv, fail("fatal: \x1b[2Jbad\n"));
+        assert_eq!(read_tips(&runner), Err("git for-each-ref failed".into()));
+        assert_eq!(read_tips(&runner), Err("fatal: \u{FFFD}[2Jbad".into()));
     }
 
     #[test]
