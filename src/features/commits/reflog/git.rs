@@ -5,8 +5,8 @@
 use crate::features::commits::git::detached_checkout;
 use crate::git::branches::run;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::runner::{GitCommand, GitRunner};
+use crate::git::safe_text::terminal_safe;
 use crate::op::checkout_command;
 
 use super::undo::{Direction, Step};
@@ -356,8 +356,6 @@ pub(crate) fn travel_command(direction: Direction, step: &Step) -> GitCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use super::*;
     use crate::features::commits::reflog::undo::Expected;
     use crate::git::fake::{FakeRunner, fail, ok};
@@ -406,11 +404,10 @@ mod tests {
         let reflog = read_reflog(&runner).unwrap();
 
         runner.assert_done();
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(runner.envs(), vec![env; 4]);
+        assert_eq!(
+            runner.process_envs(),
+            vec![crate::test_support::env_list(&crate::test_support::STANDARD_ENV); 4]
+        );
         assert_eq!(reflog.head, CommitId::parse(A));
         assert_eq!(reflog.head_ref.as_deref(), Some(&b"refs/heads/main"[..]));
         assert_eq!(reflog.entries.len(), 5);
@@ -694,7 +691,7 @@ mod tests {
         for (op, expected, marker) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Write), "{op:?}");
             let envs: Vec<_> = cmd
                 .process_env()
                 .iter()

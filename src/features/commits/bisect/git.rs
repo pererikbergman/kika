@@ -1,23 +1,19 @@
 //! `git bisect start`, which runs before the first mark of a bisect.
 
+use crate::git::error::GitError;
 use crate::git::runner::{GitCommand, GitRunner};
-use crate::op::stderr_and_stdout;
 
 /// `git bisect start` with no arguments: it records where `HEAD` is and
 /// moves nothing, so the first mark that follows starts the bisect. Hooks
 /// a later checkout runs see the user's env, so this does too. git reports
 /// on stdout, which a checked run drops, so this reads both itself.
 pub(crate) fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
-    let output = runner.run(&start_command()).map_err(|e| e.to_string())?;
+    let cmd = start_command();
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if output.success {
         return Ok(());
     }
-    let message = stderr_and_stdout(&output);
-    Err(if message.is_empty() {
-        "git bisect start failed".into()
-    } else {
-        message
-    })
+    Err(GitError::failed_with_stdout(&cmd, &output).message_or("git bisect start failed"))
 }
 
 fn start_command() -> GitCommand {
@@ -65,7 +61,10 @@ mod tests {
         run_op(&runner, &mark(BisectMark::Bad, true)).unwrap();
         runner.assert_done();
         assert_eq!(runner.process_envs()[0], []);
-        assert_eq!(super::start_command().env_profile(), EnvProfile::UserEnv);
+        assert_eq!(
+            super::start_command().env_profile(),
+            Some(EnvProfile::UserEnv)
+        );
 
         let runner = FakeRunner::new().expect(&["bisect", "good", "abc123"], ok(b""));
         run_op(&runner, &mark(BisectMark::Good, false)).unwrap();

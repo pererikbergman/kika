@@ -13,10 +13,11 @@ use super::task::ForgeContext;
 use super::{ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::{EmojiZwj, sanitize, sanitize_body};
+use crate::git::diff::{EmojiZwj, sanitize_body};
 use crate::git::forge_remote::{read_fetch_remote, read_remote_url};
 use crate::git::recording::CommandOutcome;
 use crate::git::remotes::RemoteName;
+use crate::git::safe_text::sanitize;
 
 /// Pull requests asked for per queue; there is no paging past it.
 pub const QUEUE_SIZE: usize = 50;
@@ -752,7 +753,7 @@ pub fn safe_url(url: &str) -> Option<String> {
             .get(..8)
             .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
         && !url.chars().any(|c| {
-            c.is_control() || c.is_whitespace() || crate::git::diff::is_invisible_or_bidi(c)
+            c.is_control() || c.is_whitespace() || crate::git::safe_text::is_invisible_or_bidi(c)
         });
     ok.then(|| url.to_string())
 }
@@ -1246,7 +1247,7 @@ pub(crate) mod tests {
         assert!(
             !text
                 .chars()
-                .any(|c| c.is_control() || crate::git::diff::is_invisible_or_bidi(c)),
+                .any(|c| c.is_control() || crate::git::safe_text::is_invisible_or_bidi(c)),
             "{text:?}"
         );
     }

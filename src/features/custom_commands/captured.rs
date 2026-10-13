@@ -11,7 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Instant;
 
 use super::command::CommandFailure;
-use crate::git::diff::terminal_safe;
+use crate::git::safe_text::terminal_safe;
 use crate::handoff::start_error;
 
 /// The most output kept. A program that prints more is stopped, so a

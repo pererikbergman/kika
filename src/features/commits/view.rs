@@ -17,8 +17,8 @@ use super::{CommitsPanel, CommitsTab};
 use crate::diff_mark::DiffMark;
 use crate::git::commit_files::CommitFile;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::{sanitize, terminal_safe};
 use crate::git::rebase_plan::{TodoAction, TodoEntry, branch_name};
+use crate::git::safe_text::{sanitize, terminal_safe};
 use crate::model::AppState;
 use crate::rows::{DIFF_MARK, commit_file_line, diff_mark_style};
 use crate::view::{

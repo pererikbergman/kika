@@ -264,7 +264,7 @@ mod tests {
         ] {
             for (amend, no_verify) in [(false, false), (true, true)] {
                 let cmd = commit_command(amend, no_verify, source);
-                assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{source:?}");
+                assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{source:?}");
                 assert_eq!(cmd.process_env(), [], "{source:?}");
             }
         }

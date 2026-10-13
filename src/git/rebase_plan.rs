@@ -3,8 +3,8 @@
 //! UI and the hidden sequence editor agree on one plan.
 
 use super::commit_files::CommitId;
-use super::diff::terminal_safe;
 use super::log::CommitRow;
+use super::safe_text::terminal_safe;
 
 /// What the user asked to do with the selected commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,9 +2,10 @@
 
 use std::collections::HashMap;
 
-use super::diff::{Classifier, DiffLine, EmojiZwj, sanitize, sanitize_body, terminal_safe};
+use super::diff::{Classifier, DiffLine, EmojiZwj, sanitize_body};
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::sanitize;
 
 /// One line of the blamed file and the commit that last changed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,9 +35,7 @@ pub fn blame_command(path: &RepoPath) -> GitCommand {
         .arg("--porcelain")
         .arg("--")
         .arg(path.as_os_str())
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .env("GIT_LITERAL_PATHSPECS", "1")
+        .standard_env()
 }
 
 /// What porcelain output says about a commit. Git prints it only on the
@@ -176,8 +175,7 @@ pub fn show_command(oid: &str) -> GitCommand {
         .arg("--date=iso")
         .arg(oid)
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The commit `oid` as diff lines: everything before the first `@@`, the
@@ -201,18 +199,10 @@ pub fn read_commit(
 
 /// Run `cmd` and return its stdout, or git's message, made safe, on failure.
 fn run(runner: &dyn GitRunner, cmd: &GitCommand, failed: &str) -> Result<Vec<u8>, String> {
-    let output = runner
-        .run(cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            failed.into()
-        } else {
-            message
-        });
-    }
-    Ok(output.stdout)
+    runner
+        .run_checked(cmd)
+        .map(|output| output.stdout)
+        .map_err(|e| e.message_or(failed))
 }
 
 #[cfg(test)]
@@ -220,6 +210,8 @@ mod tests {
     use super::*;
     use crate::git::diff::LineKind;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -349,27 +341,6 @@ mod tests {
         assert!(!line(A, "", "", 1, "").is_uncommitted());
     }
 
-    fn env(cmd: &GitCommand) -> Vec<(String, String)> {
-        strings(cmd.envs())
-    }
-
-    fn strings(envs: &[(std::ffi::OsString, std::ffi::OsString)]) -> Vec<(String, String)> {
-        envs.iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.to_string_lossy().into_owned(),
-                )
-            })
-            .collect()
-    }
-
-    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        list.iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
     #[test]
     fn read_blame_runs_porcelain_blame_on_the_raw_path_with_literal_pathspecs() {
         let runner = FakeRunner::new().expect(
@@ -379,14 +350,9 @@ mod tests {
         let lines = read_blame(&runner, &":(top)a*.txt".into(), EmojiZwj::Escape).unwrap();
         assert_eq!(lines.len(), 4);
         runner.assert_done();
-        assert_eq!(
-            strings(&runner.envs()[0]),
-            pairs(&[
-                ("GIT_OPTIONAL_LOCKS", "0"),
-                ("LC_ALL", "C"),
-                ("GIT_LITERAL_PATHSPECS", "1"),
-            ])
-        );
+        assert_eq!(runner.process_envs(), [env_list(&STANDARD_ENV)]);
+        let cmd = blame_command(&"a.txt".into());
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
     }
 
     #[cfg(unix)]
@@ -395,6 +361,22 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let cmd = blame_command(&RepoPath::from_bytes(b"x\xff"));
         assert_eq!(cmd.args().last().unwrap().as_bytes(), b"x\xff");
+    }
+
+    /// git can quote a remote's URL, token and all; a read's error never
+    /// shows the token.
+    #[test]
+    fn a_failed_read_takes_credentials_out_of_urls() {
+        const ARGV: &[&str] = &["blame", "--porcelain", "--", "a.txt"];
+        let runner = FakeRunner::new().expect(
+            ARGV,
+            fail("fatal: unable to access 'https://u:tok@h/r/': denied\n"),
+        );
+
+        assert_eq!(
+            read_blame(&runner, &"a.txt".into(), EmojiZwj::Escape),
+            Err("fatal: unable to access 'https://h/r/': denied".into())
+        );
     }
 
     #[test]
@@ -475,10 +457,8 @@ mod tests {
         let runner = FakeRunner::new().expect(SHOW, ok(out.as_bytes()));
         let lines = read_commit(&runner, A, EmojiZwj::Escape).unwrap();
         runner.assert_done();
-        assert_eq!(
-            env(&show_command(A)),
-            pairs(&[("GIT_OPTIONAL_LOCKS", "0"), ("LC_ALL", "C")])
-        );
+        assert_eq!(runner.process_envs(), [env_list(&STANDARD_ENV)]);
+        assert_eq!(show_command(A).env_profile(), Some(EnvProfile::Standard));
         let kinds: Vec<(LineKind, &str)> =
             lines.iter().map(|l| (l.kind, l.text.as_str())).collect();
         use LineKind::*;

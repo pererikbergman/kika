@@ -2,7 +2,6 @@
 //! for copying it.
 
 use super::commit_files::CommitId;
-use super::diff::terminal_safe;
 use super::runner::{GitCommand, GitRunner};
 
 /// `HEAD`'s full message, as the commit popup shows it to be edited.
@@ -25,19 +24,10 @@ fn read_message(runner: &dyn GitRunner, rev: &str) -> Result<String, String> {
         .arg("--format=%B")
         .arg(rev)
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C");
+        .standard_env();
     let output = runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git log failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&cmd)
+        .map_err(|e| e.message_or("git log failed"))?;
     let message: String = String::from_utf8_lossy(&output.stdout)
         .chars()
         .filter(|&c| c == '\n' || !c.is_control())
@@ -58,6 +48,13 @@ mod tests {
         assert_eq!(read_head_message(&runner), Ok("subj\n\nbody\nmore".into()));
         runner.assert_done();
         assert_eq!(runner.inputs(), [None]);
+        // No path after `--`, so the whole standard profile fits.
+        assert_eq!(
+            runner.process_envs(),
+            [crate::test_support::env_list(
+                &crate::test_support::STANDARD_ENV
+            )]
+        );
     }
 
     #[test]

@@ -3,9 +3,8 @@
 //! out: env and stdin never, config values that carry credentials as
 //! `<redacted>`, URL userinfo stripped, and message bodies cut to a subject.
 
-use super::diff::sanitize;
-use super::remote::redact_userinfo;
 use super::runner::GitCommand;
+use super::safe_text::{redact_userinfo, sanitize};
 
 /// The longest line drawn, in chars, `…` included.
 pub const MAX_LINE: usize = 1000;

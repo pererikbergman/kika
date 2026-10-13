@@ -6,25 +6,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use super::diff::terminal_safe;
 use super::error::GitError;
 
-/// Which standard env vars the runner adds to a command. A command names its
-/// profile; the runner owns the vars, so the rules live in one place.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Which standard env vars the runner adds to a command. Every command
+/// names its profile; the runner owns the vars, so the rules live in one
+/// place. There is no default: each one would silently be wrong for some
+/// command, so a command that names none fails in tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvProfile {
-    /// The runner adds nothing and the command sets its own vars.
-    /// Transitional: every command gets a named profile, then this goes (#374).
-    #[default]
-    PerCommand,
     /// Reads and streamed commands: the C locale for parseable output, no
     /// optional locks so a read never blocks a write, and literal pathspecs.
     Standard,
     /// Ops that take `index.lock` and run no hooks: like `Standard`, but they
     /// take their locks.
     Write,
-    /// Commands that run hooks or the user's programs, which must see the
-    /// user's own locale and pathspec rules.
+    /// Adds none of the standard vars: hooks, the user's programs, and
+    /// commands that set none today.
     UserEnv,
     /// English messages, nothing else. For commands that run hooks or take
     /// paths, where the other standard vars would not be provably harmless.
@@ -41,7 +38,7 @@ pub fn profile_env(profile: EnvProfile) -> &'static [(&'static str, &'static str
         ],
         EnvProfile::Write => &[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")],
         EnvProfile::Locale => &[("LC_ALL", "C")],
-        EnvProfile::PerCommand | EnvProfile::UserEnv => &[],
+        EnvProfile::UserEnv => &[],
     }
 }
 
@@ -52,7 +49,7 @@ pub fn profile_env(profile: EnvProfile) -> &'static [(&'static str, &'static str
 pub struct GitCommand {
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
-    env_profile: EnvProfile,
+    env_profile: Option<EnvProfile>,
     stdin: Option<Vec<u8>>,
     // Only unix can take the terminal away.
     #[cfg_attr(not(unix), allow(dead_code))]
@@ -64,7 +61,7 @@ impl GitCommand {
         Self {
             args: vec![subcommand.into()],
             env: Vec::new(),
-            env_profile: EnvProfile::PerCommand,
+            env_profile: None,
             stdin: None,
             no_terminal: false,
         }
@@ -101,7 +98,7 @@ impl GitCommand {
     }
 
     fn with_profile(mut self, profile: EnvProfile) -> Self {
-        self.env_profile = profile;
+        self.env_profile = Some(profile);
         self
     }
 
@@ -145,21 +142,23 @@ impl GitCommand {
     }
 
     /// Only the vars the command set itself, not its profile's.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn envs(&self) -> &[(OsString, OsString)] {
         &self.env
     }
 
-    /// Which standard vars the runner adds, for tests of a command's builder.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn env_profile(&self) -> EnvProfile {
+    /// Which standard vars the runner adds, or `None` for a command that
+    /// named no profile, which runners refuse in tests.
+    pub fn env_profile(&self) -> Option<EnvProfile> {
         self.env_profile
     }
 
     /// Everything the command adds to git's env: its profile's vars, then
-    /// its own, which come last so they win.
+    /// its own, which come last so they win. A command with no profile
+    /// adds only its own.
     pub fn process_env(&self) -> Vec<(OsString, OsString)> {
-        profile_env(self.env_profile)
+        self.env_profile
+            .map_or(&[][..], profile_env)
             .iter()
             .map(|(k, v)| (OsString::from(k), OsString::from(v)))
             .chain(self.env.iter().cloned())
@@ -221,8 +220,7 @@ pub trait GitRunner: Send + Sync {
     fn set_workdir(&self, _dir: PathBuf) {}
 
     /// Run `cmd` and fail unless git succeeded. The error's message is
-    /// already safe to draw, with URL credentials removed. Callers move
-    /// here from the free [`run_checked`] in #372/#373.
+    /// already safe to draw, with URL credentials removed.
     fn run_checked(&self, cmd: &GitCommand) -> Result<GitOutput, GitError> {
         let output = self.run(cmd).map_err(|e| GitError::io(&e))?;
         if output.success {
@@ -302,8 +300,14 @@ impl CliRunner {
     }
 
     /// The process for `cmd`, or `NotFound` when no absolute `PATH` entry
-    /// holds `git`.
+    /// holds `git`. A release build runs a command with no profile with
+    /// only its own vars rather than stop the user.
     fn command(&self, cmd: &GitCommand) -> io::Result<Command> {
+        debug_assert!(
+            cmd.env_profile().is_some(),
+            "git command with no env profile: {:?}",
+            cmd.args()
+        );
         let mut command = crate::program::command(OsStr::new("git"))?;
         // Each hidden mode's key reaches only the command that sets it.
         for key in HIDDEN_MODE_ENV
@@ -580,23 +584,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Run `cmd`, with git's message, made safe to draw, as the error.
-/// Its last callers moved to [`GitRunner::run_checked`] in #372; it goes
-/// in #374.
-#[allow(dead_code)]
-pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
-    let output = runner.run(cmd).map_err(|e| e.to_string())?;
-    if output.success {
-        return Ok(output);
-    }
-    let message = terminal_safe(&output.stderr);
-    if message.is_empty() {
-        let subcommand = cmd.subcommand().to_string_lossy();
-        return Err(format!("git {subcommand} failed"));
-    }
-    Err(message)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,9 +619,8 @@ mod tests {
     const PROFILE_KEYS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_PATHSPECS"];
 
     /// `cmd` with each profile, the same argv and explicit env otherwise.
-    fn every_profile(cmd: &GitCommand) -> [GitCommand; 5] {
+    fn every_profile(cmd: &GitCommand) -> [GitCommand; 4] {
         [
-            cmd.clone(),
             cmd.clone().standard_env(),
             cmd.clone().write_env(),
             cmd.clone().user_env(),
@@ -647,7 +633,7 @@ mod tests {
         let runner = CliRunner::new("/r");
         for cmd in every_profile(&GitCommand::new("status")) {
             let process = runner.command(&cmd).unwrap();
-            let listed = profile_env(cmd.env_profile());
+            let listed = profile_env(cmd.env_profile().unwrap());
             for key in PROFILE_KEYS {
                 let expected = listed
                     .iter()
@@ -670,11 +656,44 @@ mod tests {
         );
         assert_eq!(profile_env(EnvProfile::Locale), [("LC_ALL", "C")]);
         assert!(profile_env(EnvProfile::UserEnv).is_empty());
-        assert!(profile_env(EnvProfile::PerCommand).is_empty());
+        // No default: a command names its profile or has none.
+        assert_eq!(GitCommand::new("status").env_profile(), None);
         assert_eq!(
-            GitCommand::new("status").env_profile(),
-            EnvProfile::PerCommand
+            GitCommand::new("status").user_env().env_profile(),
+            Some(EnvProfile::UserEnv)
         );
+    }
+
+    /// Without a profile, the env is only what the command set itself.
+    #[test]
+    fn a_command_with_no_profile_adds_only_its_own_vars() {
+        let cmd = GitCommand::new("status").env("GIT_TERMINAL_PROMPT", "0");
+
+        assert_eq!(
+            cmd.process_env(),
+            [("GIT_TERMINAL_PROMPT".into(), "0".into())]
+        );
+    }
+
+    /// Every test that drives a builder through the fake so proves the
+    /// builder names a profile.
+    #[test]
+    #[should_panic(expected = "git command with no env profile")]
+    fn the_fake_refuses_a_command_with_no_profile() {
+        use crate::git::fake::{FakeRunner, ok};
+
+        let fake = FakeRunner::new().expect(&["status"], ok(b""));
+
+        let _ = fake.run(&GitCommand::new("status"));
+    }
+
+    /// The real runner refuses one too, in debug builds only, so a release
+    /// build never stops the user over it.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "git command with no env profile")]
+    fn the_real_runner_refuses_a_command_with_no_profile_in_debug_builds() {
+        let _ = CliRunner::new("/r").command(&GitCommand::new("status"));
     }
 
     #[test]
@@ -712,7 +731,7 @@ mod tests {
         let ls = GitCommand::new("ls-files").arg("--").arg("*.rs");
 
         let literal = runner.run(&ls.clone().standard_env()).unwrap();
-        let glob = runner.run(&ls).unwrap();
+        let glob = runner.run(&ls.user_env()).unwrap();
 
         assert_eq!(literal.stdout, b"*.rs\n");
         assert_eq!(glob.stdout, b"*.rs\na.rs\n");
@@ -763,7 +782,7 @@ mod tests {
             )
             .expect(&["fetch"], fail(""))
             .expect(&["fetch"], ok(b"done"));
-        let fetch = GitCommand::new("fetch");
+        let fetch = GitCommand::new("fetch").user_env();
 
         let loud = runner.run_checked(&fetch).unwrap_err();
         let silent = runner.run_checked(&fetch).unwrap_err();
@@ -789,7 +808,9 @@ mod tests {
             }
         }
 
-        let error = Broken.run_checked(&GitCommand::new("status")).unwrap_err();
+        let error = Broken
+            .run_checked(&GitCommand::new("status").user_env())
+            .unwrap_err();
 
         assert_eq!(error, GitError::Io("no git at https://h".into()));
     }
@@ -800,12 +821,18 @@ mod tests {
         use crate::sequence_editor::PLAN_ENV;
 
         let runner = CliRunner::new("/r");
-        let plain = runner.command(&GitCommand::new("status")).unwrap();
+        let plain = runner
+            .command(&GitCommand::new("status").standard_env())
+            .unwrap();
         let rebase = runner
-            .command(&GitCommand::new("rebase").env(PLAN_ENV, "pick x\n"))
+            .command(
+                &GitCommand::new("rebase")
+                    .env(PLAN_ENV, "pick x\n")
+                    .user_env(),
+            )
             .unwrap();
         let fetch = runner
-            .command(&GitCommand::new("fetch").env(SOCKET_ENV, "/s"))
+            .command(&GitCommand::new("fetch").env(SOCKET_ENV, "/s").locale_env())
             .unwrap();
         for key in [PLAN_ENV, SOCKET_ENV] {
             assert_eq!(env_of(&plain, key), Some(None), "{key}");
@@ -898,14 +925,14 @@ mod tests {
         let runner = CliRunner::isolated(tmp.path());
         assert_eq!(runner.workdir(), tmp.path());
         let process = runner
-            .command(&GitCommand::new("var").arg("GIT_EDITOR"))
+            .command(&GitCommand::new("var").arg("GIT_EDITOR").user_env())
             .unwrap();
         let envs: Vec<_> = process.get_envs().collect();
         for key in ["GIT_EDITOR", "VISUAL", "EDITOR"] {
             assert!(envs.contains(&(OsStr::new(key), None)), "{key}: {envs:?}");
         }
         let output = runner
-            .run(&GitCommand::new("var").arg("GIT_EDITOR"))
+            .run(&GitCommand::new("var").arg("GIT_EDITOR").user_env())
             .unwrap();
         assert_eq!(output.stdout, b"repo-editor\n");
     }
@@ -913,7 +940,9 @@ mod tests {
     #[test]
     fn spawn_streams_stdout_and_finish_reports_the_exit() {
         let runner = CliRunner::new(std::env::temp_dir());
-        let child = runner.spawn(&GitCommand::new("--version")).unwrap();
+        let child = runner
+            .spawn(&GitCommand::new("--version").standard_env())
+            .unwrap();
         let mut stdout = String::new();
         let mut pipe = child.stdout;
         pipe.read_to_string(&mut stdout).unwrap();
@@ -931,7 +960,7 @@ mod tests {
     fn finish_carries_stderr_of_a_failed_command() {
         let runner = CliRunner::new(std::env::temp_dir());
         let child = runner
-            .spawn(&GitCommand::new("no-such-subcommand"))
+            .spawn(&GitCommand::new("no-such-subcommand").user_env())
             .unwrap();
         let mut pipe = child.stdout;
         io::copy(&mut pipe, &mut io::sink()).unwrap();
@@ -945,7 +974,8 @@ mod tests {
         let runner = CliRunner::new(std::env::temp_dir());
         let cmd = GitCommand::new("hash-object")
             .arg("--stdin")
-            .stdin(b"hello\n".to_vec());
+            .stdin(b"hello\n".to_vec())
+            .user_env();
         let output = runner.run(&cmd).unwrap();
         assert!(
             output.success,
@@ -959,7 +989,10 @@ mod tests {
     fn stdin_larger_than_a_pipe_buffer_does_not_deadlock() {
         let runner = CliRunner::new(std::env::temp_dir());
         let big = vec![b'x'; 1 << 20];
-        let cmd = GitCommand::new("hash-object").arg("--stdin").stdin(big);
+        let cmd = GitCommand::new("hash-object")
+            .arg("--stdin")
+            .stdin(big)
+            .user_env();
         assert!(runner.run(&cmd).unwrap().success);
     }
 
@@ -1002,7 +1035,8 @@ mod tests {
             .arg("-F")
             .arg("-")
             .env("OUTER_GROUP", ours.to_string())
-            .stdin(b"msg\n".to_vec());
+            .stdin(b"msg\n".to_vec())
+            .user_env();
         // A channel, not `join`, so a failed interrupt cannot hang the test.
         let (tx, rx) = mpsc::channel();
         {
@@ -1244,7 +1278,8 @@ mod tests {
             .arg("-F")
             .arg("-")
             .env("OUTER_GROUP", ours.to_string())
-            .stdin(b"msg\n".to_vec());
+            .stdin(b"msg\n".to_vec())
+            .user_env();
         let (tx, rx) = mpsc::channel();
         {
             let runner = Arc::clone(&runner);
@@ -1345,7 +1380,11 @@ mod tests {
         let runner = CliRunner::isolated(&outside);
         runner.set_workdir(dir.clone());
 
-        let cmd = GitCommand::new("commit").arg("-q").arg("-m").arg("msg");
+        let cmd = GitCommand::new("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("msg")
+            .user_env();
         let exit = runner.run_attached(&cmd).unwrap();
 
         assert_eq!(
@@ -1381,7 +1420,8 @@ mod tests {
         let cmd = GitCommand::new("-c")
             .arg(format!("alias.probe={probe}"))
             .arg("probe")
-            .without_terminal();
+            .without_terminal()
+            .user_env();
 
         let output = runner.run(&cmd).unwrap();
 
@@ -1414,7 +1454,8 @@ mod tests {
             .arg("--allow-empty")
             .arg("-F")
             .arg("-")
-            .stdin(b"from stdin\n".to_vec());
+            .stdin(b"from stdin\n".to_vec())
+            .user_env();
 
         let exit = runner.run_attached(&cmd).unwrap();
 
@@ -1430,7 +1471,8 @@ mod tests {
             .run_attached(
                 &GitCommand::new("config")
                     .arg("--get")
-                    .arg("kika.no-such-key"),
+                    .arg("kika.no-such-key")
+                    .user_env(),
             )
             .unwrap();
         assert!(!exit.success);
@@ -1452,7 +1494,8 @@ mod tests {
             .arg("--no-index")
             .arg("--")
             .arg("/dev/null")
-            .arg("big.txt");
+            .arg("big.txt")
+            .standard_env();
 
         let child = runner.spawn(&cmd).unwrap();
         let mut reader = io::BufReader::new(child.stdout);

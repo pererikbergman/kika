@@ -416,9 +416,13 @@ mod tests {
         assert!(args.contains(&"--no-renames".to_string()));
         assert!(args.contains(&"-U3".to_string()));
         assert!(!args.contains(&"-w".to_string()));
-        assert!(
-            cmd.envs()
-                .contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into()))
+        assert_eq!(
+            cmd.env_profile(),
+            Some(crate::git::runner::EnvProfile::Standard)
+        );
+        assert_eq!(
+            cmd.process_env(),
+            crate::test_support::env_list(&crate::test_support::STANDARD_ENV)
         );
     }
 
@@ -473,7 +477,7 @@ mod tests {
             (dirty_command(), EnvProfile::Standard, &read),
         ];
         for (cmd, profile, want) in cases {
-            assert_eq!(cmd.env_profile(), profile, "{cmd:?}");
+            assert_eq!(cmd.env_profile(), Some(profile), "{cmd:?}");
             assert_eq!(&cmd.process_env(), want, "{cmd:?}");
         }
         // Hooks, a signing program and the editor see the user's own env.
@@ -484,7 +488,7 @@ mod tests {
             rebase_command("--abort"),
             reset_command(&id('a')),
         ] {
-            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{cmd:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{cmd:?}");
             assert_eq!(cmd.process_env(), [], "{cmd:?}");
         }
     }

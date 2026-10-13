@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::git::Worktree;
 use super::list::{WorktreeList, is_current, label};
-use crate::git::diff::sanitize;
+use crate::git::safe_text::sanitize;
 use crate::model::AppState;
 use crate::view::{centered, clip, elide_left, elide_right, width_of, wrap};
 
