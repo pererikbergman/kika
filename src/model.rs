@@ -61,7 +61,7 @@ use crate::popup::{
     ConfirmKind, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind,
 };
 use crate::prompts::runs_attached;
-use crate::refresh::{RefreshPlan, Scope, Selection};
+use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
 use crate::watch::{WatchEvent, WatchState};
 // Names the tests below reach through `super::*` since the op slot moved
@@ -484,14 +484,7 @@ impl AppState {
                 }
                 return effects;
             }
-            AppIntent::RefreshStatus => {
-                self.status_selection = Selection::KeepPath;
-                let mut effects = self.refresh_status();
-                effects.extend(self.reload_branches());
-                effects.extend(self.reload_commits());
-                effects.extend(self.reload_stashes());
-                return effects;
-            }
+            AppIntent::RefreshStatus => return self.reload_repo(),
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
             AppIntent::SelectNext => return self.move_selection(1),
             AppIntent::SelectPrev => return self.move_selection(-1),
@@ -1829,35 +1822,6 @@ impl AppState {
         refused
     }
 
-    /// Reload what the plan says is stale. One status load serves both the
-    /// files and the branch; reloading files reselects, which reloads the
-    /// diff too. The submodule list reloads only while it is shown.
-    pub(crate) fn apply_plan(&mut self, plan: RefreshPlan) -> Vec<Effect> {
-        let mut effects =
-            if plan.scopes.contains(&Scope::Files) || plan.scopes.contains(&Scope::Branch) {
-                self.status_selection = plan.selection;
-                self.refresh_status()
-            } else {
-                match self.selected {
-                    Some(index) if plan.scopes.contains(&Scope::Diff) => self.select(index),
-                    _ => vec![],
-                }
-            };
-        if plan.scopes.contains(&Scope::Submodules) {
-            effects.extend(self.reload_submodules());
-        }
-        if plan.scopes.contains(&Scope::Branches) {
-            effects.extend(self.reload_branches());
-        }
-        if plan.scopes.contains(&Scope::Commits) {
-            effects.extend(self.reload_commits());
-        }
-        if plan.scopes.contains(&Scope::Stash) {
-            effects.extend(self.reload_stashes());
-        }
-        effects
-    }
-
     /// Load the log from the top, and the markers and branch tips with it. What is shown
     /// stays until the new page lands, which supersedes any page in flight.
     pub(crate) fn reload_commits(&mut self) -> Vec<Effect> {
@@ -1907,10 +1871,7 @@ impl AppState {
         match self.repo.clone() {
             Some(path) => {
                 let mut effects = vec![self.record_recent(path)];
-                effects.extend(self.refresh_status());
-                effects.extend(self.reload_branches());
-                effects.extend(self.reload_commits());
-                effects.extend(self.reload_stashes());
+                effects.extend(self.reload_repo());
                 effects
             }
             None => self.open_recent(),
@@ -2318,6 +2279,7 @@ mod tests {
     use crate::menu::MenuId;
     use crate::op::ResetMode;
     use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
+    use crate::refresh::{RefreshPlan, Scope};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
 

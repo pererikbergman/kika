@@ -191,10 +191,7 @@ impl AppState {
             }
             effects.extend(self.select(index));
         }
-        effects.extend(self.refresh_status());
-        effects.extend(self.reload_branches());
-        effects.extend(self.reload_commits());
-        effects.extend(self.reload_stashes());
+        effects.extend(self.reload_repo());
         // The keys follow the repository: its own file replaces the last one's.
         effects.push(Effect::LoadConfig {
             repo: self.repo.clone(),

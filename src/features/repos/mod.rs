@@ -14,10 +14,9 @@
 //!
 //! Kept cross-feature reads and writes (move-only, ADR rule 3): `open_repo`
 //! and `park` write `files`, `files_loaded`, `branch`, `selected` and
-//! `focus`, and read `diff_options`. They call core `select`,
-//! `refresh_status`, `reload_branches` and `reload_commits` (`model.rs`),
-//! and stash's `reload_stashes` (an accepted cross-feature call, listed in
-//! ADR-0001's Outcome).
+//! `focus`, and read `diff_options`. They call core `select` (`model.rs`)
+//! and core `reload_repo` (`reload.rs`), which reloads the status,
+//! branches, log and stashes through the refresh plan.
 //!
 //! Stays in core: `switch_repo` resets the per-repository state of almost
 //! every feature, and `set_repo` and `Effect::SetRepo` are shared with

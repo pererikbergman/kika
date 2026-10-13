@@ -13,7 +13,8 @@
 //!   `stash_files_disabled`, the Stash menu's `stash_*_disabled`, and
 //!   `STASH_APART`, `STASH_RENAME_TAKEN` and `STASH_DELETED_TAKEN`;
 //! - the handlers in `update.rs`, `reload_stashes` among them (core
-//!   refresh and `test_support` call it), and `files_open`;
+//!   reload in `reload.rs`, `refs_loaded` and `test_support` call it), and
+//!   `files_open`;
 //! - `effects::{load, load_files}` and `view::render_stash_panel`.
 //!
 //! Kept cross-feature reads:
