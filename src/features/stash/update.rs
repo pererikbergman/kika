@@ -349,8 +349,8 @@ mod tests {
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::list_filter::InputTarget;
+    use crate::list_input::SELECTION_CLEARED;
     use crate::menu::MenuId;
-    use crate::model::SELECTION_CLEARED;
     use crate::refresh;
     use crate::test_support::*;
     use crossterm::event::KeyCode;

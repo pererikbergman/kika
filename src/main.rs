@@ -21,6 +21,7 @@ mod intent;
 mod keymap;
 mod layout;
 mod list_filter;
+mod list_input;
 mod menu;
 mod model;
 mod op;

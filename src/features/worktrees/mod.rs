@@ -24,8 +24,8 @@
 //! - switching to a worktree through `AppIntent::OpenRepo`.
 //!
 //! The popup's branches in the shared focus, prompt, filter and escape code
-//! (`key_focus`, `prompt_title`, `open_filter`, the filter apply match and
-//! `list_escape` in `model.rs`) stay in core.
+//! (`key_focus` and `prompt_title` in `model.rs`; `open_filter`, the filter
+//! apply match and `list_escape` in `list_input.rs`) stay in core.
 
 pub(crate) mod effects;
 mod git;
