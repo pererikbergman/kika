@@ -7,7 +7,8 @@
 use super::remotes::RemoteRow;
 use crate::effect::Effect;
 use crate::list_filter::InputTarget;
-use crate::model::{AppState, SELECTION_CLEARED};
+use crate::list_input::SELECTION_CLEARED;
+use crate::model::AppState;
 use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, RangeKind};
 

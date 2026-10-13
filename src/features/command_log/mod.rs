@@ -13,9 +13,9 @@
 //! `size`, `command_log`).
 //!
 //! The log's branches in the shared filter, escape and focus code
-//! (`key_focus`, `open_filter`, the filter apply match and `list_escape` in
-//! `model.rs`) stay in core, as does `CommandLogged` reaching `update` from
-//! the runner listener in `app.rs`.
+//! (`key_focus` in `model.rs`; `open_filter`, the filter apply match and
+//! `list_escape` in `list_input.rs`) stay in core, as does `CommandLogged`
+//! reaching `update` from the runner listener in `app.rs`.
 
 pub(crate) mod keys;
 mod log;
