@@ -26,6 +26,9 @@ pub enum EnvProfile {
     /// Commands that run hooks or the user's programs, which must see the
     /// user's own locale and pathspec rules.
     UserEnv,
+    /// English messages, nothing else. For commands that run hooks or take
+    /// paths, where the other standard vars would not be provably harmless.
+    Locale,
 }
 
 /// The vars `profile` adds, the single source of them.
@@ -37,6 +40,7 @@ pub fn profile_env(profile: EnvProfile) -> &'static [(&'static str, &'static str
             ("GIT_LITERAL_PATHSPECS", "1"),
         ],
         EnvProfile::Write => &[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")],
+        EnvProfile::Locale => &[("LC_ALL", "C")],
         EnvProfile::PerCommand | EnvProfile::UserEnv => &[],
     }
 }
@@ -89,6 +93,11 @@ impl GitCommand {
     /// Run in the user's own env, see [`EnvProfile::UserEnv`].
     pub fn user_env(self) -> Self {
         self.with_profile(EnvProfile::UserEnv)
+    }
+
+    /// Run with only the [`EnvProfile::Locale`] var.
+    pub fn locale_env(self) -> Self {
+        self.with_profile(EnvProfile::Locale)
     }
 
     fn with_profile(mut self, profile: EnvProfile) -> Self {
@@ -623,12 +632,13 @@ mod tests {
     const PROFILE_KEYS: [&str; 3] = ["LC_ALL", "GIT_OPTIONAL_LOCKS", "GIT_LITERAL_PATHSPECS"];
 
     /// `cmd` with each profile, the same argv and explicit env otherwise.
-    fn every_profile(cmd: &GitCommand) -> [GitCommand; 4] {
+    fn every_profile(cmd: &GitCommand) -> [GitCommand; 5] {
         [
             cmd.clone(),
             cmd.clone().standard_env(),
             cmd.clone().write_env(),
             cmd.clone().user_env(),
+            cmd.clone().locale_env(),
         ]
     }
 
@@ -658,6 +668,7 @@ mod tests {
             profile_env(EnvProfile::Write),
             [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")]
         );
+        assert_eq!(profile_env(EnvProfile::Locale), [("LC_ALL", "C")]);
         assert!(profile_env(EnvProfile::UserEnv).is_empty());
         assert!(profile_env(EnvProfile::PerCommand).is_empty());
         assert_eq!(
