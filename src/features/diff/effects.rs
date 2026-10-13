@@ -51,7 +51,7 @@ mod tests {
     use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::op::{GitOp, run_op};
-    use crate::test_support::HostilePanic;
+    use crate::test_support::{HostilePanic, env_list};
 
     fn patch_request() -> DiffRequest {
         DiffRequest {
@@ -156,11 +156,8 @@ mod tests {
             runner.assert_done();
             assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
             assert_eq!(
-                runner.envs(),
-                [vec![
-                    ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
-                    ("LC_ALL".into(), "C".into())
-                ]]
+                runner.process_envs(),
+                [env_list(&[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")])]
             );
         }
     }
@@ -405,11 +402,8 @@ mod tests {
         runner.assert_done();
         assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
         assert_eq!(
-            runner.envs(),
-            [vec![
-                ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
-                ("LC_ALL".into(), "C".into())
-            ]]
+            runner.process_envs(),
+            [env_list(&[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")])]
         );
     }
 

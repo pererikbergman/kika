@@ -212,7 +212,7 @@ pub(crate) fn push_command(
     );
     if paths.is_empty() && mode == StashMode::IncludeUntracked {
         // Not `write_env`: its literal pathspecs would break the `:/`.
-        return cmd.env("LC_ALL", "C");
+        return cmd.locale_env();
     }
     if paths.is_empty() || mode == StashMode::Staged {
         return cmd.write_env();
@@ -613,7 +613,7 @@ pub(crate) mod tests {
                 }
             );
             let (profile, want) = if untracked {
-                (EnvProfile::PerCommand, env_of(&[("LC_ALL", "C")]))
+                (EnvProfile::Locale, env_of(&[("LC_ALL", "C")]))
             } else {
                 (EnvProfile::Write, env_of(&WRITE))
             };

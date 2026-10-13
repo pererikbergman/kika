@@ -12,8 +12,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command, terminal_safe};
-use crate::git::runner::ChildHandle;
+use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command};
+use crate::git::error::GitError;
+use crate::git::runner::{ChildHandle, GitCommand};
 use crate::intent::AppIntent;
 
 /// Owns the single diff stream for the Diff pane.
@@ -147,7 +148,8 @@ fn stream(
     emoji: EmojiZwj,
     mut emit: impl FnMut(Result<DiffChunk, String>),
 ) {
-    let child = match runner.spawn(&diff_command(request)) {
+    let cmd = diff_command(request);
+    let child = match runner.spawn(&cmd) {
         Ok(child) => child,
         Err(e) => return emit(Err(format!("git diff: {e}"))),
     };
@@ -160,6 +162,7 @@ fn stream(
         slot.child = Some(Arc::clone(&child.handle));
     }
     pump(
+        &cmd,
         child.stdout,
         child.handle.as_ref(),
         demand,
@@ -172,7 +175,9 @@ fn stream(
 /// Read and classify lines, emitting a chunk each time `want` is reached and
 /// then waiting for a larger `want`. A closed `demand` channel means the
 /// stream was superseded: the child is killed and nothing more is emitted.
+/// `cmd` is what the child runs, for its error.
 pub fn pump(
+    cmd: &GitCommand,
     stdout: impl Read,
     child: &dyn ChildHandle,
     demand: Receiver<usize>,
@@ -220,7 +225,7 @@ pub fn pump(
     }
     match child.finish() {
         Ok(output) if !output.success && !output.stderr.is_empty() => {
-            emit(Err(terminal_safe(&output.stderr)))
+            emit(Err(GitError::failed(cmd, &output).to_string()))
         }
         // `--no-index` exits 1 when the files differ, so a quiet failure is fine.
         Ok(_) => emit(Ok(DiffChunk {
@@ -257,13 +262,13 @@ mod tests {
 
     fn pump_over(child: FakeChild, want: usize) -> Pumped {
         let runner = FakeRunner::new().expect_spawn(&["x"], child.clone());
-        let spawned = runner
-            .spawn(&crate::git::runner::GitCommand::new("x"))
-            .unwrap();
+        let cmd = GitCommand::new("x");
+        let spawned = runner.spawn(&cmd).unwrap();
         let (demand, demand_rx) = mpsc::channel();
         let (out, chunks) = mpsc::channel();
         let thread = thread::spawn(move || {
             pump(
+                &cmd,
                 spawned.stdout,
                 spawned.handle.as_ref(),
                 demand_rx,
