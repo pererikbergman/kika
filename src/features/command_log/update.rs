@@ -1,10 +1,26 @@
-//! The Command log's `update` handlers: recording each runner event and
-//! opening and moving its popup.
+//! The Command log's `update`, which core's one `AppIntent::CommandLog` arm
+//! calls, and its handlers: recording each runner event and opening and
+//! moving its popup.
 
-use super::CommandLogView;
+use super::{CommandLogIntent, CommandLogView};
+use crate::effect::Effect;
 use crate::git::recording::CommandEvent;
 use crate::model::AppState;
 use crate::popup::Popup;
+
+/// The feature's half of `update`: core's one `AppIntent::CommandLog` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CommandLogIntent) -> Vec<Effect> {
+    match intent {
+        CommandLogIntent::Logged(event) => state.command_logged(event),
+        CommandLogIntent::Open => state.open_command_log(),
+        CommandLogIntent::Next => state.move_command_log(1),
+        CommandLogIntent::Prev => state.move_command_log(-1),
+        CommandLogIntent::PageDown => state.move_command_log(state.command_log_page()),
+        CommandLogIntent::PageUp => state.move_command_log(-state.command_log_page()),
+    }
+    Vec::new()
+}
 
 /// The Command log: recording every git command, and its popup.
 impl AppState {
@@ -53,13 +69,13 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     fn log_started(state: &mut AppState, id: u64) {
-        state.update(AppIntent::CommandLogged(
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
             crate::git::recording::CommandEvent::Started {
                 id,
                 line: format!("git cmd{id}"),
                 attached: false,
             },
-        ));
+        )));
     }
 
     fn command_log_view(state: &AppState) -> CommandLogView {
@@ -77,11 +93,13 @@ mod tests {
         for id in 0..3 {
             log_started(&mut state, id);
         }
-        let effects = state.update(AppIntent::CommandLogged(CommandEvent::Finished {
-            id: 1,
-            outcome: CommandOutcome::Failed(None),
-            elapsed: std::time::Duration::from_millis(3),
-        }));
+        let effects = state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Finished {
+                id: 1,
+                outcome: CommandOutcome::Failed(None),
+                elapsed: std::time::Duration::from_millis(3),
+            },
+        )));
         assert_eq!(effects, []);
         let lines: Vec<_> = state
             .command_log
@@ -105,11 +123,13 @@ mod tests {
         assert_eq!(state.command_log.len(), CommandLog::CAP);
         assert_eq!(state.command_log.entries()[0].id, 10);
         let before = state.command_log.clone();
-        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
-            id: 1,
-            outcome: CommandOutcome::Ok,
-            elapsed: std::time::Duration::ZERO,
-        }));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Finished {
+                id: 1,
+                outcome: CommandOutcome::Ok,
+                elapsed: std::time::Duration::ZERO,
+            },
+        )));
         assert_eq!(state.command_log, before);
     }
 
@@ -120,7 +140,10 @@ mod tests {
         for id in 0..3 {
             log_started(&mut state, id);
         }
-        assert_eq!(state.update(AppIntent::OpenCommandLog), []);
+        assert_eq!(
+            state.update(AppIntent::CommandLog(CommandLogIntent::Open)),
+            []
+        );
         assert_eq!(state.key_focus(), KeyScope::CommandLog);
         assert_eq!(
             command_log_view(&state),
@@ -134,7 +157,7 @@ mod tests {
         log_started(&mut state, 3);
         assert_eq!(command_log_view(&state).cursor, 3);
 
-        state.update(AppIntent::CommandLogPrev);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Prev));
         assert_eq!(
             command_log_view(&state),
             CommandLogView {
@@ -146,8 +169,8 @@ mod tests {
         log_started(&mut state, 4);
         assert_eq!(command_log_view(&state).cursor, 2);
 
-        state.update(AppIntent::CommandLogNext);
-        state.update(AppIntent::CommandLogNext);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Next));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Next));
         assert_eq!(
             command_log_view(&state),
             CommandLogView {
@@ -161,9 +184,9 @@ mod tests {
         for id in 5..30 {
             log_started(&mut state, id);
         }
-        state.update(AppIntent::CommandLogPageUp);
+        state.update(AppIntent::CommandLog(CommandLogIntent::PageUp));
         assert_eq!(command_log_view(&state).cursor, 19);
-        state.update(AppIntent::CommandLogPageDown);
+        state.update(AppIntent::CommandLog(CommandLogIntent::PageDown));
         assert_eq!(command_log_view(&state).cursor, 29);
 
         state.update(AppIntent::PopPopup);
@@ -180,7 +203,7 @@ mod tests {
         for id in 0..12 {
             log_started(&mut state, id);
         }
-        state.update(AppIntent::OpenCommandLog);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Open));
         state
     }
 
@@ -266,7 +289,7 @@ mod tests {
         assert!(!state.should_quit);
 
         // Opened again, the log starts unfiltered.
-        state.update(AppIntent::OpenCommandLog);
+        state.update(AppIntent::CommandLog(CommandLogIntent::Open));
         assert_eq!(command_log_view(&state).filter, "");
         assert_eq!(command_log_rows(&state).len(), 12);
     }
@@ -340,7 +363,21 @@ mod tests {
             .position(|item| item.label == "Command log…")
             .expect("the Actions menu has the command log");
         assert_eq!(items[at - 1].label, "Worktrees…");
-        assert_eq!(items[at].intent, AppIntent::OpenCommandLog);
+        assert_eq!(
+            items[at].intent,
+            AppIntent::CommandLog(CommandLogIntent::Open)
+        );
         assert_eq!((items[at].disabled)(&state), None);
+    }
+
+    #[test]
+    fn the_command_log_menu_item_opens_the_log_through_update() {
+        let mut state = AppState::new(Context::Workspace);
+        let item = menu::items(menu::MenuId::Actions)
+            .iter()
+            .find(|item| item.label == "Command log…")
+            .expect("the Actions menu has the command log");
+        assert_eq!(state.update(item.intent.clone()), []);
+        assert!(matches!(state.popups.last(), Some(Popup::CommandLog(_))));
     }
 }

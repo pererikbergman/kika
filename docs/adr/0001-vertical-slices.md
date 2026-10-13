@@ -133,6 +133,8 @@ Both stay single flat enums in core (`intent.rs`, `effect.rs`), with their varia
 
 Nesting (`AppIntent::Stash(StashIntent)`) was rejected for now. The 349 bindings build `AppIntent` values in a `static`, and nesting would rewrite every binding, menu item and test for no behaviour gain. It can be revisited after the move.
 
+Revisited in ADR-0002 (`0002-nested-intents.md`): intents become per-feature enums; `Effect` stays flat.
+
 ### Config docs and registry tests
 
 - `config_docs.rs` stays a core `#[cfg(test)]` module. It keeps reading `registry()` and `REPO_LOCKED`.
