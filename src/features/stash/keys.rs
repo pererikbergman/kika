@@ -19,7 +19,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 fn no_stash(state: &AppState) -> Option<Reason> {
     state
         .stash
-        .entries
+        .list
+        .rows
         .is_empty()
         .then_some("No stashes".into())
 }
@@ -415,7 +416,7 @@ mod tests {
             stash_menu_disabled(&state),
             Some("No changes to stash".into())
         );
-        state.stash.entries = vec![crate::features::stash::StashEntry {
+        state.stash.list.rows = vec![crate::features::stash::StashEntry {
             index: 0,
             oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
             base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
@@ -433,7 +434,7 @@ mod tests {
     fn stash_panel() -> AppState {
         let mut state = AppState::new(Context::Workspace);
         state.focus = crate::model::Focus::Stash;
-        state.stash.begin(1);
+        state.stash.list.begin(1);
         let entries = ["a0", "a1", "a2"]
             .iter()
             .enumerate()
@@ -445,7 +446,15 @@ mod tests {
                 subject: format!("On main: {oid}"),
             })
             .collect();
-        state.stash.loaded(1, Ok(entries));
+        state.stash.list.loaded(
+            crate::effect::Tag {
+                generation: state.generation,
+                seq: 1,
+                user: false,
+            },
+            state.generation,
+            Ok(entries),
+        );
         assert_eq!(state.panel_focus(), KeyScope::Stash);
         state
     }
@@ -458,7 +467,7 @@ mod tests {
         for id in actions.iter().chain([&"stash.drop"]) {
             assert_eq!(reason(&state, id), None, "{id}");
         }
-        state.stash.toggle_range();
+        state.stash.list.toggle_range();
         for id in actions {
             assert_eq!(
                 reason(&state, id).as_deref(),
@@ -477,8 +486,8 @@ mod tests {
     #[test]
     fn a_stash_filter_that_hides_the_cursor_refuses_every_stash_action() {
         let mut state = stash_panel();
-        state.stash.filter = "zzz".into();
-        assert!(state.stash.selected_hidden());
+        state.stash.list.filter = "zzz".into();
+        assert!(state.stash.list.selected_hidden());
         for id in [
             "stash.files",
             "stash.apply",

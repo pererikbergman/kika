@@ -337,7 +337,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && state.commits.markers_seq.is_none()
         && state.commits.tips_seq.is_none()
         && state.commits.todo_seq.is_none()
-        && state.stash.seq.is_none()
+        && state.stash.list.seq.is_none()
         && state.commits.reflog.seq.is_none()
         && !state.review.loading()
         && !state.forge.in_flight
