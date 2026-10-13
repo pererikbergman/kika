@@ -103,7 +103,7 @@ mod tests {
     use crate::layout::SidePanel;
     use crate::model::{CommitFlow, Context, Focus};
     use crate::test_support::{
-        branches_loaded, forge_state, open_commit, remote_finished, remote_intent,
+        branches_loaded, forge_state, open_commit, remote_finished, remote_intent, toggle_stage,
     };
 
     fn github() -> Vec<ForgeHost> {
@@ -524,7 +524,7 @@ mod tests {
         state.selected = Some(0);
         state.focus = Focus::Files;
         state.expanded = SidePanel::Files;
-        let staged = state.update(AppIntent::ToggleStage);
+        let staged = toggle_stage(&mut state);
         assert!(
             staged.iter().any(|e| matches!(e, Effect::RunOp { .. })),
             "{staged:?}"

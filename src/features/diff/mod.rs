@@ -18,7 +18,14 @@
 //! with `EDITED_HUNK_INVALID`, the popup for an edit git rejects. And it
 //! draws the streamed pane and the focused pane's title (`view.rs`).
 //!
-//! Its `pub(crate)` API: `DiffStreamer`; the handlers `diff_loaded`,
+//! Its intents are nested (ADR-0002): core wraps [`DiffIntent`] in
+//! `AppIntent::Diff`, and its one `update` arm calls [`update`] here,
+//! which hands `DiffIntent::Renderers` on to the child's `update`.
+//! `Discard`, `OpenInEditor` and `ScrollDiff` are shared core intents:
+//! other features bind them, and core's arms handle them.
+//!
+//! Its `pub(crate)` API: the intent enum [`DiffIntent`] and the free
+//! function [`update`]; `DiffStreamer`; the handlers `diff_loaded`,
 //! `patch_loaded`, `with_lines`, `next_hunk`, `prev_hunk`,
 //! `enter_line_mode`, `toggle_selection_stage`, `toggle_diff_side`,
 //! `open_in_editor`, `edit_hunk`, `editor_closed`, `hunk_edited` and
@@ -40,7 +47,7 @@
 //! - `set_diff_options` reads `commits.open`, `stash.open`, `selected`,
 //!   `files` and `diff_options`, and calls stash's `stash_file_diff` and
 //!   core `select`/`commit_file_diff`. A feature does not call a sibling's
-//!   behaviour, so core keeps it;
+//!   behaviour, so core keeps it, `pub(crate)` so [`update`] can call it;
 //! - the pane's one way in and out, `open_diff` and `close_diff` (with
 //!   `DiffPane::open`/`clear` and `DiffStart`, in `diff_pane.rs`),
 //!   because `commits`, `stash` and `review` call them; and `remap`,
@@ -49,7 +56,8 @@
 //!   `files_open` (stash) and `open_conflict` (conflicts);
 //! - `toggle_hunk_stage` and `toggle_lines_stage`, because a commit's
 //!   change goes to custom_patch's `patch_toggle_lines`. They call the
-//!   moved `toggle_selection_stage` for the rest;
+//!   moved `toggle_selection_stage` for the rest, and are `pub(crate)` so
+//!   [`update`] can call them;
 //! - `load_patch` and the `display_only` method, which custom_patch and the
 //!   renderers call;
 //! - in `keymap.rs`: `DISPLAY_ONLY`, `WHITESPACE_HIDDEN`, `NOT_IN_COMMIT`
@@ -75,13 +83,18 @@
 //!   features hand off through too, and `diff_pane.rs`/`hunk_view.rs`,
 //!   which many features import.
 //!
-//! The child `renderers` draws the pane with an external pager or tool.
+//! The child `renderers` draws the pane with an external pager or tool. Its
+//! intents nest in `DiffIntent::Renderers`.
 
 pub(crate) mod effects;
+mod intent;
 pub(crate) mod keys;
 pub(crate) mod renderers;
 pub(crate) mod stream;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::DiffIntent;
+pub(crate) use update::update;
 
 pub(crate) use stream::DiffStreamer;

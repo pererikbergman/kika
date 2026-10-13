@@ -1295,6 +1295,7 @@ mod tests {
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::features::custom_commands::CustomCommandsIntent;
+    use crate::features::diff::DiffIntent;
     use crate::features::repos::ReposIntent;
     use crate::git::remote::RemoteFailure;
     use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
@@ -2019,7 +2020,10 @@ mod tests {
 
         runtime.spawn(Effect::DiffLoadingDelay { tag });
 
-        assert_eq!(rx.recv().await, Some(AppIntent::DiffSlow { tag }));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Diff(DiffIntent::Slow { tag }))
+        );
         assert!(start.elapsed() >= DIFF_LOADING_DELAY);
     }
 
@@ -2196,10 +2200,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::DiffLoaded {
+            Some(AppIntent::Diff(DiffIntent::Loaded {
                 tag: got,
                 result: Ok(chunk),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(chunk.lines.len(), 2);
                 assert!(chunk.done);

@@ -3,6 +3,8 @@
 //! its position there is behaviour.
 
 use super::external_diff::NO_RENDERER;
+use crate::features::diff::DiffIntent;
+use crate::features::diff::renderers::RenderersIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, Reason};
 use crate::model::AppState;
@@ -20,7 +22,7 @@ pub(crate) static RENDERERS_DIFF: &[Binding] = &[
         id: "diff.renderer",
         keys: &[KeyPattern::any(KeyCode::Char('R'))],
         scope: KeyScope::Diff,
-        intent: AppIntent::CycleRenderer,
+        intent: AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Cycle)),
         description: "Cycle diff renderer",
         label: "renderer",
         bar: false,

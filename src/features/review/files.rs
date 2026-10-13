@@ -464,6 +464,7 @@ mod tests {
     use crate::git::remotes::RemoteName;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
+    use crate::test_support::diff_chunk;
 
     fn id(c: char) -> CommitId {
         CommitId::parse(&c.to_string().repeat(40)).unwrap()
@@ -998,10 +999,7 @@ mod tests {
                 },
             })
             .collect();
-        state.update(AppIntent::DiffLoaded {
-            tag,
-            result: Ok(DiffChunk { lines, done }),
-        });
+        state.update(diff_chunk(tag, DiffChunk { lines, done }));
     }
 
     fn current_row(state: &AppState) -> Option<usize> {

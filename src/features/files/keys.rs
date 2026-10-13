@@ -4,6 +4,7 @@
 //! behaviour.
 
 use crate::confirm_question::Answer;
+use crate::features::files::FilesIntent;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -23,7 +24,7 @@ pub(crate) static FILES_NAV: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Files,
-        intent: AppIntent::SelectNext,
+        intent: AppIntent::Files(FilesIntent::Next),
         description: "Select the next file",
         label: "",
         bar: false,
@@ -36,7 +37,7 @@ pub(crate) static FILES_NAV: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Files,
-        intent: AppIntent::SelectPrev,
+        intent: AppIntent::Files(FilesIntent::Prev),
         description: "Select the previous file",
         label: "",
         bar: false,
@@ -50,7 +51,7 @@ pub(crate) static FILES_STAGE: &[Binding] = &[
         id: "files.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Files,
-        intent: AppIntent::ToggleStage,
+        intent: AppIntent::Files(FilesIntent::ToggleStage),
         description: "Stage the selected file, or unstage it if fully staged",
         label: "stage",
         bar: true,
@@ -60,7 +61,7 @@ pub(crate) static FILES_STAGE: &[Binding] = &[
         id: "files.stage_all",
         keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
         scope: KeyScope::Files,
-        intent: AppIntent::ToggleStageAll,
+        intent: AppIntent::Files(FilesIntent::ToggleStageAll),
         description: "Stage everything, or unstage everything if all is staged",
         label: "all",
         bar: true,
@@ -115,7 +116,7 @@ pub(crate) static FILES_IGNORE: &[Binding] = &[
         id: "files.ignore",
         keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenIgnore,
+        intent: AppIntent::Files(FilesIntent::OpenIgnore),
         description: "Add to .gitignore",
         label: "ignore",
         // Out of the bar, which is full at 80 columns; the help menu lists it.

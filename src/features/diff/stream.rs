@@ -11,6 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::Tag;
+use crate::features::diff::DiffIntent;
 use crate::git::GitRunner;
 use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command};
 use crate::git::error::GitError;
@@ -99,15 +100,17 @@ impl DiffStreamer {
                     emoji,
                     |result| {
                         // A closed channel means the app is quitting.
-                        let _ = reader_tx.send(AppIntent::DiffLoaded { tag, result });
+                        let _ = reader_tx.send(AppIntent::Diff(DiffIntent::Loaded { tag, result }));
                     },
                 );
             },
             // A crash still reports back, or the pane would say "Loading…" forever.
             move |reader| {
-                reader.err().map(|e| AppIntent::DiffLoaded {
-                    tag,
-                    result: Err(format!("git diff crashed: {e}")),
+                reader.err().map(|e| {
+                    AppIntent::Diff(DiffIntent::Loaded {
+                        tag,
+                        result: Err(format!("git diff crashed: {e}")),
+                    })
                 })
             },
         );
@@ -249,6 +252,7 @@ mod tests {
     use tokio::sync::mpsc as tokio_mpsc;
 
     use super::*;
+    use crate::features::diff::DiffIntent;
     use crate::git::diff::{DiffSide, LineKind};
     use crate::git::fake::{FakeChild, FakeRunner, fail};
 
@@ -529,10 +533,10 @@ mod tests {
         until("the first child is killed", || first.was_killed()).await;
 
         match rx.recv().await {
-            Some(AppIntent::DiffLoaded {
+            Some(AppIntent::Diff(DiffIntent::Loaded {
                 tag: got,
                 result: Ok(chunk),
-            }) => {
+            })) => {
                 assert_eq!(got, tag(2), "the killed stream emits nothing");
                 assert!(chunk.done);
                 assert_eq!(chunk.lines.len(), 3);
@@ -565,9 +569,9 @@ mod tests {
         streamer.start(tag(7), untracked("a"), 10);
 
         let lines = |intent| match intent {
-            Some(AppIntent::DiffLoaded {
+            Some(AppIntent::Diff(DiffIntent::Loaded {
                 result: Ok(chunk), ..
-            }) => chunk.lines.len(),
+            })) => chunk.lines.len(),
             other => panic!("expected a chunk, got {other:?}"),
         };
         assert_eq!(lines(rx.recv().await), 10);
@@ -604,10 +608,10 @@ mod tests {
         streamer.start(tag(3), untracked("a"), 250);
 
         match rx.recv().await {
-            Some(AppIntent::DiffLoaded {
+            Some(AppIntent::Diff(DiffIntent::Loaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag(3));
                 assert!(message.contains("git diff crashed"), "{message}");
             }
@@ -652,9 +656,9 @@ mod tests {
 
         streamer.start(tag(4), request, 250);
 
-        let Some(AppIntent::DiffLoaded {
+        let Some(AppIntent::Diff(DiffIntent::Loaded {
             result: Ok(chunk), ..
-        }) = rx.recv().await
+        })) = rx.recv().await
         else {
             panic!("expected a chunk");
         };
@@ -689,9 +693,9 @@ mod tests {
 
         streamer.start(tag(1), untracked("a"), 250);
 
-        let Some(AppIntent::DiffLoaded {
+        let Some(AppIntent::Diff(DiffIntent::Loaded {
             result: Ok(chunk), ..
-        }) = rx.recv().await
+        })) = rx.recv().await
         else {
             panic!("expected a chunk");
         };

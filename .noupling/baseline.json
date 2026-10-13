@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "timestamp": "1791886797",
-  "issue_count": 20,
+  "timestamp": "1791888237",
+  "issue_count": 19,
   "fingerprints": [
     "coupling_violation:src/e2e -> src/features",
     "coupling_violation:src/e2e -> src/forge",
@@ -20,7 +20,6 @@
     "low_cohesion:src/features/commits/compare",
     "low_cohesion:src/features/commits/custom_patch",
     "low_cohesion:src/features/commits/rewrite",
-    "low_cohesion:src/features/diff",
     "low_cohesion:src/features/operation",
     "low_cohesion:src/features/repos"
   ]

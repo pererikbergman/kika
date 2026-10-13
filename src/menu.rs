@@ -13,6 +13,7 @@ use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
 use crate::features::commits::keys::reset_disabled;
+use crate::features::files::FilesIntent;
 use crate::features::files::keys::{files_stage_disabled, stage_all_disabled};
 use crate::features::operation::OperationIntent;
 use crate::features::operation::keys::merge_disabled;
@@ -196,12 +197,12 @@ static CUSTOM_PATCH: &[MenuItem] = &[
 static STAGE: &[MenuItem] = &[
     MenuItem {
         label: "Selected file",
-        intent: AppIntent::ToggleStage,
+        intent: AppIntent::Files(FilesIntent::ToggleStage),
         disabled: files_stage_disabled,
     },
     MenuItem {
         label: "Everything",
-        intent: AppIntent::ToggleStageAll,
+        intent: AppIntent::Files(FilesIntent::ToggleStageAll),
         disabled: stage_all_disabled,
     },
 ];
