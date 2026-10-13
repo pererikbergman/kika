@@ -2297,8 +2297,9 @@ impl AppState {
     }
 }
 
-/// The Branches panel: loading the list and the selected branch's log,
-/// and the actions on the selected branch.
+/// Shared actions several features call: reloading the branch list,
+/// taking the selected branch for an action, starting an op attached or
+/// detached, and copying the selected commit's text.
 impl AppState {
     /// Load the branch list again, keeping what it shows until it lands.
     pub(crate) fn reload_branches(&mut self) -> Vec<Effect> {
@@ -2406,7 +2407,8 @@ impl AppState {
     }
 }
 
-/// Fetch, pull and push, and the questions git and ssh ask while they run.
+/// The questions git and ssh ask while a fetch, pull, push or review
+/// fetch runs: the credential popup that sync and review share.
 impl AppState {
     /// Show the question, or say no at once to one nobody is waiting for.
     fn credential_asked(&mut self, tag: Tag, prompt: String, confirm: bool) -> Vec<Effect> {
@@ -2436,7 +2438,8 @@ impl AppState {
     }
 }
 
-/// List filters.
+/// The Files panel's rows as its filter shows them. Core list input and
+/// keys read them, and so do the files and stash features.
 impl AppState {
     /// The indexes of the files the filter shows, in order.
     pub fn files_visible(&self) -> Vec<usize> {
@@ -5091,7 +5094,7 @@ mod tests {
         assert!(!format!("{:?}", state.command_log).contains("hunter2"));
     }
 
-    // --- Squash, fixup, drop and reword ---
+    // --- Failure titles: an interactive rebase and an undo or redo ---
 
     #[test]
     fn a_failed_interactive_rebase_points_at_the_status_panel() {
@@ -5752,6 +5755,8 @@ mod tests {
         assert_eq!(state.notice, Some("Selection cleared".into()));
     }
 
+    // --- Copying the selected commit's text ---
+
     /// The one menu open over `state`, and its title.
     fn open_menu(state: &AppState) -> MenuId {
         match state.popups.as_slice() {
@@ -5898,7 +5903,7 @@ mod tests {
         ));
     }
 
-    // --- Stash ---
+    // --- Stash failures and the repository switch ---
 
     #[test]
     fn stash_failures_have_their_own_titles() {
@@ -5959,6 +5964,8 @@ mod tests {
         assert_eq!(state.stash, crate::features::stash::StashList::default());
         assert_eq!(state.stash_draft, None);
     }
+
+    // --- A Files range across a status reload ---
 
     #[test]
     fn a_reload_that_drops_a_file_inside_the_range_clears_it() {
@@ -6032,6 +6039,8 @@ mod tests {
         assert_eq!(state.files_range(), [0, 1]);
         assert_eq!(state.notice, None);
     }
+
+    // --- Start-up facts ---
 
     #[test]
     fn with_git_version_records_what_main_found() {

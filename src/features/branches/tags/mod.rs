@@ -19,7 +19,8 @@
 //! Kept cross-feature reads and calls:
 //! - `commits.rows` and `commits.selected` (commits), to take the commit a
 //!   new tag points at;
-//! - `push_tag` calls sync's `start_remote` on `AppState`;
+//! - `push_tag` calls `start_remote` (sync) on `AppState`, an accepted
+//!   cross-feature call listed in ADR-0001's Outcome;
 //! - `branches.*` (the parent, `features/branches`): the tab, its tags and
 //!   the pending tag, and `load_branch_log`.
 //!

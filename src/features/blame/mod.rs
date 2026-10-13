@@ -16,7 +16,7 @@
 //! Kept cross-feature reads and calls, left as they are because this slice
 //! only moves code:
 //! - `open_blame` and `blame_disabled` read `selected` and `files` (files);
-//! - `close_blame` calls `render_if_stale` (diff renderers).
+//! - `close_blame` calls core `render_if_stale` (`model.rs`).
 //!
 //! Others read blame state directly: `command_target` (custom commands),
 //! core list input and search, `blame_open`, `pane_search_disabled` and the

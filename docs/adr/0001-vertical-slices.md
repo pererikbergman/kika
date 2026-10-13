@@ -76,7 +76,7 @@ MVI does not change. `update(state, intent)` stays pure and returns effects. I/O
    - `discard_disabled` is used by `files` and `diff`, so it goes in core.
    - `commit_file_line` is used by the `stash` and `commits` views, so it goes in `rows.rs`.
 2. **A feature never calls another feature's behaviour directly.** It returns an `Effect`, or the core refresh plan (`refresh.rs`) reloads what an operation changed.
-3. **Reading another feature's state** goes through that feature's `pub(crate)` query methods on `AppState`, such as `selected_file()`, `selected_commit()` or `local_branch_selected()`. The issues below are move-only, so direct field reads that exist today are kept as they are and listed in `slices.md`. New code follows this rule.
+3. **Reading another feature's state** goes through that feature's `pub(crate)` query methods on `AppState`, such as `selected_file()`, `selected_commit()` or `local_branch_selected()`. The issues below are move-only, so direct field reads that exist today are kept as they are and listed in each feature's `mod.rs`. New code follows this rule.
 4. **noupling only sees `use` items.** It misses fully qualified paths written inline (`crate::features::x::f()`) and calls to `AppState` methods. So every slice PR also runs this check, which must print nothing:
    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
    Hits that point at a parent feature are allowed.
@@ -191,3 +191,97 @@ Bad:
 - Handlers become `pub(crate)` rather than `pub(super)`, because core dispatch is no longer their parent module.
 - Cross-feature calls to `AppState` methods and direct field reads stay invisible to noupling. Rule 3 and the grep check are the guard.
 - `factory/project.md` must replace its "Architecture: strict MVI" file table with the core and feature layout and these rules. The skeleton issue does that.
+
+## Outcome
+
+Recorded on 2026-10-13, when the last slice (#323) closed the refactor. The status stays Accepted. Behaviour, key bindings and the config format did not change. `registry_order_is_pinned` still pins the same 349 ids, and `docs/configuration.md` was never edited.
+
+### Final layout
+
+```
+src/features/
+  files/  diff/{renderers/}  commit/  stash/  submodules/  worktrees/  repos/
+  command_log/  custom_commands/  blame/  conflicts/  sync/  operation/
+  pull_requests/  review/
+  branches/{remotes/, tags/}
+  commits/{reflog/, rewrite/, copy/, custom_patch/, bisect/, compare/}
+```
+
+That is 26 feature folders and 179 `.rs` files. `src/model/` holds only `confirm_guard.rs`. `AppIntent` and `Effect` stay flat. Their variants are grouped under `// --- <feature> ---` comments, core first and then the features in the order above.
+
+### Core files and why they stay
+
+Most of these have importers or callers in two or more sibling features, or in core and a feature, so rule 1 puts them in core:
+
+| File | Why it stays in core |
+|---|---|
+| `bisect.rs` | Bisect-aware guards and words. Branches, commit, commits, operation and the custom patch all refuse a `HEAD` move while a bisect runs. |
+| `diff_pane.rs`, `hunk_view.rs`, `diff_search.rs` | The Diff pane, the hunk cursor and pane search. Diff, commits, stash, review, blame and the renderers all show or search a diff. |
+| `diff_mark.rs` | The diff mark, which branches, commits and compare use. |
+| `range_delete.rs` | The range question shared by the Local, Remotes and Tags tabs and the Stash panel. |
+| `remote_run.rs` | The running fetch, pull or push, which sync, branches and tags use. |
+| `handoff.rs` | Terminal hand-off, used by commit, diff, custom commands, the rewrite and the custom patch. |
+| `list_input.rs`, `list_filter.rs` | List filters, ranges and pane search: the bottom-bar input dispatches on focus across every list. |
+| `refresh.rs`, `watch.rs` | The refresh plan and the outside-change watch, which reload every feature's data. |
+| `rows.rs`, `pick_list.rs`, `popup*.rs`, `menu.rs` | Shared widgets. |
+| `clipboard.rs`, `config.rs`, `program.rs`, `worktree_file.rs`, `sequence_editor.rs` | Plumbing that the loop, `src/git` or several features use. |
+| `model/confirm_guard.rs` | `confirm_refused`, the re-check a `HEAD`-moving question runs on `y`. Only commits and its rewrite call it, so rule 1 would put it in `commits`. #323 kept it in place as planned. Moving it is a candidate for a follow-up. |
+
+A few hub items have only one feature caller today and still stay, because they are generic or because moving them would change a test assertion:
+- `AppState::git_has` (`model.rs`) reads core `git_version`; commits and its rewrite ask it.
+- `op_running` (`keymap.rs`) pairs with `OP_RUNNING`, which most features use; branches and remotes call it.
+- `PanelLook::fits_bare` (`view.rs`) is a method of the shared panel widget.
+- `GitOp::discard_for` and `GitOp::discard_many` (`op.rs`) build `GitOp` values next to the enum. `features/files/mod.rs` explains them.
+- `CLEAR_LOG_FILTER` (`keymap.rs`) is shared by the rewrite and the custom patch. Their tests assert on it as `keymap::CLEAR_LOG_FILTER`.
+
+The final sweep moved one item: `query_title`, used only by the Commits panel, from `view.rs` into `features/commits/view.rs`.
+
+### Accepted cross-feature calls
+
+Rule 2 has seven known exceptions. Each is a direct call to an `AppState` method that a sibling feature defines. They are listed in the caller's `mod.rs`:
+
+| Caller | Calls | Owner |
+|---|---|---|
+| `branches/update.rs`, `branches_loaded` | `load_pull_requests` | pull_requests |
+| `review/merge.rs`, after a merge | `load_pull_requests` | pull_requests |
+| `branches/tags/update.rs`, `push_tag` | `start_remote` | sync |
+| `pull_requests/create.rs`, `pick_select` | `pick_check` | review |
+| `pull_requests/create.rs`, `pick_select` | `pick_merge_method` | review |
+| `repos/update.rs`, `open_repo` | `reload_stashes` | stash |
+| `submodules/update.rs`, `enter_submodule` and `leave_submodule` | `reload_stashes` | stash |
+
+They were kept for two reasons. Moving a callee into `model.rs` would break "hubs only shrink". Turning a call into an `Effect` round trip would change the order and timing of effects. A possible follow-up is to move the callees into a core file that is not a hub, such as a `reload.rs`.
+
+### Deferred
+
+`render_hunk_view` and `HunkPane` stay in `src/view.rs`. To move them into `features/diff`, core would have to compute the custom patch's picks and pass them in. That changes a signature, so it is not a pure move.
+
+### Hubs, then and now
+
+| File | Lines at the start | Lines now | Of which `mod tests` now |
+|---|---:|---:|---:|
+| `src/model.rs` | 21,513 | 6,051 | 3,466 |
+| `src/keymap.rs` | 11,583 | 5,656 | 3,176 |
+| `src/view.rs` | 6,727 | 4,196 | 2,656 |
+| `src/effect.rs` | 5,023 | 2,915 | 1,627 |
+| `src/git/ops.rs`, now `src/op.rs` | 4,938 | 1,302 | 566 |
+| Total | 49,784 | 20,120 | |
+
+`model.rs` keeps 2,585 lines outside its tests. 2,198 of them are code, not blank lines or comments, against the expected 1,700. The extra code is the shared actions above, the credential questions and the op slot's failure titles. The suite has 2,883 tests, against 2,817 when this ADR was written.
+
+### noupling
+
+Measured with noupling 0.9.2 on a `git archive` copy of the #323 tree:
+
+| Tree | Health score | TRI | Modules | Issues |
+|---|---:|---:|---:|---|
+| Before the refactor (c325f1f) | 64.0 | 504 | 140 | 11 |
+| After the last slice (#323) | 4.9 | 2,472 | 260 | 21: 7 critical, 3 medium, 11 low |
+
+The baseline holds 21 fingerprints:
+- 6 `coupling_violation`s: `src/e2e -> src/features`, `src/e2e -> src/forge`, `src/e2e -> src/git`, `src/features -> src/git`, `src/features -> src/forge` and `src/forge -> src/git`;
+- `red_flag:fused_sibling:src/features -> src/git`;
+- `zone_flag:src`, `zone_flag:src/forge` and `zone_flag:src/git`;
+- 11 `low_cohesion` fingerprints: one for `src/features` and ten for single feature folders.
+
+None of them is a `cycle:*`, a `rule_violation:*`, a feature-to-feature coupling, or `src/git` or `src/forge` importing a feature. The score fell further than the 18.0 the simulation predicted. Of the 95.1 points lost, 86.9 come from `src/features -> src/git` (79.4) and `src/features -> src/forge` (7.5), which score per sibling import, as described above. The workspace-crate follow-up under "noupling" is still the way to win them back.

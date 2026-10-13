@@ -23,7 +23,8 @@
 //!   load_files, merge}`.
 //!
 //! Kept cross-feature reads and calls:
-//! - `merge.rs` calls `load_pull_requests` (pull_requests) after a merge;
+//! - `merge.rs` calls `load_pull_requests` (pull_requests) after a merge,
+//!   an accepted cross-feature call listed in ADR-0001's Outcome;
 //! - pull_requests' `pick_select` calls `pick_check` and
 //!   `pick_merge_method`;
 //! - `files.rs` reads and writes `diff` and `diff_options` (diff);

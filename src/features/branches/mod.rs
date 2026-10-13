@@ -31,7 +31,8 @@
 //!
 //! Kept cross-feature reads and calls:
 //! - `branches_loaded` calls `load_pull_requests` (pull_requests) on
-//!   `AppState` and writes `forge`'s branch names;
+//!   `AppState`, an accepted cross-feature call listed in ADR-0001's
+//!   Outcome, and writes `forge`'s branch names;
 //! - `watch.branches_pending`, `busy`, `take_seq`, `start_op`, `op_seq`,
 //!   `bisect_refuses` and `branch_for_action` (core), and
 //!   `crate::bisect::head_move_disabled` (core), so no checkout moves

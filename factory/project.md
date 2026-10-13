@@ -37,6 +37,13 @@ Core files:
 | `src/effect.rs` | Effects | `Effect`, one flat enum, and the `Runtime::run` dispatch that calls each feature's `effects.rs`. |
 | `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |
 | `src/view.rs` and the shared widgets (`layout.rs`, `popup*.rs`, `menu.rs`, `pick_list.rs`, `list_filter.rs`, ...) | View | `render(&AppState, &mut Frame)` composes the frame. Reads state only. |
+| `src/op.rs`, `src/prompts.rs` | Op slot | `GitOp`, `op_command` and `run_op`; whether an op needs the terminal. Feature `git.rs` files hold the argv builders the arms call. |
+| `src/refresh.rs`, `src/watch.rs` | Refresh | The refresh plan from each `GitOp` to the data it makes stale, and the watch for outside changes. |
+| `src/handoff.rs` | Hand-off | Blocking work that needs the real terminal (editor, attached ops, commands). The loop suspends the screen around it. |
+| `src/list_input.rs` | List input | List filters, ranges, pane search and Esc in a list, shared by every list. |
+| `src/bisect.rs`, `src/diff_pane.rs`, `src/hunk_view.rs`, `src/diff_search.rs`, `src/diff_mark.rs`, `src/range_delete.rs`, `src/remote_run.rs`, `src/model/confirm_guard.rs` | Shared state | State and guards that two or more features use. Each one's reason is in ADR-0001's Outcome. |
+| `src/config.rs`, `src/config_docs.rs`, `src/clipboard.rs`, `src/program.rs`, `src/sequence_editor.rs`, `src/worktree_file.rs` | Plumbing | Config loading and its doc test, the clipboard, program lookup, Kika as git's sequence editor, and worktree file I/O. |
+| `src/test_support.rs` | Tests | Shared `#[cfg(test)]` builders that tests in more than one area use. A helper only one feature's tests use stays with that feature. |
 
 Feature-folder files (each only when the feature has something to put there):
 
@@ -69,6 +76,9 @@ Dependency rules:
 4. noupling only sees `use` items. Every slice also runs this check, which must print
    nothing (hits that point at a parent feature are allowed):
    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
+
+The known exceptions to rule 2 (seven direct calls to a sibling feature's `AppState`
+methods) are listed in ADR-0001's Outcome section and in each caller's `mod.rs`.
 
 MVI purity:
 - `update` is pure and returns effects. Git, network and filesystem work runs in tasks
