@@ -1,13 +1,12 @@
 use crate::diff_mark::DiffMark;
-use crate::diff_pane::DiffPane;
-use crate::diff_search::DiffSearch;
+use crate::diff_pane_view::{HunkPane, render_hunk_view};
 use crate::features::blame;
 use crate::features::branches;
 use crate::features::branches::BranchesTab;
 use crate::features::branches::remotes;
 use crate::features::commit;
 use crate::features::commits;
-use crate::features::commits::custom_patch::{self, CustomPatch};
+use crate::features::commits::custom_patch;
 use crate::features::conflicts;
 use crate::features::diff::renderers::view::{render_rendered, tool_title};
 use crate::features::diff::view::{hunk_title, hunk_title_parts, options_note, render_diff_pane};
@@ -15,13 +14,10 @@ use crate::features::files;
 use crate::features::operation;
 use crate::features::stash;
 use crate::git::bisect::BisectState;
-use crate::git::diff::{DiffLine, DiffOptions, EmojiZwj, LineKind};
 use crate::git::emoji;
-use crate::git::patch::{FileKind, PatchError};
 use crate::git::remote::RemoteOp;
 use crate::git::safe_text::sanitize;
 use crate::git::status::Head;
-use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
 use crate::layout::{Panel, SidePanel, help_rows, workspace_layout};
 use crate::model::{AppState, Context, Focus};
@@ -31,7 +27,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 pub(crate) use crate::layout::screen_layout;
 
@@ -120,7 +116,12 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
         (true, true) => "Press l, then R, for the built-in diff",
         (true, false) => "Press l, then R, for the next renderer",
     };
-    match (&state.focus, state.rendered_shown(), label) {
+    match (
+        &state.focus,
+        state.hunk_view(),
+        state.rendered_shown(),
+        label,
+    ) {
         // What the selected branch holds, before acting on it.
         // A remote's header row has no log; what the remote is instead.
         (Focus::Branches, ..)
@@ -139,28 +140,34 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             render_diff_pane(&state.diff, options, &look, frame, area)
         }
         // A tool's rows show no patch lines, so no cursor is drawn on them.
-        (Focus::Diff(view), Some(rendered), Some(label)) if state.display_only() => {
+        (Focus::Diff, Some(view), Some(rendered), Some(label)) if state.display_only() => {
             let (side, tail) = hunk_title_parts(view, options);
             let path = view.path.display();
             let block = look.block(tool_title(&look, side, path, &tail, label));
             render_rendered(rendered, block, None, hint, frame, area);
         }
-        (Focus::Diff(view), Some(rendered), Some(label)) => {
+        (Focus::Diff, Some(view), Some(rendered), Some(label)) => {
             let block = look.block(hunk_title(view, options, label, &look));
             render_rendered(rendered, block, Some(view), hint, frame, area);
         }
-        (Focus::Diff(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
+        (Focus::Diff, Some(view), None, Some(label)) if state.rendered_for_shown().is_some() => {
             // Short, so it fits the pane's title at 80 columns.
             let suffix = format!("{label} (unmapped)");
             let view = HunkPane { view, picks: None };
             render_hunk_view(view, options, state.emoji_zwj, &suffix, &look, frame, area)
         }
-        (Focus::Diff(view), ..) => {
+        (Focus::Diff, Some(view), ..) => {
+            // The custom patch's picks, when the view is of the commit it
+            // takes changes from: the pane draws them, core works them out.
             let picks = state
                 .custom_patch
                 .as_ref()
-                .filter(|p| view.commit.as_ref().is_some_and(|c| p.is_from(c)));
-            let view = HunkPane { view, picks };
+                .filter(|p| view.commit.as_ref().is_some_and(|c| p.is_from(c)))
+                .map(|patch| custom_patch::view::picked_rows(view, patch));
+            let view = HunkPane {
+                view,
+                picks: picks.as_ref(),
+            };
             render_hunk_view(view, options, state.emoji_zwj, "", &look, frame, area)
         }
         (Focus::Conflict(view), ..) => {
@@ -170,12 +177,12 @@ fn render_workspace(state: &AppState, frame: &mut Frame, main: Rect) {
             Some(commit) => blame::view::render_commit_view(commit, &look, frame, area),
             None => blame::view::render_blame(view, &look, frame, area),
         },
-        (_, Some(rendered), Some(label)) if state.display_only() => {
+        (_, _, Some(rendered), Some(label)) if state.display_only() => {
             let (path, tail) = (rendered.path.display(), options_note(options));
             let block = look.block(tool_title(&look, "Diff", path, &tail, label));
             render_rendered(rendered, block, None, hint, frame, area);
         }
-        (_, Some(rendered), Some(label)) => {
+        (_, _, Some(rendered), Some(label)) => {
             let tail = format!("{} · {label}", options_note(options));
             let block = look.block(look.path_title("Diff", rendered.path.display(), &tail));
             render_rendered(rendered, block, None, hint, frame, area);
@@ -435,7 +442,7 @@ struct Glyph {
 /// out by it and the search marks snap to it, so a mark never cuts a glyph
 /// the terminal draws as one. A zero-width char with no glyph before it
 /// continues nothing.
-fn continues_glyph(line: &str) -> Vec<bool> {
+pub(crate) fn continues_glyph(line: &str) -> Vec<bool> {
     let mut glyph_is_emoji = None;
     let mut before = None;
     // The glyph so far is a single regional indicator, waiting for its pair.
@@ -500,7 +507,7 @@ pub(crate) fn clip(line: &str, from: usize, width: usize) -> String {
 
 /// [`clip`], and whether the text ran past the right edge, so its last
 /// cell is the `…`.
-fn clip_cut(line: &str, from: usize, width: usize) -> (String, bool) {
+pub(crate) fn clip_cut(line: &str, from: usize, width: usize) -> (String, bool) {
     let mut cells = vec![Cell::Blank; width];
     let mut col: usize = 0;
     let mut last: Option<Glyph> = None;
@@ -910,7 +917,7 @@ const SEARCH_KEYS: [[&str; 4]; 5] = [
 /// pane's, the blame's, its commit's, or a side panel's diff preview.
 fn searching(state: &AppState, focus: KeyScope) -> bool {
     match (focus, &state.focus) {
-        (KeyScope::Diff, Focus::Diff(view)) => view.search.is_some(),
+        (KeyScope::Diff, Focus::Diff) => state.hunk_view().is_some_and(|v| v.search.is_some()),
         (KeyScope::Blame, Focus::Blame(view)) => view.search.is_some(),
         (KeyScope::BlameCommit, Focus::Blame(view)) => {
             view.commit.as_ref().is_some_and(|c| c.search.is_some())
@@ -1203,288 +1210,9 @@ pub(crate) fn reversed(mut line: Line<'_>, width: usize) -> Line<'_> {
     line.style(Style::new().add_modifier(Modifier::REVERSED))
 }
 
-/// Where in the streamed diff the pane is: ` · <first shown>/<loaded>`,
-/// `+` while more are coming; empty with nothing to show.
-pub(crate) fn diff_position(diff: &DiffPane) -> String {
-    if diff.lines.is_empty() || diff.error.is_some() {
-        return String::new();
-    }
-    let first = (diff.scroll + 1).min(diff.lines.len());
-    let more = if diff.done { "" } else { "+" };
-    format!(" · {first}/{}{more}", diff.lines.len())
-}
-
-/// The inside of a streamed Diff pane at `inner`'s size: an error, a
-/// delayed "Loading…", "No diff", or the visible lines, with the
-/// search's matches marked on them.
-pub(crate) fn diff_pane_body(diff: &DiffPane, inner: Rect) -> Paragraph<'static> {
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    if let Some(error) = &diff.error {
-        let lines = error.lines().map(|l| Line::from(l.to_string()));
-        return Paragraph::new(lines.collect::<Vec<_>>()).wrap(Wrap { trim: false });
-    }
-    if diff.show_loading {
-        return Paragraph::new("Loading…");
-    }
-    if diff.done && diff.lines.is_empty() {
-        return Paragraph::new("No diff");
-    }
-    // Only the visible slice: a 50,000-line diff costs a screenful per frame.
-    let start = diff.scroll.min(diff.lines.len());
-    let end = start.saturating_add(rows).min(diff.lines.len());
-    Paragraph::new(
-        diff.lines[start..end]
-            .iter()
-            .zip(start..)
-            .map(|(line, at)| styled_diff_line(line, width, &marks_of(&diff.search, at)))
-            .collect::<Vec<_>>(),
-    )
-}
-
-/// The focused Diff pane: one side of the file as hunks, the selected one
-/// marked by a reversed `@@` row and a `▌` gutter, so it reads without colour.
-/// In line mode the picked lines are marked that way instead.
-/// `suffix`, when set, follows the title after a `·`.
-fn render_hunk_view(
-    pane: HunkPane,
-    options: DiffOptions,
-    emoji: EmojiZwj,
-    suffix: &str,
-    look: &PanelLook,
-    frame: &mut Frame,
-    area: Rect,
-) {
-    let view = pane.view;
-    let block = look.block(hunk_title(view, options, suffix, look));
-    let inner = block.inner(area);
-    let (rows, width) = (usize::from(inner.height), usize::from(inner.width));
-    // A commit's change gives a second column to what the patch holds.
-    let picked_ids = pane
-        .picks
-        .map(|patch| custom_patch::view::picked_rows(view, patch));
-    let gutters = if picked_ids.is_some() { 2 } else { 1 };
-    let pane = match &view.patch {
-        None if view.loading() => Paragraph::new("Loading…"),
-        None => Paragraph::new("Could not read the diff"),
-        Some(patch) if patch.kind == FileKind::Binary => {
-            Paragraph::new(PatchError::Binary.message())
-        }
-        Some(patch) if patch.kind == FileKind::Unsupported => {
-            Paragraph::new(PatchError::Unsupported.message())
-        }
-        Some(patch) if patch.hunks.is_empty() => Paragraph::new(NO_CHANGES),
-        Some(_) => {
-            let picked = view.selected_range();
-            let lines = view
-                .rows()
-                .into_iter()
-                .enumerate()
-                .skip(view.scroll)
-                .take(rows)
-                .map(|(at, row)| {
-                    let in_hunk = row.hunk == Some(view.hunk);
-                    // In line mode only the picked lines are marked.
-                    let selected = if view.lines.is_some() {
-                        in_hunk && row.line.is_some_and(|i| picked.contains(&i))
-                    } else {
-                        in_hunk
-                    };
-                    let gutter = if selected { "▌" } else { " " };
-                    let style = match row.kind {
-                        RowKind::Header => Style::new().add_modifier(Modifier::BOLD),
-                        RowKind::HunkHeader => Style::new().fg(Color::Cyan),
-                        RowKind::Added => Style::new().fg(Color::Green),
-                        RowKind::Removed => Style::new().fg(Color::Red),
-                        RowKind::Context => Style::new(),
-                        RowKind::NoNewline => Style::new().fg(Color::DarkGray),
-                    };
-                    let mut spans = vec![Span::styled(gutter, Style::new().fg(FOCUSED))];
-                    if let Some(ids) = &picked_ids {
-                        let held = matches!((row.hunk, row.line), (Some(h), Some(l)) if ids.contains(&(h, l)));
-                        let mark = if held { "●" } else { " " };
-                        spans.push(Span::styled(mark, commits::view::PATCH_MARK));
-                    }
-                    spans.extend(clipped_marked(
-                        &drawn_text(&row, emoji),
-                        width.saturating_sub(gutters),
-                        style,
-                        &marks_of(&view.search, at),
-                    ));
-                    let line = Line::from(spans);
-                    let mark = match view.lines {
-                        Some(_) => row.line.is_some(),
-                        None => row.kind == RowKind::HunkHeader,
-                    };
-                    if selected && mark {
-                        reversed(line, width)
-                    } else {
-                        line
-                    }
-                })
-                .collect::<Vec<_>>();
-            Paragraph::new(lines)
-        }
-    };
-    frame.render_widget(pane.block(block), area);
-}
-
-/// The focused hunk view, with the custom patch when the view is of the
-/// commit it holds changes from.
-#[derive(Clone, Copy)]
-struct HunkPane<'a> {
-    view: &'a HunkView,
-    picks: Option<&'a CustomPatch>,
-}
-
-/// [`search_marks`] of a pane's search, if it has one.
-pub(crate) fn marks_of(search: &Option<DiffSearch>, at: usize) -> Vec<(usize, usize, Style)> {
-    search
-        .as_ref()
-        .map_or_else(Vec::new, |s| search_marks(s, at))
-}
-
-/// Matches of the search on row `at`: char ranges and their style, the
-/// current match standing out from the rest.
-fn search_marks(search: &DiffSearch, at: usize) -> Vec<(usize, usize, Style)> {
-    // Matches are in row order, so this row's are found by bisection.
-    let from = search.matches.partition_point(|m| m.row < at);
-    let to = search.matches.partition_point(|m| m.row <= at);
-    search.matches[from..to]
-        .iter()
-        .zip(from..)
-        .map(|(m, i)| {
-            let style = if Some(i) == search.current {
-                CURRENT_MATCH
-            } else {
-                MATCH
-            };
-            (m.start, m.end, style)
-        })
-        .collect()
-}
-
-/// A search match, and the one `n` and `N` step from.
-pub(crate) const MATCH: Style = Style::new().fg(Color::Black).bg(Color::Yellow);
-/// The current one is also bold and underlined, so it stands out without
-/// colour.
-pub(crate) const CURRENT_MATCH: Style = Style::new()
-    .fg(Color::Black)
-    .bg(Color::LightRed)
-    .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED));
-
-/// `text` in `style`, split so each char range in `marks` (in order, not
-/// overlapping) takes its own style on top. Ranges past the end of a
-/// clipped text are cut to it. Each range widens to whole glyphs: the
-/// buffer measures each span on its own, so a span that ended inside an
-/// emoji sequence or before a combining mark would split what `clip` laid
-/// out as one glyph, and shift the rest of the row. A glyph holding the
-/// current match keeps its style even when another match shares it.
-fn marked_spans(text: String, style: Style, marks: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
-    if marks.is_empty() {
-        return vec![Span::styled(text, style)];
-    }
-    let continues = continues_glyph(&text);
-    let chars: Vec<char> = text.chars().collect();
-    let inside = |i: usize| continues.get(i).copied().unwrap_or(false);
-    let piece = |from: usize, to: usize| {
-        chars[from.min(chars.len())..to.min(chars.len())]
-            .iter()
-            .collect::<String>()
-    };
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut at = 0;
-    // The mark the last marked span carries.
-    let mut last_mark = None;
-    for &(start, end, mark) in marks {
-        let mut start = start.min(chars.len()).max(at);
-        while start > at && inside(start) {
-            start -= 1;
-        }
-        let mut end = end.min(chars.len());
-        while inside(end) {
-            end += 1;
-        }
-        // A match in the glyph the last one widened to: that span already
-        // holds it, and takes this match's style on top, unless it holds
-        // the current match, which keeps its own look so `n` and `N` always
-        // show where they stopped.
-        if end <= start {
-            if at > 0
-                && last_mark != Some(CURRENT_MATCH)
-                && let Some(last) = spans.last_mut()
-            {
-                last.style = last.style.patch(mark);
-                last_mark = Some(mark);
-            }
-            continue;
-        }
-        spans.push(Span::styled(piece(at, start), style));
-        spans.push(Span::styled(piece(start, end), style.patch(mark)));
-        last_mark = Some(mark);
-        at = end;
-    }
-    spans.push(Span::styled(piece(at, chars.len()), style));
-    spans.retain(|span| !span.content.is_empty());
-    spans
-}
-
-/// `line` clipped to `width` from its start, with `marks` drawn over
-/// `style`. A cut line's `…` stays in `style`: it stands for text off
-/// screen, not for the match, and a marked `…` would read as matched.
-pub(crate) fn clipped_marked(
-    line: &str,
-    width: usize,
-    style: Style,
-    marks: &[(usize, usize, Style)],
-) -> Vec<Span<'static>> {
-    let (text, cut) = clip_cut(line, 0, width);
-    if !cut {
-        return marked_spans(text, style, marks);
-    }
-    let ellipsis = text.chars().count() - 1;
-    let marks: Vec<_> = marks
-        .iter()
-        .map(|&(start, end, mark)| (start, end.min(ellipsis), mark))
-        .filter(|&(start, end, _)| start < end)
-        .collect();
-    marked_spans(text, style, &marks)
-}
-
-/// Where a search is, for a pane's title: " · match i of n", with `+` on
-/// the count while `more` lines can still come, or " · no matches". Never
-/// the query: the bottom bar shows that, escaped.
-pub(crate) fn found_note(search: Option<&DiffSearch>, more: bool) -> String {
-    let more = if more { "+" } else { "" };
-    match search {
-        Some(search) => match search.current {
-            Some(i) => format!(" · match {} of {}{more}", i + 1, search.matches.len()),
-            None => " · no matches".to_string(),
-        },
-        None => String::new(),
-    }
-}
-
 /// `text` followed by spaces up to `width` columns.
 pub(crate) fn pad(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width.saturating_sub(width_of(text))))
-}
-
-/// Colour by kind; `---`/`+++` arrive as headers, so they are never red or
-/// green. A line wider than `width` ends in `…`, so a cut is never silent.
-/// `marks` are search matches, drawn over the colour.
-pub(crate) fn styled_diff_line(
-    line: &DiffLine,
-    width: usize,
-    marks: &[(usize, usize, Style)],
-) -> Line<'static> {
-    let style = match line.kind {
-        LineKind::Added => Style::new().fg(Color::Green),
-        LineKind::Removed => Style::new().fg(Color::Red),
-        LineKind::Hunk => Style::new().fg(Color::Cyan),
-        LineKind::Header => Style::new().add_modifier(Modifier::BOLD),
-        LineKind::Context => Style::new(),
-    };
-    Line::from(clipped_marked(&line.text, width, style, marks))
 }
 
 /// Fit `text` into `max` columns by replacing its start with `…`.
@@ -1542,11 +1270,14 @@ pub(crate) fn row_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff_pane_view::{CURRENT_MATCH, MATCH};
     use crate::features::blame::CommitView;
     use crate::git::FileEntry;
+    use crate::git::diff::EmojiZwj;
     use crate::git::diff::{DiffLine, DiffSide, LineKind};
     use crate::git::repo_state::Operation;
     use crate::git::status::EntryKind;
+    use crate::hunk_view::HunkView;
     use crate::test_support::OID;
     use crate::test_support::screen::{
         TWO_HUNKS, assert_no_split_cluster, blame_line, blamed, branch, cell_at, contains,
@@ -2106,7 +1837,7 @@ mod tests {
         // The heading's control bytes never reach the terminal.
         assert!(contains(&rows, "@@ -9 +9 @@ fn \u{FFFD}[2Jx"), "{rows:#?}");
 
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.next(20);
         }
         assert!(!reversed_at(&state, "@@ -1,2 +1,2 @@"));
@@ -2309,7 +2040,7 @@ mod tests {
         for query in ["👨", "👩", "\u{200D}", family, "Q👨", "👩X", "X👨"] {
             for width in [100, 24, 20] {
                 let mut state = joined_keep(&diff);
-                if let Focus::Diff(view) = &mut state.focus {
+                if let Some(view) = state.hunk_view_mut() {
                     view.set_search(query, EmojiZwj::Keep);
                 }
                 let buffer = draw_buffer(&state, width, 12);
@@ -2345,55 +2076,6 @@ mod tests {
     }
 
     #[test]
-    fn marks_widen_to_whole_glyphs_and_a_second_mark_in_one_glyph_restyles_it() {
-        let family = "👨\u{200D}👩";
-        let text = format!("Q{family}X");
-        let spans = |marks: &[(usize, usize, Style)]| -> Vec<(String, Style)> {
-            marked_spans(text.clone(), Style::new(), marks)
-                .into_iter()
-                .map(|span| (span.content.into_owned(), span.style))
-                .collect()
-        };
-        let plain = Style::new();
-        // `👩` (chars 3..4) and the ZWJ (2..3) both widen to the sequence.
-        for range in [(3, 4), (2, 3), (1, 2), (1, 4)] {
-            assert_eq!(
-                spans(&[(range.0, range.1, MATCH)]),
-                [
-                    ("Q".to_string(), plain),
-                    (family.to_string(), MATCH),
-                    ("X".to_string(), plain),
-                ],
-                "{range:?}"
-            );
-        }
-        // Two matches in the one sequence: the current one wins.
-        assert_eq!(
-            spans(&[(1, 2, MATCH), (3, 4, CURRENT_MATCH)]),
-            [
-                ("Q".to_string(), plain),
-                (family.to_string(), MATCH.patch(CURRENT_MATCH)),
-                ("X".to_string(), plain),
-            ]
-        );
-        // A combining mark stays with its letter too.
-        let accented = marked_spans("e\u{301}x".into(), plain, &[(0, 1, MATCH)]);
-        assert_eq!(accented[0].content, "e\u{301}");
-    }
-
-    #[test]
-    fn the_current_match_keeps_its_style_when_a_later_match_shares_its_glyph() {
-        let text = "e\u{301}\u{301}x".to_string();
-        let spans = marked_spans(text, Style::new(), &[(1, 2, CURRENT_MATCH), (2, 3, MATCH)]);
-        assert_eq!(spans[0].content, "e\u{301}\u{301}");
-        assert_eq!(spans[0].style, CURRENT_MATCH);
-        assert_eq!(spans[0].style.bg, CURRENT_MATCH.bg);
-        let bold_underlined = Modifier::BOLD | Modifier::UNDERLINED;
-        assert!(spans[0].style.add_modifier.contains(bold_underlined));
-        assert_eq!(spans[1].content, "x");
-    }
-
-    #[test]
     fn a_current_match_sharing_a_glyph_with_another_draws_as_current() {
         let family = "👨\u{200D}👦\u{200D}👦";
         let diff = format!(
@@ -2401,7 +2083,7 @@ mod tests {
         );
         for (width, height) in [(80, 24), (20, 10)] {
             let mut state = joined_keep(&diff);
-            if let Focus::Diff(view) = &mut state.focus {
+            if let Some(view) = state.hunk_view_mut() {
                 view.set_search("👦", EmojiZwj::Keep);
                 let search = view.search.as_ref().unwrap();
                 assert_eq!((search.matches.len(), search.current), (2, Some(0)));
@@ -2423,7 +2105,7 @@ mod tests {
         );
         for (width, height) in [(80, 24), (20, 10)] {
             let mut state = hunks(DiffSide::Worktree, diff.as_bytes());
-            if let Focus::Diff(view) = &mut state.focus {
+            if let Some(view) = state.hunk_view_mut() {
                 view.set_search("🇺", EmojiZwj::Escape);
             }
             let buffer = draw_buffer(&state, width, height);
@@ -2480,7 +2162,7 @@ mod tests {
         let mut state = loaded(vec![file("a.rs")]);
         let mut view = HunkView::for_commit("a.rs".into(), range.clone());
         view.loaded(crate::git::patch::parse(TWO_HUNKS).unwrap(), 20);
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         let mut patch = CustomPatch::new(range, "b0b".into());
         patch.toggle_lines(&"a.rs".into(), &[LineId::added(9)].into());
         state.custom_patch = Some(patch);
@@ -2494,7 +2176,7 @@ mod tests {
         assert!(contains(&rows, "▌ +new one"), "{rows:#?}");
 
         // Another commit's view shows no marks.
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.commit.as_mut().unwrap().oid = CommitId::parse("c0c").unwrap();
         }
         let rows = draw(&state, 100, 20);
@@ -2516,7 +2198,7 @@ mod tests {
         let mut state = loaded(vec![file("a.rs")]);
         let mut view = HunkView::for_commit("a.rs".into(), range.clone());
         view.loaded(crate::git::patch::parse(diff.as_bytes()).unwrap(), 20);
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         let mut patch = CustomPatch::new(range, "b0b".into());
         patch.toggle_lines(&"a.rs".into(), &[LineId::added(1)].into());
         state.custom_patch = Some(patch);
@@ -2545,7 +2227,7 @@ mod tests {
     #[test]
     fn in_line_mode_the_picked_lines_are_reversed_and_the_header_is_not() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.enter_lines();
             view.next_line(true);
         }
@@ -2569,7 +2251,7 @@ mod tests {
         assert!(contains(&rows, " Unstaged a.rs · lines "), "{rows:#?}");
 
         // A one-line range marks only that line.
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.next_line(false);
         }
         let rows = draw(&state, 100, 20);
@@ -2600,7 +2282,7 @@ mod tests {
         state.selected = Some(0);
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.seq = Some(3);
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         let rows = draw(&state, 100, 20);
         assert!(contains(&rows, "Loading…"), "{rows:#?}");
     }
@@ -2937,7 +2619,7 @@ mod tests {
                 format!("[Log] Reflog{mode} ")
             }
             (Panel::Side(side), _) => format!(" [{}] {}{mode} ", side.number(), side.title()),
-            (Panel::Diff, Focus::Diff(_)) => format!(" [0] Unstaged a.rs{mode} "),
+            (Panel::Diff, Focus::Diff) => format!(" [0] Unstaged a.rs{mode} "),
             // The selected branch's commits take the diff's place.
             (Panel::Diff, Focus::Branches) => format!(" [0] Commits{mode} "),
             (Panel::Diff, _) => format!(" [0] Diff a.rs · 1/1{mode} "),
@@ -3197,7 +2879,7 @@ mod tests {
                         "[Local]"
                     }
                     Panel::Side(side) => side.title(),
-                    Panel::Diff if matches!(state.focus, Focus::Diff(_)) => "Unstaged",
+                    Panel::Diff if matches!(state.focus, Focus::Diff) => "Unstaged",
                     Panel::Diff if state.focus == Focus::Branches => "Commits",
                     Panel::Diff => "Diff",
                 };
@@ -3502,36 +3184,6 @@ mod tests {
     }
 
     #[test]
-    fn a_marked_clip_drops_the_marks_from_its_ellipsis() {
-        let spans = |line: &str, width, marks: &[(usize, usize, Style)]| -> Vec<(String, Style)> {
-            clipped_marked(line, width, Style::new(), marks)
-                .into_iter()
-                .map(|span| (span.content.into_owned(), span.style))
-                .collect()
-        };
-        let plain = Style::new();
-        // A match across the cut stops before the `…`; one past it is gone.
-        assert_eq!(
-            spans("abcdefghij", 5, &[(2, 8, MATCH), (8, 9, CURRENT_MATCH)]),
-            [
-                ("ab".to_string(), plain),
-                ("cd".to_string(), MATCH),
-                ("…".to_string(), plain),
-            ]
-        );
-        // A match only on the cut cell is dropped.
-        assert_eq!(
-            spans("abcdefghij", 5, &[(4, 5, MATCH)]),
-            [("abcd…".to_string(), plain)]
-        );
-        // Uncut text keeps its marks, a `…` of its own included.
-        assert_eq!(
-            spans("abc…", 5, &[(3, 4, MATCH)]),
-            [("abc".to_string(), plain), ("…".to_string(), MATCH)]
-        );
-    }
-
-    #[test]
     fn each_search_pane_draws_at_80_by_24_and_at_20_by_5() {
         let states = [
             ("preview", preview_searching(alpha_beta_gamma(), "one")),
@@ -3649,7 +3301,7 @@ mod tests {
     #[test]
     fn diff_matches_are_marked_and_the_current_one_stands_out() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.set_search("one", EmojiZwj::Escape);
         }
         let buffer = draw_buffer(&state, 100, 20);
@@ -4027,7 +3679,7 @@ mod tests {
     fn a_match_after_a_wide_glyph_is_marked_where_it_shows() {
         let wide = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-a\n+日本x\n";
         let mut state = hunks(DiffSide::Worktree, wide.as_bytes());
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.set_search("x", EmojiZwj::Escape);
         }
         let buffer = draw_buffer(&state, 100, 20);
@@ -4056,7 +3708,7 @@ mod tests {
             "rs\u{202E}日",
         );
         let mut search = hunks(DiffSide::Worktree, TWO_HUNKS);
-        if let Focus::Diff(view) = &mut search.focus {
+        if let Some(view) = search.hunk_view_mut() {
             view.set_search("one", EmojiZwj::Escape);
         }
         for state in [&files, &typing_files, &search] {
@@ -4084,7 +3736,7 @@ mod tests {
         let mut search = hunks(DiffSide::Worktree, TWO_HUNKS);
         let rows = draw(&search, 120, 20);
         assert!(rows[19].contains("/ search"), "{:?}", rows[19]);
-        if let Focus::Diff(view) = &mut search.focus {
+        if let Some(view) = search.hunk_view_mut() {
             view.set_search("one", EmojiZwj::Escape);
         }
         let rows = draw(&search, 120, 20);

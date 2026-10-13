@@ -36,7 +36,7 @@ Core files:
 | `src/model.rs` | Model | `AppState` (composes feature state) + `update(intent)`, one `match` whose arms call feature handlers. Pure: no I/O, no rendering. |
 | `src/effect.rs` | Effects | `Effect`, one flat enum, and the `Runtime::run` dispatch that calls each feature's `effects.rs`. |
 | `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |
-| `src/view.rs` and the shared widgets (`layout.rs`, `popup*.rs`, `menu.rs`, `pick_list.rs`, `list_filter.rs`, ...) | View | `render(&AppState, &mut Frame)` composes the frame. Reads state only. |
+| `src/view.rs`, `src/diff_pane_view.rs` (the Diff pane's drawing and search marks) and the shared widgets (`layout.rs`, `popup*.rs`, `menu.rs`, `pick_list.rs`, `list_filter.rs`, ...) | View | `render(&AppState, &mut Frame)` composes the frame. Reads state only. |
 | `src/op.rs`, `src/prompts.rs` | Op slot | `GitOp`, `op_command` and `run_op`; whether an op needs the terminal. Feature `git.rs` files hold the argv builders the arms call. |
 | `src/refresh.rs`, `src/reload.rs`, `src/watch.rs` | Refresh | The refresh plan from each `GitOp` to the data it makes stale, the reload executor (`apply_plan`, `reload_repo`) that turns a plan into each feature's loads, and the watch for outside changes. |
 | `src/handoff.rs` | Hand-off | Blocking work that needs the real terminal (editor, attached ops, commands). The loop suspends the screen around it. |

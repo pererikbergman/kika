@@ -81,7 +81,7 @@ fn hunk_disabled(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
-    let Focus::Diff(view) = &state.focus else {
+    let Some(view) = state.hunk_view() else {
         return Some(NO_CHANGES.into());
     };
     if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
@@ -114,8 +114,8 @@ fn side_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = in_commit(state) {
         return Some(reason);
     }
-    match &state.focus {
-        Focus::Diff(view) if view.side == DiffSide::Untracked => {
+    match state.hunk_view() {
+        Some(view) if view.side == DiffSide::Untracked => {
             Some("Untracked file: nothing is staged".into())
         }
         _ => None,
@@ -151,7 +151,7 @@ fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
-    let Focus::Diff(view) = &state.focus else {
+    let Some(view) = state.hunk_view() else {
         return Some(NO_CHANGES.into());
     };
     if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
@@ -560,7 +560,7 @@ mod tests {
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.patch =
             Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
+        state.focus_hunk_view(view.clone());
         for c in [' ', 'v', 'd', 'e'] {
             assert_eq!(
                 reason(&state, KeyScope::Diff, c),
@@ -572,7 +572,7 @@ mod tests {
             anchor: 0,
             cursor: 0,
         });
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         for c in [' ', 'd'] {
             assert_eq!(
                 reason(&state, KeyScope::Lines, c),
@@ -623,7 +623,7 @@ mod tests {
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.patch =
             Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
+        state.focus_hunk_view(view.clone());
         for c in [' ', 'v', 'd', 'e'] {
             assert_eq!(
                 reason(&state, KeyScope::Diff, c),
@@ -635,7 +635,7 @@ mod tests {
             anchor: 0,
             cursor: 0,
         });
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         for c in [' ', 'd'] {
             assert_eq!(
                 reason(&state, KeyScope::Lines, c),
@@ -653,7 +653,7 @@ mod tests {
         use crate::hunk_view::HunkView;
 
         let mut state = AppState::new(Context::Workspace);
-        state.focus = Focus::Diff(HunkView::new("a.rs".into(), DiffSide::Worktree));
+        state.focus_hunk_view(HunkView::new("a.rs".into(), DiffSide::Worktree));
         state.renderers = vec![ExternalRenderer {
             label: "difft".into(),
             argv: vec!["difft".into()],
@@ -724,20 +724,20 @@ mod tests {
 
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.seq = Some(3);
-        state.focus = Focus::Diff(view.clone());
+        state.focus_hunk_view(view.clone());
         assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some("Loading…".into()));
         view.seq = None;
-        state.focus = Focus::Diff(view.clone());
+        state.focus_hunk_view(view.clone());
         assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(NO_CHANGES.into()));
         view.patch =
             Some(parse(b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-a\n+b\n").unwrap());
-        state.focus = Focus::Diff(view.clone());
+        state.focus_hunk_view(view.clone());
         assert_eq!(reason(&state, KeyScope::Diff, 'e'), None);
         view.lines = Some(LineCursor {
             anchor: 0,
             cursor: 0,
         });
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         assert_eq!(
             reason(&state, KeyScope::Lines, 'e'),
             Some("Press Esc to edit the whole hunk".into())

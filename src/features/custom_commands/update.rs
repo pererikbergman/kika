@@ -58,11 +58,14 @@ impl AppState {
                     commit: None,
                 })
             }
-            Focus::Diff(view) => Some(Target {
-                path: view.path.clone(),
-                line: view.editor_line(),
-                commit: None,
-            }),
+            Focus::Diff => {
+                let view = self.hunk_view()?;
+                Some(Target {
+                    path: view.path.clone(),
+                    line: view.editor_line(),
+                    commit: None,
+                })
+            }
             Focus::Blame(view) => {
                 let line = view.selected();
                 Some(Target {
