@@ -78,7 +78,7 @@ pub(crate) static DIFF_WORKSPACE: &[Binding] = &[
 
 /// Why the selected hunk cannot be staged or unstaged right now.
 fn hunk_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     let Focus::Diff(view) = &state.focus else {
@@ -148,7 +148,7 @@ fn edit_hunk_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = in_commit(state) {
         return Some(reason);
     }
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     let Focus::Diff(view) = &state.focus else {
@@ -714,13 +714,13 @@ mod tests {
             reason(&state, KeyScope::Files, 'o'),
             Some("No file selected".into())
         );
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(
             reason(&state, KeyScope::Files, 'o'),
             Some(OP_RUNNING.into())
         );
         assert_eq!(reason(&state, KeyScope::Diff, 'e'), Some(OP_RUNNING.into()));
-        state.op_seq = None;
+        state.free_op();
 
         let mut view = HunkView::new("a.rs".into(), DiffSide::Worktree);
         view.seq = Some(3);

@@ -11,7 +11,7 @@ use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, nev
 use crate::model::{AppState, CommitFlow};
 
 pub(crate) fn commit_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if let Some(reason) = crate::bisect::head_move_disabled(state) {
         Some(reason)
@@ -31,7 +31,7 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
         None => true,
         Some(branch) => matches!(branch.head, Head::Unborn(_)),
     };
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if no_commit {
         Some("No commit to amend".into())
@@ -46,7 +46,7 @@ pub(crate) fn amend_disabled(state: &AppState) -> Option<Reason> {
 
 /// The editor's keys wait while the commit runs, so the message cannot change.
 fn commit_editor_disabled(state: &AppState) -> Option<Reason> {
-    let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_seq.is_some();
+    let running = matches!(state.commit, CommitFlow::Running(_)) || state.op_is_running();
     running.then_some(OP_RUNNING.into())
 }
 
@@ -241,7 +241,7 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         state.commit = CommitFlow::Running(crate::features::commit::CommitEditor::new(false));
-        state.op_seq = Some(1);
+        state.hold_op(1);
         for c in ['n', 'e'] {
             assert!(matches!(
                 resolve(
@@ -260,7 +260,7 @@ mod tests {
     fn the_editor_keys_wait_while_the_commit_runs() {
         let mut state = AppState::new(Context::Workspace);
         state.commit = CommitFlow::Running(crate::features::commit::CommitEditor::new(false));
-        state.op_seq = Some(1);
+        state.hold_op(1);
         for k in [
             key(KeyCode::Char('s'), KeyModifiers::CONTROL),
             key(KeyCode::Esc, KeyModifiers::NONE),

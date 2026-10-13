@@ -19,7 +19,7 @@ fn no_submodule(state: &AppState) -> Option<Reason> {
 
 /// Why `i` or `u` cannot run on the selected submodule right now.
 fn submodule_op_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     no_submodule(state)
@@ -28,7 +28,7 @@ fn submodule_op_disabled(state: &AppState) -> Option<Reason> {
 /// Why the selected submodule cannot be entered: it must be surely checked
 /// out, and an operation must not be running in the repository being left.
 pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some("Wait for the operation to finish".into());
     }
     match state.selected_submodule() {
@@ -49,7 +49,7 @@ pub(crate) fn enter_submodule_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn leave_submodule_disabled(state: &AppState) -> Option<Reason> {
     if state.repo_stack.is_empty() {
         Some("Not in a submodule".into())
-    } else if state.op_seq.is_some() {
+    } else if state.op_is_running() {
         Some("Wait for the operation to finish".into())
     } else {
         None
@@ -268,7 +268,7 @@ mod tests {
                 "{scope:?}"
             );
         }
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert!(matches!(
             resolve(
                 registry(),

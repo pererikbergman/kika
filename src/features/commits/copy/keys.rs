@@ -33,7 +33,7 @@ pub(crate) fn paste_disabled(state: &AppState) -> Option<Reason> {
         .branch
         .as_ref()
         .is_none_or(|b| matches!(b.head, Head::Unborn(_)));
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.copied.is_empty() {
         Some("Nothing copied".into())

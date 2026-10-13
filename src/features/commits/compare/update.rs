@@ -86,9 +86,7 @@ impl AppState {
         tag: Tag,
         result: Result<CommitRange, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let current = self.pending_diff.as_ref().map(|p| p.seq);
         if tag.generation != self.generation || current != Some(tag.seq) {
             return vec![];
@@ -300,9 +298,9 @@ mod tests {
     fn a_failed_resolve_says_why_and_opens_nothing() {
         let mut state = with_branches();
         type_text(&mut state, "Mj");
-        let busy = state.busy;
+        let busy = state.busy_count();
         let (tag, ..) = resolve(&press(&mut state, KeyCode::Enter));
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
 
         state.update(AppIntent::DiffResolved {
             tag,
@@ -314,6 +312,6 @@ mod tests {
             state.notice_text.as_deref(),
             Some("Could not compare: No branch named topic")
         );
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
     }
 }

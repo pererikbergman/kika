@@ -126,11 +126,11 @@ mod tests {
                 .confirm_question(&ConfirmKind::DetachedCheckout)
                 .starts_with("Check out c1 as a detached HEAD? You will be on no branch;"),
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         assert_eq!(state.popups, []);
         assert_eq!(state.commits.pending, None);
     }
@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
             assert_eq!(state.commits.pending, None, "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
 
@@ -160,7 +160,7 @@ mod tests {
         let mut state = on_commit();
         let (tag, op) = attached_of(&press_char(&mut state, 'R'));
         assert_eq!(op, GitOp::Revert(cid("c1")));
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
     }
 
     #[test]
@@ -170,10 +170,10 @@ mod tests {
         assert_eq!(press_char(&mut merge, 'R'), vec![]);
         assert_eq!(merge.notice, Some("Cannot revert a merge commit".into()));
         assert_eq!(merge.update(AppIntent::RevertCommit), vec![]);
-        assert_eq!(merge.op_seq, None);
+        assert_eq!(merge.held_seq(), None);
 
         let mut running = on_commit();
-        running.op_seq = Some(9);
+        running.hold_op(9);
         assert_eq!(press_char(&mut running, 'R'), vec![]);
         assert_eq!(running.notice, Some(keymap::OP_RUNNING.into()));
         assert_eq!(running.update(AppIntent::RevertCommit), vec![]);
@@ -188,7 +188,7 @@ mod tests {
             Some("Finish or abort the operation in progress".into())
         );
         assert_eq!(reverting.update(AppIntent::RevertCommit), vec![]);
-        assert_eq!(reverting.op_seq, None);
+        assert_eq!(reverting.held_seq(), None);
     }
 
     #[test]
@@ -238,12 +238,12 @@ mod tests {
             })]
         );
         assert_eq!(state.key_focus(), KeyScope::ResetHard);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         // Enter is not an answer: the question stays and nothing runs.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups.len(), 1);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, hard);
@@ -258,7 +258,7 @@ mod tests {
             assert_eq!(state.popups.len(), 1, "{code:?}");
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
 
@@ -269,7 +269,7 @@ mod tests {
         state.popups.push(Popup::Confirm(ConfirmKind::Quit));
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -288,6 +288,6 @@ mod tests {
             assert_eq!(state.update(AppIntent::ResetTo(mode)), vec![]);
         }
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 }

@@ -34,7 +34,7 @@
 //! `open_in_editor` reads them to find the file to open (the Files
 //! panel's `files.open` key dispatches the core `OpenInEditor` intent).
 //! The rest reads core state (`generation`, `diff`, `focus`,
-//! `diff_options`, `op_seq`, `keymap`).
+//! `diff_options`, the op slot, `keymap`).
 //!
 //! What stays in core, and why:
 //! - `set_diff_options` reads `commits.open`, `stash.open`, `selected`,

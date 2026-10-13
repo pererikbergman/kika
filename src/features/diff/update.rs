@@ -56,9 +56,7 @@ impl AppState {
 
     pub(crate) fn patch_loaded(&mut self, tag: Tag, result: Result<FilePatch, String>) {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let rows = self.pane_rows();
         let Focus::Diff(view) = &mut self.focus else {
             return;
@@ -165,7 +163,7 @@ impl AppState {
     /// Hand the terminal to the editor on the selected file: at the
     /// selected change from the Diff pane, at the top from the Files panel.
     pub(crate) fn open_in_editor(&mut self) -> Vec<Effect> {
-        if self.context != Context::Workspace || self.op_seq.is_some() {
+        if self.context != Context::Workspace || self.op_is_running() {
             return vec![];
         }
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
@@ -188,7 +186,7 @@ impl AppState {
     /// staged. Only plain changes to a file: other headers need more than
     /// a recount to apply.
     pub(crate) fn edit_hunk(&mut self) -> Vec<Effect> {
-        if self.context != Context::Workspace || self.op_seq.is_some() {
+        if self.context != Context::Workspace || self.op_is_running() {
             return vec![];
         }
         let Focus::Diff(view) = &self.focus else {
@@ -378,10 +376,10 @@ mod tests {
     #[test]
     fn enter_focuses_the_diff_on_the_entry_side_and_loads_the_patch() {
         let (mut state, _) = with_files(three_files(), 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let (tag, request) = patch_load(&press(&mut state, KeyCode::Enter));
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(
             request,
             DiffRequest {
@@ -413,7 +411,7 @@ mod tests {
     #[test]
     fn a_loaded_patch_lowers_busy_and_shows() {
         let state = focused(three_files(), TWO_HUNKS);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert_eq!(view(&state).seq, None);
         assert_eq!(view(&state).hunk_count(), 2);
     }
@@ -478,16 +476,16 @@ mod tests {
             state.notice,
             Some("Binary file: stage it from the Files panel".into())
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn space_is_refused_in_order_of_what_matters_most() {
         let mut state = focused(three_files(), TWO_HUNKS);
-        state.op_seq = Some(1);
+        state.hold_op(1);
         press(&mut state, KeyCode::Char(' '));
         assert_eq!(state.notice, Some("An operation is running".into()));
-        state.op_seq = None;
+        state.free_op();
 
         let mut loading = state.clone();
         press(&mut loading, KeyCode::Char('t'));
@@ -557,13 +555,13 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         let (old, _) = patch_load(&press(&mut state, KeyCode::Enter));
         let (new, _) = patch_load(&press(&mut state, KeyCode::Char('t')));
-        assert_eq!(state.busy, 2);
+        assert_eq!(state.busy_count(), 2);
 
         state.update(AppIntent::PatchLoaded {
             tag: old,
             result: Ok(patch_of(TWO_HUNKS)),
         });
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         assert_eq!(view(&state).patch, None);
         assert_eq!(view(&state).seq, Some(new.seq));
 
@@ -573,7 +571,7 @@ mod tests {
             tag: new,
             result: Ok(patch_of(TWO_HUNKS)),
         });
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert_eq!(view(&state).patch, None);
     }
 
@@ -593,7 +591,7 @@ mod tests {
             other => panic!("expected one error popup, got {other:?}"),
         }
         assert_eq!(view(&state).seq, None);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -639,7 +637,7 @@ mod tests {
             result: Ok(patch_of(ONE_HUNK)),
         });
         assert_eq!(view(&state).hunk, 0);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -773,8 +771,8 @@ mod tests {
             state.notice,
             Some("New file: press Esc, then Space for the whole file".into())
         );
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -823,8 +821,8 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         let effects = press(&mut state, KeyCode::Char('o'));
         assert_eq!(hand_off(&effects), &open_file("a.rs", None));
-        assert_eq!(state.op_seq, None);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.held_seq(), None);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -888,7 +886,7 @@ mod tests {
             }
             other => panic!("expected an EditHunk, got {other:?}"),
         }
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -910,7 +908,7 @@ mod tests {
         );
 
         let mut running = focused(three_files(), TWO_HUNKS);
-        running.op_seq = Some(5);
+        running.hold_op(5);
         assert_eq!(running.update(AppIntent::EditHunk), vec![]);
         assert_eq!(running.update(AppIntent::OpenInEditor), vec![]);
 
@@ -938,7 +936,7 @@ mod tests {
                 patch: b"edited".to_vec()
             }
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
     }
 
     const GARBAGE: &str = "error: patch with only garbage at <stdin>:4";
@@ -1012,7 +1010,7 @@ mod tests {
             vec![]
         );
         assert_eq!(state.notice, Some("Edit cancelled".into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(state.popups, []);
     }
 
@@ -1041,7 +1039,7 @@ mod tests {
                 }
                 other => panic!("expected one error popup, got {other:?}"),
             }
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
         }
     }
 
@@ -1053,7 +1051,7 @@ mod tests {
             matches!(effects.as_slice(), [Effect::LoadStatus { tag }] if tag.user),
             "{effects:?}"
         );
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
     }
 
     #[test]

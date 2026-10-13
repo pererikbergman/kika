@@ -28,13 +28,8 @@ impl AppState {
             return vec![];
         };
         let seq = self.take_seq();
-        self.busy += 1;
         self.focus = Focus::Conflict(ConflictView::new(path.clone(), seq));
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadConflict { tag, path }]
     }
 
@@ -45,9 +40,7 @@ impl AppState {
         result: Result<(Vec<u8>, usize), String>,
     ) {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let rows = self.pane_rows();
         let Focus::Conflict(view) = &mut self.focus else {
             return;
@@ -98,14 +91,10 @@ impl AppState {
         let path = view.path.clone();
         view.pending = Some(PendingPick { block, previous });
         view.next_unpicked(rows);
-        let seq = self.take_seq();
-        self.op_seq = Some(seq);
-        self.op_error = None;
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
+        self.clear_op_error();
+        // The guard above refuses while an op runs, so the slot is free.
+        let Some(tag) = self.take_op() else {
+            return vec![];
         };
         vec![Effect::WriteResolved {
             tag,
@@ -124,12 +113,7 @@ impl AppState {
         path: RepoPath,
         result: Result<Vec<u8>, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if self.op_seq == Some(tag.seq) {
-            self.op_seq = None;
-        }
+        self.release_op(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -238,11 +222,11 @@ mod tests {
     /// conflict view and its load's tag.
     fn conflict_opened() -> (AppState, Tag) {
         let (mut state, _) = with_files(vec![conflicted("c.txt"), changed("a.rs", '.', 'M')], 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
         match press(&mut state, KeyCode::Enter).as_slice() {
             [Effect::LoadConflict { tag, path }] => {
                 assert_eq!(path, &RepoPath::from("c.txt"));
-                assert_eq!(state.busy, busy + 1, "a user load");
+                assert_eq!(state.busy_count(), busy + 1, "a user load");
                 (state, *tag)
             }
             other => panic!("expected one LoadConflict, got {other:?}"),
@@ -306,7 +290,7 @@ mod tests {
         assert_eq!(view.block_count(), 2);
         assert_eq!(view.choices, [None, None]);
         assert_eq!(view.seq, None);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -331,7 +315,7 @@ mod tests {
         let (tag, expected, content) = write_of(&press_char(&mut state, 'o'));
         assert_eq!(expected, CONFLICT);
         assert_eq!(content, [&b"a\nours 1\nb\n"[..], SECOND_BLOCK].concat());
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         assert!(tag.user);
         let view = conflict(&state);
         assert_eq!(view.choices, [Some(Choice::Ours), None]);
@@ -363,7 +347,7 @@ mod tests {
             "{effects:?}"
         );
         assert_eq!(state.popups, [], "one block is left");
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (tag, expected, content) = write_of(&press_char(&mut state, 't'));
         assert_eq!(expected, first, "the bytes the first write left");
@@ -403,7 +387,7 @@ mod tests {
         let view = conflict(&state);
         assert_eq!(view.loaded.as_ref().unwrap().on_disk, CONFLICT);
         assert_eq!(view.choices, [None, None]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -415,7 +399,7 @@ mod tests {
             Err(crate::worktree_file::CHANGED_ON_DISK.to_string()),
         ));
         assert_eq!(effects, vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         let view = conflict(&state);
         assert_eq!(view.choices, [None, None]);
         assert_eq!(view.block, 0);
@@ -469,7 +453,7 @@ mod tests {
         let (mut state, _) = with_files(vec![conflicted("c.txt"), changed("a.rs", '.', 'M')], 24);
         let (tag, op) = attached_of(&press_char(&mut state, 'M'));
         assert_eq!(op, GitOp::MergeTool("c.txt".into()));
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         let effects = state.update(finished(tag, op, Ok(())));
         assert!(
             effects

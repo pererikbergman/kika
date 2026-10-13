@@ -16,7 +16,7 @@
 //! - the handlers in `update.rs` that `update()` calls.
 //!
 //! Kept cross-feature reads: `commits.open`, `commits.rows`, `selected`,
-//! `todo_selected`, `query` and `filter` (commits); `files`, `op_seq` and
+//! `todo_selected`, `query` and `filter` (commits); `files`, the op slot and
 //! `branch` (core).
 //!
 //! What stays in core, and why:

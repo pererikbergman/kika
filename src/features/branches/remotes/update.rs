@@ -21,9 +21,7 @@ impl AppState {
         tag: Tag,
         result: Result<Vec<Remote>, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let remotes = &mut self.branches.remotes;
         if tag.generation != self.generation || remotes.list_seq != Some(tag.seq) {
             return vec![];
@@ -91,7 +89,7 @@ impl AppState {
             self.notice = Some("A branch needs a name".into());
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -137,7 +135,7 @@ impl AppState {
             self.notice = Some(reason.into());
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -174,7 +172,7 @@ impl AppState {
             self.notice = Some(reason.into());
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -348,7 +346,11 @@ mod tests {
             type_text(&mut state, bad);
             assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{bad:?}");
             assert!(state.notice.is_some(), "{bad:?}");
-            assert_eq!((state.op_seq, &state.popups), (None, &vec![]), "{bad:?}");
+            assert_eq!(
+                (state.held_seq(), &state.popups),
+                (None, &vec![]),
+                "{bad:?}"
+            );
             assert_eq!(state.branches.remotes.pending, None);
         }
     }
@@ -484,7 +486,7 @@ mod tests {
     #[test]
     fn remote_actions_wait_for_a_running_op() {
         let mut state = on_remote_row(2);
-        state.op_seq = Some(99);
+        state.hold_op(99);
         for intent in [
             AppIntent::TrackRemoteBranch,
             AppIntent::AddRemote,

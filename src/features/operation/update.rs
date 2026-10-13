@@ -113,7 +113,7 @@ mod tests {
                 strategy: MergeStrategy::NoFastForward
             }
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         state.update(finished(tag, op, Ok(())));
 
         let (_, op) = attached_of(&state.update(AppIntent::RebaseOnto));
@@ -164,7 +164,7 @@ mod tests {
         );
         assert_eq!(merging.popups, []);
         assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
-        assert_eq!(merging.op_seq, None);
+        assert_eq!(merging.held_seq(), None);
     }
 
     #[test]
@@ -177,7 +177,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 's'), vec![]);
         assert_eq!(state.notice, Some("A merge cannot be skipped".into()));
         assert_eq!(state.update(AppIntent::SkipOperation), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -195,7 +195,7 @@ mod tests {
             state.popups,
             [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))]
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Abort(Operation::Merge));
@@ -208,7 +208,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(press_char(&mut state, 'n'), vec![]);
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
 
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(state.popups, question);
     }
 
@@ -248,14 +248,14 @@ mod tests {
             press_char(&mut state, 'a');
             assert_eq!(press(&mut state, no), vec![], "{no:?}");
             assert_eq!(state.popups, [], "{no:?}");
-            assert_eq!(state.op_seq, None, "{no:?}");
+            assert_eq!(state.held_seq(), None, "{no:?}");
         }
 
         let mut state = status_focused(&[Operation::Rebase]);
         press_char(&mut state, 'a');
         press_with(&mut state, 'c', KeyModifiers::CONTROL);
         assert!(state.should_quit);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -274,13 +274,13 @@ mod tests {
             assert_eq!(state.update(intent), vec![]);
         }
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn the_status_keys_wait_for_a_running_op() {
         let mut state = status_focused(&[Operation::Rebase]);
-        state.op_seq = Some(9);
+        state.hold_op(9);
         for c in ['c', 's', 'a'] {
             state.notice = None;
             assert_eq!(press_char(&mut state, c), vec![], "{c}");

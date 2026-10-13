@@ -13,7 +13,7 @@ use crossterm::event::KeyCode;
 /// Why the conflict view cannot pick a side now: one write at a time, and
 /// only in a file whose blocks were read.
 pub(crate) fn pick_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     match &state.focus {
@@ -25,7 +25,7 @@ pub(crate) fn pick_disabled(state: &AppState) -> Option<Reason> {
 /// Why the merge tool cannot start now: in the conflict view it is for
 /// that file; from Files, only for a conflicted one.
 pub(crate) fn mergetool_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     if matches!(state.focus, Focus::Conflict(_)) {

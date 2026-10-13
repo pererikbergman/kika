@@ -23,7 +23,7 @@ impl AppState {
     }
 
     /// Start `op` on the current branch, unless something else runs: it
-    /// holds `op_seq` like any git mutation, so the two never race.
+    /// holds the op slot like any git mutation, so the two never race.
     pub(crate) fn start_remote(&mut self, op: RemoteOp) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
@@ -37,17 +37,13 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
-        self.op_error = None;
-        let seq = self.take_seq();
-        self.op_seq = Some(seq);
-        self.busy += 1;
-        let branch = self.branches.current().map(|b| b.name.clone());
-        self.remote = Some(RemoteRun::new(op.clone(), seq, branch));
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
+        self.clear_op_error();
+        // The guard above refuses while an op runs, so the slot is free.
+        let Some(tag) = self.take_op() else {
+            return vec![];
         };
+        let branch = self.branches.current().map(|b| b.name.clone());
+        self.remote = Some(RemoteRun::new(op.clone(), tag.seq, branch));
         vec![Effect::Remote { tag, op }]
     }
 
@@ -84,12 +80,7 @@ impl AppState {
         result: Result<(), RemoteFailure>,
     ) -> Vec<Effect> {
         // As with other user effects: every one reports once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if self.op_seq == Some(tag.seq) {
-            self.op_seq = None;
-        }
+        self.release_op(tag);
         if self.remote.as_ref().is_some_and(|run| run.seq == tag.seq) {
             self.remote = None;
             // Git has gone; a question still open has nobody to answer.
@@ -165,7 +156,7 @@ mod tests {
         let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         assert!(!tag.user);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert!(watch(&mut state, WatchEvent::Fetch).is_empty());
     }
 
@@ -189,7 +180,7 @@ mod tests {
 
         background_status_tag(&effects);
         assert!(!state.watch.fetch_pending);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -217,7 +208,7 @@ mod tests {
     fn a_fetch_finishing_while_an_op_runs_starts_no_status() {
         let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
-        state.op_seq = Some(9);
+        state.hold_op(9);
         let effects = state.update(AppIntent::FetchFinished {
             tag,
             result: Ok(()),
@@ -241,12 +232,23 @@ mod tests {
             let (tag, started) = remote_of(&effects);
             assert_eq!(started, op, "{key}");
             assert!(tag.user);
-            assert_eq!(state.op_seq, Some(tag.seq));
-            assert_eq!(state.busy, 1);
+            assert_eq!(state.held_seq(), Some(tag.seq));
+            assert_eq!(state.busy_count(), 1);
             let run = state.remote.as_ref().expect("a run is recorded");
             assert_eq!((&run.op, run.seq), (&op, tag.seq));
             assert_eq!(run.branch, Some(BranchName::from("main")));
         }
+    }
+
+    #[test]
+    fn a_started_remote_op_holds_the_slot_with_its_effects_tag() {
+        let mut state = remote_ready();
+
+        let (tag, _) = remote_of(&state.start_remote(RemoteOp::Fetch));
+
+        assert!(state.op_is_running() && state.holds_op(tag));
+        assert!(state.is_busy());
+        assert_eq!(state.remote.as_ref().map(|run| run.seq), Some(tag.seq));
     }
 
     #[test]
@@ -269,16 +271,16 @@ mod tests {
         assert_eq!(shift(&mut state, 'P'), []);
 
         let mut state = remote_ready();
-        state.op_seq = Some(99);
+        state.hold_op(99);
         assert_eq!(press_char(&mut state, 'p'), []);
         assert_eq!(state.notice, Some("Another operation is running".into()));
         assert_eq!(state.remote, None);
 
         // An intent that skips the keymap is refused the same way.
         let mut state = remote_ready();
-        state.op_seq = Some(99);
+        state.hold_op(99);
         assert_eq!(state.update(AppIntent::ForcePush), []);
-        assert_eq!(state.op_seq, Some(99));
+        assert_eq!(state.held_seq(), Some(99));
     }
 
     #[test]
@@ -330,7 +332,7 @@ mod tests {
             }));
             let effects = state.update(remote_finished(tag, op, Ok(())));
             assert_eq!(state.remote, None);
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
             assert!(
                 effects
                     .iter()
@@ -347,7 +349,7 @@ mod tests {
             );
             assert_eq!(state.popups, []);
             // Only the reloads count as busy now.
-            assert_eq!(state.busy, 4);
+            assert_eq!(state.busy_count(), 4);
         }
     }
 
@@ -403,7 +405,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 'n'), []);
         assert_eq!(state.popups, []);
         assert_eq!(state.remote, None);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -415,8 +417,8 @@ mod tests {
         ] {
             let mut state = remote_ready();
             let seq = state.take_seq();
-            state.op_seq = Some(seq);
-            state.busy = 1;
+            state.hold_op(seq);
+            state.set_busy(1);
             state.remote = Some(RemoteRun::new(op.clone(), seq, None));
             let tag = Tag {
                 generation: state.generation,
@@ -471,7 +473,7 @@ mod tests {
         ));
         assert_eq!(effects, []);
         assert_eq!(state.popups, []);
-        assert_eq!((state.op_seq, state.busy), (None, 0));
+        assert_eq!((state.held_seq(), state.busy_count()), (None, 0));
         assert_eq!(state.remote, None);
     }
 

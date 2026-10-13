@@ -164,7 +164,7 @@ pub(crate) fn review_files_disabled(state: &AppState) -> Option<Reason> {
     if state.review_repo().is_none() {
         return Some(super::state::NO_FORGE.into());
     }
-    state.op_seq.is_some().then_some(OP_RUNNING.into())
+    state.op_is_running().then_some(OP_RUNNING.into())
 }
 
 /// `r` asks GitHub about the pull request, which the files screen hides.
@@ -291,29 +291,31 @@ impl AppState {
         let (oids, Some(remote)) = missing else {
             return vec![];
         };
-        // Once per head for the session, whatever the fetch comes to.
-        files.fetched = true;
-        files.stage = FilesStage::Fetching;
-        self.review.fetched_heads.push(key);
         // A user effect holding the git slot, like a fetch from the
-        // workspace: the busy mark shows and nothing else starts.
-        let seq = self.take_seq();
+        // workspace: the busy mark shows and nothing else starts. The
+        // files screen refuses while an op runs, so the slot is free.
+        let taken = self.take_op();
         if let Some(files) = &mut self.review.files {
-            files.seq = Some(seq);
+            match taken {
+                Some(tag) => {
+                    // Once per head for the session, whatever the fetch comes to.
+                    files.fetched = true;
+                    files.stage = FilesStage::Fetching;
+                    files.seq = Some(tag.seq);
+                }
+                None => files.stage = FilesStage::Failed(OP_RUNNING.into()),
+            }
         }
-        self.op_seq = Some(seq);
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
+        let Some(tag) = taken else {
+            return vec![];
         };
+        self.review.fetched_heads.push(key);
         vec![Effect::FetchReviewCommits { tag, remote, oids }]
     }
 
     /// The fetch is the review's; questions it asks may be answered.
     pub(crate) fn review_fetch_running(&self, tag: Tag) -> bool {
-        tag.generation == self.generation && self.op_seq == Some(tag.seq) && tag.user
+        tag.generation == self.generation && self.holds_op(tag) && tag.user
     }
 
     pub(crate) fn review_head_fetched(
@@ -322,11 +324,9 @@ impl AppState {
         result: Result<(), String>,
     ) -> Vec<Effect> {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if self.op_seq == Some(tag.seq) {
-            self.op_seq = None;
+        let held = self.holds_op(tag);
+        self.release_op(tag);
+        if held {
             // Git has gone; a question still open has nobody to answer.
             self.close_credential();
         }
@@ -652,14 +652,17 @@ mod tests {
             other => panic!("expected one fetch, got {other:?}"),
         };
         assert_eq!(stage(&state), FilesStage::Fetching);
-        assert_eq!((state.busy, state.op_seq), (1, Some(fetch_tag.seq)));
+        assert_eq!(
+            (state.busy_count(), state.held_seq()),
+            (1, Some(fetch_tag.seq))
+        );
 
         // Fetched: look again. Still missing: an error, never a second fetch.
         let effects = state.update(AppIntent::ReviewHeadFetched {
             tag: fetch_tag,
             result: Ok(()),
         });
-        assert_eq!((state.busy, state.op_seq), (0, None));
+        assert_eq!((state.busy_count(), state.held_seq()), (0, None));
         let tag = check_tag(&effects);
         let effects = state.update(AppIntent::ReviewObjectsChecked {
             tag,
@@ -701,7 +704,7 @@ mod tests {
             stage(&state),
             FilesStage::Failed("fatal: could not read from remote".into())
         );
-        assert_eq!((state.busy, state.op_seq), (0, None));
+        assert_eq!((state.busy_count(), state.held_seq()), (0, None));
     }
 
     #[test]
@@ -732,6 +735,52 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_fetch_result_leaves_the_running_fetchs_question_open() {
+        let (mut state, tag) = opened();
+        let effects = state.update(AppIntent::ReviewObjectsChecked {
+            tag,
+            result: missing(Some("origin")),
+        });
+        let [Effect::FetchReviewCommits { tag, .. }] = effects.as_slice() else {
+            panic!("{effects:?}");
+        };
+        state.update(AppIntent::CredentialAsked {
+            tag: *tag,
+            prompt: "Password:".into(),
+            confirm: false,
+        });
+        assert_eq!(state.key_focus(), KeyScope::Credential);
+
+        let stale = Tag {
+            seq: tag.seq + 99,
+            ..*tag
+        };
+        state.update(AppIntent::ReviewHeadFetched {
+            tag: stale,
+            result: Err("cancelled".into()),
+        });
+
+        assert_eq!(state.key_focus(), KeyScope::Credential);
+        assert!(state.holds_op(*tag));
+    }
+
+    #[test]
+    fn with_the_slot_taken_nothing_is_fetched_and_the_screen_says_why() {
+        let (mut state, tag) = opened();
+        state.hold_op(77);
+
+        let effects = state.update(AppIntent::ReviewObjectsChecked {
+            tag,
+            result: missing(Some("origin")),
+        });
+
+        assert_eq!(effects, []);
+        assert_eq!(stage(&state), FilesStage::Failed(OP_RUNNING.into()));
+        assert_eq!(state.review.fetched_heads, []);
+        assert_eq!(state.held_seq(), Some(77));
+    }
+
+    #[test]
     fn with_no_remote_for_the_repository_nothing_is_fetched_and_the_screen_says_why() {
         let (mut state, tag) = opened();
         let effects = state.update(AppIntent::ReviewObjectsChecked {
@@ -740,7 +789,7 @@ mod tests {
         });
         assert_eq!(effects, []);
         assert_eq!(stage(&state), FilesStage::Failed(NO_FETCH_REMOTE.into()));
-        assert_eq!((state.busy, state.op_seq), (0, None));
+        assert_eq!((state.busy_count(), state.held_seq()), (0, None));
         assert!(state.review.fetched_heads.is_empty());
     }
 
@@ -768,7 +817,7 @@ mod tests {
             result: missing(Some("origin")),
         });
         let fetch = Tag {
-            seq: state.op_seq.unwrap(),
+            seq: state.held_seq().unwrap(),
             user: true,
             ..tag
         };
@@ -849,7 +898,7 @@ mod tests {
             let (mut state, _) = ready();
             let diff = state.diff.clone();
             state.status_seq = Some(500);
-            state.busy += 1;
+            state.set_busy(state.busy_count() + 1);
             let status = RepoStatus {
                 branch: BranchStatus {
                     head: Head::Detached("abc".into()),
@@ -905,7 +954,7 @@ mod tests {
         assert_eq!(state.notice.as_deref(), Some(DETAIL_LOADING));
 
         let mut state = in_detail(Vec::new());
-        state.op_seq = Some(77);
+        state.hold_op(77);
         assert_eq!(type_char(&mut state, 'f'), []);
         assert_eq!(state.notice.as_deref(), Some(OP_RUNNING));
 

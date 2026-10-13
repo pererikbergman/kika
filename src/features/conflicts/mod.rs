@@ -19,8 +19,8 @@
 //! - `open_conflict`, `open_merge_tool` and `mergetool_disabled` read
 //!   `selected` and `files`;
 //! - `resolved_written` calls `refresh_status` and sets `status_selection`;
-//! - writes and staging go through the core op slot (`op_seq`, `start_op`,
-//!   `run_op_where_it_belongs`).
+//! - writes and staging go through the core op slot (`take_op`,
+//!   `release_op`, `start_op`, `run_op_where_it_belongs`).
 //!
 //! What stays in core: the view's branches in shared code (`ScrollDiff`,
 //! the `Panel::Diff` mapping, `key_focus`, the `Focus::Conflict(_) => None`

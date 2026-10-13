@@ -137,9 +137,9 @@ mod tests {
             }];
             state.branch = branch(head, &ops, bisect);
             states.push(state.clone());
-            state.op_seq = Some(1);
+            state.hold_op(1);
             states.push(state.clone());
-            state.op_seq = None;
+            state.free_op();
             state.files = vec![crate::git::FileEntry {
                 path: "a.rs".into(),
                 orig_path: None,

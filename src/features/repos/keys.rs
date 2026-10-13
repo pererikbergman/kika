@@ -14,7 +14,7 @@ pub(crate) fn init_repo_disabled(state: &AppState) -> Option<Reason> {
     let offered = matches!(state.popups.last(), Some(Popup::Recent(list)) if list.offer_init);
     if state.repo.is_some() || !offered {
         Some("Already in a repository".into())
-    } else if state.busy > 0 {
+    } else if state.is_busy() {
         Some("Loading…".into())
     } else {
         None

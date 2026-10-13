@@ -72,7 +72,7 @@ fn patch_state_disabled(state: &AppState) -> Option<Reason> {
     let Some(patch) = state.custom_patch.as_ref().filter(|p| !p.is_empty()) else {
         return Some(PATCH_EMPTY.into());
     };
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     if let Some(reason) = in_progress_disabled(state) {

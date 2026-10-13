@@ -418,7 +418,7 @@ mod tests {
                 Some("Finish or abort the operation in progress".into())
             );
         }
-        state.op_seq = Some(1);
+        state.hold_op(1);
         for disabled in all {
             assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
         }
@@ -478,7 +478,7 @@ mod tests {
         let mut narrowed = range_state();
         narrowed.commits.query.author = Some("ann".into());
         let mut running = range_state();
-        running.op_seq = Some(1);
+        running.hold_op(1);
         let mut rebasing = range_state();
         in_rebase(&mut rebasing);
         let mut stacked = range_state();
@@ -618,7 +618,7 @@ mod tests {
         let mut range = fixup_state();
         range.commits.range_anchor = Some("b".repeat(40));
         let mut running = fixup_state();
-        running.op_seq = Some(1);
+        running.hold_op(1);
         let mut unborn = fixup_state();
         unborn.commits.rows.clear();
         unborn.branch = Some(crate::git::status::BranchStatus {
@@ -677,7 +677,7 @@ mod tests {
         let mut todo = fixup_state();
         todo.commits.todo_selected = Some(0);
         let mut running = fixup_state();
-        running.op_seq = Some(1);
+        running.hold_op(1);
         let mut rebasing = fixup_state();
         in_rebase(&mut rebasing);
         let mut none = fixup_state();

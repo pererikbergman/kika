@@ -56,6 +56,7 @@ use crate::list_filter::{self, InputTarget, ListInput};
 use crate::list_input::{RANGE_FILES_CHANGED, search_input};
 use crate::menu;
 use crate::op::GitOp;
+use crate::op_slot::OpSlot;
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind,
@@ -175,9 +176,9 @@ pub struct AppState {
     pub next_seq: u64,
     /// Sequence of the latest status load; only its result is applied.
     pub status_seq: Option<u64>,
-    /// User-initiated effects still in flight. Core reads and writes it
-    /// through `op_slot.rs`.
-    pub busy: u32,
+    /// The op slot: the running git op, the busy count and why the last op
+    /// was refused. Only `op_slot.rs` sees inside it.
+    pub(crate) op_slot: OpSlot,
     pub files: Vec<FileEntry>,
     /// False until the first status result arrives, to tell "loading" from "clean".
     pub files_loaded: bool,
@@ -195,10 +196,6 @@ pub struct AppState {
     /// How much of the screen the focused panel takes; kept across focus
     /// changes.
     pub screen_mode: ScreenMode,
-    /// Sequence of the Git operation in flight. Operations run one at a
-    /// time so two quick presses never race for `index.lock`. Core takes
-    /// and frees it through `op_slot.rs`.
-    pub op_seq: Option<u64>,
     /// The left-behind check in flight; one at a time, so a second press
     /// cannot stack a second question.
     pub left_behind_check: Option<LeftBehindCheck>,
@@ -207,9 +204,6 @@ pub struct AppState {
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
     /// anything, so a commit that only runs hooks stays detached.
     pub commit_hooks_detached: bool,
-    /// The last operation's failure, or why one was refused. Core sets it
-    /// through `op_slot.rs`.
-    pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
     pub help_open: bool,
@@ -264,7 +258,7 @@ pub struct AppState {
     pub command_running: bool,
     /// The Branches panel and the selected branch's log.
     pub branches: BranchesPanel,
-    /// The fetch, pull or push running now. It also holds `op_seq`.
+    /// The fetch, pull or push running now. It also holds the op slot.
     pub remote: Option<RemoteRun>,
     /// The history of `HEAD`, loaded at startup whether shown or not.
     pub commits: CommitsPanel,
@@ -335,7 +329,7 @@ impl AppState {
             generation: 0,
             next_seq: 0,
             status_seq: None,
-            busy: 0,
+            op_slot: OpSlot::default(),
             files: Vec::new(),
             files_loaded: false,
             status_error: None,
@@ -345,11 +339,9 @@ impl AppState {
             focus: Focus::Files,
             expanded: SidePanel::Files,
             screen_mode: ScreenMode::Normal,
-            op_seq: None,
             left_behind_check: None,
             commit_on_terminal: false,
             commit_hooks_detached: false,
-            op_error: None,
             status_selection: Selection::KeepPath,
             help_open: false,
             help_scroll: 0,
@@ -2286,7 +2278,7 @@ mod tests {
     #[test]
     fn quitting_while_an_op_runs_interrupts_git() {
         let mut state = AppState::new(Context::Workspace);
-        state.op_seq = Some(4);
+        state.hold_op(4);
         assert_eq!(state.update(AppIntent::Quit), vec![Effect::InterruptGit]);
         assert!(state.should_quit);
     }
@@ -2340,7 +2332,7 @@ mod tests {
     fn refresh_in_review_does_nothing() {
         let mut state = AppState::new(Context::Review { number: Some(3) });
         assert_eq!(state.update(AppIntent::RefreshStatus), vec![]);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -2438,7 +2430,7 @@ mod tests {
     #[test]
     fn a_branch_only_plan_loads_status_once() {
         let (mut state, _) = with_files(three_files(), 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let effects = state.apply_plan(RefreshPlan {
             scopes: [Scope::Branch].into(),
             selection: Selection::KeepPath,
@@ -2447,7 +2439,7 @@ mod tests {
             matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
             "{effects:?}"
         );
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
     }
 
     #[test]
@@ -2474,14 +2466,14 @@ mod tests {
     fn busy_rises_per_refresh_and_falls_per_result_even_when_stale() {
         let mut state = AppState::new(Context::Workspace);
         let old = refresh_tag(&mut state);
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         let new = refresh_tag(&mut state);
-        assert_eq!(state.busy, 2);
+        assert_eq!(state.busy_count(), 2);
 
         state.update(loaded(old, &[]));
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         state.update(loaded(new, &[]));
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -2493,7 +2485,7 @@ mod tests {
             user: true,
         };
         state.update(loaded(tag, &[]));
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -2502,7 +2494,7 @@ mod tests {
         let mut tag = refresh_tag(&mut state);
         tag.user = false;
         state.update(loaded(tag, &[]));
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
     }
 
     #[test]
@@ -2710,7 +2702,8 @@ mod tests {
         // their markers and the branch tips, then the stashes.
         assert_eq!(press(&mut state, KeyCode::Char('r')).len(), 8);
         assert_eq!(
-            state.busy, 4,
+            state.busy_count(),
+            4,
             "the status, the branch list, the remotes and the tags"
         );
         press(&mut state, KeyCode::Char('q'));
@@ -2762,12 +2755,12 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         select_path(&mut state, "b.rs");
         let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let effects = state.update(finished(tag, op, Ok(())));
         // The op's slot is released and the status load takes one.
-        assert_eq!(state.busy, busy);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.busy_count(), busy);
+        assert_eq!(state.held_seq(), None);
         let status = match effects.as_slice() {
             [Effect::LoadStatus { tag }] => *tag,
             other => panic!("expected one LoadStatus, got {other:?}"),
@@ -2813,8 +2806,8 @@ mod tests {
             }
             other => panic!("expected one error popup, got {other:?}"),
         }
-        assert_eq!(state.op_error, None);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.op_error(), None);
+        assert_eq!(state.held_seq(), None);
         assert!(
             matches!(effects.as_slice(), [Effect::LoadStatus { .. }]),
             "{effects:?}"
@@ -2825,24 +2818,24 @@ mod tests {
     fn a_successful_op_clears_an_earlier_error() {
         let (mut state, _) = with_files(three_files(), 24);
         let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
-        state.op_error = Some("left over".into());
+        state.set_op_error("left over".into());
         state.update(finished(tag, op, Ok(())));
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
     }
 
     #[test]
     fn a_stale_generation_op_lowers_busy_and_does_nothing_else() {
         let (mut state, _) = with_files(three_files(), 24);
         let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.generation += 1;
 
         let effects = state.update(finished(tag, op, Err("boom".into())));
 
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, busy - 1);
-        assert_eq!(state.op_error, None);
-        assert_eq!(state.op_seq, None, "the slot is freed even when stale");
+        assert_eq!(state.busy_count(), busy - 1);
+        assert_eq!(state.op_error(), None);
+        assert_eq!(state.held_seq(), None, "the slot is freed even when stale");
     }
 
     #[test]
@@ -3104,7 +3097,7 @@ mod tests {
             }
         );
         assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (tag, op) = op_of(&press(&mut state, KeyCode::Char('y')));
         assert_eq!(op, GitOp::DiscardWorktree(vec!["a.rs".into()]));
@@ -3118,7 +3111,7 @@ mod tests {
             let (mut state, _) = with_files(three_files(), 24);
             press(&mut state, KeyCode::Char('d'));
             assert_eq!(press(&mut state, key), vec![], "{key:?}");
-            assert_eq!(state.op_seq, None, "{key:?}");
+            assert_eq!(state.held_seq(), None, "{key:?}");
             assert!(!state.should_quit, "{key:?}");
             if key == KeyCode::Enter {
                 // Enter never discards, and never answers at all.
@@ -3177,7 +3170,7 @@ mod tests {
         review.files = three_files();
         review.selected = Some(0);
         let (mut running, _) = with_files(three_files(), 24);
-        running.op_seq = Some(9);
+        running.hold_op(9);
         for state in [&mut review, &mut running] {
             assert_eq!(state.update(AppIntent::Discard), vec![]);
             assert_eq!(state.popups, []);
@@ -3463,7 +3456,7 @@ mod tests {
             matches!(effects.as_slice(), [Effect::RunOp { .. }]),
             "{effects:?}"
         );
-        state.op_seq = None;
+        state.free_op();
         press_char(&mut state, 'd');
         assert!(
             matches!(state.popups.as_slice(), [Popup::Discard(_)]),
@@ -3990,7 +3983,7 @@ mod tests {
             ] => assert!(!tag.user && !remotes.user && !tags.user),
             other => panic!("expected background LoadBranches and the commits, got {other:?}"),
         }
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -4018,7 +4011,7 @@ mod tests {
     fn poll_files_starts_a_background_status_that_never_touches_busy() {
         let mut state = idle_with_files();
         let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert_eq!(state.status_seq, Some(tag.seq));
         assert!(state.watch.status_pending);
 
@@ -4026,7 +4019,7 @@ mod tests {
             tag,
             result: Ok(repo(three_files())),
         });
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         assert!(!state.watch.status_pending);
     }
 
@@ -4045,18 +4038,18 @@ mod tests {
             }
             other => panic!("expected a config, a status and a snapshot, got {other:?}"),
         }
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
     fn background_status_is_skipped_while_busy_an_op_runs_or_one_is_pending() {
         let mut state = idle_with_files();
-        state.busy = 1;
+        state.set_busy(1);
         assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
 
         let mut state = idle_with_files();
-        state.op_seq = Some(42);
+        state.hold_op(42);
         assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
 
         let mut state = idle_with_files();
@@ -4071,7 +4064,7 @@ mod tests {
     #[test]
     fn focus_gained_while_busy_still_takes_a_snapshot() {
         let mut state = idle_with_files();
-        state.busy = 1;
+        state.set_busy(1);
         let effects = watch(&mut state, WatchEvent::FocusGained);
         assert_eq!(
             effects[0],
@@ -4165,9 +4158,9 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(state.files, three_files());
         assert!(!state.watch.status_pending);
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         state.update(loaded(user, &["x.txt"]));
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -4210,7 +4203,7 @@ mod tests {
             tag: tags,
             result: Ok(vec![]),
         });
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
 
         let refs = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
         assert!(state.update(refs_loaded(refs, b"sub")).is_empty());
@@ -4278,7 +4271,7 @@ mod tests {
         assert_eq!(press_char(&mut state.clone(), 's'), []);
         let mut space = state.clone();
         assert_eq!(press_char(&mut space, ' '), []);
-        assert_eq!(space.op_seq, None);
+        assert_eq!(space.held_seq(), None);
         assert_eq!(space.notice, None);
         assert!(is_stage(&press_char(&mut state, 'x')), "x stages");
     }
@@ -4576,7 +4569,7 @@ mod tests {
         }
         for (name, state, _) in &questions {
             assert_eq!(state.popups.len(), 1, "{name}");
-            assert_eq!(state.op_seq, None, "{name}");
+            assert_eq!(state.held_seq(), None, "{name}");
         }
         questions
     }
@@ -4598,7 +4591,7 @@ mod tests {
         assert_eq!(effects, [], "{name}");
         assert_eq!(state.notice, Some(reason.into()), "{name}");
         assert_eq!(state.popups, [], "{name}");
-        assert_eq!(state.op_seq, None, "{name}");
+        assert_eq!(state.held_seq(), None, "{name}");
         assert_eq!(state.commits.pending, None, "{name}");
     }
 
@@ -4623,7 +4616,7 @@ mod tests {
                     // question does too.
                     let (tag, ran) = op_of(&effects);
                     assert_eq!(ran, op, "{name}");
-                    assert_eq!(state.op_seq, Some(tag.seq), "{name}");
+                    assert_eq!(state.held_seq(), Some(tag.seq), "{name}");
                 } else {
                     assert_refused(&state, &effects, IN_PROGRESS, &name);
                 }
@@ -4649,7 +4642,7 @@ mod tests {
         for (name, mut state, op) in open_move_questions() {
             let (tag, ran) = op_of(&answer_yes(&mut state));
             assert_eq!(ran, op, "{name}");
-            assert_eq!(state.op_seq, Some(tag.seq), "{name}");
+            assert_eq!(state.held_seq(), Some(tag.seq), "{name}");
             assert_eq!(state.popups, [], "{name}");
             assert_eq!(state.notice, None, "{name}");
         }
@@ -4675,7 +4668,7 @@ mod tests {
         }
         assert_eq!(state.popups, []);
         assert_eq!(state.commits.pending, None);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -4844,7 +4837,7 @@ mod tests {
             ],
         );
         reload_tags(&mut state, two_tags());
-        state.busy = 0;
+        state.set_busy(0);
         press_char(&mut state, ']');
         press_char(&mut state, ']');
         let (tag, op) = remote_of(&shift(&mut state, 'P'));
@@ -4877,7 +4870,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 'c'), vec![]);
         assert_eq!(state.notice, Some(bisect::MARK_INSTEAD.into()));
         assert_eq!(state.update(AppIntent::ContinueOperation), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -4895,7 +4888,7 @@ mod tests {
 
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups, question);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::BisectReset);
@@ -4906,7 +4899,7 @@ mod tests {
             press_char(&mut state, 'a');
             assert_eq!(press(&mut state, no), vec![], "{no:?}");
             assert_eq!(state.popups, []);
-            assert_eq!(state.op_seq, None);
+            assert_eq!(state.held_seq(), None);
         }
     }
 
@@ -5098,7 +5091,7 @@ mod tests {
             );
             assert_eq!(state.popups, popups, "{name} {action:?}");
             assert_eq!(state.commit, CommitFlow::Closed, "{name} {action:?}");
-            assert_eq!(state.op_seq, None, "{name} {action:?}");
+            assert_eq!(state.held_seq(), None, "{name} {action:?}");
         }
     }
 
@@ -5119,7 +5112,7 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()));
         assert_eq!(state.commit, before);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -5127,10 +5120,10 @@ mod tests {
         let mut state = testing_c1(&[Operation::Bisect]);
         let (_, op) = op_of(&state.update(AppIntent::BisectHead(BisectMark::Good)));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
-        state.op_seq = None;
+        state.free_op();
         let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Bad)));
         assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", false));
-        state.op_seq = None;
+        state.free_op();
         state.update(AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)));
         let (_, op) = op_of(&state.update(AppIntent::ConfirmBisectReset));
         assert_eq!(op, GitOp::BisectReset);
@@ -5518,19 +5511,19 @@ mod tests {
     #[test]
     fn the_full_message_is_read_first_and_only_the_latest_read_is_copied() {
         let mut state = copy_ready();
-        let busy = state.busy;
+        let busy = state.busy_count();
         let first = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
         let [Effect::LoadCommitMessage { tag: old, oid }] = first.as_slice() else {
             panic!("expected a message load, got {first:?}");
         };
         assert_eq!(oid, &cid(COPIED_OID));
         assert!(old.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         let second = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
         let [Effect::LoadCommitMessage { tag: new, .. }] = second.as_slice() else {
             panic!("expected a message load, got {second:?}");
         };
-        assert_eq!(state.busy, busy + 2);
+        assert_eq!(state.busy_count(), busy + 2);
 
         let stale = state.update(AppIntent::CommitMessageLoaded {
             tag: *old,
@@ -5538,7 +5531,7 @@ mod tests {
             result: Ok("old".into()),
         });
         assert_eq!(stale, vec![]);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         let effects = state.update(AppIntent::CommitMessageLoaded {
             tag: *new,
             oid: cid(COPIED_OID),
@@ -5549,7 +5542,10 @@ mod tests {
             state.notice_text.as_deref(),
             Some("Copied message: subj  body")
         );
-        assert_eq!((state.busy, state.pending_copy.clone()), (busy, None));
+        assert_eq!(
+            (state.busy_count(), state.pending_copy.clone()),
+            (busy, None)
+        );
     }
 
     #[test]

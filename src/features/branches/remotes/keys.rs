@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Why no remote can be added now: git one operation at a time.
 pub(crate) fn add_remote_disabled(state: &AppState) -> Option<Reason> {
-    state.op_seq.is_some().then_some(OP_RUNNING.into())
+    state.op_is_running().then_some(OP_RUNNING.into())
 }
 
 /// Why the selected remote branch cannot be checked out: a header row
@@ -21,7 +21,7 @@ pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = list_guard(state, false) {
         return Some(reason);
     }
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.branches.remotes.selected_branch().is_none() {
         Some("Select a remote branch".into())
@@ -52,7 +52,7 @@ pub(crate) fn rename_remote_disabled(state: &AppState) -> Option<Reason> {
 /// and `remote remove` take no `--` in older git, so a name like an option
 /// is never passed; nor is a group of refs no configured remote owns.
 fn remote_selected_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     match state.branches.remotes.selected_remote() {

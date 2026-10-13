@@ -10,7 +10,7 @@ pub const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRun {
     pub op: RemoteOp,
-    /// The effect's sequence, which also holds `op_seq`.
+    /// The effect's sequence, which also holds the op slot.
     pub seq: u64,
     /// The branch `HEAD` was on when it started; its row gets the spinner.
     pub branch: Option<BranchName>,

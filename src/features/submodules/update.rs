@@ -51,20 +51,13 @@ impl AppState {
     }
 
     fn load_submodules(&mut self, seq: u64) -> Vec<Effect> {
-        self.busy += 1;
         vec![Effect::LoadSubmodules {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user: true,
-            },
+            tag: self.user_tag(seq),
         }]
     }
 
     pub(crate) fn submodules_loaded(&mut self, tag: Tag, result: Result<Vec<Submodule>, String>) {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return;
         }
@@ -176,11 +169,11 @@ mod tests {
     #[test]
     fn s_opens_the_submodules_popup_and_loads_it_once() {
         let (mut state, _) = with_files(three_files(), 24);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let tag = submodules_tag(&press_char(&mut state, 'S'));
         assert!(tag.user);
         assert_eq!(tag.generation, state.generation);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::Submodules);
         assert_eq!(*submodule_list(&state), SubmoduleList::loading(tag.seq));
 
@@ -190,7 +183,7 @@ mod tests {
             result: Ok(subs.clone()),
         });
         assert_eq!(submodule_list(&state).items, Some(subs));
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
@@ -208,7 +201,7 @@ mod tests {
     fn a_stale_or_unwanted_submodule_load_is_dropped_but_still_lowers_busy() {
         let (mut state, _) = with_files(three_files(), 24);
         let old = submodules_tag(&press_char(&mut state, 'S'));
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         let subs = vec![submodule("sub", SubmoduleState::UpToDate)];
         let stale_seq = Tag {
             seq: old.seq + 100,
@@ -227,7 +220,7 @@ mod tests {
             result: Ok(subs.clone()),
         });
         assert_eq!(submodule_list(&state).items, None);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
 
         // Closed before the answer: nothing comes back.
         press(&mut state, KeyCode::Esc);
@@ -406,7 +399,7 @@ mod tests {
     #[test]
     fn enter_waits_for_a_running_op() {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::UpToDate)]);
-        state.op_seq = Some(99);
+        state.hold_op(99);
         assert_eq!(state.update(AppIntent::EnterSubmodule), vec![]);
         assert_eq!(
             state.notice,

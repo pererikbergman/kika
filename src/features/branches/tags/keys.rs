@@ -26,7 +26,7 @@ pub(crate) fn tag_commit_disabled(state: &AppState) -> Option<Reason> {
 /// operation at a time.
 pub(crate) fn delete_tag_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
-        if state.op_seq.is_some() {
+        if state.op_is_running() {
             Some(OP_RUNNING.into())
         } else if state.branches.tags.range_anchor.is_some() {
             None
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(tag_commit_disabled(&state), Some("No commit".into()));
         state.commits.rows = vec![row(&"a".repeat(40))];
         // An operation running does not refuse the prompt; the answer waits.
-        state.op_seq = Some(1);
+        state.hold_op(1);
         let ran = |key| match resolve_in(&state, key) {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),

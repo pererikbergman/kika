@@ -20,7 +20,7 @@
 //! Kept cross-feature reads:
 //! - stashing from the Files panel reads `files` and `files_marked()`,
 //!   and clears `files_anchor`;
-//! - the handlers read `op_seq`, `focus`, `context`, `generation` and
+//! - the handlers read the op slot, `focus`, `context`, `generation` and
 //!   `popups`, and write `diff` and `notice`;
 //! - `files_open` reads `commits.open`. It answers whether the Diff pane
 //!   belongs to a commit's or a stash's files, and core dispatch calls

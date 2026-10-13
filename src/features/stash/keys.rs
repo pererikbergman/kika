@@ -46,7 +46,7 @@ pub(crate) fn stash_files_disabled(state: &AppState) -> Option<Reason> {
 
 /// Git runs one operation at a time, and the list needs an entry.
 fn stash_busy_or_empty(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else {
         no_stash(state)
@@ -64,7 +64,7 @@ fn stash_menu_disabled(state: &AppState) -> Option<Reason> {
 /// Why nothing can be stashed now: one operation at a time, and git
 /// cannot stash a conflicted index.
 fn stash_blocked(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
         Some("Resolve conflicts first".into())
@@ -423,7 +423,7 @@ mod tests {
             subject: String::new(),
         }];
         assert_eq!(stash_action_disabled(&state), None);
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(stash_action_disabled(&state), Some(OP_RUNNING.into()));
         assert_eq!(no_stash(&state), None);
     }
@@ -470,7 +470,7 @@ mod tests {
         for id in ["stash.next", "stash.prev", "stash.filter", "stash.range"] {
             assert_eq!(reason(&state, id), None, "{id}");
         }
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(reason(&state, "stash.drop").as_deref(), Some(OP_RUNNING));
     }
 

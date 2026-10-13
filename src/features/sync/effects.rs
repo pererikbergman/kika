@@ -41,7 +41,7 @@ pub(crate) fn remote(
             let bridge = Bridge::open(tag, bridge_tx, slot);
             run_remote(runner.as_ref(), &task_op, bridge.env.as_ref())
         },
-        // A panic still reports back, or `op_seq` would block every later op.
+        // A panic still reports back, or the op slot would block every later op.
         |e| {
             Err(RemoteFailure::Failed(terminal_safe(
                 format!("git crashed: {e}").as_bytes(),

@@ -457,7 +457,7 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         state.files = files;
-        state.op_seq = Some(1);
+        state.hold_op(1);
         for item in items(MenuId::Stash) {
             assert_eq!(
                 (item.disabled)(&state),
