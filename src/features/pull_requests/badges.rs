@@ -102,7 +102,7 @@ mod tests {
     use crate::intent::AppIntent;
     use crate::layout::SidePanel;
     use crate::model::{CommitFlow, Context, Focus};
-    use crate::test_support::forge_state;
+    use crate::test_support::{branches_loaded, forge_state};
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
@@ -159,10 +159,10 @@ mod tests {
     fn list_branches(state: &mut AppState, names: &[&str]) -> Vec<Effect> {
         let mut effects = state.update(AppIntent::RefreshStatus);
         let tag = branches_tag(&effects);
-        effects.extend(state.update(AppIntent::BranchesLoaded {
+        effects.extend(state.update(branches_loaded(
             tag,
-            result: Ok(names.iter().map(|n| branch(n)).collect()),
-        }));
+            names.iter().map(|n| branch(n)).collect(),
+        )));
         effects
     }
 
@@ -191,10 +191,7 @@ mod tests {
         });
         let tag = branches_tag(&finished);
         effects.extend(finished);
-        effects.extend(state.update(AppIntent::BranchesLoaded {
-            tag,
-            result: Ok(vec![branch("main")]),
-        }));
+        effects.extend(state.update(branches_loaded(tag, vec![branch("main")])));
         effects
     }
 

@@ -3,8 +3,11 @@
 //! use stays with that feature.
 
 use crate::effect::{Effect, Tag};
+use crate::features::branches::BranchesIntent;
 use crate::features::branches::BranchesTab;
+use crate::features::branches::remotes::RemotesIntent;
 use crate::features::branches::remotes::{RemoteLine, lines};
+use crate::features::branches::tags::TagsIntent;
 use crate::features::commit::CommitEditor;
 use crate::features::commits::CommitFilesList;
 use crate::features::commits::CommitsIntent;
@@ -117,18 +120,22 @@ pub(crate) fn refresh_tag(state: &mut AppState) -> Tag {
             Effect::LoadStashes { .. },
         ] => {
             let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
-            state.update(AppIntent::BranchesLoaded {
+            state.update(AppIntent::Branches(BranchesIntent::Loaded {
                 tag: list,
                 result: Ok(vec![]),
-            });
-            state.update(AppIntent::RemotesLoaded {
-                tag: remotes,
-                result: Ok(vec![]),
-            });
-            state.update(AppIntent::TagsLoaded {
-                tag: tags,
-                result: Ok(vec![]),
-            });
+            }));
+            state.update(AppIntent::Branches(BranchesIntent::Remotes(
+                RemotesIntent::Loaded {
+                    tag: remotes,
+                    result: Ok(vec![]),
+                },
+            )));
+            state.update(AppIntent::Branches(BranchesIntent::Tags(
+                TagsIntent::Loaded {
+                    tag: tags,
+                    result: Ok(vec![]),
+                },
+            )));
             tag
         }
         other => {
@@ -705,11 +712,17 @@ pub(crate) fn log_load(effects: &[Effect]) -> Option<(Tag, Vec<u8>)> {
     })
 }
 
+/// Move the Branches panel's selection down one row. Core builds the
+/// branches intent, so tests in other features need not name it.
+pub(crate) fn next_branch(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Branches(BranchesIntent::Next))
+}
+
 pub(crate) fn branches_loaded(tag: Tag, branches: Vec<Branch>) -> AppIntent {
-    AppIntent::BranchesLoaded {
+    AppIntent::Branches(BranchesIntent::Loaded {
         tag,
         result: Ok(branches),
-    }
+    })
 }
 
 /// A workspace with `three_branches` loaded and the Branches panel
@@ -723,11 +736,11 @@ pub(crate) fn with_branches() -> AppState {
     let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
     let effects = state.update(branches_loaded(tag, three_branches()));
     let (tag, refname) = log_load(&effects).expect("the selection's log loads");
-    state.update(AppIntent::BranchLogLoaded {
+    state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
         tag,
         refname,
         result: Ok(vec![]),
-    });
+    }));
     state.update(AppIntent::FocusPanel(layout::Panel::Side(
         SidePanel::Branches,
     )));
@@ -772,10 +785,12 @@ pub(crate) fn remotes_tag(effects: &[Effect]) -> Tag {
 /// Reload both lists, answering with `remotes`.
 pub(crate) fn reload_remotes(state: &mut AppState, remotes: Vec<Remote>) -> Vec<Effect> {
     let tag = remotes_tag(&state.update(AppIntent::RefreshStatus));
-    state.update(AppIntent::RemotesLoaded {
-        tag,
-        result: Ok(remotes),
-    })
+    state.update(AppIntent::Branches(BranchesIntent::Remotes(
+        RemotesIntent::Loaded {
+            tag,
+            result: Ok(remotes),
+        },
+    )))
 }
 
 /// `fork` (no branches), `origin` with `main` and `topic`, and `stray`,
@@ -1523,10 +1538,12 @@ pub(crate) fn tags_tag(effects: &[Effect]) -> Tag {
 /// Reload the lists, answering the tags with `tags`.
 pub(crate) fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
     let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
-    state.update(AppIntent::TagsLoaded {
-        tag,
-        result: Ok(tags),
-    })
+    state.update(AppIntent::Branches(BranchesIntent::Tags(
+        TagsIntent::Loaded {
+            tag,
+            result: Ok(tags),
+        },
+    )))
 }
 
 /// `v2` then `v1`, newest first.

@@ -5,6 +5,7 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::config::ConfigError;
 use crate::effect::Tag;
+use crate::features::branches::BranchesIntent;
 use crate::features::command_log::CommandLogIntent;
 use crate::features::commits::CommitsIntent;
 use crate::features::conflicts::Choice;
@@ -19,18 +20,16 @@ use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::blame::BlameLine;
-use crate::git::branches::{Branch, BranchName, LogRow};
+use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitRange;
 use crate::git::diff::{DiffChunk, DiffLine};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::git::remotes::Remote;
 use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
-use crate::git::tags::TagRef;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -658,103 +657,9 @@ pub enum AppIntent {
     },
 
     // --- branches ---
-    /// The branch list was read; `tag` says which load.
-    BranchesLoaded {
-        tag: Tag,
-        result: Result<Vec<Branch>, String>,
-    },
-    /// The log of the full ref `refname` was read; `tag` says which load.
-    BranchLogLoaded {
-        tag: Tag,
-        refname: Vec<u8>,
-        result: Result<Vec<LogRow>, String>,
-    },
-    /// Show the Branches panel's next tab: local branches, remotes, tags.
-    SwitchBranchesTab,
-    /// Show the Branches panel's previous tab.
-    PrevBranchesTab,
-    /// Move the branch selection down or up.
-    BranchNext,
-    BranchPrev,
-    /// Switch to the selected branch.
-    CheckoutBranch,
-    /// Ask for a name, to make a branch at the selected one.
-    NewBranch,
-    /// Ask for a new name for the selected branch, the old one filled in.
-    RenameBranch,
-    /// Ask before deleting the selected branch.
-    DeleteBranch,
-    /// The new branch's name, typed into the `NewBranch` prompt.
-    CreateBranchNamed(String),
-    /// The new name, typed into the `RenameBranch` prompt.
-    RenameBranchTo(String),
-    /// Delete the branch the open question names: plainly, or with
-    /// `force` when its commits are not merged.
-    ConfirmDeleteBranch {
-        force: bool,
-    },
-    /// Ask which remote branch the selected local branch should track.
-    SetUpstream,
-    /// The upstream, as `remote/branch`, typed into the `SetUpstream` prompt.
-    SetUpstreamTo(String),
-    /// Stop the selected local branch tracking its upstream.
-    UnsetUpstream,
-
-    // --- branches/remotes ---
-    /// The remotes and their branches were read; `tag` says which load.
-    RemotesLoaded {
-        tag: Tag,
-        result: Result<Vec<Remote>, String>,
-    },
-    /// Move the Remotes tab's selection down or up, over remote and
-    /// branch rows alike.
-    RemoteNext,
-    RemotePrev,
-    /// Ask for a local name, to check out the selected remote branch as a
-    /// new branch tracking it.
-    TrackRemoteBranch,
-    /// The local name, typed into the `TrackBranch` prompt.
-    TrackRemoteBranchNamed(String),
-    /// Ask for a new remote's name, then its URL.
-    AddRemote,
-    /// The new remote's name, typed into the `RemoteName` prompt.
-    AddRemoteNamed(String),
-    /// The new remote's URL, typed into the `RemoteUrl` prompt.
-    AddRemoteUrl(String),
-    /// Ask for a new name for the selected remote, the old one filled in.
-    RenameRemote,
-    /// The new name, typed into the `RenameRemote` prompt.
-    RenameRemoteTo(String),
-    /// Ask before removing the selected remote.
-    RemoveRemote,
-    /// Remove the remote the open question names.
-    ConfirmRemoveRemote,
-
-    // --- branches/tags ---
-    /// The tags were read; `tag` says which load.
-    TagsLoaded {
-        tag: Tag,
-        result: Result<Vec<TagRef>, String>,
-    },
-    /// Move the Tags tab's selection down or up.
-    TagNext,
-    TagPrev,
-    /// Ask for a name, to tag the selected commit with a lightweight tag.
-    NewTag,
-    /// Ask for a name and then a message, to tag the selected commit with
-    /// an annotated tag.
-    NewAnnotatedTag,
-    /// The tag's name, typed into the `TagName` prompt.
-    TagNamed(String),
-    /// The annotated tag's message, typed into the `TagMessage` prompt.
-    TagMessaged(String),
-    /// Ask before deleting the selected tag.
-    DeleteTag,
-    /// Delete the tag the open question names.
-    ConfirmDeleteTag,
-    /// Push the selected tag to the current branch's remote, or the only
-    /// one.
-    PushTag,
+    /// Everything the branches subtree does: the panel and its Remotes
+    /// and Tags tabs. Its own `update` handles it.
+    Branches(BranchesIntent),
 
     // --- commits ---
     /// Everything the commits subtree does: the panel and its
@@ -774,6 +679,12 @@ pub enum Scroll {
 impl From<CommandLogIntent> for AppIntent {
     fn from(intent: CommandLogIntent) -> Self {
         Self::CommandLog(intent)
+    }
+}
+
+impl From<BranchesIntent> for AppIntent {
+    fn from(intent: BranchesIntent) -> Self {
+        Self::Branches(intent)
     }
 }
 

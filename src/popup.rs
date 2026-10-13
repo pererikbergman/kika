@@ -8,6 +8,9 @@ use std::fmt;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
+use crate::features::branches::BranchesIntent;
+use crate::features::branches::remotes::RemotesIntent;
+use crate::features::branches::tags::TagsIntent;
 use crate::features::command_log::CommandLogView;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::custom_patch::CustomPatchIntent;
@@ -558,18 +561,30 @@ impl PromptKind {
         match self {
             PromptKind::GoToFile => AppIntent::GoToFile(text),
             PromptKind::Command => AppIntent::CommandPromptAnswered(text),
-            PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
-            PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
+            PromptKind::NewBranch => AppIntent::Branches(BranchesIntent::CreateNamed(text)),
+            PromptKind::RenameBranch => AppIntent::Branches(BranchesIntent::RenameTo(text)),
             PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
             PromptKind::RenameStash => AppIntent::RenameStashTo(text),
-            PromptKind::TrackBranch => AppIntent::TrackRemoteBranchNamed(text),
-            PromptKind::RemoteName => AppIntent::AddRemoteNamed(text),
-            PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
-            PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
-            PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
+            PromptKind::TrackBranch => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(text)))
+            }
+            PromptKind::RemoteName => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddNamed(text)))
+            }
+            PromptKind::RemoteUrl => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddUrl(text)))
+            }
+            PromptKind::RenameRemote => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::RenameTo(text)))
+            }
+            PromptKind::SetUpstream => AppIntent::Branches(BranchesIntent::SetUpstreamTo(text)),
             PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
-            PromptKind::TagName => AppIntent::TagNamed(text),
-            PromptKind::TagMessage => AppIntent::TagMessaged(text),
+            PromptKind::TagName => {
+                AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Named(text)))
+            }
+            PromptKind::TagMessage => {
+                AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(text)))
+            }
             PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
             PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
             PromptKind::PatchCommitMessage => AppIntent::Commits(CommitsIntent::CustomPatch(
@@ -959,11 +974,11 @@ mod tests {
     fn branch_prompts_answer_with_their_intents() {
         assert_eq!(
             PromptKind::NewBranch.submit("n".into()),
-            AppIntent::CreateBranchNamed("n".into())
+            AppIntent::Branches(BranchesIntent::CreateNamed("n".into()))
         );
         assert_eq!(
             PromptKind::RenameBranch.submit("r".into()),
-            AppIntent::RenameBranchTo("r".into())
+            AppIntent::Branches(BranchesIntent::RenameTo("r".into()))
         );
     }
 
@@ -972,33 +987,36 @@ mod tests {
         let t = || "t".to_string();
         assert_eq!(
             PromptKind::TrackBranch.submit(t()),
-            AppIntent::TrackRemoteBranchNamed(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(t())))
         );
         assert_eq!(
             PromptKind::RemoteName.submit(t()),
-            AppIntent::AddRemoteNamed(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddNamed(t())))
         );
         assert_eq!(
             PromptKind::RemoteUrl.submit(t()),
-            AppIntent::AddRemoteUrl(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddUrl(t())))
         );
         assert_eq!(
             PromptKind::RenameRemote.submit(t()),
-            AppIntent::RenameRemoteTo(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::RenameTo(t())))
         );
         assert_eq!(
             PromptKind::SetUpstream.submit(t()),
-            AppIntent::SetUpstreamTo(t())
+            AppIntent::Branches(BranchesIntent::SetUpstreamTo(t()))
         );
     }
 
     #[test]
     fn tag_prompts_answer_with_their_intents_and_delete_asks_plainly() {
         let t = || "t".to_string();
-        assert_eq!(PromptKind::TagName.submit(t()), AppIntent::TagNamed(t()));
+        assert_eq!(
+            PromptKind::TagName.submit(t()),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Named(t())))
+        );
         assert_eq!(
             PromptKind::TagMessage.submit(t()),
-            AppIntent::TagMessaged(t())
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(t())))
         );
         let ask = crate::features::branches::tags::delete_tag_question(
             "v1".into(),

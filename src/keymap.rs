@@ -2480,6 +2480,9 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
+    use crate::features::branches::tags::TagsIntent;
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::bisect::BisectIntent;
     use crate::features::commits::copy::CopyIntent;
@@ -3090,15 +3093,30 @@ mod tests {
             other => panic!("{key:?}: {other:?}"),
         };
         let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(run(&state, plain('j')), Some(AppIntent::BranchNext));
+        assert_eq!(
+            run(&state, plain('j')),
+            Some(AppIntent::Branches(BranchesIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(AppIntent::BranchPrev)
+            Some(AppIntent::Branches(BranchesIntent::Prev))
         );
-        assert_eq!(run(&state, plain(' ')), Some(AppIntent::CheckoutBranch));
-        assert_eq!(run(&state, plain('n')), Some(AppIntent::NewBranch));
-        assert_eq!(run(&state, shift('R')), Some(AppIntent::RenameBranch));
-        assert_eq!(run(&state, plain('d')), Some(AppIntent::DeleteBranch));
+        assert_eq!(
+            run(&state, plain(' ')),
+            Some(AppIntent::Branches(BranchesIntent::Checkout))
+        );
+        assert_eq!(
+            run(&state, plain('n')),
+            Some(AppIntent::Branches(BranchesIntent::New))
+        );
+        assert_eq!(
+            run(&state, shift('R')),
+            Some(AppIntent::Branches(BranchesIntent::Rename))
+        );
+        assert_eq!(
+            run(&state, plain('d')),
+            Some(AppIntent::Branches(BranchesIntent::Delete))
+        );
         // `r` still reloads, and the digits still move focus.
         assert_eq!(run(&state, plain('r')), Some(AppIntent::RefreshStatus));
         assert_eq!(
@@ -3159,16 +3177,34 @@ mod tests {
             other => panic!("{key:?}: {other:?}"),
         };
         let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(run(&state, plain('j')), AppIntent::RemoteNext);
+        assert_eq!(
+            run(&state, plain('j')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            AppIntent::RemotePrev
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Prev))
         );
-        assert_eq!(run(&state, plain('a')), AppIntent::AddRemote);
-        assert_eq!(run(&state, shift('R')), AppIntent::RenameRemote);
-        assert_eq!(run(&state, plain('d')), AppIntent::RemoveRemote);
-        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
-        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
+        assert_eq!(
+            run(&state, plain('a')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Add))
+        );
+        assert_eq!(
+            run(&state, shift('R')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Rename))
+        );
+        assert_eq!(
+            run(&state, plain('d')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Remove))
+        );
+        assert_eq!(
+            run(&state, plain('[')),
+            AppIntent::Branches(BranchesIntent::PrevTab)
+        );
+        assert_eq!(
+            run(&state, plain(']')),
+            AppIntent::Branches(BranchesIntent::SwitchTab)
+        );
         assert_eq!(run(&state, plain('r')), AppIntent::RefreshStatus);
         assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
         // A header row is a remote, not a branch to check out.
@@ -3177,7 +3213,10 @@ mod tests {
             Resolution::Disabled(ref reason) if reason == "Select a remote branch"
         ));
         state.branches.remotes.list.move_by(1);
-        assert_eq!(run(&state, plain(' ')), AppIntent::TrackRemoteBranch);
+        assert_eq!(
+            run(&state, plain(' ')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track))
+        );
         assert_eq!(KeyScope::Remotes.parent(), Some(KeyScope::Workspace));
 
         let branches = |key| match resolve(
@@ -3191,8 +3230,14 @@ mod tests {
             Resolution::Disabled(_) => None,
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(branches(plain('[')), Some(AppIntent::PrevBranchesTab));
-        assert_eq!(branches(plain(']')), Some(AppIntent::SwitchBranchesTab));
+        assert_eq!(
+            branches(plain('[')),
+            Some(AppIntent::Branches(BranchesIntent::PrevTab))
+        );
+        assert_eq!(
+            branches(plain(']')),
+            Some(AppIntent::Branches(BranchesIntent::SwitchTab))
+        );
         // No branch is selected, so both are refused.
         assert_eq!(branches(plain('u')), None);
         assert_eq!(branches(shift('U')), None);
@@ -3240,19 +3285,34 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(run(&state, plain('j')), AppIntent::TagNext);
+        assert_eq!(
+            run(&state, plain('j')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Down, KeyModifiers::NONE)),
-            AppIntent::TagNext
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Next))
         );
-        assert_eq!(run(&state, plain('k')), AppIntent::TagPrev);
+        assert_eq!(
+            run(&state, plain('k')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Prev))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            AppIntent::TagPrev
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Prev))
         );
-        assert_eq!(run(&state, plain('d')), AppIntent::DeleteTag);
-        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
-        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
+        assert_eq!(
+            run(&state, plain('d')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Delete))
+        );
+        assert_eq!(
+            run(&state, plain(']')),
+            AppIntent::Branches(BranchesIntent::SwitchTab)
+        );
+        assert_eq!(
+            run(&state, plain('[')),
+            AppIntent::Branches(BranchesIntent::PrevTab)
+        );
         assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
         assert_eq!(KeyScope::Tags.parent(), Some(KeyScope::Workspace));
 
@@ -3280,7 +3340,10 @@ mod tests {
                 merged: true,
             }]),
         );
-        assert_eq!(run(&state, shift_p), AppIntent::PushTag);
+        assert_eq!(
+            run(&state, shift_p),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Push))
+        );
         assert_eq!(push_tag_remote(&state), Ok("origin".into()));
         state.remote = Some(crate::remote_run::RemoteRun::new(
             crate::git::remote::RemoteOp::Fetch,
@@ -4900,6 +4963,7 @@ mod tests {
     #[test]
     fn every_binding_that_quits_starts_a_program_destroys_work_or_answers_is_locked() {
         use AppIntent::*;
+        let mut branches_risky = Vec::new();
         for b in registry() {
             let risky = matches!(
                 b.intent,
@@ -4916,8 +4980,8 @@ mod tests {
                     | ConfirmNo
                     | InitRepo
                     | RecentSelect
-                    | DeleteBranch
-                    | ConfirmDeleteBranch { .. }
+                    | Branches(BranchesIntent::Delete)
+                    | Branches(BranchesIntent::ConfirmDelete { .. })
                     | Fetch
                     | Pull
                     | Push
@@ -4942,12 +5006,12 @@ mod tests {
                     | DropStash
                     | RenameStash
                     | ConfirmDropStash
-                    | RemoveRemote
-                    | ConfirmRemoveRemote
+                    | Branches(BranchesIntent::Remotes(RemotesIntent::Remove))
+                    | Branches(BranchesIntent::Remotes(RemotesIntent::ConfirmRemove))
                     | ConfirmDeleteRange
-                    | DeleteTag
-                    | ConfirmDeleteTag
-                    | PushTag
+                    | Branches(BranchesIntent::Tags(TagsIntent::Delete))
+                    | Branches(BranchesIntent::Tags(TagsIntent::ConfirmDelete))
+                    | Branches(BranchesIntent::Tags(TagsIntent::Push))
                     | Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(_)))
                     | Commits(CommitsIntent::Rewrite(RewriteIntent::Move(_)))
                     | Commits(CommitsIntent::Rewrite(RewriteIntent::InsertBreak))
@@ -4985,7 +5049,25 @@ mod tests {
                     | PaneEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
+            if risky && matches!(b.intent, Branches(_)) {
+                branches_risky.push(b.id);
+            }
         }
+        // `use AppIntent::*` lets a stale bare name in the pattern above
+        // bind anything, so pin the branches bindings it must match.
+        assert_eq!(
+            branches_risky,
+            [
+                "branches.delete",
+                "remotes.remove",
+                "tags.delete",
+                "tags.push",
+                "delete_branch.yes",
+                "delete_branch.force",
+                "delete_tag.yes",
+                "remove_remote.yes",
+            ]
+        );
     }
 
     #[test]
