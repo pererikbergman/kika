@@ -123,7 +123,7 @@ mod tests {
     use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::model::Focus;
-    use crate::test_support::{oid, press, type_text, with_log};
+    use crate::test_support::{load_list, oid, press, type_text, with_log};
 
     /// The one `ResolveDiff` in `effects`.
     fn resolve(effects: &[Effect]) -> (Tag, DiffEnd, DiffEnd) {
@@ -221,9 +221,10 @@ mod tests {
 
     fn with_branches() -> AppState {
         let mut state = with_log(2);
-        state
-            .branches
-            .loaded(Ok(vec![branch("main"), branch("topic")]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![branch("main"), branch("topic")]),
+        );
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         state

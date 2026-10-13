@@ -35,7 +35,7 @@ pub(crate) fn track_disabled(state: &AppState) -> Option<Reason> {
 /// one-at-a-time rule is left to check.
 pub(crate) fn change_remote_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
-        if state.branches.remotes.range_anchor.is_some() {
+        if state.branches.remotes.list.range_anchor.is_some() {
             op_running(state)
         } else {
             remote_selected_disabled(state)

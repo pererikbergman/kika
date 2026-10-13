@@ -600,7 +600,7 @@ mod tests {
         state.update(AppIntent::PopPopup);
         assert_eq!(the_worktree_list(&state).pending_branch, None);
 
-        state.branches.branches[1].name = BranchName::from_bytes(b"x\xff");
+        state.branches.list.rows[1].name = BranchName::from_bytes(b"x\xff");
         press_char(&mut state, 'a');
         assert!(matches!(
             state.popups.last(),
@@ -614,7 +614,7 @@ mod tests {
         // A reload moves the selection while the path is typed.
         let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
         state.update(branches_loaded(tag, three_branches()));
-        state.branches.selected = Some(0);
+        state.branches.list.selected = 0;
         let busy = state.busy_count();
         let effects = state.update(AppIntent::SubmitPrompt);
         match &effects[..] {
@@ -653,14 +653,14 @@ mod tests {
     #[test]
     fn a_is_disabled_on_another_tab_or_for_a_branch_checked_out_elsewhere() {
         let mut state = with_worktrees(four_worktrees(), 0);
-        state.branches.selected = Some(1);
+        state.branches.list.selected = 1;
         assert_eq!(press_char(&mut state, 'a'), vec![]);
         assert_eq!(
             state.notice,
             Some("Branch is already checked out in a worktree".into())
         );
         on_remotes_tab(&mut state);
-        state.branches.selected = Some(2);
+        state.branches.list.selected = 2;
         press_char(&mut state, 'a');
         assert_eq!(
             state.notice,

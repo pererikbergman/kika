@@ -1287,7 +1287,7 @@ pub(crate) fn tag_selected_disabled(state: &AppState) -> Option<Reason> {
     state
         .branches
         .tags
-        .selected_tag()
+        .selected_row()
         .is_none()
         .then_some("No tag".into())
 }
@@ -1307,8 +1307,7 @@ pub(crate) fn push_tag_remote(state: &AppState) -> Result<RemoteName, &'static s
     let configured: Vec<&RemoteName> = state
         .branches
         .remotes
-        .remotes
-        .iter()
+        .remotes()
         .filter(|r| r.configured)
         .map(|r| &r.name)
         .collect();
@@ -1408,10 +1407,13 @@ pub(crate) const CLEAR_RANGE_FIRST: &str = "Clear the selection first (esc)";
 pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
     let branches = &state.branches;
     let (hidden, range) = match state.panel_focus() {
-        KeyScope::Branches => (branches.selected_hidden(), branches.range_anchor.is_some()),
+        KeyScope::Branches => (
+            branches.list.selected_hidden(),
+            branches.list.range_anchor.is_some(),
+        ),
         KeyScope::Remotes => (
-            branches.remotes.selected_hidden(),
-            branches.remotes.range_anchor.is_some(),
+            branches.remotes.list.selected_hidden(),
+            branches.remotes.list.range_anchor.is_some(),
         ),
         KeyScope::Tags => (
             branches.tags.selected_hidden(),
@@ -2493,7 +2495,7 @@ mod tests {
     use crate::git::version;
     use crate::menu::MenuId;
     use crate::model::Context;
-    use crate::test_support::{binding, build, from, key, layer, plain};
+    use crate::test_support::{binding, build, from, key, layer, load_list, load_remotes, plain};
 
     fn off(_: &AppState) -> Option<Reason> {
         Some("off".into())
@@ -3056,10 +3058,11 @@ mod tests {
             track: Track::None,
             merged: true,
         };
-        state
-            .branches
-            .loaded(Ok(vec![branch("main", true), branch("topic", false)]));
-        state.branches.move_by(1);
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![branch("main", true), branch("topic", false)]),
+        );
+        state.branches.list.move_by(1);
         let run = |state: &AppState, key| match resolve(
             registry(),
             &Keymap::default(),
@@ -3093,7 +3096,7 @@ mod tests {
             Some(AppIntent::ScrollDiff(Scroll::LineDown))
         );
 
-        state.branches.move_by(-1);
+        state.branches.list.move_by(-1);
         for c in [' ', 'd'] {
             assert!(matches!(
                 resolve(
@@ -3113,16 +3116,19 @@ mod tests {
         use crate::git::remotes::{Remote, RemoteBranch};
         let mut state =
             AppState::new(Context::Workspace).with_location(Some("/r".into()), "/r".into());
-        state.branches.remotes.loaded(Ok(vec![Remote {
-            name: "origin".into(),
-            url: Some("/srv".into()),
-            configured: true,
-            branches: vec![RemoteBranch {
-                remote: "origin".into(),
-                short: b"main".to_vec(),
-                refname: b"refs/remotes/origin/main".to_vec(),
-            }],
-        }]));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![Remote {
+                name: "origin".into(),
+                url: Some("/srv".into()),
+                configured: true,
+                branches: vec![RemoteBranch {
+                    remote: "origin".into(),
+                    short: b"main".to_vec(),
+                    refname: b"refs/remotes/origin/main".to_vec(),
+                }],
+            }]),
+        );
         let resolve_in = |state: &AppState, key| {
             resolve(
                 registry(),
@@ -3154,7 +3160,7 @@ mod tests {
             resolve_in(&state, plain(' ')),
             Resolution::Disabled(ref reason) if reason == "Select a remote branch"
         ));
-        state.branches.remotes.move_by(1);
+        state.branches.remotes.list.move_by(1);
         assert_eq!(run(&state, plain(' ')), AppIntent::TrackRemoteBranch);
         assert_eq!(KeyScope::Remotes.parent(), Some(KeyScope::Workspace));
 
@@ -3213,7 +3219,7 @@ mod tests {
         assert_eq!(disabled(&state, plain('d')), "No tag");
         assert_eq!(disabled(&state, shift_p), "No tag");
 
-        state.branches.tags.loaded(Ok(vec![tag_ref("v1")]));
+        load_list(&mut state.branches.tags, Ok(vec![tag_ref("v1")]));
         let run = |state: &AppState, key| match resolve_in(state, key) {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
@@ -3236,22 +3242,28 @@ mod tests {
 
         // `P` is the tag's push here, never the branch's.
         assert_eq!(disabled(&state, shift_p), "No remote");
-        state.branches.remotes.loaded(Ok(vec![
-            remote_named("fork", true),
-            remote_named("origin", true),
-            remote_named("stray", false),
-        ]));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![
+                remote_named("fork", true),
+                remote_named("origin", true),
+                remote_named("stray", false),
+            ]),
+        );
         assert_eq!(
             disabled(&state, shift_p),
             "Several remotes and no upstream to choose from"
         );
-        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
-            name: "main".into(),
-            head: true,
-            upstream: Some("origin/main".into()),
-            track: crate::git::branches::Track::None,
-            merged: true,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![crate::git::branches::Branch {
+                name: "main".into(),
+                head: true,
+                upstream: Some("origin/main".into()),
+                track: crate::git::branches::Track::None,
+                merged: true,
+            }]),
+        );
         assert_eq!(run(&state, shift_p), AppIntent::PushTag);
         assert_eq!(push_tag_remote(&state), Ok("origin".into()));
         state.remote = Some(crate::remote_run::RemoteRun::new(
@@ -3272,23 +3284,26 @@ mod tests {
             track: crate::git::branches::Track::None,
             merged: true,
         };
-        state.branches.remotes.loaded(Ok(vec![
-            remote_named("a", true),
-            remote_named("a/b", true),
-            remote_named("only-group", false),
-        ]));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![
+                remote_named("a", true),
+                remote_named("a/b", true),
+                remote_named("only-group", false),
+            ]),
+        );
         // A name with `/` owns the upstream it is the longest prefix of.
-        state.branches.loaded(Ok(vec![branch(Some("a/b/main"))]));
+        load_list(&mut state.branches.list, Ok(vec![branch(Some("a/b/main"))]));
         assert_eq!(push_tag_remote(&state), Ok("a/b".into()));
-        state.branches.loaded(Ok(vec![branch(Some("a/main"))]));
+        load_list(&mut state.branches.list, Ok(vec![branch(Some("a/main"))]));
         assert_eq!(push_tag_remote(&state), Ok("a".into()));
         // An upstream no remote owns, such as a local branch, chooses none.
-        state.branches.loaded(Ok(vec![branch(Some("main2"))]));
+        load_list(&mut state.branches.list, Ok(vec![branch(Some("main2"))]));
         assert!(push_tag_remote(&state).is_err());
-        state
-            .branches
-            .remotes
-            .loaded(Ok(vec![remote_named("solo", true)]));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![remote_named("solo", true)]),
+        );
         assert_eq!(push_tag_remote(&state), Ok("solo".into()));
     }
 
@@ -3328,13 +3343,16 @@ mod tests {
             subject: "s".into(),
             subject_altered: false,
         }];
-        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
-            name: "topic".into(),
-            head: false,
-            upstream: None,
-            track: crate::git::branches::Track::None,
-            merged: false,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![crate::git::branches::Branch {
+                name: "topic".into(),
+                head: false,
+                upstream: None,
+                track: crate::git::branches::Track::None,
+                merged: false,
+            }]),
+        );
         state.branch = Some(crate::git::status::BranchStatus {
             head: Head::Detached("abc".into()),
             upstream: None,
@@ -3543,13 +3561,16 @@ mod tests {
                 .map(|(_, disabled)| disabled)
         };
         assert_eq!(listed(&state), Some(Some("No branch selected".into())));
-        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
-            name: "topic".into(),
-            head: false,
-            upstream: None,
-            track: crate::git::branches::Track::None,
-            merged: false,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![crate::git::branches::Branch {
+                name: "topic".into(),
+                head: false,
+                upstream: None,
+                track: crate::git::branches::Track::None,
+                merged: false,
+            }]),
+        );
         assert_eq!(listed(&state), Some(None));
         match resolve(
             registry(),
@@ -4144,17 +4165,19 @@ mod tests {
         state.focus = Focus::Branches;
         state.branches.tab = tab;
         state.diff_mark = Some(crate::diff_mark::DiffMark::Branch("other".into()));
-        state.branches.loaded(Ok(vec![Branch {
-            name: "topic".into(),
-            head: false,
-            upstream: Some("origin/topic".into()),
-            track: Track::None,
-            merged: true,
-        }]));
-        state
-            .branches
-            .remotes
-            .loaded(Ok(vec![crate::git::remotes::Remote {
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![Branch {
+                name: "topic".into(),
+                head: false,
+                upstream: Some("origin/topic".into()),
+                track: Track::None,
+                merged: true,
+            }]),
+        );
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Ok(vec![crate::git::remotes::Remote {
                 name: "origin".into(),
                 url: Some("/srv/origin".into()),
                 configured: true,
@@ -4163,12 +4186,12 @@ mod tests {
                     short: b"topic".to_vec(),
                     refname: b"refs/remotes/origin/topic".to_vec(),
                 }],
-            }]));
+            }]),
+        );
         let oid = "a".repeat(40);
-        state
-            .branches
-            .tags
-            .loaded(Ok(vec![crate::git::tags::TagRef {
+        load_list(
+            &mut state.branches.tags,
+            Ok(vec![crate::git::tags::TagRef {
                 name: "v1".into(),
                 target: CommitId::parse(&oid).unwrap(),
                 target_short: oid[..7].into(),
@@ -4176,7 +4199,8 @@ mod tests {
                 annotated: false,
                 date: "2026-10-01".into(),
                 subject: "s".into(),
-            }]));
+            }]),
+        );
         state
     }
 
@@ -4233,8 +4257,8 @@ mod tests {
         for tab in [BranchesTab::Local, BranchesTab::Remotes, BranchesTab::Tags] {
             let mut state = branch_lists(tab);
             match tab {
-                BranchesTab::Local => state.branches.filter = "zzz".into(),
-                BranchesTab::Remotes => state.branches.remotes.filter = "zzz".into(),
+                BranchesTab::Local => state.branches.list.filter = "zzz".into(),
+                BranchesTab::Remotes => state.branches.remotes.list.filter = "zzz".into(),
                 BranchesTab::Tags => state.branches.tags.filter = "zzz".into(),
             }
             let (actions, delete) = row_actions(state.panel_focus());

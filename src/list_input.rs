@@ -99,8 +99,11 @@ impl AppState {
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
             KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
-            KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.filter),
-            KeyScope::Remotes => (InputTarget::RemotesFilter, &self.branches.remotes.filter),
+            KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.list.filter),
+            KeyScope::Remotes => (
+                InputTarget::RemotesFilter,
+                &self.branches.remotes.list.filter,
+            ),
             KeyScope::Tags => (InputTarget::TagsFilter, &self.branches.tags.filter),
             KeyScope::Reflog => (InputTarget::ReflogFilter, &self.commits.reflog.filter),
             KeyScope::CommitFiles => match &self.commits.open {
@@ -289,8 +292,8 @@ impl AppState {
                 let row = self.commits.rows.get(self.commits.selected);
                 self.commits.range_anchor = row.map(|r| r.oid.clone());
             }
-            KeyScope::Branches => self.branches.toggle_range(),
-            KeyScope::Remotes => self.branches.remotes.toggle_range(),
+            KeyScope::Branches => self.branches.list.toggle_range(),
+            KeyScope::Remotes => self.branches.remotes.list.toggle_range(),
             KeyScope::Tags => self.branches.tags.toggle_range(),
             KeyScope::Stash => self.stash.list.toggle_range(),
             _ => {}
@@ -330,10 +333,13 @@ impl AppState {
                 self.commits.range_anchor.take().is_some(),
                 &mut self.commits.filter,
             ),
-            KeyScope::Branches => (branches.range_anchor.take().is_some(), &mut branches.filter),
+            KeyScope::Branches => (
+                branches.list.range_anchor.take().is_some(),
+                &mut branches.list.filter,
+            ),
             KeyScope::Remotes => (
-                branches.remotes.range_anchor.take().is_some(),
-                &mut branches.remotes.filter,
+                branches.remotes.list.range_anchor.take().is_some(),
+                &mut branches.remotes.list.filter,
             ),
             KeyScope::Tags => (
                 branches.tags.range_anchor.take().is_some(),

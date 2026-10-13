@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use super::{RemoteRow, RemotesList};
+use super::{RemoteLine, RemotesList};
 use crate::git::remotes::Remote;
 use crate::view::{PanelLook, elide_right, no_matches, range_row, scrolled};
 
@@ -22,6 +22,7 @@ pub const NO_BRANCHES: &str = "No branches yet. Press f to fetch.";
 /// below, as the filter shows them, the selection and the range reversed
 /// and scrolled into view.
 pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'static> {
+    let list = &list.list;
     if let Some(error) = &list.error {
         let mut lines: Vec<Line> = error.lines().map(|l| Line::from(l.to_string())).collect();
         lines.push(Line::from("Press r to retry"));
@@ -30,26 +31,26 @@ pub fn list_body(list: &RemotesList, rows: usize, width: usize) -> Paragraph<'st
     if !list.loaded {
         return Paragraph::new("Loading…");
     }
-    if list.remotes.is_empty() {
+    if list.rows.is_empty() {
         return Paragraph::new(NO_REMOTES);
     }
     let shown = list.visible();
     if shown.is_empty() {
         return Paragraph::new(no_matches());
     }
-    let all = list.rows();
     let range = list.range();
-    let lines = scrolled(&shown, list.selected, rows)
+    let selected = Some(list.selected);
+    let lines = scrolled(&shown, selected, rows)
         .iter()
         .map(|&i| {
-            let line = match all[i] {
-                RemoteRow::Remote(r) => header(&list.remotes[r], width),
-                RemoteRow::Branch(r, b) => {
-                    let short = list.remotes[r].branches[b].short_display();
+            let line = match &list.rows[i] {
+                RemoteLine::Remote(remote) => header(remote, width),
+                RemoteLine::Branch(branch) => {
+                    let short = branch.short_display();
                     Line::from(elide_right(&format!("  {short}"), width))
                 }
             };
-            range_row(line, i, list.selected, &range, width)
+            range_row(line, i, selected, &range, width)
         })
         .collect::<Vec<_>>();
     Paragraph::new(lines)
@@ -79,7 +80,7 @@ fn header(remote: &Remote, width: usize) -> Line<'static> {
 /// remote's name and URL, and how to see its branches if it has none.
 pub fn render_remote(list: &RemotesList, look: &PanelLook, frame: &mut Frame, area: Rect) {
     let Some(remote) = list.selected_remote() else {
-        let text = if list.loaded {
+        let text = if list.list.loaded {
             NO_REMOTES
         } else {
             "Loading…"
@@ -121,6 +122,7 @@ mod tests {
     use crate::git::remotes::{RemoteBranch, RemoteName};
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
+    use crate::test_support::{load_list, load_remotes};
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -155,9 +157,9 @@ mod tests {
         state.files_loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
-        state.branches.loaded(Ok(vec![]));
+        load_list(&mut state.branches.list, Ok(vec![]));
         state.branches.tab = BranchesTab::Remotes;
-        state.branches.remotes.loaded(Ok(remotes));
+        load_remotes(&mut state.branches.remotes.list, Ok(remotes));
         state
     }
 
@@ -168,7 +170,7 @@ mod tests {
             remote("origin", Some("https://h/r"), &["feature/x", "main"]),
             remote("stray", None, &["y"]),
         ]);
-        state.branches.remotes.move_by(2);
+        state.branches.remotes.list.move_by(2);
         let refname = b"refs/remotes/origin/feature/x".to_vec();
         state.branches.log.begin(1, refname);
         let rows = draw(&state, 80, 24);
@@ -242,7 +244,7 @@ mod tests {
         assert!(contains(&rows, "Remote · fork"), "{rows:#?}");
         assert!(contains(&rows, NO_BRANCHES), "{rows:#?}");
 
-        state.branches.remotes.move_by(1);
+        state.branches.remotes.list.move_by(1);
         let rows = draw(&state, 100, 24);
         assert!(contains(&rows, "Remote · origin"), "{rows:#?}");
         assert!(contains(&rows, "/srv/origin"), "{rows:#?}");
@@ -256,7 +258,7 @@ mod tests {
             remote("origin", Some("/srv/origin"), &["main", "topic"]),
         ]);
         state.screen_mode = crate::layout::ScreenMode::Full;
-        state.branches.remotes.set_filter("o\x1b[31m".into());
+        state.branches.remotes.list.set_filter("o\x1b[31m".into());
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal.draw(|frame| render(&state, frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -270,9 +272,9 @@ mod tests {
         assert!(contains(&rows, "0 of 5"), "{rows:#?}");
 
         // origin's header and its two branches show; fork's do not.
-        state.branches.remotes.set_filter("origin".into());
-        state.branches.remotes.toggle_range();
-        state.branches.remotes.move_by(1);
+        state.branches.remotes.list.set_filter("origin".into());
+        state.branches.remotes.list.toggle_range();
+        state.branches.remotes.list.move_by(1);
         terminal.draw(|frame| render(&state, frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let rows = buffer_rows(&buffer);
@@ -290,10 +292,10 @@ mod tests {
         assert!(contains(&draw(&state, 80, 24), NO_REMOTES));
         state.branches.remotes = RemotesList::default();
         assert!(contains(&draw(&state, 80, 24), "Loading…"));
-        state
-            .branches
-            .remotes
-            .loaded(Err("fatal: \u{FFFD}bad".into()));
+        load_remotes(
+            &mut state.branches.remotes.list,
+            Err("fatal: \u{FFFD}bad".into()),
+        );
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "fatal: \u{FFFD}bad"), "{rows:#?}");
         assert!(contains(&rows, "Press r to retry"), "{rows:#?}");
@@ -303,7 +305,7 @@ mod tests {
     fn wide_names_are_elided_to_the_panel_and_the_selection_fills_its_row() {
         let wide = "山田太郎".repeat(5);
         let mut state = focused(vec![remote(&wide, Some("/srv/r"), &[&wide, "main"])]);
-        state.branches.remotes.move_by(1);
+        state.branches.remotes.list.move_by(1);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(&state, frame)).unwrap();
         let buffer = terminal.backend().buffer();
