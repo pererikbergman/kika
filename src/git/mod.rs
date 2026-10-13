@@ -10,6 +10,7 @@ pub mod comment_prefix;
 pub mod commit_files;
 pub mod diff;
 pub(crate) mod emoji;
+pub mod error;
 #[cfg(test)]
 pub mod fake;
 pub mod forge_remote;
