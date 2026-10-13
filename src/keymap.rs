@@ -2506,8 +2506,13 @@ mod tests {
     use crate::features::diff::DiffIntent;
     use crate::features::diff::renderers::RenderersIntent;
     use crate::features::files::FilesIntent;
+    use crate::features::pull_requests::PullRequestsIntent;
     use crate::features::repos::ReposIntent;
+    use crate::features::review::ReviewIntent;
+    use crate::features::stash::StashIntent;
+    use crate::features::submodules::SubmodulesIntent;
     use crate::features::sync::SyncIntent;
+    use crate::features::worktrees::WorktreesIntent;
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::{CommitId, CommitRange};
     use crate::git::rebase_plan::{Direction, Edit};
@@ -2789,7 +2794,10 @@ mod tests {
     #[test]
     fn review_has_no_workspace_keys_but_still_quits() {
         let review = |k| from(KeyScope::Review, k);
-        assert_eq!(review(plain('r')), Some(AppIntent::RefreshReview));
+        assert_eq!(
+            review(plain('r')),
+            Some(AppIntent::Review(ReviewIntent::Refresh))
+        );
         assert_eq!(review(plain(' ')), None);
         assert_eq!(review(plain('a')), None);
         assert_eq!(review(plain('q')), Some(AppIntent::Quit));
@@ -3761,7 +3769,10 @@ mod tests {
         });
         match press(&state) {
             Resolution::Run(binding) => {
-                assert_eq!(binding.intent, AppIntent::RefreshPullRequests)
+                assert_eq!(
+                    binding.intent,
+                    AppIntent::PullRequests(PullRequestsIntent::Refresh)
+                )
             }
             other => panic!("{other:?}"),
         }
@@ -3812,7 +3823,7 @@ mod tests {
         assert_eq!(resolve_in(ask, plain('q')), None);
         assert_eq!(
             resolve_in(ask, plain('y')),
-            Some(AppIntent::ConfirmCreatePullRequest)
+            Some(AppIntent::PullRequests(PullRequestsIntent::ConfirmCreate))
         );
         assert_eq!(resolve_in(ask, plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
@@ -3823,9 +3834,12 @@ mod tests {
         let pick = KeyScope::PickList;
         assert_eq!(
             resolve_in(pick, key(KeyCode::Enter, none)),
-            Some(AppIntent::PickSelect)
+            Some(AppIntent::PullRequests(PullRequestsIntent::PickSelect))
         );
-        assert_eq!(resolve_in(pick, plain('j')), Some(AppIntent::PickNext));
+        assert_eq!(
+            resolve_in(pick, plain('j')),
+            Some(AppIntent::PullRequests(PullRequestsIntent::PickNext))
+        );
         assert_eq!(
             resolve_in(pick, key(KeyCode::Esc, none)),
             Some(AppIntent::PopPopup)
@@ -3853,7 +3867,10 @@ mod tests {
             };
         let none = KeyModifiers::NONE;
         let ask = KeyScope::MergePullRequest;
-        assert_eq!(resolve_in(ask, plain('y')), Some(AppIntent::ConfirmMergePr));
+        assert_eq!(
+            resolve_in(ask, plain('y')),
+            Some(AppIntent::Review(ReviewIntent::ConfirmMergePr))
+        );
         assert_eq!(resolve_in(ask, key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(ask, plain('q')), None);
         assert_eq!(resolve_in(ask, plain('Y')), None);
@@ -3869,7 +3886,7 @@ mod tests {
         assert_eq!(ask.parent(), None);
         let merge = registry().iter().find(|b| b.id == "review.merge").unwrap();
         assert_eq!(merge.scope, KeyScope::Review);
-        assert_eq!(merge.intent, AppIntent::OpenMergePr);
+        assert_eq!(merge.intent, AppIntent::Review(ReviewIntent::OpenMergePr));
         assert!(merge.matches(key(KeyCode::Char('M'), KeyModifiers::SHIFT)));
         for id in [
             "review.merge",
@@ -5009,6 +5026,11 @@ mod tests {
                 Repos(_) => Some("repos"),
                 Files(_) => Some("files"),
                 Diff(_) => Some("diff"),
+                Stash(_) => Some("stash"),
+                Submodules(_) => Some("submodules"),
+                Worktrees(_) => Some("worktrees"),
+                PullRequests(_) => Some("pull_requests"),
+                Review(_) => Some("review"),
                 _ => None,
             }
         }
@@ -5021,8 +5043,8 @@ mod tests {
                     | Diff(DiffIntent::EditHunk)
                     | Diff(DiffIntent::Renderers(RenderersIntent::Cycle))
                     | Commit(CommitIntent::EditExternally)
-                    | InitSubmodule
-                    | UpdateSubmodule
+                    | Submodules(SubmodulesIntent::Init)
+                    | Submodules(SubmodulesIntent::Update)
                     | Discard
                     | Commit(CommitIntent::Discard)
                     | ConfirmYes
@@ -5049,12 +5071,12 @@ mod tests {
                     | Commits(CommitsIntent::ConfirmResetHard)
                     | Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits))
                     | OpenMenu(MenuId::Stash)
-                    | OpenStashFiles
-                    | ApplyStash
-                    | PopStash
-                    | DropStash
-                    | RenameStash
-                    | ConfirmDropStash
+                    | Stash(StashIntent::OpenFiles)
+                    | Stash(StashIntent::Apply)
+                    | Stash(StashIntent::Pop)
+                    | Stash(StashIntent::Drop)
+                    | Stash(StashIntent::Rename)
+                    | Stash(StashIntent::ConfirmDrop)
                     | Branches(BranchesIntent::Remotes(RemotesIntent::Remove))
                     | Branches(BranchesIntent::Remotes(RemotesIntent::ConfirmRemove))
                     | ConfirmDeleteRange
@@ -5068,33 +5090,33 @@ mod tests {
                     | Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash))
                     | Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(_)))
                     | OpenMenu(MenuId::Bisect)
-                    | OpenWorktree
-                    | AddWorktree
-                    | RemoveWorktree
-                    | ConfirmRemoveWorktree
+                    | Worktrees(WorktreesIntent::Open)
+                    | Worktrees(WorktreesIntent::Add)
+                    | Worktrees(WorktreesIntent::Remove)
+                    | Worktrees(WorktreesIntent::ConfirmRemove)
                     | Commits(CommitsIntent::Reflog(ReflogIntent::Undo))
                     | Commits(CommitsIntent::Reflog(ReflogIntent::Redo))
                     | Commits(CommitsIntent::Reflog(ReflogIntent::ConfirmTravel))
                     | ListEscape
                     | OpenMenu(MenuId::PullRequest)
-                    | ConfirmCreatePullRequest
+                    | PullRequests(PullRequestsIntent::ConfirmCreate)
                     // It asks GitHub for the badges again.
-                    | RefreshPullRequests
+                    | PullRequests(PullRequestsIntent::Refresh)
                     | Commits(CommitsIntent::CustomPatch(CustomPatchIntent::OpenMenu))
                     // Review mode reaches GitHub or starts the browser, and
                     // a pick may open a check's page.
-                    | EnterReview
-                    | OpenPr
-                    | RefreshReview
-                    | OpenCheckDetails
+                    | Review(ReviewIntent::Enter)
+                    | Review(ReviewIntent::OpenPr)
+                    | Review(ReviewIntent::Refresh)
+                    | Review(ReviewIntent::OpenCheckDetails)
                     // A merge reaches GitHub and cannot be undone.
-                    | OpenMergePr
-                    | ConfirmMergePr
+                    | Review(ReviewIntent::OpenMergePr)
+                    | Review(ReviewIntent::ConfirmMergePr)
                     // It may fetch the pull request's commits.
-                    | OpenReviewFiles
-                    | PickSelect
+                    | Review(ReviewIntent::OpenFiles)
+                    | PullRequests(PullRequestsIntent::PickSelect)
                     // Esc falls through to quit without it.
-                    | CloseReviewDetail
+                    | Review(ReviewIntent::CloseDetail)
                     | PaneEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
@@ -5175,6 +5197,51 @@ mod tests {
             ]
         );
         assert_eq!(risky_in("diff"), ["diff.edit_hunk", "diff.renderer"]);
+        assert_eq!(
+            risky_in("stash"),
+            [
+                "stash.files",
+                "stash.apply",
+                "stash.pop",
+                "stash.drop",
+                "stash.rename",
+                "drop_stash.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("submodules"),
+            ["submodules.update", "submodules.init"]
+        );
+        assert_eq!(
+            risky_in("worktrees"),
+            [
+                "worktrees.open",
+                "worktrees.add",
+                "worktrees.remove",
+                "remove_worktree.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("pull_requests"),
+            [
+                "branches.refresh_pull_requests",
+                "pick_list.pick",
+                "create_pull_request.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("review"),
+            [
+                "workspace.review",
+                "review.open",
+                "review.refresh",
+                "review.open_check",
+                "review.merge",
+                "review.back",
+                "review.files",
+                "merge_pr.yes",
+            ]
+        );
         for feature in ["blame", "custom_commands", "operation", "files"] {
             assert!(risky_in(feature).is_empty(), "{feature}");
         }

@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::Tag;
+use crate::features::submodules::SubmodulesIntent;
 use crate::git::GitRunner;
 use crate::git::submodule::read_submodules;
 use crate::intent::AppIntent;
@@ -18,6 +19,6 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
         move || read_submodules(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git submodule"),
-        move |result| AppIntent::SubmodulesLoaded { tag, result },
+        move |result| AppIntent::Submodules(SubmodulesIntent::Loaded { tag, result }),
     );
 }

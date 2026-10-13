@@ -268,13 +268,14 @@ mod tests {
 
     use super::*;
     use crate::confirm_question::ConfirmQuestion;
+    use crate::features::review::ReviewIntent;
     use crate::features::review::state::tests::{fixture_detail, in_queues, press, repo};
     use crate::forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
     use crate::forge::{CiState, ForgeView};
     use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::keymap::KeyPress;
-    use crate::test_support::load_list;
+    use crate::test_support::{load_list, pull_requests_fetched};
 
     const NOW: i64 = 1_700_000_000;
 
@@ -287,12 +288,12 @@ mod tests {
         let mut detail = fixture_detail();
         detail.number = number;
         change(&mut detail);
-        state.update(AppIntent::PrDetailLoaded {
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
             repo: Some(repo()),
             result: Ok(Some(detail)),
-        });
+        }));
         assert_eq!(state.review.detail.as_ref().map(|d| d.number), Some(number));
         state
     }
@@ -378,7 +379,11 @@ mod tests {
         assert_eq!(state.busy_count(), busy + 1);
         assert!(state.popups.is_empty());
         // A second `y` has no question to answer.
-        assert!(state.update(AppIntent::ConfirmMergePr).is_empty());
+        assert!(
+            state
+                .update(AppIntent::Review(ReviewIntent::ConfirmMergePr))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -587,11 +592,11 @@ mod tests {
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
         let busy = state.busy_count();
-        let effects = state.update(AppIntent::PullRequestMerged {
+        let effects = state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Ok(()),
-        });
+        }));
         assert_eq!(state.busy_count(), busy - 1);
         assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Merged);
         let queues = state.review.queues.as_ref().unwrap();
@@ -642,11 +647,11 @@ mod tests {
         let old = *old;
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        state.update(AppIntent::PullRequestMerged {
+        state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Ok(()),
-        });
+        }));
         assert_eq!(badge(&state).state, PrState::Merged);
         let open = HashMap::from([(
             BranchName::from("topic"),
@@ -656,11 +661,7 @@ mod tests {
                 ci: Some(CiState::Success),
             },
         )]);
-        state.update(AppIntent::PullRequestsFetched {
-            tag: old,
-            result: Ok(open),
-            limited_until: None,
-        });
+        state.update(pull_requests_fetched(old, Ok(open), None));
         assert_eq!(badge(&state).state, PrState::Merged);
         assert_eq!(badge(&state).ci, Some(CiState::Success));
 
@@ -686,11 +687,11 @@ mod tests {
         let mut state = on_detail(squash_only);
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        let effects = state.update(AppIntent::PullRequestMerged {
+        let effects = state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Ok(()),
-        });
+        }));
         assert!(state.forge.badges.is_empty());
         assert!(matches!(
             effects.as_slice(),
@@ -704,11 +705,11 @@ mod tests {
             name: "other".into(),
             ..repo()
         });
-        let effects = state.update(AppIntent::PullRequestMerged {
+        let effects = state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Ok(()),
-        });
+        }));
         assert_eq!(effects, []);
     }
 
@@ -723,11 +724,11 @@ mod tests {
             seq: tag.seq + 100,
             ..tag
         };
-        let effects = state.update(AppIntent::PullRequestMerged {
+        let effects = state.update(AppIntent::Review(ReviewIntent::Merged {
             tag: stale,
             number,
             result: Ok(()),
-        });
+        }));
         assert!(effects.is_empty());
         // Its busy count is still let go.
         assert_eq!(state.busy_count(), busy - 1);
@@ -739,11 +740,11 @@ mod tests {
             generation: tag.generation + 1,
             ..tag
         };
-        state.update(AppIntent::PullRequestMerged {
+        state.update(AppIntent::Review(ReviewIntent::Merged {
             tag: other,
             number,
             result: Ok(()),
-        });
+        }));
         assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Open);
         assert_eq!(badge(&state).state, PrState::Open);
     }
@@ -753,11 +754,11 @@ mod tests {
         let mut state = on_detail(squash_only);
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        state.update(AppIntent::PullRequestMerged {
+        state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Err(CreateError::Refused("Head branch was modified".into())),
-        });
+        }));
         match state.popups.as_slice() {
             [Popup::Error(error)] => {
                 let shown = format!("{error:?}");
@@ -775,11 +776,11 @@ mod tests {
         let mut state = on_detail(squash_only);
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        state.update(AppIntent::PullRequestMerged {
+        state.update(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Err(CreateError::RateLimited { until: NOW + 600 }),
-        });
+        }));
         assert_eq!(state.forge.limited.get("github.com"), Some(&(NOW + 600)));
         assert!(state.popups.is_empty());
         // The next try is refused before it asks.

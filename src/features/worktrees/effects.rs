@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::git::{add_worktree, read_worktrees, remove_worktree};
 use crate::background;
 use crate::effect::Tag;
+use crate::features::worktrees::WorktreesIntent;
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
 use crate::git::path::RepoPath;
@@ -20,7 +21,7 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
         move || read_worktrees(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git worktree list"),
-        move |result| AppIntent::WorktreesLoaded { tag, result },
+        move |result| AppIntent::Worktrees(WorktreesIntent::Loaded { tag, result }),
     );
 }
 
@@ -37,7 +38,7 @@ pub(crate) fn add(
         move || add_worktree(runner.as_ref(), &path, &branch),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git worktree add"),
-        move |result| AppIntent::WorktreeAdded { tag, result },
+        move |result| AppIntent::Worktrees(WorktreesIntent::Added { tag, result }),
     );
 }
 
@@ -54,7 +55,7 @@ pub(crate) fn remove(
         move || remove_worktree(runner.as_ref(), &path),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git worktree remove"),
-        move |result| AppIntent::WorktreeRemoved { tag, result },
+        move |result| AppIntent::Worktrees(WorktreesIntent::Removed { tag, result }),
     );
 }
 
@@ -65,6 +66,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::worktrees::WorktreesIntent;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::intent::AppIntent;
 
@@ -91,10 +93,10 @@ mod tests {
 
         runtime.spawn(Effect::LoadWorktrees { tag });
         match rx.recv().await {
-            Some(AppIntent::WorktreesLoaded {
+            Some(AppIntent::Worktrees(WorktreesIntent::Loaded {
                 tag: got,
                 result: Ok(list),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(list[0].path.display(), "/r");
             }
@@ -106,10 +108,10 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::WorktreeRemoved {
+            Some(AppIntent::Worktrees(WorktreesIntent::Removed {
                 tag,
                 result: Err("fatal: '/r/x' is locked".into()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -136,10 +138,10 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::WorktreeAdded {
+            Some(AppIntent::Worktrees(WorktreesIntent::Added {
                 tag,
                 result: Err("fatal: not a git repository".into()),
-            })
+            }))
         );
         runner.assert_done();
     }

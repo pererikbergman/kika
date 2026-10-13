@@ -9,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::{Tag, log_program};
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::forge::task::{ForgeContext, Load, LoadEvent, run_load};
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::GitRunner;
@@ -35,7 +36,9 @@ pub(crate) fn load(
     match forge.filter(|_| !hosts.is_empty()) {
         // Off: nothing is read, run or written.
         None => {
-            let _ = tx.send(AppIntent::ForgeRepoNone { tag });
+            let _ = tx.send(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+                tag,
+            }));
         }
         Some(forge) => {
             let send = tx.clone();
@@ -57,11 +60,13 @@ pub(crate) fn load(
                 },
                 // A panic still ends the call, or no refresh would run again.
                 move |done| {
-                    (done.is_err() && refresh).then_some(AppIntent::PullRequestsFetched {
-                        tag,
-                        result: Err(ForgeStatus::Failed),
-                        limited_until: None,
-                    })
+                    (done.is_err() && refresh).then_some(AppIntent::PullRequests(
+                        PullRequestsIntent::Fetched {
+                            tag,
+                            result: Err(ForgeStatus::Failed),
+                            limited_until: None,
+                        },
+                    ))
                 },
             );
         }
@@ -71,16 +76,18 @@ pub(crate) fn load(
 /// The intent that reports `event` of the load tagged `tag`.
 pub(crate) fn load_intent(tag: Tag, event: LoadEvent) -> AppIntent {
     match event {
-        LoadEvent::RepoNone => AppIntent::ForgeRepoNone { tag },
-        LoadEvent::Cached { repo, badges } => AppIntent::PullRequestsCached { tag, repo, badges },
+        LoadEvent::RepoNone => AppIntent::PullRequests(PullRequestsIntent::RepoNone { tag }),
+        LoadEvent::Cached { repo, badges } => {
+            AppIntent::PullRequests(PullRequestsIntent::Cached { tag, repo, badges })
+        }
         LoadEvent::Fetched {
             result,
             limited_until,
-        } => AppIntent::PullRequestsFetched {
+        } => AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag,
             result,
             limited_until,
-        },
+        }),
     }
 }
 
@@ -100,10 +107,10 @@ pub(crate) fn create(
     // No forge client: nothing may reach the network. The client itself
     // refuses a repository `[forge.allow]` leaves out.
     let Some(forge) = forge else {
-        let _ = tx.send(AppIntent::PullRequestCreated {
+        let _ = tx.send(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag,
             result: Err(CreateError::Status(ForgeStatus::Failed)),
-        });
+        }));
         return;
     };
     background::run(
@@ -111,7 +118,7 @@ pub(crate) fn create(
         move || forge.create_pull(&host, &repo, &head, &base, &title),
         // A panic still answers, or the create would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
-        move |result| AppIntent::PullRequestCreated { tag, result },
+        move |result| AppIntent::PullRequests(PullRequestsIntent::Created { tag, result }),
     );
 }
 
@@ -123,7 +130,9 @@ pub(crate) fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSend
     let finished = log_program(&argv, sink);
     let Some((program, args)) = argv.split_first() else {
         finished(CommandOutcome::NotStarted);
-        let _ = tx.send(AppIntent::OpenUrlFailed("No browser is configured".into()));
+        let _ = tx.send(AppIntent::PullRequests(PullRequestsIntent::OpenUrlFailed(
+            "No browser is configured".into(),
+        )));
         return;
     };
     let spawned = crate::program::command(program).and_then(|mut command| {
@@ -148,8 +157,8 @@ pub(crate) fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSend
         Err(e) => {
             finished(CommandOutcome::NotStarted);
             let program = terminal_safe(program.as_encoded_bytes());
-            let _ = tx.send(AppIntent::OpenUrlFailed(format!(
-                "Could not start {program}: {e}"
+            let _ = tx.send(AppIntent::PullRequests(PullRequestsIntent::OpenUrlFailed(
+                format!("Could not start {program}: {e}"),
             )));
         }
     }
@@ -164,6 +173,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime};
+    use crate::features::pull_requests::PullRequestsIntent;
     use crate::forge::task::ForgeContext;
     use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
     use crate::git::fake::FakeRunner;
@@ -197,7 +207,9 @@ mod tests {
         runtime.spawn(load(vec![]));
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+            Some(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+                tag: forge_tag()
+            }))
         );
         // Without a forge client, even named hosts reach nobody.
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -205,7 +217,9 @@ mod tests {
         bare.spawn(load(vec![ForgeHost::parse("github.com").unwrap()]));
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::ForgeRepoNone { tag: forge_tag() })
+            Some(AppIntent::PullRequests(PullRequestsIntent::RepoNone {
+                tag: forge_tag()
+            }))
         );
         git.assert_done();
         assert_eq!(gh.calls(), []);
@@ -233,7 +247,7 @@ mod tests {
         )]);
         assert_eq!(
             load_intent(forge_tag(), LoadEvent::RepoNone),
-            AppIntent::ForgeRepoNone { tag: forge_tag() }
+            AppIntent::PullRequests(PullRequestsIntent::RepoNone { tag: forge_tag() })
         );
         assert_eq!(
             load_intent(
@@ -243,11 +257,11 @@ mod tests {
                     badges: Some(badges.clone()),
                 }
             ),
-            AppIntent::PullRequestsCached {
+            AppIntent::PullRequests(PullRequestsIntent::Cached {
                 tag: forge_tag(),
                 repo,
                 badges: Some(badges.clone()),
-            }
+            })
         );
         for (result, limited_until) in [
             (Ok(badges), None),
@@ -261,11 +275,11 @@ mod tests {
                         limited_until,
                     }
                 ),
-                AppIntent::PullRequestsFetched {
+                AppIntent::PullRequests(PullRequestsIntent::Fetched {
                     tag: forge_tag(),
                     result,
                     limited_until,
-                }
+                })
             );
         }
     }
@@ -386,10 +400,10 @@ mod tests {
         runtime.spawn(create.clone());
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
+            Some(AppIntent::PullRequests(PullRequestsIntent::Created {
                 tag: forge_tag(),
                 result: Ok((42, "https://github.com/acme/widgets/pull/42".into())),
-            })
+            }))
         );
         git.assert_done();
         let [call] = gh.calls().try_into().unwrap();
@@ -401,10 +415,10 @@ mod tests {
         Runtime::new(git, tx).spawn(create);
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
+            Some(AppIntent::PullRequests(PullRequestsIntent::Created {
                 tag: forge_tag(),
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
+            }))
         );
     }
 
@@ -438,10 +452,10 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestCreated {
+            Some(AppIntent::PullRequests(PullRequestsIntent::Created {
                 tag: forge_tag(),
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
+            }))
         );
         git.assert_done();
         assert_eq!(gh.calls(), []);
@@ -460,7 +474,7 @@ mod tests {
             argv: vec!["/nonexistent/kika-browser".into(), url.into()],
         });
         match rx.recv().await {
-            Some(AppIntent::OpenUrlFailed(message)) => {
+            Some(AppIntent::PullRequests(PullRequestsIntent::OpenUrlFailed(message))) => {
                 assert!(
                     message.starts_with("Could not start /nonexistent/kika-browser: "),
                     "{message}"

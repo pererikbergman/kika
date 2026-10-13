@@ -2,6 +2,7 @@
 //! entry to its files, the actions on the selected entry, and stashing
 //! from the Files panel's menu.
 
+use super::StashIntent;
 use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use super::keys;
 use super::list::{StashDraft, StashFilesList};
@@ -14,6 +15,44 @@ use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{DeleteRangeConfirm, LineInput, Popup, PromptKind, RangeKind};
+
+/// The Stash panel's half of `update`: core's one `AppIntent::Stash` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: StashIntent) -> Vec<Effect> {
+    match intent {
+        StashIntent::Loaded { tag, result } => {
+            state.stash.list.loaded(tag, state.generation, result);
+        }
+        StashIntent::Next => {
+            state.stash.list.move_by(1);
+        }
+        StashIntent::Prev => {
+            state.stash.list.move_by(-1);
+        }
+        StashIntent::OpenFiles => return state.open_stash_files(),
+        StashIntent::CloseFiles => return state.close_stash_files(),
+        StashIntent::FileNext => return state.move_stash_file(1),
+        StashIntent::FilePrev => return state.move_stash_file(-1),
+        StashIntent::FilesLoaded { tag, result } => {
+            return state.stash_files_loaded(tag, result);
+        }
+        StashIntent::Apply => return state.stash_op(GitOp::StashApply),
+        StashIntent::Pop => return state.stash_op(GitOp::StashPop),
+        StashIntent::Drop if state.stash.list.range_anchor.is_some() => {
+            state.ask_delete_range(RangeKind::Stashes)
+        }
+        StashIntent::Drop => state.ask_drop_stash(),
+        StashIntent::ConfirmDrop => return state.confirm_drop_stash(),
+        StashIntent::Rename => state.ask_rename_stash(),
+        StashIntent::RenameTo(text) => return state.rename_stash_to(&text),
+        StashIntent::All => state.ask_stash_message(StashMode::All),
+        StashIntent::IncludingUntracked => state.ask_stash_message(StashMode::IncludeUntracked),
+        StashIntent::Staged => state.ask_stash_message(StashMode::Staged),
+        StashIntent::File => state.ask_stash_file_message(),
+        StashIntent::MessageAnswered(text) => return state.stash_message_answered(&text),
+    }
+    Vec::new()
+}
 
 /// Said when a range's stash is refused because its files changed while
 /// the message was typed.
@@ -392,23 +431,23 @@ mod tests {
             other => panic!("{other:?}"),
         };
         let busy = state.busy_count();
-        state.update(AppIntent::StashesLoaded {
+        state.update(AppIntent::Stash(StashIntent::Loaded {
             tag: first,
             result: Ok(three_stashes()),
-        });
+        }));
         assert!(state.stash.list.rows.is_empty(), "a stale seq is ignored");
-        state.update(AppIntent::StashesLoaded {
+        state.update(AppIntent::Stash(StashIntent::Loaded {
             tag: Tag {
                 generation: second.generation + 1,
                 ..second
             },
             result: Ok(three_stashes()),
-        });
+        }));
         assert!(state.stash.list.rows.is_empty(), "another repository's");
-        state.update(AppIntent::StashesLoaded {
+        state.update(AppIntent::Stash(StashIntent::Loaded {
             tag: second,
             result: Ok(three_stashes()),
-        });
+        }));
         assert_eq!(state.stash.list.rows, three_stashes());
         assert!(state.stash.list.loaded);
         assert_eq!(state.busy_count(), busy);
@@ -456,10 +495,10 @@ mod tests {
         assert!(tag.user);
         assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::StashFiles);
-        let effects = state.update(AppIntent::StashFilesLoaded {
+        let effects = state.update(AppIntent::Stash(StashIntent::FilesLoaded {
             tag,
             result: Ok(tracked_and_untracked()),
-        });
+        }));
         assert_eq!(state.busy_count(), busy);
         let request = diff_request(&effects);
         assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
@@ -490,10 +529,10 @@ mod tests {
             seq: tag.seq + 1,
             ..tag
         };
-        let effects = state.update(AppIntent::StashFilesLoaded {
+        let effects = state.update(AppIntent::Stash(StashIntent::FilesLoaded {
             tag: stale,
             result: Ok(tracked_and_untracked()),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert_eq!(state.busy_count(), busy - 1);
         assert!(!state.stash.open.as_ref().unwrap().list.loaded);
@@ -501,7 +540,7 @@ mod tests {
         for result in [Ok(vec![]), Err("bad object".to_string())] {
             let mut state = on_stash_one();
             let (tag, _) = stash_files_load(&press(&mut state, KeyCode::Enter));
-            let effects = state.update(AppIntent::StashFilesLoaded { tag, result });
+            let effects = state.update(AppIntent::Stash(StashIntent::FilesLoaded { tag, result }));
             assert_eq!(effects, vec![Effect::CancelDiff]);
             assert_eq!(state.diff, DiffPane::default());
         }
@@ -746,15 +785,15 @@ mod tests {
             assert_eq!(state.stash.open, None, "{code:?}");
         }
         // Asked of the model directly, the guard still holds.
-        state.update(AppIntent::ApplyStash);
+        state.update(AppIntent::Stash(StashIntent::Apply));
         assert_eq!(state.held_seq(), None);
-        state.update(AppIntent::OpenStashFiles);
+        state.update(AppIntent::Stash(StashIntent::OpenFiles));
         assert_eq!(state.stash.open, None);
 
         // The anchor hidden by a filter set under the range: nothing to ask.
         state.stash.list.filter = "{2}".into();
         assert!(state.stash.list.range().is_empty());
-        state.update(AppIntent::DropStash);
+        state.update(AppIntent::Stash(StashIntent::Drop));
         assert_eq!(state.popups, []);
         assert_eq!(state.notice.as_deref(), Some("No stash in the selection"));
     }
@@ -813,7 +852,10 @@ mod tests {
             assert_eq!(state.held_seq(), None, "{code:?}");
         }
         let mut state = on_stash_one();
-        assert_eq!(state.update(AppIntent::ConfirmDropStash), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Stash(StashIntent::ConfirmDrop)),
+            vec![]
+        );
         assert_eq!(state.held_seq(), None);
     }
 
@@ -833,7 +875,7 @@ mod tests {
             "Rename stash@{1}"
         );
         // The cursor moving under the prompt does not change the entry.
-        state.update(AppIntent::StashNext);
+        state.update(AppIntent::Stash(StashIntent::Next));
 
         type_text(&mut state, "!");
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
@@ -853,7 +895,10 @@ mod tests {
         press(&mut state, KeyCode::Char('R'));
         // What Enter on a blanked prompt submits.
         state.popups.clear();
-        assert_eq!(state.update(AppIntent::RenameStashTo("   ".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Stash(StashIntent::RenameTo("   ".into()))),
+            vec![]
+        );
         assert_eq!(state.notice, Some("A stash message cannot be empty".into()));
         assert_eq!(state.held_seq(), None);
 
@@ -861,7 +906,10 @@ mod tests {
         assert!(state.stash.pending.is_some());
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.stash.pending, None);
-        assert_eq!(state.update(AppIntent::RenameStashTo("x".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Stash(StashIntent::RenameTo("x".into()))),
+            vec![]
+        );
     }
 
     #[test]
@@ -994,7 +1042,7 @@ mod tests {
         assert_eq!(state.stash_draft, None);
         assert_eq!(state.popups, []);
         assert_eq!(
-            state.update(AppIntent::StashMessageAnswered("x".into())),
+            state.update(AppIntent::Stash(StashIntent::MessageAnswered("x".into()))),
             vec![]
         );
     }

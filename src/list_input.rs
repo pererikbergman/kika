@@ -13,6 +13,7 @@ use crate::features::blame::BlameView;
 use crate::features::commits::CommitsIntent;
 use crate::features::commits::compare::MARK_CLEARED;
 use crate::features::review;
+use crate::features::stash::StashIntent;
 use crate::git::FileEntry;
 use crate::git::log::LogQuery;
 use crate::git::path::RepoPath;
@@ -462,7 +463,7 @@ impl AppState {
             KeyScope::Blame => AppIntent::Blame(BlameIntent::Close),
             KeyScope::BlameCommit => AppIntent::Blame(BlameIntent::CloseCommit),
             KeyScope::CommitFiles => AppIntent::Commits(CommitsIntent::CloseFiles),
-            KeyScope::StashFiles => AppIntent::CloseStashFiles,
+            KeyScope::StashFiles => AppIntent::Stash(StashIntent::CloseFiles),
             _ => return vec![],
         };
         self.update(close)

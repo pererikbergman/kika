@@ -645,6 +645,7 @@ pub(crate) mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+    use crate::features::review::ReviewIntent;
     use crate::forge::ForgeView;
     use crate::forge::review::Check;
     use crate::forge::review::fixtures::{DETAIL, QUEUES};
@@ -732,12 +733,12 @@ pub(crate) mod tests {
     /// In review mode with the fixture's queues shown.
     pub(crate) fn in_queues() -> AppState {
         let mut state = workspace();
-        let tag = queue_tag(&state.update(AppIntent::EnterReview));
-        state.update(AppIntent::ReviewQueuesLoaded {
+        let tag = queue_tag(&state.update(AppIntent::Review(ReviewIntent::Enter)));
+        state.update(AppIntent::Review(ReviewIntent::QueuesLoaded {
             tag,
             repo: Some(repo()),
             result: Ok(fixture_queues()),
-        });
+        }));
         state
     }
 
@@ -747,12 +748,12 @@ pub(crate) mod tests {
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         let mut detail = fixture_detail();
         detail.checks = checks;
-        state.update(AppIntent::PrDetailLoaded {
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
             repo: Some(repo()),
             result: Ok(Some(detail)),
-        });
+        }));
         state
     }
 
@@ -817,7 +818,7 @@ pub(crate) mod tests {
     fn with_no_host_or_another_host_nothing_is_asked() {
         // No `[forge] github` hosts at all.
         let mut state = AppState::new(Context::Workspace);
-        assert_eq!(state.update(AppIntent::EnterReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::NoForgeHost)
@@ -833,7 +834,7 @@ pub(crate) mod tests {
         let mut state = workspace();
         state.forge.repo = None;
         state.forge.unmatched = true;
-        assert_eq!(state.update(AppIntent::EnterReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::NoForgeHost)
@@ -852,7 +853,7 @@ pub(crate) mod tests {
         let rule = crate::forge::allow::AllowRule::parse("someone-else").unwrap();
         state.forge.hosts = vec![state.forge.hosts[0].clone().with_allow(vec![rule])];
         assert!(state.forge.repo.is_some());
-        assert_eq!(state.update(AppIntent::EnterReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::NoForgeHost)
@@ -863,14 +864,14 @@ pub(crate) mod tests {
     fn a_host_limited_past_now_gets_no_load_until_its_reset() {
         let mut state = workspace();
         state.forge.limited.insert("github.com".into(), NOW + 60);
-        assert_eq!(state.update(AppIntent::EnterReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Enter)), []);
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::Limited(NOW + 60))
         );
         // At the reset it asks, and hands the limit to the task as well.
         state.now = NOW + 60;
-        let effects = state.update(AppIntent::RefreshReview);
+        let effects = state.update(AppIntent::Review(ReviewIntent::Refresh));
         match effects.as_slice() {
             [Effect::LoadReviewQueues { limited, repo, .. }] => {
                 assert_eq!(*limited, [(github()[0].clone(), NOW + 60)]);
@@ -883,25 +884,25 @@ pub(crate) mod tests {
     #[test]
     fn a_rate_limited_answer_is_remembered_and_an_answer_clears_it() {
         let mut state = workspace();
-        let tag = queue_tag(&state.update(AppIntent::EnterReview));
-        state.update(AppIntent::ReviewQueuesLoaded {
+        let tag = queue_tag(&state.update(AppIntent::Review(ReviewIntent::Enter)));
+        state.update(AppIntent::Review(ReviewIntent::QueuesLoaded {
             tag,
             repo: Some(repo()),
             result: Err(ReviewError::Limited { until: NOW + 90 }),
-        });
+        }));
         assert_eq!(state.forge.limited.get("github.com"), Some(&(NOW + 90)));
         assert_eq!(
             state.review.queues_fetch.error,
             Some(ReviewProblem::Limited(NOW + 90))
         );
-        assert_eq!(state.update(AppIntent::RefreshReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Refresh)), []);
         state.now = NOW + 90;
-        let tag = queue_tag(&state.update(AppIntent::RefreshReview));
-        state.update(AppIntent::ReviewQueuesLoaded {
+        let tag = queue_tag(&state.update(AppIntent::Review(ReviewIntent::Refresh)));
+        state.update(AppIntent::Review(ReviewIntent::QueuesLoaded {
             tag,
             repo: Some(repo()),
             result: Ok(fixture_queues()),
-        });
+        }));
         assert!(state.forge.limited.is_empty());
         assert_eq!(state.forge.status, ForgeView::Off);
     }
@@ -972,34 +973,34 @@ pub(crate) mod tests {
     #[test]
     fn stale_answers_are_dropped() {
         let mut state = workspace();
-        let old = queue_tag(&state.update(AppIntent::EnterReview));
+        let old = queue_tag(&state.update(AppIntent::Review(ReviewIntent::Enter)));
         // A refresh waits for a load in flight; one that got past it
         // still wins over the first.
-        assert_eq!(state.update(AppIntent::RefreshReview), []);
+        assert_eq!(state.update(AppIntent::Review(ReviewIntent::Refresh)), []);
         let new = queue_tag(&state.load_review_queues());
-        state.update(AppIntent::ReviewQueuesLoaded {
+        state.update(AppIntent::Review(ReviewIntent::QueuesLoaded {
             tag: old,
             repo: Some(repo()),
             result: Ok(fixture_queues()),
-        });
+        }));
         assert_eq!(state.review.queues, None);
         assert!(state.review.queues_fetch.loading);
-        state.update(AppIntent::ReviewQueuesLoaded {
+        state.update(AppIntent::Review(ReviewIntent::QueuesLoaded {
             tag: new,
             repo: Some(repo()),
             result: Ok(fixture_queues()),
-        });
+        }));
         assert!(state.review.queues.is_some());
 
         // A detail answer for a pull request no longer open is dropped too.
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
         press(&mut state, KeyCode::Esc);
-        state.update(AppIntent::PrDetailLoaded {
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
             repo: Some(repo()),
             result: Ok(Some(fixture_detail())),
-        });
+        }));
         assert_eq!(state.review.detail, None);
         assert_eq!(state.review.screen, ReviewScreen::Queue);
     }
@@ -1008,12 +1009,12 @@ pub(crate) mod tests {
     fn a_missing_pull_request_says_so() {
         let mut state = in_queues();
         let (tag, number) = detail_load(&press(&mut state, KeyCode::Enter));
-        state.update(AppIntent::PrDetailLoaded {
+        state.update(AppIntent::Review(ReviewIntent::PrDetailLoaded {
             tag,
             number,
             repo: Some(repo()),
             result: Ok(None),
-        });
+        }));
         assert_eq!(
             state.review.detail_fetch.error,
             Some(ReviewProblem::Missing(12))

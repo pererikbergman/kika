@@ -1296,7 +1296,9 @@ mod tests {
     use crate::features::custom_commands::CommandFailure;
     use crate::features::custom_commands::CustomCommandsIntent;
     use crate::features::diff::DiffIntent;
+    use crate::features::pull_requests::PullRequestsIntent;
     use crate::features::repos::ReposIntent;
+    use crate::features::submodules::SubmodulesIntent;
     use crate::git::remote::RemoteFailure;
     use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
 
@@ -1344,11 +1346,17 @@ mod tests {
         });
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::PullRequestsCached { badges: None, .. })
+            Some(AppIntent::PullRequests(PullRequestsIntent::Cached {
+                badges: None,
+                ..
+            }))
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(AppIntent::PullRequestsFetched { result: Ok(_), .. })
+            Some(AppIntent::PullRequests(PullRequestsIntent::Fetched {
+                result: Ok(_),
+                ..
+            }))
         ));
         fake.assert_done();
         assert_eq!(gh.calls().len(), 3);
@@ -1773,14 +1781,14 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::SubmodulesLoaded {
+            Some(AppIntent::Submodules(SubmodulesIntent::Loaded {
                 tag,
                 result: Ok(vec![Submodule {
                     path: "sub".into(),
                     oid: "1234567".into(),
                     state: SubmoduleState::UpToDate,
                 }]),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -1798,10 +1806,10 @@ mod tests {
         runtime.spawn(Effect::LoadSubmodules { tag });
 
         match rx.recv().await {
-            Some(AppIntent::SubmodulesLoaded {
+            Some(AppIntent::Submodules(SubmodulesIntent::Loaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(
                     message.starts_with("git submodule crashed: "),
@@ -2646,7 +2654,9 @@ mod tests {
             assert!(!notice.chars().any(char::is_control), "{notice:?}");
         };
         match rx.recv().await {
-            Some(AppIntent::OpenUrlFailed(notice)) => clear(&notice),
+            Some(AppIntent::PullRequests(PullRequestsIntent::OpenUrlFailed(notice))) => {
+                clear(&notice)
+            }
             other => panic!("{other:?}"),
         }
         match rx.recv().await {
