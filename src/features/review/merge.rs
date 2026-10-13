@@ -272,6 +272,7 @@ mod tests {
     use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::keymap::KeyPress;
+    use crate::test_support::load_list;
 
     const NOW: i64 = 1_700_000_000;
 
@@ -550,13 +551,16 @@ mod tests {
 
     /// The fixture's workspace with local `topic` showing #12's badge.
     fn with_badge(state: &mut AppState) {
-        state.branches.loaded(Ok(vec![Branch {
-            name: "topic".into(),
-            head: false,
-            upstream: Some("origin/topic".into()),
-            track: Track::None,
-            merged: false,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![Branch {
+                name: "topic".into(),
+                head: false,
+                upstream: Some("origin/topic".into()),
+                track: Track::None,
+                merged: false,
+            }]),
+        );
         state.forge.badges.insert(
             "topic".into(),
             PrBadge {

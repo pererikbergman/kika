@@ -19,7 +19,7 @@
 //! Kept cross-feature reads:
 //! - the handlers read and write `commits.reflog` and read `commits.tab`
 //!   (the parent `commits` panel);
-//! - `plan_travel` reads `branches.branches` and `files`;
+//! - `plan_travel` reads `branches.list.rows` and `files`;
 //! - `head_unborn` and `undo_disabled` read `branch`, the op slot and
 //!   `repo`; `travel` and `plan_travel` push onto `popups`, and the
 //!   handlers check `context`.

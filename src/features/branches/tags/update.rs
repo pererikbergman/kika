@@ -34,12 +34,9 @@ impl AppState {
         result: Result<Vec<TagRef>, String>,
     ) -> Vec<Effect> {
         self.user_done(tag);
-        let tags = &mut self.branches.tags;
-        if tag.generation != self.generation || tags.list_seq != Some(tag.seq) {
+        if !self.branches.tags.loaded(tag, self.generation, result) {
             return vec![];
         }
-        tags.list_seq = None;
-        tags.loaded(result);
         if self.branches.tab == BranchesTab::Tags {
             self.load_branch_log(tag.user)
         } else {
@@ -152,7 +149,7 @@ impl AppState {
             self.notice = Some(reason);
             return;
         }
-        let Some(tag) = self.branches.tags.selected_tag() else {
+        let Some(tag) = self.branches.tags.selected_row() else {
             return;
         };
         let op = GitOp::DeleteTag {
@@ -187,7 +184,7 @@ impl AppState {
             return vec![];
         }
         let (Some(tag), Ok(remote)) = (
-            self.branches.tags.selected_tag(),
+            self.branches.tags.selected_row(),
             keymap::push_tag_remote(self),
         ) else {
             return vec![];
@@ -234,7 +231,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 'j'), vec![], "at the end");
         log_load(&press(&mut state, KeyCode::Up)).unwrap();
         assert_eq!(
-            state.branches.tags.selected_tag().unwrap().name,
+            state.branches.tags.selected_row().unwrap().name,
             "v2".into()
         );
         // A reload while the tab is shown reloads its log too.

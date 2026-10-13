@@ -4,10 +4,12 @@
 
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
+use crate::features::branches::remotes::{RemoteLine, lines};
 use crate::features::commit::CommitEditor;
 use crate::features::commits::CommitFilesList;
 use crate::features::commits::reflog::Reflog;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
+use crate::filtered_list::{FilteredList, Row};
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
 use crate::git::GitRunner;
@@ -794,7 +796,7 @@ pub(crate) fn with_remotes() -> AppState {
 pub(crate) fn on_remote_row(row: usize) -> AppState {
     let mut state = with_remotes();
     press_char(&mut state, ']');
-    state.branches.remotes.move_by(row as isize);
+    state.branches.remotes.list.move_by(row as isize);
     state
 }
 
@@ -1137,7 +1139,7 @@ pub(crate) fn two_commit_repo() -> (crate::git::fake::TempDir, CommitId) {
 pub(crate) fn undoable() -> AppState {
     let mut state = with_commits(3, true);
     state.branch = Some(on_branch("main"));
-    state.branches.branches = vec![Branch {
+    state.branches.list.rows = vec![Branch {
         name: "main".into(),
         head: true,
         upstream: None,
@@ -1192,6 +1194,26 @@ pub(crate) fn three_stashes() -> Vec<StashEntry> {
         stash_entry(1, "a1", "On main: one"),
         stash_entry(2, "a2", "On main: two"),
     ]
+}
+
+/// Apply `result` to a list built by hand, as the load in flight, for
+/// tests that do not go through a reload.
+pub(crate) fn load_list<R: Row>(list: &mut FilteredList<R>, result: Result<Vec<R>, String>) {
+    list.begin(0);
+    let tag = Tag {
+        generation: 0,
+        seq: 0,
+        user: false,
+    };
+    assert!(list.loaded(tag, 0, result));
+}
+
+/// [`load_list`] for the Remotes tab, its remotes flattened into rows.
+pub(crate) fn load_remotes(
+    list: &mut FilteredList<RemoteLine>,
+    result: Result<Vec<Remote>, String>,
+) {
+    load_list(list, result.map(lines));
 }
 
 /// Reload the stash list and answer with `entries`.
@@ -1325,7 +1347,7 @@ pub(crate) fn forge_state(branches: &[BranchName]) -> AppState {
             git_branch(&name, name == "main", true)
         })
         .collect();
-    state.branches.loaded(Ok(listed));
+    load_list(&mut state.branches.list, Ok(listed));
     state.forge.set_branches(branches);
     state.focus = Focus::Branches;
     state.expanded = SidePanel::Branches;

@@ -83,33 +83,27 @@ pub(crate) fn render_panel(
         remotes::view::list_body(&panel.remotes, usize::from(inner.height), width)
     } else if expanded && panel.tab == BranchesTab::Tags {
         tags::view::list_body(&panel.tags, usize::from(inner.height), width)
-    } else if let Some(error) = &panel.error {
+    } else if let Some(error) = &panel.list.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from("Press r to retry"));
         Paragraph::new(lines).wrap(Wrap { trim: false })
-    } else if !panel.loaded {
+    } else if !panel.list.loaded {
         Paragraph::new("Loading…")
-    } else if panel.branches.is_empty() {
+    } else if panel.list.rows.is_empty() {
         Paragraph::new("No branches")
     } else if !expanded {
         Paragraph::new(current.map(|b| row(b, width)).unwrap_or_default())
     } else {
-        let shown = panel.visible();
+        let list = &panel.list;
+        let shown = list.visible();
         if shown.is_empty() {
             Paragraph::new(no_matches())
         } else {
-            let range = panel.range();
-            let lines = scrolled(&shown, panel.selected, usize::from(inner.height))
+            let range = list.range();
+            let selected = Some(list.selected);
+            let lines = scrolled(&shown, selected, usize::from(inner.height))
                 .iter()
-                .map(|&i| {
-                    range_row(
-                        row(&panel.branches[i], width),
-                        i,
-                        panel.selected,
-                        &range,
-                        width,
-                    )
-                })
+                .map(|&i| range_row(row(&list.rows[i], width), i, selected, &range, width))
                 .collect::<Vec<_>>();
             Paragraph::new(lines)
         }
@@ -122,22 +116,25 @@ fn tab_title(panel: &BranchesPanel, look: &PanelLook) -> String {
     let tabs = tabs_title(panel.tab, look);
     let range = |anchored: bool, range: Vec<usize>| anchored.then_some(range.len());
     match panel.tab {
-        BranchesTab::Local => list_title(
-            look,
-            &tabs,
-            &panel.filter,
-            panel.visible().len(),
-            panel.branches.len(),
-            range(panel.range_anchor.is_some(), panel.range()),
-        ),
-        BranchesTab::Remotes => {
-            let list = &panel.remotes;
+        BranchesTab::Local => {
+            let list = &panel.list;
             list_title(
                 look,
                 &tabs,
                 &list.filter,
                 list.visible().len(),
-                list.rows().len(),
+                list.rows.len(),
+                range(list.range_anchor.is_some(), list.range()),
+            )
+        }
+        BranchesTab::Remotes => {
+            let list = &panel.remotes.list;
+            list_title(
+                look,
+                &tabs,
+                &list.filter,
+                list.visible().len(),
+                list.rows.len(),
                 range(list.range_anchor.is_some(), list.range()),
             )
         }
@@ -148,7 +145,7 @@ fn tab_title(panel: &BranchesPanel, look: &PanelLook) -> String {
                 &tabs,
                 &list.filter,
                 list.visible().len(),
-                list.tags.len(),
+                list.rows.len(),
                 range(list.range_anchor.is_some(), list.range()),
             )
         }
@@ -348,7 +345,7 @@ pub(crate) fn render_log(panel: &BranchesPanel, look: &PanelLook, frame: &mut Fr
     let body = if let Some(error) = &log.error {
         Paragraph::new(error.lines().map(Line::from).collect::<Vec<_>>()).wrap(Wrap { trim: false })
     } else if log.for_ref.is_none() {
-        Paragraph::new(if panel.loaded {
+        Paragraph::new(if panel.list.loaded {
             "No branch selected"
         } else {
             "Loading…"
@@ -391,7 +388,7 @@ mod tests {
     use super::*;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
-    use crate::test_support::reversed_at;
+    use crate::test_support::{load_list, reversed_at};
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -420,7 +417,7 @@ mod tests {
         state.files_loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
-        state.branches.loaded(Ok(branches));
+        load_list(&mut state.branches.list, Ok(branches));
         state
     }
 
@@ -440,16 +437,16 @@ mod tests {
                 .collect(),
         );
         state.screen_mode = crate::layout::ScreenMode::Full;
-        state.branches.set_filter("f\x1b[31m".into());
+        state.branches.list.set_filter("f\x1b[31m".into());
         let drawn = buffer(&state, 100, 24);
         let rows = buffer_rows(&drawn);
         assert!(drawn.content().iter().all(|c| !c.symbol().contains('\x1b')));
         assert!(contains(&rows, "0 of 5"), "{rows:#?}");
         assert!(contains(&rows, "No matches"), "{rows:#?}");
 
-        state.branches.set_filter("fix".into());
-        state.branches.toggle_range();
-        state.branches.move_by(1);
+        state.branches.list.set_filter("fix".into());
+        state.branches.list.toggle_range();
+        state.branches.list.move_by(1);
         let drawn = buffer(&state, 100, 24);
         let rows = buffer_rows(&drawn);
         assert!(contains(&rows, "/fix 3 of 5 · 2 selected"), "{rows:#?}");
@@ -494,8 +491,8 @@ mod tests {
             ("nope", Some(pr(4, PrState::Closed, Some(CiState::Failure)))),
             ("bare", None),
         ]);
-        state.branches.branches[0].upstream = Some("origin/ok".into());
-        state.branches.branches[0].track = Track::Counts {
+        state.branches.list.rows[0].upstream = Some("origin/ok".into());
+        state.branches.list.rows[0].track = Track::Counts {
             ahead: 1,
             behind: 0,
         };
@@ -900,7 +897,10 @@ mod tests {
         assert!(contains(&draw(&state, 80, 24), "No branches"));
         state.branches = BranchesPanel::default();
         assert!(contains(&draw(&state, 80, 24), "Loading…"));
-        state.branches.loaded(Err("fatal: \u{FFFD}broken".into()));
+        load_list(
+            &mut state.branches.list,
+            Err("fatal: \u{FFFD}broken".into()),
+        );
         let rows = draw(&state, 80, 24);
         assert!(contains(&rows, "fatal: \u{FFFD}broken"), "{rows:#?}");
         assert!(contains(&rows, "Press r to retry"), "{rows:#?}");
@@ -959,7 +959,7 @@ mod tests {
             branch("main", true, None, Track::None),
             branch("topic", false, None, Track::None),
         ]);
-        state.branches.move_by(1);
+        state.branches.list.move_by(1);
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(&state, frame)).unwrap();
         let buffer = terminal.backend().buffer();

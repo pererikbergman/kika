@@ -37,7 +37,7 @@
 //!   `bisect_refuses` and `branch_for_action` (core), and
 //!   `crate::bisect::head_move_disabled` (core), so no checkout moves
 //!   `HEAD` mid-bisect;
-//! - `branches.remotes.branch_named` and `branches.remotes.remotes` (own
+//! - `branches.remotes.branch_named` and `branches.remotes.remotes()` (own
 //!   child), which the upstream prompt reads.
 //!
 //! What stays in core: `local_branch_selected`, which worktrees reads;

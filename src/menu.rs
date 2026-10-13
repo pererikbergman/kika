@@ -345,6 +345,7 @@ mod tests {
     use crate::git::status::EntryKind;
     use crate::keymap::OP_RUNNING;
     use crate::model::Context;
+    use crate::test_support::load_list;
 
     fn file(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
         FileEntry {
@@ -417,13 +418,16 @@ mod tests {
             subject: "s".into(),
             subject_altered: false,
         }];
-        state.branches.loaded(Ok(vec![crate::git::branches::Branch {
-            name: "topic".into(),
-            head: false,
-            upstream: None,
-            track: crate::git::branches::Track::None,
-            merged: false,
-        }]));
+        load_list(
+            &mut state.branches.list,
+            Ok(vec![crate::git::branches::Branch {
+                name: "topic".into(),
+                head: false,
+                upstream: None,
+                track: crate::git::branches::Track::None,
+                merged: false,
+            }]),
+        );
         state.branch = Some(BranchStatus {
             head: Head::Detached("abc".into()),
             upstream: None,

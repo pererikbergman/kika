@@ -913,7 +913,7 @@ impl AppState {
             AppIntent::AddRemoteUrl(text) => return self.remote_url(&text),
             AppIntent::RenameRemote => self.ask_remote_rename(),
             AppIntent::RenameRemoteTo(text) => return self.rename_remote_to(&text),
-            AppIntent::RemoveRemote if self.branches.remotes.range_anchor.is_some() => {
+            AppIntent::RemoveRemote if self.branches.remotes.list.range_anchor.is_some() => {
                 self.ask_delete_range(RangeKind::Remotes)
             }
             AppIntent::RemoveRemote => self.ask_remove_remote(),
@@ -927,7 +927,7 @@ impl AppState {
             AppIntent::CheckoutBranch => return self.checkout_branch(),
             AppIntent::NewBranch => self.ask_branch_name(PromptKind::NewBranch),
             AppIntent::RenameBranch => self.ask_branch_name(PromptKind::RenameBranch),
-            AppIntent::DeleteBranch if self.branches.range_anchor.is_some() => {
+            AppIntent::DeleteBranch if self.branches.list.range_anchor.is_some() => {
                 self.ask_delete_range(RangeKind::Branches)
             }
             AppIntent::DeleteBranch => self.ask_delete_branch(),
@@ -4813,7 +4813,7 @@ mod tests {
     #[test]
     fn shift_p_pushes_the_selected_tag_to_the_upstreams_remote() {
         let mut state = remote_ready();
-        state.branches.branches[0].upstream = Some("origin/main".into());
+        state.branches.list.rows[0].upstream = Some("origin/main".into());
         reload_remotes(
             &mut state,
             vec![
@@ -4838,7 +4838,7 @@ mod tests {
         tags_tag(&effects);
 
         // Two remotes and no upstream: nothing to choose from.
-        state.branches.branches[0].upstream = None;
+        state.branches.list.rows[0].upstream = None;
         assert_eq!(shift(&mut state, 'P'), vec![]);
         assert_eq!(
             state.notice,
