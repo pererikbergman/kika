@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::diff_mark::DiffEnd;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::commit_files::{CommitId, CommitRange};
-use crate::git::diff::terminal_safe;
 use crate::git::log::branch_commit;
 use crate::intent::AppIntent;
 
@@ -22,24 +22,20 @@ pub(crate) fn resolve(
     base: DiffEnd,
     target: DiffEnd,
 ) {
-    tokio::spawn(async move {
-        // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let base = resolve_end(runner.as_ref(), base)?;
             let target = resolve_end(runner.as_ref(), target)?;
             Ok(CommitRange {
                 oid: target,
                 parent: Some(base),
             })
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("git rev-parse crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::DiffResolved { tag, result });
-    });
+        },
+        // A panic still reports back, or the busy counter would stay raised.
+        background::crashed("git rev-parse"),
+        move |result| AppIntent::DiffResolved { tag, result },
+    );
 }
 
 /// A comparison's end as a commit: a commit as it is, a branch where it

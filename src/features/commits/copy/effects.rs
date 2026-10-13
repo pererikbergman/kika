@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::head::read_commit_message;
 use crate::intent::AppIntent;
 
@@ -20,13 +20,12 @@ pub(crate) fn load_message(
     tag: Tag,
     oid: CommitId,
 ) {
-    tokio::spawn(async move {
-        let read = oid.clone();
+    let read = oid.clone();
+    background::run(
+        tx,
+        move || read_commit_message(runner.as_ref(), &read),
         // A panic still reports back, or the busy counter would stay raised.
-        let result =
-            tokio::task::spawn_blocking(move || read_commit_message(runner.as_ref(), &read))
-                .await
-                .unwrap_or_else(|e| Err(terminal_safe(format!("git log crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::CommitMessageLoaded { tag, oid, result });
-    });
+        background::crashed("git log"),
+        move |result| AppIntent::CommitMessageLoaded { tag, oid, result },
+    );
 }

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::clipboard::{self, ClipboardSink, TerminalSink};
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
@@ -988,33 +989,24 @@ impl Runtime {
             // shutdown must not wait on git.
             Effect::InterruptGit => self.runner.interrupt(),
             Effect::RunOp { tag, op } => {
-                tokio::spawn(async move {
+                let task_op = op.clone();
+                background::run(
+                    tx,
+                    move || run_op(runner.as_ref(), &task_op),
                     // A panic still reports back, or `op_seq` would block every later op.
-                    let task_op = op.clone();
-                    let result =
-                        tokio::task::spawn_blocking(move || run_op(runner.as_ref(), &task_op))
-                            .await
-                            // The panic text may quote a path; it is drawn in the status bar.
-                            .unwrap_or_else(|e| {
-                                Err(terminal_safe(format!("git crashed: {e}").as_bytes()))
-                            });
-                    let _ = tx.send(AppIntent::OpFinished { tag, op, result });
-                });
+                    // The panic text may quote a path; it is drawn in the status bar.
+                    background::crashed("git"),
+                    move |result| AppIntent::OpFinished { tag, op, result },
+                );
             }
             Effect::ProbeCommit { tag, op } => commit::effects::probe(runner, tx, tag, op),
-            Effect::SnapshotRefs { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the watch would never poll again.
-                    let result = tokio::task::spawn_blocking(move || read_refs(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
-                                format!("git for-each-ref crashed: {e}").as_bytes(),
-                            ))
-                        });
-                    let _ = tx.send(AppIntent::RefsLoaded { tag, result });
-                });
-            }
+            Effect::SnapshotRefs { tag } => background::run(
+                tx,
+                move || read_refs(runner.as_ref()),
+                // A panic still reports back, or the watch would never poll again.
+                background::crashed("git for-each-ref"),
+                move |result| AppIntent::RefsLoaded { tag, result },
+            ),
             Effect::LoadCommits {
                 tag,
                 tip,
@@ -1047,19 +1039,19 @@ impl Runtime {
             Effect::Fetch { tag } => sync::effects::fetch(runner, tx, tag),
             Effect::LoadConfig { repo } => {
                 let paths = ConfigPaths::new(self.global_config.clone(), repo.as_deref());
-                tokio::spawn(async move {
+                background::run_with(
+                    tx,
+                    move || config::load(&paths),
                     // `load` reports its own errors; a panic leaves the keys as they were.
-                    if let Ok(loaded) =
-                        tokio::task::spawn_blocking(move || config::load(&paths)).await
-                    {
-                        let _ = tx.send(AppIntent::ConfigLoaded {
+                    move |outcome| {
+                        outcome.ok().map(|loaded| AppIntent::ConfigLoaded {
                             // Echoed so the reducer can drop a late result.
                             repo,
                             keymap: loaded.keymap,
                             errors: loaded.errors,
-                        });
-                    }
-                });
+                        })
+                    },
+                );
             }
             Effect::RunCommand {
                 title,
