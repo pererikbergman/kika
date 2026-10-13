@@ -1005,7 +1005,7 @@ impl AppState {
             AppIntent::IgnorePatternAnswered(text) => return self.ignore_answered(text),
             AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
-            AppIntent::ConfirmResetHard => return self.confirm_reset_hard(),
+            AppIntent::ConfirmResetHard => return self.answer_question(KeyScope::ResetHard),
             AppIntent::LeftBehindChecked {
                 tag,
                 op,
@@ -1225,7 +1225,7 @@ impl AppState {
             Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
             Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
             Some(Popup::DeleteRange(_)) => return KeyScope::DeleteRange,
-            Some(Popup::ResetHard(_)) => return KeyScope::ResetHard,
+            Some(Popup::Question(q)) => return q.scope,
             Some(Popup::LeaveCommits(_)) => return KeyScope::LeaveCommits,
             Some(Popup::DropStash(_)) => return KeyScope::DropStash,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
@@ -1379,15 +1379,16 @@ impl AppState {
                 self.start_op(Ok(Some(confirm.op)))
             }
             Some(Popup::Discard(_)) => vec![],
-            // Only `ConfirmDeleteBranch` deletes, only `ConfirmResetHard`
-            // resets, only `ConfirmLeaveCommits` leaves commits behind, only
+            // Only `ConfirmDeleteBranch` deletes, only a question's own yes
+            // key (`ConfirmResetHard` for a hard reset) answers it, only
+            // `ConfirmLeaveCommits` leaves commits behind, only
             // `ConfirmRemoveRemote` removes, only `ConfirmDeleteTag` deletes
             // a tag, only `ConfirmDeleteRange` deletes a range, only
             // `ConfirmTravel` undoes or redoes and only `ConfirmDropStash`
             // drops a stash; yes here keeps the question, no closes it.
             Some(
                 Popup::DeleteBranch(_)
-                | Popup::ResetHard(_)
+                | Popup::Question(_)
                 | Popup::LeaveCommits(_)
                 | Popup::RemoveRemote(_)
                 | Popup::DeleteTag(_)

@@ -3,12 +3,12 @@
 //! leaving them to the reflog.
 
 use crate::effect::{Effect, Tag};
+use crate::features::commits::reset_hard_question;
 use crate::git::commit_files::CommitId;
-use crate::git::status::Head;
 use crate::keymap::KeyScope;
 use crate::model::AppState;
 use crate::op::{GitOp, ResetMode};
-use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHardConfirm};
+use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup};
 
 /// The left-behind check in flight, and where the user was when it
 /// started. Its answer only asks if they are still there, so a key meant
@@ -21,14 +21,6 @@ pub(crate) struct LeftBehindCheck {
 }
 
 impl AppState {
-    /// `HEAD`'s commit when it is detached on an id git can use.
-    fn detached_head(&self) -> Option<CommitId> {
-        match &self.branch.as_ref()?.head {
-            Head::Detached(oid) => CommitId::parse(oid),
-            _ => None,
-        }
-    }
-
     /// Plan `op`, which moves `HEAD` to `target`. On a detached `HEAD`,
     /// first look for the commits it would leave behind; anywhere else, go
     /// on as without the check. One check runs at a time, so two quick
@@ -72,11 +64,8 @@ impl AppState {
                 mode: ResetMode::Hard,
             } => {
                 let short_oid = self.commits.short_oid(to);
-                self.popups.push(Popup::ResetHard(ResetHardConfirm {
-                    short_oid,
-                    op,
-                    head,
-                }));
+                self.popups
+                    .push(Popup::Question(reset_hard_question(short_oid, op, head)));
                 vec![]
             }
             op => self.start_op(Ok(Some(op))),
@@ -157,19 +146,6 @@ impl AppState {
         }
         self.start_op(Ok(Some(confirm.op)))
     }
-
-    /// Whether `HEAD` is still the detached `head` a question was asked
-    /// from; `None` asks nothing. Says so when it has moved.
-    pub(crate) fn head_still(&mut self, head: Option<&CommitId>) -> bool {
-        let Some(head) = head else {
-            return true;
-        };
-        if self.detached_head().as_ref() == Some(head) {
-            return true;
-        }
-        self.notice = Some("HEAD moved; try again".into());
-        false
-    }
 }
 
 #[cfg(test)]
@@ -177,11 +153,12 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use crate::effect::Tag;
+    use crate::features::commits::reset_hard_question;
     use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::op::ResetMode;
-    use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup, ResetHardConfirm};
+    use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup};
     use crate::test_support::{
         check_of, checked, cid, detached_on_commit, ids, moves, on_branch, on_commit, op_of, press,
         press_char, reset_op,
@@ -239,11 +216,11 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(
             state.popups,
-            [Popup::ResetHard(ResetHardConfirm {
-                short_oid: "c1".into(),
-                op: reset_op(ResetMode::Hard),
-                head: Some(cid("c0")),
-            })]
+            [Popup::Question(reset_hard_question(
+                "c1".into(),
+                reset_op(ResetMode::Hard),
+                Some(cid("c0"))
+            ))]
         );
     }
 
@@ -491,25 +468,5 @@ mod tests {
             let (_, op) = op_of(&state.update(AppIntent::ConfirmLeaveCommits));
             assert_eq!(op, planned, "{intent:?}");
         }
-    }
-
-    #[test]
-    fn the_hard_reset_question_runs_nothing_once_head_has_moved() {
-        let (mut state, _) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
-        let mut moved = state.clone();
-        moved.branch.as_mut().unwrap().head = Head::Detached("c2".into());
-        assert_eq!(moved.update(AppIntent::ConfirmResetHard), vec![]);
-        assert_eq!(moved.popups, []);
-        assert_eq!(moved.held_seq(), None);
-        assert_eq!(moved.notice, Some("HEAD moved; try again".into()));
-
-        // Back on a branch is a move too.
-        let mut on_main = state.clone();
-        on_main.branch = Some(on_branch("main"));
-        assert_eq!(on_main.update(AppIntent::ConfirmResetHard), vec![]);
-        assert_eq!(on_main.held_seq(), None);
-
-        let (_, op) = op_of(&state.update(AppIntent::ConfirmResetHard));
-        assert_eq!(op, reset_op(ResetMode::Hard));
     }
 }

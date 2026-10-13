@@ -23,3 +23,69 @@ impl AppState {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::bisect::RESET_FIRST;
+    use crate::model::AppState;
+    use crate::op::{GitOp, ResetMode};
+    use crate::test_support::{cid, on_commit, reset_op, start_bisecting, start_merging};
+
+    fn merging() -> AppState {
+        let mut state = on_commit();
+        start_merging(&mut state);
+        state
+    }
+
+    fn bisecting() -> AppState {
+        let mut state = on_commit();
+        start_bisecting(&mut state);
+        state
+    }
+
+    #[test]
+    fn a_reset_is_refused_while_an_operation_is_in_progress() {
+        let reset = reset_op(ResetMode::Hard);
+        let mut state = merging();
+        assert!(state.confirm_refused(&reset));
+        assert_eq!(
+            state.notice,
+            Some("Finish or abort the operation in progress".into())
+        );
+
+        let mut state = bisecting();
+        assert!(state.confirm_refused(&reset));
+        assert_eq!(state.notice, Some(RESET_FIRST.into()));
+    }
+
+    #[test]
+    fn a_checkout_is_refused_only_during_a_bisect() {
+        let checkout = GitOp::CheckoutCommit(cid("c1"));
+        let mut state = bisecting();
+        assert!(state.confirm_refused(&checkout));
+        assert_eq!(state.notice, Some(RESET_FIRST.into()));
+
+        let mut state = merging();
+        assert!(!state.confirm_refused(&checkout));
+        assert_eq!(state.notice, None);
+    }
+
+    #[test]
+    fn other_ops_and_a_clean_state_are_not_refused_and_keep_the_notice() {
+        for op in [
+            GitOp::Revert(cid("c1")),
+            reset_op(ResetMode::Hard),
+            GitOp::CheckoutCommit(cid("c1")),
+        ] {
+            let mut clean = on_commit();
+            clean.notice = Some("earlier".into());
+            assert!(!clean.confirm_refused(&op), "{op:?}");
+            assert_eq!(clean.notice, Some("earlier".into()), "{op:?}");
+        }
+        for mut state in [merging(), bisecting()] {
+            state.notice = Some("earlier".into());
+            assert!(!state.confirm_refused(&GitOp::Revert(cid("c1"))));
+            assert_eq!(state.notice, Some("earlier".into()));
+        }
+    }
+}

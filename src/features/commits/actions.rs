@@ -4,12 +4,12 @@
 //! the bisect and copy children also use, so only a hex id reaches argv.
 
 use super::keys;
+use crate::confirm_question::{Answer, ConfirmQuestion};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
-use crate::keymap::Reason;
+use crate::keymap::{KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::{GitOp, ResetMode};
-use crate::popup::Popup;
 
 /// The selected commit's actions: checkout, revert and reset.
 impl AppState {
@@ -80,23 +80,26 @@ impl AppState {
             to,
         )
     }
+}
 
-    /// Reset hard as the open question asked, and only if one is open, its
-    /// guard still allows it and `HEAD` has not moved since.
-    pub(crate) fn confirm_reset_hard(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
-            return vec![];
-        }
-        let Some(Popup::ResetHard(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        if self.confirm_refused(&confirm.op) {
-            return vec![];
-        }
-        if !self.head_still(confirm.head.as_ref()) {
-            return vec![];
-        }
-        self.start_op(Ok(Some(confirm.op)))
+/// "Reset hard and lose every uncommitted change?", answered only by `y`.
+/// `op` is the planned reset; `head` the detached `HEAD` it was asked from,
+/// `None` on a branch.
+pub(crate) fn reset_hard_question(
+    short_oid: String,
+    op: GitOp,
+    head: Option<CommitId>,
+) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::ResetHard,
+        title: "Reset hard",
+        text: format!(
+            "Reset to {short_oid} and throw away every uncommitted change, staged and \
+             unstaged? Commits after it leave the branch."
+        ),
+        answer: Answer::YOnly,
+        op,
+        head,
     }
 }
 
@@ -107,9 +110,9 @@ mod tests {
     use super::*;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
-    use crate::keymap::{self, KeyScope};
+    use crate::keymap;
     use crate::menu::MenuId;
-    use crate::popup::{ConfirmKind, ResetHardConfirm};
+    use crate::popup::{ConfirmKind, Popup};
     use crate::test_support::{attached_of, cid, on_branch, on_commit, op_of, press, press_char};
 
     #[test]
@@ -231,11 +234,11 @@ mod tests {
         };
         assert_eq!(
             state.popups,
-            [Popup::ResetHard(ResetHardConfirm {
-                short_oid: "c1".into(),
-                op: hard.clone(),
-                head: None,
-            })]
+            [Popup::Question(reset_hard_question(
+                "c1".into(),
+                hard.clone(),
+                None
+            ))]
         );
         assert_eq!(state.key_focus(), KeyScope::ResetHard);
         assert_eq!(state.held_seq(), None);
@@ -263,10 +266,13 @@ mod tests {
     }
 
     #[test]
-    fn confirm_reset_hard_does_nothing_without_the_question() {
+    fn answering_the_hard_reset_does_nothing_without_the_question() {
         let mut state = on_commit();
+        assert_eq!(state.answer_question(KeyScope::ResetHard), vec![]);
+        assert_eq!(state.popups, []);
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
         state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        assert_eq!(state.answer_question(KeyScope::ResetHard), vec![]);
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
         assert_eq!(state.held_seq(), None);

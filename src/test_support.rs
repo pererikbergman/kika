@@ -1056,6 +1056,12 @@ pub(crate) fn start_bisecting(state: &mut AppState) {
     branch.in_progress.push(Operation::Bisect);
 }
 
+/// `state` as git leaves it when a merge stops on a conflict.
+pub(crate) fn start_merging(state: &mut AppState) {
+    let branch = state.branch.get_or_insert_with(|| on_branch("main"));
+    branch.in_progress.push(Operation::Merge);
+}
+
 pub(crate) fn bisect_branch(
     head: Head,
     ops: &[Operation],
