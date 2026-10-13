@@ -1,7 +1,7 @@
 //! Files: the Files panel's list navigation, its renderer, and the effect
 //! that loads the working tree's status. Chunks 10 (`files.next`,
-//! `files.prev`) and 38 (`files.menu`) are its key bindings, and
-//! `Effect::LoadStatus` is its effect.
+//! `files.prev`) and 38 (`files.menu`) are its key bindings, and it runs
+//! `Effect::LoadStatus`, whose variant stays in core.
 //!
 //! Its `pub(crate)` API:
 //! - `move_selection` (`update.rs`), which core dispatch calls for
@@ -21,12 +21,12 @@
 //!   `reload_rebase_todo` (commits/rewrite);
 //! - `reselect`: it calls `files_open` (stash) and `review_files_shown`
 //!   (review);
-//! - `files_visible` and `files_selected_hidden`: core, the stash feature
-//!   and its tests call them;
+//! - `files_visible` and `files_selected_hidden`: core (`model.rs`,
+//!   `keymap.rs`) and a stash test call them;
 //! - `status_unchanged`, `files_range`, `files_range_paths`,
 //!   `RANGE_FILES_CHANGED` and `stream_diff`, the files fields of
 //!   `AppState`, `refresh::Selection`, `src/git/status.rs`,
-//!   `Effect::LoadStatus` itself, the `StatusLoaded`/`SelectNext`/
+//!   the `Effect::LoadStatus` variant, the `StatusLoaded`/`SelectNext`/
 //!   `SelectPrev` intents and their `update()` arms;
 //! - the stage, discard, ignore and go-to-file keys and handlers, which
 //!   later slices move.
