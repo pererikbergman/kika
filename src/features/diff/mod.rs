@@ -11,17 +11,30 @@
 //! behind `LoadPatch`. The ops it starts (`ApplyCached`, `Stage`,
 //! `Unstage`) stay core `GitOp`s, built and run by `op.rs`.
 //!
+//! It also owns the editor hand-off: `open_in_editor`, `edit_hunk`,
+//! `editor_closed` and `hunk_edited` in `update.rs`, which return
+//! `Effect::HandOff` or start the core `GitOp::ApplyEdited`; the guard
+//! `edit_hunk_disabled` (`keys.rs`, chunk 32); and `edited_hunk_error`
+//! with `EDITED_HUNK_INVALID`, the popup for an edit git rejects. And it
+//! draws the streamed pane and the focused pane's title (`view.rs`).
+//!
 //! Its `pub(crate)` API: `DiffStreamer`; the handlers `diff_loaded`,
 //! `patch_loaded`, `with_lines`, `next_hunk`, `prev_hunk`,
-//! `enter_line_mode`, `toggle_selection_stage` and `toggle_diff_side`
+//! `enter_line_mode`, `toggle_selection_stage`, `toggle_diff_side`,
+//! `open_in_editor`, `edit_hunk`, `editor_closed`, `hunk_edited` and
+//! `edited_hunk_error`, and the const `EDITED_HUNK_INVALID`
 //! (`update.rs`); the chunks `keys::DIFF_WORKSPACE`, `keys::DIFF_FILES`,
-//! `keys::DIFF_KEYS` and `keys::DIFF_LINES`; and `effects::loading_delay`
-//! and `effects::load_patch`.
+//! `keys::DIFF_KEYS` and `keys::DIFF_LINES`; `effects::loading_delay`
+//! and `effects::load_patch`; and `view::options_note`,
+//! `view::render_diff_pane`, `view::hunk_title` and
+//! `view::hunk_title_parts`.
 //!
 //! Kept cross-feature reads: `hunk_disabled` reads the Files panel's
-//! `files` and `selected`, to refuse a conflicted or renamed file. The rest
-//! reads core state (`generation`, `diff`, `focus`, `diff_options`,
-//! `op_seq`).
+//! `files` and `selected`, to refuse a conflicted or renamed file, and
+//! `open_in_editor` reads them to find the file to open (the Files
+//! panel's `files.open` key dispatches the core `OpenInEditor` intent).
+//! The rest reads core state (`generation`, `diff`, `focus`,
+//! `diff_options`, `op_seq`, `keymap`).
 //!
 //! What stays in core, and why:
 //! - `set_diff_options` reads `commits.open`, `stash.open`, `selected`,
@@ -39,12 +52,22 @@
 //!   renderers call;
 //! - in `keymap.rs`: `DISPLAY_ONLY`, `WHITESPACE_HIDDEN`, `NOT_IN_COMMIT`
 //!   and the guards `display_only`, `whitespace_hidden`, `in_commit`,
-//!   `no_file_selected`, `open_disabled`, `discard_disabled` and
-//!   `edit_hunk_disabled`, because core guards, custom_patch or the
-//!   renderers use them too; and `blame_open`/`BLAME_OPEN`;
+//!   `no_file_selected`, `open_disabled` and `discard_disabled`, because
+//!   core guards, custom_patch or the renderers use them too; and
+//!   `blame_open`/`BLAME_OPEN`;
 //! - discard (`ask_discard`, `discard_confirm`) and the `ApplyWorktree`
 //!   tests in `op.rs`, which exercise the discard op;
-//! - `DIFF_LOADING_DELAY` in `effect.rs`, which this feature imports.
+//! - `DIFF_LOADING_DELAY` in `effect.rs`, which this feature imports;
+//! - `failure_title` in `model.rs`, which names every failed op and which
+//!   `edited_hunk_error` calls;
+//! - in `view.rs`: `diff_position`, because review draws it too;
+//!   `styled_diff_line`, because blame does; `render_hunk_view` and
+//!   `HunkPane`, because they draw custom_patch's picks; and
+//!   `diff_pane_body`, `found_note`, `marked_spans`, `MATCH` and
+//!   `CURRENT_MATCH`, which review, blame and search use;
+//! - `handoff.rs`, the shared runner behind `Effect::HandOff`, which other
+//!   features hand off through too, and `diff_pane.rs`/`hunk_view.rs`,
+//!   which many features import.
 //!
 //! The child `renderers` draws the pane with an external pager or tool.
 
@@ -53,5 +76,6 @@ pub(crate) mod keys;
 pub(crate) mod renderers;
 pub(crate) mod stream;
 mod update;
+pub(crate) mod view;
 
 pub(crate) use stream::DiffStreamer;
