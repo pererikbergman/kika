@@ -8,7 +8,6 @@ use super::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
 use crate::git::safe_text::sanitize;
-use crate::list_filter;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
@@ -32,16 +31,11 @@ pub(crate) fn update(state: &mut AppState, intent: FilesIntent) -> Vec<Effect> {
 impl AppState {
     /// Move by `delta` rows among those the filter shows.
     pub(crate) fn move_selection(&mut self, delta: isize) -> Vec<Effect> {
-        let Some(current) = self.selected else {
-            return vec![];
-        };
-        let Some(next) = list_filter::step(&self.files_visible(), current, delta) else {
-            return vec![];
-        };
-        if next == current {
-            return vec![];
+        if self.files.move_by(delta) {
+            self.select(self.files.selected)
+        } else {
+            vec![]
         }
-        self.select(next)
     }
 
     /// Select the first file whose path contains `text`, ignoring case.
@@ -52,6 +46,7 @@ impl AppState {
         }
         let found = self
             .files
+            .rows
             .iter()
             .position(|f| f.path.display().to_lowercase().contains(&needle));
         match found {
@@ -73,7 +68,7 @@ impl AppState {
             self.notice = Some(reason);
             return;
         }
-        let Some(file) = self.selected.and_then(|i| self.files.get(i)) else {
+        let Some(file) = self.files.selected_row() else {
             return;
         };
         let bytes = match gitignore::escape(&file.path) {
@@ -157,28 +152,30 @@ impl AppState {
     /// file.
     pub(crate) fn toggle_stage(&mut self) -> Vec<Effect> {
         // Only where the range shows; elsewhere Stage is the one file's.
-        if self.focus == Focus::Files && self.files_anchor.is_some() {
+        if self.focus == Focus::Files && self.files.range_anchor.is_some() {
             return self.stage_range();
         }
-        let op = self
-            .selected
-            .and_then(|i| self.files.get(i))
-            .and_then(toggle_for);
+        let op = self.files.selected_row().and_then(toggle_for);
         self.start_op(Ok(op))
     }
 
     /// `a`: stage everything, or unstage everything when all is staged.
     pub(crate) fn toggle_stage_all(&mut self) -> Vec<Effect> {
-        self.start_op(toggle_all(&self.files))
+        self.start_op(toggle_all(&self.files.rows))
     }
 
     /// Stage every file in the range, or unstage them all when none has
     /// anything left to stage. One op, so one git call.
     fn stage_range(&mut self) -> Vec<Effect> {
-        let entries: Vec<&FileEntry> = self.files_range().iter().map(|&i| &self.files[i]).collect();
+        let entries: Vec<&FileEntry> = self
+            .files
+            .range()
+            .iter()
+            .map(|&i| &self.files.rows[i])
+            .collect();
         let op = toggle_many(&entries);
         if op.is_some() {
-            self.files_anchor = None;
+            self.files.range_anchor = None;
         }
         self.start_op(Ok(op))
     }
@@ -186,7 +183,12 @@ impl AppState {
     /// Ask before discarding the range: the files it can restore and the
     /// untracked ones it would delete, counted in the question.
     pub(crate) fn ask_discard_range(&mut self) {
-        let entries: Vec<&FileEntry> = self.files_range().iter().map(|&i| &self.files[i]).collect();
+        let entries: Vec<&FileEntry> = self
+            .files
+            .range()
+            .iter()
+            .map(|&i| &self.files.rows[i])
+            .collect();
         let Some(op) = GitOp::discard_many(&entries) else {
             self.notice = Some("No unstaged changes to discard".into());
             return;
@@ -246,12 +248,12 @@ mod tests {
         let effects = state.update(AppIntent::Files(FilesIntent::Next));
         let second = diff_tag(&effects);
         assert!(second.seq > first.seq);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         match &effects[0] {
             Effect::LoadDiff { request, .. } => {
                 assert_eq!(
                     request,
-                    &DiffRequest::for_entry(&state.files[1], DiffOptions::default())
+                    &DiffRequest::for_entry(&state.files.rows[1], DiffOptions::default())
                 )
             }
             other => panic!("{other:?}"),
@@ -273,22 +275,22 @@ mod tests {
     fn selection_stops_at_the_ends_of_the_list() {
         let (mut state, _) = with_files(three_files(), 24);
         assert_eq!(state.update(AppIntent::Files(FilesIntent::Prev)), vec![]);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
 
         state.update(AppIntent::Files(FilesIntent::Next));
         state.update(AppIntent::Files(FilesIntent::Next));
         assert_eq!(state.update(AppIntent::Files(FilesIntent::Next)), vec![]);
-        assert_eq!(state.selected, Some(2));
+        assert_eq!(state.files.selected, 2);
 
         diff_tag(&state.update(AppIntent::Files(FilesIntent::Prev)));
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
     }
 
     #[test]
     fn selection_does_nothing_without_files() {
         let (mut state, effects) = with_files(vec![], 24);
         assert_eq!(effects, vec![Effect::CancelDiff]);
-        assert_eq!(state.selected, None);
+        assert_eq!(state.files.selected_row(), None);
         assert_eq!(state.update(AppIntent::Files(FilesIntent::Next)), vec![]);
         assert_eq!(state.update(AppIntent::Files(FilesIntent::Prev)), vec![]);
     }
@@ -308,7 +310,7 @@ mod tests {
 
         let tag = diff_tag(&effects);
         assert!(tag.seq > 0);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         assert_eq!(state.diff.path, Some("b.txt".into()));
         assert_eq!(state.popups, []);
     }
@@ -324,7 +326,7 @@ mod tests {
 
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
         assert_eq!(state.popups, []);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         assert!(!state.should_quit);
     }
 
@@ -336,7 +338,7 @@ mod tests {
             vec![]
         );
         assert_eq!(state.notice, Some("No file matches".into()));
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
 
         state.notice = None;
         assert_eq!(
@@ -344,7 +346,7 @@ mod tests {
             vec![]
         );
         assert_eq!(state.notice, None);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
     }
 
     /// The text and kind of the prompt on top.
@@ -361,7 +363,7 @@ mod tests {
         let mut file = untracked("x");
         file.path = RepoPath::from_bytes(name);
         let (state, _) = with_files(vec![changed("a.rs", '.', 'M'), file], 24);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         state
     }
 
@@ -611,8 +613,8 @@ mod tests {
     #[test]
     fn toggles_do_nothing_in_review_or_without_files() {
         let mut review = AppState::new(Context::Review { number: Some(1) });
-        review.files = three_files();
-        review.selected = Some(0);
+        review.files.rows = three_files();
+        review.files.selected = 0;
         let (mut clean, _) = with_files(vec![], 24);
         for state in [&mut review, &mut clean] {
             assert_eq!(
@@ -647,10 +649,10 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
-        assert_eq!(state.files_range(), [0, 1, 2]);
+        assert_eq!(state.files.range(), [0, 1, 2]);
         let (_, op) = op_of(&press_char(&mut state, ' '));
         assert_eq!(op, GitOp::Stage(vec!["a.rs".into(), "d.rs".into()]));
-        assert_eq!(state.files_anchor, None, "the range is done with");
+        assert_eq!(state.files.range_anchor, None, "the range is done with");
     }
 
     #[test]
@@ -696,7 +698,7 @@ mod tests {
         assert_eq!(state.popups.len(), 1, "Enter does not answer");
         assert_eq!(press_char(&mut state, 'n'), vec![]);
         assert!(state.popups.is_empty());
-        assert!(state.files_anchor.is_some(), "no keeps the range");
+        assert!(state.files.range_anchor.is_some(), "no keeps the range");
 
         press_char(&mut state, 'd');
         let (_, op) = op_of(&press_char(&mut state, 'y'));
@@ -707,7 +709,7 @@ mod tests {
                 delete: vec!["n.txt".into()],
             }
         );
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
     }
 
     #[test]
@@ -730,7 +732,7 @@ mod tests {
             SidePanel::Branches,
         )));
         let (_, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
-        assert_eq!(op, toggle_for(&state.files[1]).unwrap());
+        assert_eq!(op, toggle_for(&state.files.rows[1]).unwrap());
     }
 
     #[test]

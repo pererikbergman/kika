@@ -482,8 +482,8 @@ mod tests {
 
     fn workspace(files: &[&str]) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
-        state.files = files
+        state.files.loaded = true;
+        state.files.rows = files
             .iter()
             .map(|path| FileEntry {
                 path: (*path).into(),
@@ -493,7 +493,6 @@ mod tests {
                 kind: EntryKind::Changed,
             })
             .collect();
-        state.selected = (!files.is_empty()).then_some(0);
         state
     }
 
@@ -540,14 +539,14 @@ mod tests {
     #[test]
     fn the_stash_menus_refusal_of_a_mixed_range_shows_whole_at_80_columns() {
         let mut state = workspace(&["gone.rs", "u.txt"]);
-        state.files[0].index = 'D';
-        state.files[0].worktree = '.';
-        state.files[1].index = '?';
-        state.files[1].worktree = '?';
-        state.files[1].kind = EntryKind::Untracked;
+        state.files.rows[0].index = 'D';
+        state.files.rows[0].worktree = '.';
+        state.files.rows[1].index = '?';
+        state.files.rows[1].worktree = '?';
+        state.files.rows[1].kind = EntryKind::Untracked;
         state.focus = crate::model::Focus::Files;
-        state.files_anchor = Some("gone.rs".into());
-        state.selected = Some(1);
+        state.files.range_anchor = Some("gone.rs".into());
+        state.files.selected = 1;
         state.popups = vec![Popup::Menu {
             id: MenuId::Stash,
             cursor: 0,
@@ -838,7 +837,7 @@ mod tests {
         use crate::features::commits::custom_patch::CustomPatch;
         use crate::git::commit_files::{CommitId, CommitRange};
         let mut state = workspace(&["a.rs"]);
-        state.files.clear();
+        state.files.rows.clear();
         let range = CommitRange {
             oid: CommitId::parse(&"b".repeat(40)).unwrap(),
             parent: CommitId::parse(&"a".repeat(40)),

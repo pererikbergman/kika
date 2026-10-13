@@ -137,7 +137,7 @@ mod tests {
 
     fn state(view: ConflictView) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Conflict(view);
         state
     }

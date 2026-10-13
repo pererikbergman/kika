@@ -17,7 +17,7 @@
 //! `effects::{load, record, init}`.
 //!
 //! Kept cross-feature reads and writes (move-only, ADR rule 3): `open_repo`
-//! and `park` write `files`, `files_loaded`, `branch`, `selected` and
+//! and `park` write `files` (its rows, `loaded` and cursor), `branch` and
 //! `focus`, and read `diff_options`. They call core `select` (`model.rs`)
 //! and core `reload_repo` (`reload.rs`), which reloads the status,
 //! branches, log and stashes through the refresh plan.

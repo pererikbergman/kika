@@ -32,7 +32,7 @@ pub(crate) fn mergetool_disabled(state: &AppState) -> Option<Reason> {
     if matches!(state.focus, Focus::Conflict(_)) {
         return None;
     }
-    match state.selected.and_then(|i| state.files.get(i)) {
+    match state.files.selected_row() {
         Some(file) if file.kind == EntryKind::Conflicted => None,
         _ => Some("Not a conflicted file".into()),
     }

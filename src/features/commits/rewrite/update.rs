@@ -874,7 +874,7 @@ mod tests {
     #[test]
     fn a_fixup_needs_something_staged() {
         let mut state = with_a_fixup();
-        state.files.clear();
+        state.files.rows.clear();
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::Rewrite(
                 RewriteIntent::CreateFixup

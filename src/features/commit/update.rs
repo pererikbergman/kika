@@ -68,7 +68,11 @@ impl AppState {
             self.notice = Some(reason);
             return;
         }
-        let staged = self.files.iter().any(|f| !matches!(f.index, '.' | '?'));
+        let staged = self
+            .files
+            .rows
+            .iter()
+            .any(|f| !matches!(f.index, '.' | '?'));
         self.commit = if staged {
             CommitFlow::Editing(CommitEditor::new(false))
         } else {

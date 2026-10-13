@@ -60,8 +60,8 @@ impl AppState {
             Focus::Commits if self.commits.open.is_some() => None,
             Focus::Stash if self.stash.open.is_some() => None,
             Focus::Status | Focus::Files | Focus::Branches | Focus::Commits | Focus::Stash => self
-                .selected
-                .and_then(|i| self.files.get(i))
+                .files
+                .selected_row()
                 .map(|entry| DiffRequest::for_entry(entry, self.diff_options)),
             Focus::Diff => match self.hunk_view()? {
                 // Like the commit's file in the Commits panel, never rendered.
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(
             request,
-            DiffRequest::for_entry(&state.files[0], state.diff_options)
+            DiffRequest::for_entry(&state.files.rows[0], state.diff_options)
         );
         assert!(state.rendered.as_ref().unwrap().rendering());
     }
@@ -400,7 +400,7 @@ mod tests {
         state.update(finished(tag, op, Ok(())));
         let effects = state.update(AppIntent::StatusLoaded {
             tag: Tag {
-                seq: state.status_seq.unwrap(),
+                seq: state.files.seq.unwrap(),
                 ..status
             },
             result: Ok(repo(three_files())),

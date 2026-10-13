@@ -67,11 +67,7 @@ impl AppState {
         if self.context != Context::Workspace {
             return vec![];
         }
-        let Some(path) = self
-            .selected
-            .and_then(|i| self.files.get(i))
-            .map(|entry| entry.path.clone())
-        else {
+        let Some(path) = self.files.selected_row().map(|entry| entry.path.clone()) else {
             return vec![];
         };
         let query = LogQuery {
@@ -157,14 +153,14 @@ mod tests {
         let mut state = with_log(3);
         state.commits.query = author("ann");
         let raw = RepoPath::from_bytes(b"x\xff.rs");
-        state.files = vec![FileEntry {
+        state.files.rows = vec![FileEntry {
             path: raw.clone(),
             orig_path: None,
             index: '.',
             worktree: 'M',
             kind: EntryKind::Changed,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.focus = Focus::Files;
         state.commits.tab = CommitsTab::Reflog;
 

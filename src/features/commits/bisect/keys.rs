@@ -146,7 +146,7 @@ mod tests {
             state.hold_op(1);
             states.push(state.clone());
             state.free_op();
-            state.files = vec![crate::git::FileEntry {
+            state.files.rows = vec![crate::git::FileEntry {
                 path: "a.rs".into(),
                 orig_path: None,
                 index: 'M',

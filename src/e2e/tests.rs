@@ -691,6 +691,7 @@ fn same_name_repo() -> TestRepo {
 fn listed(app: &Harness) -> Vec<String> {
     app.state()
         .files
+        .rows
         .iter()
         .map(|entry| entry.path.display().to_string())
         .collect()
@@ -803,7 +804,7 @@ async fn started_in_a_subdirectory_kika_acts_on_root_relative_paths() {
     // Status: the same files as from the root.
     assert_eq!(listed(&app), ["a.txt", "d/a.txt"]);
     assert_eq!(listed(&app), from_root);
-    assert!(app.state().status_error.is_none());
+    assert!(app.state().files.error.is_none());
 
     // Diff: the root a.txt, not d/a.txt.
     let selected = app.selected_line().expect("a file is selected");
@@ -868,11 +869,11 @@ async fn started_outside_a_repository_the_files_panel_shows_gits_error() {
     // The welcome first, with no status asked for yet.
     app.assert_screen_contains("Not a git repository");
     app.assert_screen_contains("Initialise a repository here");
-    assert_eq!(app.state().status_error, None);
+    assert_eq!(app.state().files.error, None);
 
     // Closed, git's own error shows as it always did.
     app.press(KeyCode::Esc).await;
-    let error = app.state().status_error.clone().expect("status failed");
+    let error = app.state().files.error.clone().expect("status failed");
     assert!(error.contains("not a git repository"), "{error}");
     app.assert_screen_contains("not a git repository");
     assert!(!app.state().should_quit);
@@ -902,7 +903,7 @@ async fn started_outside_a_repository_i_initialises_it_and_the_files_load() {
     let repo = app.state().repo.clone().expect("a repository is open");
     assert_eq!(repo.canonicalize().unwrap(), launch.canonicalize().unwrap());
     assert!(app.state().popups.is_empty(), "{}", app.screen().join("\n"));
-    assert_eq!(app.state().status_error, None);
+    assert_eq!(app.state().files.error, None);
     assert_eq!(app.selected_line().as_deref(), Some("?? notes.txt"));
     app.assert_screen_contains("+hello");
 }
@@ -951,7 +952,7 @@ async fn the_recent_list_switches_repositories_and_back_restores_the_view() {
     assert_eq!(app.selected_line().as_deref(), Some("M a2.txt"));
     assert!(matches!(app.state().focus, Focus::Diff));
     app.assert_screen_contains("+two");
-    assert_eq!(app.state().status_error, None);
+    assert_eq!(app.state().files.error, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1209,7 +1210,7 @@ async fn a_line_is_staged_through_a_renderer_view() {
 async fn a_file_edited_outside_appears_on_the_next_files_poll() {
     let repo = TestRepo::new().write("a.txt", "one\n").commit("init");
     let mut app = Harness::start(&repo).await;
-    assert!(app.state().files.is_empty());
+    assert!(app.state().files.rows.is_empty());
 
     let _repo = repo.write("outside.txt", "new\n");
     app.intent(AppIntent::Watch(WatchEvent::PollFiles)).await;
@@ -1229,7 +1230,7 @@ async fn a_commit_made_outside_disappears_from_the_list_on_focus_in() {
 
     let screen = app.screen().join("\n");
     assert!(!screen.contains("a.txt"), "a.txt still listed:\n{screen}");
-    assert!(app.state().files.is_empty());
+    assert!(app.state().files.rows.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1243,7 +1244,7 @@ async fn a_commit_made_outside_is_noticed_by_the_refs_poll() {
     repo.git(["commit", "-q", "-am", "elsewhere"]);
     app.intent(AppIntent::Watch(WatchEvent::PollRefs)).await;
 
-    assert!(app.state().files.is_empty());
+    assert!(app.state().files.rows.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2238,7 +2239,7 @@ async fn a_filtered_range_stages_exactly_the_files_it_shows() {
     app.press(KeyCode::Char(' ')).await;
 
     assert_eq!(repo.staged(), ["src/one.rs", "src/two.rs"]);
-    assert_eq!(app.state().files_anchor, None);
+    assert_eq!(app.state().files.range_anchor, None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2331,6 +2332,7 @@ async fn stashing_a_range_of_files_takes_those_two_and_leaves_the_others() {
     let paths: Vec<String> = app
         .state()
         .files
+        .rows
         .iter()
         .map(|f| f.path.display().to_string())
         .collect();
@@ -2358,7 +2360,11 @@ async fn stashing_a_range_of_files_takes_those_two_and_leaves_the_others() {
     assert_eq!(repo.read("d.txt"), "new d\n");
     let status = String::from_utf8(repo.git(["status", "--porcelain"])).unwrap();
     assert_eq!(status, " M a.txt\n?? d.txt\n");
-    assert_eq!(app.state().files_anchor, None, "the range is done with");
+    assert_eq!(
+        app.state().files.range_anchor,
+        None,
+        "the range is done with"
+    );
 
     // The stash holds exactly the two: b.txt's change and c.txt untracked.
     let tracked =
@@ -2437,6 +2443,7 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
     let at = app
         .state()
         .files
+        .rows
         .iter()
         .position(|f| f.path.display() == "n.txt")
         .unwrap();
@@ -2457,7 +2464,7 @@ async fn a_staged_rename_with_a_file_back_at_its_old_path_stashes_nothing() {
 
 /// Put the Files cursor on the staged deletion of `path`.
 async fn select_deleted(app: &mut Harness, path: &str) {
-    let at = (app.state().files.iter())
+    let at = (app.state().files.rows.iter())
         .position(|f| f.path.display() == path && f.index == 'D')
         .unwrap();
     for _ in 0..at {

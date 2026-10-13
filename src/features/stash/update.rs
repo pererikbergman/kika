@@ -154,9 +154,10 @@ impl AppState {
         if self.stash.open.take().is_none() {
             return vec![];
         }
-        match self.selected {
-            Some(index) if index < self.files.len() => self.select_from(index, DiffStart::Top),
-            _ => self.close_diff(),
+        if self.files.selected_row().is_some() {
+            self.select_from(self.files.selected, DiffStart::Top)
+        } else {
+            self.close_diff()
         }
     }
 
@@ -344,7 +345,7 @@ impl AppState {
                 self.notice = Some(STASH_SET_CHANGED.into());
                 return vec![];
             }
-            self.files_anchor = None;
+            self.files.range_anchor = None;
         }
         let message = Some(text.trim())
             .filter(|m| !m.is_empty())
@@ -969,7 +970,7 @@ mod tests {
             tag,
             result: Ok(repo(vec![changed("a.rs", '.', 'M')])),
         });
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
 
         type_text(&mut state, " wip ");
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
@@ -1120,7 +1121,7 @@ mod tests {
         assert_eq!(stash_menu_item(&mut state, 3), vec![]);
         assert_eq!(state.notice, Some(reason.into()));
         assert_eq!(state.stash_draft, None);
-        assert!(state.files_anchor.is_some());
+        assert!(state.files.range_anchor.is_some());
     }
 
     #[test]
@@ -1196,7 +1197,7 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
-        assert_eq!(state.files_range(), [0, 1]);
+        assert_eq!(state.files.range(), [0, 1]);
         stash_menu_item(&mut state, 3);
         let draft = state.stash_draft.clone().unwrap();
         assert!(draft.from_range);
@@ -1212,7 +1213,7 @@ mod tests {
                 unstage: vec![],
             }
         );
-        assert_eq!(state.files_anchor, None, "the range is done with");
+        assert_eq!(state.files.range_anchor, None, "the range is done with");
     }
 
     #[test]
@@ -1225,7 +1226,7 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.stash_draft, None);
         assert!(
-            state.files_anchor.is_some(),
+            state.files.range_anchor.is_some(),
             "a cancelled prompt keeps the range"
         );
 
@@ -1241,7 +1242,7 @@ mod tests {
                 unstage: vec![],
             }
         );
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
     }
 
     #[test]
@@ -1255,10 +1256,10 @@ mod tests {
         let (mut state, _) = with_files(files, 24);
         type_text(&mut state, "/mod");
         press(&mut state, KeyCode::Enter);
-        assert_eq!(state.files_visible(), [0, 2]);
+        assert_eq!(state.files.visible(), [0, 2]);
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
-        assert_eq!(state.files_range(), [0, 2]);
+        assert_eq!(state.files.range(), [0, 2]);
         stash_menu_item(&mut state, 3);
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
         let GitOp::StashPush { mode, paths, .. } = op else {
@@ -1320,7 +1321,7 @@ mod tests {
                 changed("b.rs", '.', 'M'),
             ],
         );
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         type_text(&mut state, "late");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
@@ -1343,7 +1344,7 @@ mod tests {
             &mut state,
             vec![changed("a.rs", '.', 'M'), changed("b.rs", 'D', '.')],
         );
-        assert!(state.files_anchor.is_some());
+        assert!(state.files.range_anchor.is_some());
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
 
@@ -1374,10 +1375,13 @@ mod tests {
             &mut state,
             vec![changed("a.rs", '.', 'M'), untracked("b.rs")],
         );
-        assert!(state.files_anchor.is_some());
+        assert!(state.files.range_anchor.is_some());
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
-        assert!(state.files_anchor.is_some(), "the range stays to try again");
+        assert!(
+            state.files.range_anchor.is_some(),
+            "the range stays to try again"
+        );
     }
 
     #[test]
