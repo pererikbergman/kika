@@ -254,7 +254,7 @@ mod tests {
         ];
         for (files, branch, reason) in cases {
             let mut state = ready_to_bisect();
-            state.files = files;
+            state.files.rows = files;
             state.branch = Some(branch);
             assert_eq!(
                 state.update(AppIntent::Commits(CommitsIntent::Bisect(
@@ -266,7 +266,7 @@ mod tests {
             assert_eq!(state.held_seq(), None);
         }
         let mut untracked_only = ready_to_bisect();
-        untracked_only.files = vec![untracked("new.txt")];
+        untracked_only.files.rows = vec![untracked("new.txt")];
         op_of(
             &untracked_only.update(AppIntent::Commits(CommitsIntent::Bisect(
                 BisectIntent::MarkSelected(BisectMark::Good),

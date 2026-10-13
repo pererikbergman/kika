@@ -155,7 +155,7 @@ mod tests {
     /// The Stash panel focused and zoomed, listing `entries`.
     fn showing(entries: Vec<StashEntry>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Stash;
         state.expanded = SidePanel::Stash;
         state.screen_mode = ScreenMode::Full;

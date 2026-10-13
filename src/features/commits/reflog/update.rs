@@ -127,7 +127,11 @@ impl AppState {
         let ctx = undo::Context {
             branch: branch.as_deref(),
             branches: &self.branches.list.rows,
-            dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
+            dirty: self
+                .files
+                .rows
+                .iter()
+                .any(|f| f.kind != EntryKind::Untracked),
         };
         match undo::plan(direction, &reflog, &ctx) {
             Ok(plan) => self.popups.push(Popup::Question(travel_question(
@@ -360,13 +364,13 @@ mod tests {
         );
 
         let mut state = undoable();
-        state.files = vec![changed("a.rs", '.', 'M')];
+        state.files.rows = vec![changed("a.rs", '.', 'M')];
         undo_with(&mut state, commit_reflog('c'));
         assert_eq!(state.op_error(), Some("Commit or stash your changes first"));
 
         // Untracked files are left to `reset --keep`.
         let mut state = undoable();
-        state.files = vec![untracked("new.rs")];
+        state.files.rows = vec![untracked("new.rs")];
         undo_with(&mut state, commit_reflog('c'));
         assert_eq!(state.popups.len(), 1);
     }

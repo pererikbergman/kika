@@ -42,11 +42,7 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
-        let Some(path) = self
-            .selected
-            .and_then(|i| self.files.get(i))
-            .map(|f| f.path.clone())
-        else {
+        let Some(path) = self.files.selected_row().map(|f| f.path.clone()) else {
             return vec![];
         };
         let seq = self.take_seq();

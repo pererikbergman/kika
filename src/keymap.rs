@@ -1227,7 +1227,7 @@ pub(crate) fn commit_source_disabled(state: &AppState, open: &CommitFilesList) -
 }
 
 pub(crate) fn no_file_selected(state: &AppState) -> Option<Reason> {
-    let selected = state.selected.and_then(|i| state.files.get(i));
+    let selected = state.files.selected_row();
     selected.is_none().then_some("No file selected".into())
 }
 
@@ -1426,7 +1426,10 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
             branches.tags.selected_hidden(),
             branches.tags.range_anchor.is_some(),
         ),
-        KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
+        KeyScope::Files => (
+            state.files.selected_hidden(),
+            state.files.range_anchor.is_some(),
+        ),
         KeyScope::Stash => (
             state.stash.list.selected_hidden(),
             state.stash.list.range_anchor.is_some(),
@@ -2840,12 +2843,12 @@ mod tests {
             worktree: 'U',
             kind,
         };
-        state.files = vec![file(EntryKind::Changed), file(EntryKind::Conflicted)];
+        state.files.rows = vec![file(EntryKind::Changed), file(EntryKind::Conflicted)];
         assert_eq!(c(&state), Err("Resolve conflicts before committing".into()));
         state.hold_op(1);
         assert_eq!(c(&state), Err("An operation is running".into()));
         state.free_op();
-        state.files.pop();
+        state.files.rows.pop();
         assert_eq!(c(&state), Ok(AppIntent::Commit(CommitIntent::Open)));
     }
 
@@ -2879,7 +2882,7 @@ mod tests {
 
         // A clean tree with commits: nothing staged is a message-only amend.
         state.branch = Some(branch(Head::Branch("main".into())));
-        assert!(state.files.is_empty());
+        assert!(state.files.rows.is_empty());
         assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
         state.branch = Some(branch(Head::Detached("abc".into())));
         assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
@@ -2887,7 +2890,7 @@ mod tests {
         state.hold_op(1);
         assert_eq!(a(&state), Err(OP_RUNNING.into()));
         state.free_op();
-        state.files = vec![crate::git::FileEntry {
+        state.files.rows = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: 'U',
@@ -3441,14 +3444,14 @@ mod tests {
     /// and a bisect in progress.
     fn bisecting() -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files = vec![crate::git::FileEntry {
+        state.files.rows = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: 'M',
             worktree: '.',
             kind: EntryKind::Changed,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
@@ -5623,13 +5626,13 @@ mod tests {
             worktree,
             kind,
         };
-        state.files = vec![file(EntryKind::Changed, '.', 'M')];
-        state.selected = Some(0);
+        state.files.rows = vec![file(EntryKind::Changed, '.', 'M')];
+        state.files.selected = 0;
         assert_eq!(
             resolve_i(&state),
             Err("Only untracked files can be ignored".into())
         );
-        state.files = vec![file(EntryKind::Untracked, '?', '?')];
+        state.files.rows = vec![file(EntryKind::Untracked, '?', '?')];
         assert_eq!(
             resolve_i(&state),
             Ok(AppIntent::Files(FilesIntent::OpenIgnore))

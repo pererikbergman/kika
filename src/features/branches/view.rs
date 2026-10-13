@@ -414,7 +414,7 @@ mod tests {
     /// A workspace with the Branches panel focused, showing `branches`.
     fn focused(branches: Vec<Branch>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         load_list(&mut state.branches.list, Ok(branches));

@@ -92,10 +92,7 @@ fn hunk_disabled(state: &AppState) -> Option<Reason> {
         return Some("Loading…".into());
     }
     // A commit's file is not the selected working-tree one.
-    let entry = state
-        .selected
-        .and_then(|i| state.files.get(i))
-        .filter(|_| view.commit.is_none());
+    let entry = state.files.selected_row().filter(|_| view.commit.is_none());
     match entry.map(|e| e.kind) {
         Some(EntryKind::Conflicted) => return Some("Resolve the conflict first".into()),
         Some(EntryKind::Renamed | EntryKind::Copied) => {
@@ -566,14 +563,14 @@ mod tests {
         use crate::hunk_view::{HunkView, LineCursor};
 
         let mut state = AppState::new(Context::Workspace);
-        state.files = vec![crate::git::FileEntry {
+        state.files.rows = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '.',
             worktree: 'M',
             kind: EntryKind::Changed,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.diff_options.ignore_whitespace = true;
         let reason = |state: &AppState, scope, c| match resolve(
             registry(),
@@ -624,14 +621,14 @@ mod tests {
         use crate::hunk_view::{HunkView, LineCursor};
 
         let mut state = AppState::new(Context::Workspace);
-        state.files = vec![crate::git::FileEntry {
+        state.files.rows = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '.',
             worktree: 'M',
             kind: EntryKind::Changed,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.renderers = vec![ExternalRenderer {
             label: "difft".into(),
             argv: vec!["difft".into()],

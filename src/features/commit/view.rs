@@ -197,7 +197,7 @@ mod tests {
 
     fn with_commit(commit: CommitFlow) -> AppState {
         let mut state = loaded(vec![file("a.rs")]);
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.commit = commit;
         state
     }

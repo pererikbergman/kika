@@ -43,7 +43,12 @@ pub(crate) fn paste_disabled(state: &AppState) -> Option<Reason> {
         Some("No commit to cherry-pick onto".into())
     } else if let Some(reason) = in_progress_disabled(state) {
         Some(reason)
-    } else if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind != EntryKind::Untracked)
+    {
         Some("Commit or stash your changes first".into())
     } else {
         None

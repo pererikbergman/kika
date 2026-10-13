@@ -17,9 +17,10 @@ impl AppState {
                 self.status_selection = plan.selection;
                 self.refresh_status()
             } else {
-                match self.selected {
-                    Some(index) if plan.scopes.contains(&Scope::Diff) => self.select(index),
-                    _ => vec![],
+                if plan.scopes.contains(&Scope::Diff) && self.files.selected_row().is_some() {
+                    self.select(self.files.selected)
+                } else {
+                    vec![]
                 }
             };
         if plan.scopes.contains(&Scope::Submodules) {

@@ -31,11 +31,12 @@
 //!   ops the stage keys run; their argv stays in core `op_command`;
 //! - `view::render_files_panel`, `effects::load` and `effects::ignore`.
 //!
+//! Its rows are a `FilteredList<FileEntry>` (`list.rs` makes `FileEntry`
+//! a row), which owns their cursor, filter, range and load in flight.
+//!
 //! Kept cross-feature reads: none. The handlers and the renderer read the
-//! core files fields (`files`, `selected`, `files_filter`, `files_anchor`,
-//! `files_loaded`, `status_error`), `context` and `ignore_draft`, and call
-//! the core queries `files_visible` and `files_range`, and core `select`,
-//! `refresh_status` and `start_op`. The `.gitignore` write goes only
+//! core `files` list, `context` and `ignore_draft`, and call core
+//! `select`, `refresh_status` and `start_op`. The `.gitignore` write goes only
 //! through core `worktree_file::update`.
 //!
 //! What stays in core, and why (a feature never calls a sibling's
@@ -45,11 +46,9 @@
 //!   `reload_rebase_todo` (commits/rewrite);
 //! - `reselect`: it calls `files_open` (stash) and `review_files_shown`
 //!   (review);
-//! - `files_visible` and `files_selected_hidden`: core (`model.rs`,
-//!   `keymap.rs`) and a stash test call them;
-//! - `status_unchanged`, `files_range`, `files_range_paths`,
-//!   `RANGE_FILES_CHANGED` and `select_from` (the commit and stash closes
-//!   call it), the files fields of `AppState`, `refresh::Selection`,
+//! - `status_unchanged`, `files_range_paths`, `RANGE_FILES_CHANGED` and
+//!   `select_from` (the commit and stash closes call it), the `files`
+//!   field of `AppState`, `refresh::Selection`,
 //!   `src/git/status.rs`, the `Effect::LoadStatus` variant, and the
 //!   `StatusLoaded` intent and its `update()` arm;
 //! - the `ignore_draft` field, and the prompt kinds and menu item that
@@ -65,6 +64,7 @@ pub(crate) mod git;
 mod gitignore;
 mod intent;
 pub(crate) mod keys;
+mod list;
 mod update;
 pub(crate) mod view;
 

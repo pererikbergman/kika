@@ -67,7 +67,7 @@ impl AppState {
             | Focus::Stash
             | Focus::Conflict(_) => None,
             Focus::Files => {
-                let entry = self.selected.and_then(|i| self.files.get(i))?;
+                let entry = self.files.selected_row()?;
                 Some(Target {
                     path: entry.path.clone(),
                     line: None,

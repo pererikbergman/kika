@@ -519,14 +519,14 @@ mod tests {
         use crate::model::Context;
 
         let mut state = AppState::new(Context::Workspace);
-        state.files = vec![FileEntry {
+        state.files.rows = vec![FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '.',
             worktree: 'M',
             kind: EntryKind::Changed,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state
     }
 

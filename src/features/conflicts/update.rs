@@ -41,11 +41,7 @@ impl AppState {
         if self.context != Context::Workspace {
             return vec![];
         }
-        let Some(path) = self
-            .selected
-            .and_then(|i| self.files.get(i))
-            .map(|f| f.path.clone())
-        else {
+        let Some(path) = self.files.selected_row().map(|f| f.path.clone()) else {
             return vec![];
         };
         let seq = self.take_seq();
@@ -208,7 +204,7 @@ impl AppState {
         }
         let path = match &self.focus {
             Focus::Conflict(view) => view.path.clone(),
-            _ => match self.selected.and_then(|i| self.files.get(i)) {
+            _ => match self.files.selected_row() {
                 Some(entry) => entry.path.clone(),
                 None => return vec![],
             },

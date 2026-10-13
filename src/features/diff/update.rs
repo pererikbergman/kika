@@ -221,7 +221,7 @@ impl AppState {
         if self.context != Context::Workspace || self.op_is_running() {
             return vec![];
         }
-        let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
+        let Some(entry) = self.files.selected_row() else {
             return vec![];
         };
         if entry.worktree == 'D' || entry.index == 'D' {
@@ -483,7 +483,7 @@ mod tests {
         press(&mut state, KeyCode::Up);
         assert_eq!(view(&state).hunk, 0);
         // The file selection never moved.
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
             ),
         ] {
             let mut odd = state.clone();
-            odd.files[0].kind = kind;
+            odd.files.rows[0].kind = kind;
             assert_eq!(press(&mut odd, KeyCode::Char(' ')), vec![]);
             assert_eq!(odd.notice, Some(reason.into()), "{kind:?}");
         }
@@ -1119,8 +1119,8 @@ mod tests {
     #[test]
     fn editor_intents_do_nothing_outside_the_workspace() {
         let mut review = AppState::new(Context::Review { number: Some(1) });
-        review.files = three_files();
-        review.selected = Some(0);
+        review.files.rows = three_files();
+        review.files.selected = 0;
         for intent in [
             AppIntent::OpenInEditor,
             AppIntent::Diff(DiffIntent::EditHunk),

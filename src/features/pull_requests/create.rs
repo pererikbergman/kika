@@ -651,7 +651,7 @@ mod tests {
         state.forge.repo = Some(repo("acme", "widgets"));
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
-        state.files_loaded = true;
+        state.files.loaded = true;
         state
     }
 

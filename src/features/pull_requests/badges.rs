@@ -519,14 +519,14 @@ mod tests {
         );
 
         // Staging and committing go on as ever.
-        state.files = vec![FileEntry {
+        state.files.rows = vec![FileEntry {
             path: "a.rs".into(),
             orig_path: None,
             index: '?',
             worktree: '?',
             kind: EntryKind::Untracked,
         }];
-        state.selected = Some(0);
+        state.files.selected = 0;
         state.focus = Focus::Files;
         state.expanded = SidePanel::Files;
         let staged = toggle_stage(&mut state);
