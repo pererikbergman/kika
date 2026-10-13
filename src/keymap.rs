@@ -2480,7 +2480,13 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::bisect::BisectIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::custom_patch::CustomPatchIntent;
     use crate::features::commits::custom_patch::keys::patch_file_disabled;
+    use crate::features::commits::reflog::ReflogIntent;
+    use crate::features::commits::rewrite::RewriteIntent;
     use crate::features::commits::rewrite::keys::{
         commits_drop_disabled, commits_fixup_disabled, commits_reword_disabled,
         commits_squash_disabled,
@@ -2671,10 +2677,16 @@ mod tests {
         assert_eq!(KeyScope::Commits.title(), "Commits");
         let commits = |k| from(KeyScope::Commits, k);
         let none = KeyModifiers::NONE;
-        assert_eq!(commits(plain('j')), Some(CommitNext));
-        assert_eq!(commits(key(KeyCode::Down, none)), Some(CommitNext));
-        assert_eq!(commits(plain('k')), Some(CommitPrev));
-        assert_eq!(commits(key(KeyCode::Up, none)), Some(CommitPrev));
+        assert_eq!(commits(plain('j')), Some(Commits(CommitsIntent::Next)));
+        assert_eq!(
+            commits(key(KeyCode::Down, none)),
+            Some(Commits(CommitsIntent::Next))
+        );
+        assert_eq!(commits(plain('k')), Some(Commits(CommitsIntent::Prev)));
+        assert_eq!(
+            commits(key(KeyCode::Up, none)),
+            Some(Commits(CommitsIntent::Prev))
+        );
         assert_eq!(commits(plain('r')), Some(RefreshStatus));
         assert_eq!(commits(plain('q')), Some(Quit));
     }
@@ -2685,7 +2697,7 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(
             from(KeyScope::Commits, key(KeyCode::Enter, none)),
-            Some(OpenCommitFiles)
+            Some(Commits(CommitsIntent::OpenFiles))
         );
         assert_eq!(KeyScope::CommitFiles.parent(), Some(KeyScope::Workspace));
         assert_eq!(KeyScope::CommitFiles.title(), "Commit files");
@@ -2693,12 +2705,18 @@ mod tests {
         // Esc clears a search first, then goes back.
         assert_eq!(files(key(KeyCode::Esc, none)), Some(PaneEscape));
         for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(files(k), Some(CloseCommitFiles), "{k:?}");
+            assert_eq!(files(k), Some(Commits(CommitsIntent::CloseFiles)), "{k:?}");
         }
-        assert_eq!(files(plain('j')), Some(CommitFileNext));
-        assert_eq!(files(key(KeyCode::Down, none)), Some(CommitFileNext));
-        assert_eq!(files(plain('k')), Some(CommitFilePrev));
-        assert_eq!(files(key(KeyCode::Up, none)), Some(CommitFilePrev));
+        assert_eq!(files(plain('j')), Some(Commits(CommitsIntent::FileNext)));
+        assert_eq!(
+            files(key(KeyCode::Down, none)),
+            Some(Commits(CommitsIntent::FileNext))
+        );
+        assert_eq!(files(plain('k')), Some(Commits(CommitsIntent::FilePrev)));
+        assert_eq!(
+            files(key(KeyCode::Up, none)),
+            Some(Commits(CommitsIntent::FilePrev))
+        );
         assert_eq!(files(plain('q')), Some(Quit));
         assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
     }
@@ -3309,10 +3327,10 @@ mod tests {
     fn the_commits_panel_checks_out_reverts_and_resets_the_selected_commit() {
         use AppIntent::*;
         let commits = |k| from(KeyScope::Commits, k);
-        assert_eq!(commits(plain(' ')), Some(CheckoutCommit));
+        assert_eq!(commits(plain(' ')), Some(Commits(CommitsIntent::Checkout)));
         assert_eq!(
             commits(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
-            Some(RevertCommit)
+            Some(Commits(CommitsIntent::Revert))
         );
         assert_eq!(
             commits(key(KeyCode::Char('X'), KeyModifiers::SHIFT)),
@@ -3395,7 +3413,6 @@ mod tests {
 
     #[test]
     fn the_commits_panel_squashes_fixes_up_drops_and_rewords() {
-        use AppIntent::RewriteCommit;
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
         state.commits.rows = (0..2)
@@ -3421,22 +3438,50 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(on(&state, plain('s')), Some(RewriteCommit(Edit::Squash)));
+        assert_eq!(
+            on(&state, plain('s')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Squash)
+            )))
+        );
         assert_eq!(
             on(&state, key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
-            Some(RewriteCommit(Edit::Fixup))
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Fixup)
+            )))
         );
-        assert_eq!(on(&state, plain('d')), Some(RewriteCommit(Edit::Drop)));
-        assert_eq!(on(&state, plain('e')), Some(RewriteCommit(Edit::Reword)));
+        assert_eq!(
+            on(&state, plain('d')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Drop)
+            )))
+        );
+        assert_eq!(
+            on(&state, plain('e')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Reword)
+            )))
+        );
         assert_eq!(
             on(&state, key(KeyCode::Char('E'), KeyModifiers::SHIFT)),
-            Some(RewriteCommit(Edit::Stop))
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Stop)
+            )))
         );
-        assert_eq!(on(&state, plain('b')), Some(AppIntent::InsertBreak));
+        assert_eq!(
+            on(&state, plain('b')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::InsertBreak
+            )))
+        );
         let alt = KeyModifiers::ALT;
         let (up, down) = (
-            Some(AppIntent::MoveCommit(Direction::Up)),
-            Some(AppIntent::MoveCommit(Direction::Down)),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Move(Direction::Up),
+            ))),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Move(Direction::Down),
+            ))),
         );
         state.commits.selected = 1;
         assert_eq!(on(&state, key(KeyCode::Char('k'), alt)), up);
@@ -3447,11 +3492,11 @@ mod tests {
         // Plain arrows still move the cursor.
         assert_eq!(
             on(&state, key(KeyCode::Down, KeyModifiers::NONE)),
-            Some(AppIntent::CommitNext)
+            Some(AppIntent::Commits(CommitsIntent::Next))
         );
         assert_eq!(
             on(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(AppIntent::CommitPrev)
+            Some(AppIntent::Commits(CommitsIntent::Prev))
         );
         // Only plain arrows move the cursor now: Alt+arrow moves the
         // commit, and Shift+arrow is left unbound.
@@ -3524,7 +3569,10 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmResetHard));
+        assert_eq!(
+            resolve_in(plain('y')),
+            Some(AppIntent::Commits(CommitsIntent::ConfirmResetHard))
+        );
         assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
             resolve_in(key(KeyCode::Esc, none)),
@@ -3790,8 +3838,20 @@ mod tests {
                 Resolution::Run(binding) => Some(binding.intent.clone()),
                 other => panic!("{scope:?} {k:?}: {other:?}"),
             };
-            assert_eq!(run(ctrl('z')), Some(AppIntent::Undo), "{scope:?}");
-            assert_eq!(run(ctrl('r')), Some(AppIntent::Redo), "{scope:?}");
+            assert_eq!(
+                run(ctrl('z')),
+                Some(AppIntent::Commits(CommitsIntent::Reflog(
+                    ReflogIntent::Undo
+                ))),
+                "{scope:?}"
+            );
+            assert_eq!(
+                run(ctrl('r')),
+                Some(AppIntent::Commits(CommitsIntent::Reflog(
+                    ReflogIntent::Redo
+                ))),
+                "{scope:?}"
+            );
         }
         // Plain `z` still zooms and plain `r` still refreshes.
         assert_eq!(
@@ -4870,11 +4930,11 @@ mod tests {
                     | AbortOperation
                     | PickConflict(_)
                     | OpenMergeTool
-                    | RevertCommit
-                    | PasteCommits
+                    | Commits(CommitsIntent::Revert)
+                    | Commits(CommitsIntent::Copy(CopyIntent::Paste))
                     | OpenMenu(MenuId::Reset)
-                    | ConfirmResetHard
-                    | ConfirmLeaveCommits
+                    | Commits(CommitsIntent::ConfirmResetHard)
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits))
                     | OpenMenu(MenuId::Stash)
                     | OpenStashFiles
                     | ApplyStash
@@ -4888,26 +4948,26 @@ mod tests {
                     | DeleteTag
                     | ConfirmDeleteTag
                     | PushTag
-                    | RewriteCommit(_)
-                    | MoveCommit(_)
-                    | InsertBreak
-                    | CreateFixup
-                    | Autosquash
-                    | BisectHead(_)
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(_)))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Move(_)))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::InsertBreak))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash))
+                    | Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(_)))
                     | OpenMenu(MenuId::Bisect)
                     | OpenWorktree
                     | AddWorktree
                     | RemoveWorktree
                     | ConfirmRemoveWorktree
-                    | Undo
-                    | Redo
-                    | ConfirmTravel
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::Undo))
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::Redo))
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::ConfirmTravel))
                     | ListEscape
                     | OpenMenu(MenuId::PullRequest)
                     | ConfirmCreatePullRequest
                     // It asks GitHub for the badges again.
                     | RefreshPullRequests
-                    | OpenPatchMenu
+                    | Commits(CommitsIntent::CustomPatch(CustomPatchIntent::OpenMenu))
                     // Review mode reaches GitHub or starts the browser, and
                     // a pick may open a check's page.
                     | EnterReview
@@ -5223,8 +5283,18 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             other => panic!("{c}: {other:?}"),
         };
-        assert_eq!(status('g'), Some(BisectHead(BisectMark::Good)));
-        assert_eq!(status('b'), Some(BisectHead(BisectMark::Bad)));
+        assert_eq!(
+            status('g'),
+            Some(Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+                BisectMark::Good
+            ))))
+        );
+        assert_eq!(
+            status('b'),
+            Some(Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+                BisectMark::Bad
+            ))))
+        );
         assert_eq!(status('s'), Some(SkipOperation));
         assert_eq!(status('a'), Some(AbortOperation));
     }

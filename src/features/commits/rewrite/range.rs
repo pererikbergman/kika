@@ -5,6 +5,8 @@
 use super::{range_log_plan, range_rewrite_disabled};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::commit_files::CommitId;
 use crate::git::rebase_plan::{Edit, RebasePlan, TodoAction};
 use crate::intent::AppIntent;
@@ -29,7 +31,9 @@ pub(crate) fn drop_range_question(ids: Vec<CommitId>) -> ConfirmQuestion {
             ids.len()
         ),
         answer: Answer::YOnly,
-        then: Then::Intent(Box::new(AppIntent::ConfirmDropRange(ids))),
+        then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::ConfirmDropRange(ids),
+        )))),
         range: false,
         head: None,
     }
@@ -302,7 +306,9 @@ mod tests {
         let mut state = on_log(0);
         keys(&mut state, "Vjj");
         assert_eq!(
-            state.update(AppIntent::ConfirmDropRange(vec![id(0), id(1)])),
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmDropRange(vec![id(0), id(1)])
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some(SELECTION_CHANGED.into()));
@@ -360,11 +366,11 @@ mod tests {
     fn reword_moves_and_the_other_rewrites_still_refuse_a_range() {
         use crate::git::rebase_plan::Direction;
         let intents = [
-            AppIntent::RewriteCommit(Edit::Reword),
-            AppIntent::RewriteCommit(Edit::Stop),
-            AppIntent::RewriteCommit(Edit::Pick),
-            AppIntent::MoveCommit(Direction::Up),
-            AppIntent::MoveCommit(Direction::Down),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Reword))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Stop))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Pick))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Up))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Down))),
         ];
         for intent in intents {
             let mut state = on_log(1);

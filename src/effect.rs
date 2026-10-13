@@ -401,7 +401,7 @@ pub enum Effect {
 
     // --- commits ---
     /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to
-    /// `query`; always answered by one `CommitsLoaded`.
+    /// `query`; always answered by one `CommitsIntent::PageLoaded`.
     LoadCommits {
         tag: Tag,
         tip: Option<String>,
@@ -409,37 +409,37 @@ pub enum Effect {
         query: LogQuery,
     },
     /// List the files `range` changed; always answered by one
-    /// `CommitFilesLoaded`.
+    /// `CommitsIntent::FilesLoaded`.
     LoadCommitFiles {
         tag: Tag,
         range: CommitRange,
     },
     /// Read which commits are unpushed or unmerged; always answered by
-    /// one `MarkersLoaded`.
+    /// one `CommitsIntent::MarkersLoaded`.
     LoadMarkers {
         tag: Tag,
     },
     /// Read where every local branch points; always answered by one
-    /// `BranchTipsLoaded`.
+    /// `CommitsIntent::TipsLoaded`.
     LoadBranchTips {
         tag: Tag,
     },
 
     // --- commits/reflog ---
     /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
-    /// `ReflogLoaded`.
+    /// `ReflogIntent::Loaded`.
     LoadReflog {
         tag: Tag,
     },
 
     // --- commits/rewrite ---
     /// Find the commits the staged lines come from; always answered by
-    /// one `FixupBaseFound`.
+    /// one `RewriteIntent::FixupBaseFound`.
     FindFixupBase {
         tag: Tag,
     },
     /// Read the stopped rebase's todo list and what it has done; always
-    /// answered by one `RebaseTodoLoaded`.
+    /// answered by one `RewriteIntent::TodoLoaded`.
     LoadRebaseTodo {
         tag: Tag,
         /// The installed git reads `core.commentString` (2.45).
@@ -448,7 +448,7 @@ pub enum Effect {
     /// Check `content` as an edit of `expected`, both read with the
     /// `comment` prefix `expected` was loaded with, then write it over the
     /// todo list at `path` only while it still holds `expected`; always
-    /// answered by one `RebaseTodoWritten`.
+    /// answered by one `RewriteIntent::TodoWritten`.
     WriteRebaseTodo {
         tag: Tag,
         path: PathBuf,
@@ -457,7 +457,7 @@ pub enum Effect {
         comment: Vec<u8>,
     },
     /// List the commits only `head` reaches before `op` moves `HEAD` to
-    /// `target`; always answered by one `LeftBehindChecked`.
+    /// `target`; always answered by one `RewriteIntent::LeftBehindChecked`.
     CheckLeftBehind {
         tag: Tag,
         op: GitOp,
@@ -467,7 +467,7 @@ pub enum Effect {
 
     // --- commits/copy ---
     /// Read commit `oid`'s full message to copy it; always answered by
-    /// one `CommitMessageLoaded`.
+    /// one `CopyIntent::MessageLoaded`.
     LoadCommitMessage {
         tag: Tag,
         oid: CommitId,
@@ -475,7 +475,7 @@ pub enum Effect {
 
     // --- commits/compare ---
     /// Read both ends of a comparison as commits; always answered by one
-    /// `DiffResolved`.
+    /// `CompareIntent::Resolved`.
     ResolveDiff {
         tag: Tag,
         base: DiffEnd,
@@ -1285,6 +1285,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::compare::CompareIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::reflog::ReflogIntent;
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::git::remote::RemoteFailure;
@@ -1466,11 +1470,13 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommitMessageLoaded {
-                tag,
-                oid,
-                result: Ok("subj".into()),
-            })
+            Some(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::MessageLoaded {
+                    tag,
+                    oid,
+                    result: Ok("subj".into()),
+                }
+            )))
         );
         fake.assert_done();
         let events = events.lock().unwrap().clone();
@@ -2087,13 +2093,15 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::DiffResolved {
-                tag: user,
-                result: Ok(CommitRange {
-                    oid: target,
-                    parent: CommitId::parse("aaa111"),
-                }),
-            })
+            Some(AppIntent::Commits(CommitsIntent::Compare(
+                CompareIntent::Resolved {
+                    tag: user,
+                    result: Ok(CommitRange {
+                        oid: target,
+                        parent: CommitId::parse("aaa111"),
+                    }),
+                }
+            )))
         );
 
         // Output that is not hex is never taken for a commit.
@@ -2103,10 +2111,10 @@ mod tests {
             target: DiffEnd::Branch(BranchName::from_bytes(b"topic")),
         });
         match rx.recv().await {
-            Some(AppIntent::DiffResolved {
+            Some(AppIntent::Commits(CommitsIntent::Compare(CompareIntent::Resolved {
                 tag,
                 result: Err(message),
-            }) => {
+            }))) => {
                 assert_eq!(tag, user);
                 assert!(message.contains("not a commit id"), "{message:?}");
             }
@@ -2507,10 +2515,10 @@ mod tests {
 
         runtime.spawn(Effect::LoadReflog { tag: background(8) });
         match rx.recv().await {
-            Some(AppIntent::ReflogLoaded {
+            Some(AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Loaded {
                 tag,
                 result: Ok(reflog),
-            }) => {
+            }))) => {
                 assert_eq!(tag, background(8));
                 assert_eq!(reflog.entries.len(), 1);
                 assert_eq!(
@@ -2526,10 +2534,10 @@ mod tests {
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
         runtime.spawn(Effect::LoadReflog { tag: background(9) });
         match rx.recv().await {
-            Some(AppIntent::ReflogLoaded {
+            Some(AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Loaded {
                 tag,
                 result: Err(message),
-            }) => {
+            }))) => {
                 assert_eq!(tag, background(9));
                 assert!(!message.contains(char::is_control), "{message:?}");
             }

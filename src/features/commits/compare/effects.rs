@@ -8,13 +8,15 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::background;
 use crate::diff_mark::DiffEnd;
 use crate::effect::Tag;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::compare::CompareIntent;
 use crate::git::GitRunner;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::log::branch_commit;
 use crate::intent::AppIntent;
 
 /// Read both ends of a comparison as commits and send the range from
-/// `base` to `target` back as `DiffResolved`.
+/// `base` to `target` back as `CompareIntent::Resolved`.
 pub(crate) fn resolve(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -34,7 +36,12 @@ pub(crate) fn resolve(
         },
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git rev-parse"),
-        move |result| AppIntent::DiffResolved { tag, result },
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Compare(CompareIntent::Resolved {
+                tag,
+                result,
+            }))
+        },
     );
 }
 

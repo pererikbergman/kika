@@ -9,6 +9,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::features::command_log::CommandLogView;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
@@ -570,7 +572,9 @@ impl PromptKind {
             PromptKind::TagMessage => AppIntent::TagMessaged(text),
             PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
             PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
-            PromptKind::PatchCommitMessage => AppIntent::PatchCommitMessage(text),
+            PromptKind::PatchCommitMessage => AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::CommitMessage(text),
+            )),
         }
     }
 }

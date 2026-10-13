@@ -4,6 +4,8 @@
 //! position there is behaviour.
 
 use crate::confirm_question::Answer;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::reflog::ReflogIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
 use crate::list_filter::LogFilterField;
@@ -45,7 +47,7 @@ pub(crate) static REFLOG_WORKSPACE: &[Binding] = &[
         id: "workspace.undo",
         keys: &[KeyPattern::exact(KeyCode::Char('z'), KeyModifiers::CONTROL)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::Undo,
+        intent: AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Undo)),
         description: "Undo the last commit, checkout, reset or rebase, saying first what moves",
         label: "undo",
         bar: false,
@@ -55,7 +57,7 @@ pub(crate) static REFLOG_WORKSPACE: &[Binding] = &[
         id: "workspace.redo",
         keys: &[KeyPattern::exact(KeyCode::Char('r'), KeyModifiers::CONTROL)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::Redo,
+        intent: AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Redo)),
         description: "Redo what the last undo reversed, saying first what moves",
         label: "redo",
         bar: false,
@@ -72,7 +74,7 @@ pub(crate) static REFLOG_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Reflog,
-        intent: AppIntent::ReflogNext,
+        intent: AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Next)),
         description: "Select the next reflog entry",
         label: "",
         bar: false,
@@ -85,7 +87,7 @@ pub(crate) static REFLOG_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Reflog,
-        intent: AppIntent::ReflogPrev,
+        intent: AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Prev)),
         description: "Select the previous reflog entry",
         label: "",
         bar: false,
@@ -98,7 +100,7 @@ pub(crate) static REFLOG_KEYS: &[Binding] = &[
             KeyPattern::exact(KeyCode::Char(']'), NONE),
         ],
         scope: KeyScope::Reflog,
-        intent: AppIntent::SwitchCommitsTab,
+        intent: AppIntent::Commits(CommitsIntent::SwitchTab),
         description: "Show the log",
         label: "log",
         bar: true,
@@ -134,7 +136,7 @@ pub(crate) static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
         id: "travel.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::Travel,
-        intent: AppIntent::ConfirmTravel,
+        intent: AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::ConfirmTravel)),
         description: "Yes, do what the question says",
         label: "yes",
         bar: true,
@@ -171,7 +173,7 @@ pub(crate) static REFLOG_LOG_FILTER: &[Binding] = &[
         id: "reflog.filter_path",
         keys: &[KeyPattern::any(KeyCode::Char('L'))],
         scope: KeyScope::Reflog,
-        intent: AppIntent::OpenLogFilter(LogFilterField::Path),
+        intent: AppIntent::Commits(CommitsIntent::OpenLogFilter(LogFilterField::Path)),
         description: "Show only the commits that changed a typed path, across renames",
         label: "log of path",
         bar: false,
@@ -181,7 +183,7 @@ pub(crate) static REFLOG_LOG_FILTER: &[Binding] = &[
         id: "reflog.filter_author",
         keys: &[KeyPattern::any(KeyCode::Char('A'))],
         scope: KeyScope::Reflog,
-        intent: AppIntent::OpenLogFilter(LogFilterField::Author),
+        intent: AppIntent::Commits(CommitsIntent::OpenLogFilter(LogFilterField::Author)),
         description: "Show only the commits by a typed author",
         label: "log by author",
         bar: false,
@@ -215,7 +217,12 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmTravel));
+        assert_eq!(
+            resolve_in(plain('y')),
+            Some(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::ConfirmTravel
+            )))
+        );
         assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
             resolve_in(key(KeyCode::Esc, none)),
@@ -233,19 +240,31 @@ mod tests {
     fn brackets_switch_the_commits_panel_between_log_and_reflog() {
         use AppIntent::*;
         for c in ['[', ']'] {
-            assert_eq!(from(KeyScope::Commits, plain(c)), Some(SwitchCommitsTab));
-            assert_eq!(from(KeyScope::Reflog, plain(c)), Some(SwitchCommitsTab));
+            assert_eq!(
+                from(KeyScope::Commits, plain(c)),
+                Some(Commits(CommitsIntent::SwitchTab))
+            );
+            assert_eq!(
+                from(KeyScope::Reflog, plain(c)),
+                Some(Commits(CommitsIntent::SwitchTab))
+            );
         }
         let none = KeyModifiers::NONE;
-        assert_eq!(from(KeyScope::Reflog, plain('j')), Some(ReflogNext));
+        assert_eq!(
+            from(KeyScope::Reflog, plain('j')),
+            Some(Commits(CommitsIntent::Reflog(ReflogIntent::Next)))
+        );
         assert_eq!(
             from(KeyScope::Reflog, key(KeyCode::Down, none)),
-            Some(ReflogNext)
+            Some(Commits(CommitsIntent::Reflog(ReflogIntent::Next)))
         );
-        assert_eq!(from(KeyScope::Reflog, plain('k')), Some(ReflogPrev));
+        assert_eq!(
+            from(KeyScope::Reflog, plain('k')),
+            Some(Commits(CommitsIntent::Reflog(ReflogIntent::Prev)))
+        );
         assert_eq!(
             from(KeyScope::Reflog, key(KeyCode::Up, none)),
-            Some(ReflogPrev)
+            Some(Commits(CommitsIntent::Reflog(ReflogIntent::Prev)))
         );
         // The log's actions do not reach the reflog's rows.
         for c in [' ', 's', 'd', 'e'] {

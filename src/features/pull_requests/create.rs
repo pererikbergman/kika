@@ -805,8 +805,14 @@ mod tests {
             subject: "s".into(),
             subject_altered: false,
         }];
+        // The menu's own intent, as a user picks it.
+        let copy_url = menu::items(MenuId::Copy)
+            .iter()
+            .find(|item| item.label == "Forge URL")
+            .map(|item| item.intent.clone())
+            .expect("the Copy menu has a Forge URL item");
         assert_eq!(reason(&state, "Forge URL"), None);
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl));
+        let effects = state.update(copy_url.clone());
         let url = format!("https://github.com/acme/widgets/commit/{OID}");
         assert_eq!(effects, [Effect::Clipboard(url)]);
         assert!(
@@ -820,10 +826,7 @@ mod tests {
 
         state.branches.remotes.list.rows.clear();
         assert_eq!(reason(&state, "Forge URL").as_deref(), Some(NO_FORGE));
-        assert_eq!(
-            state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl)),
-            vec![]
-        );
+        assert_eq!(state.update(copy_url), vec![]);
         assert_eq!(state.notice.as_deref(), Some(NO_FORGE));
     }
 

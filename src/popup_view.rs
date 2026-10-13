@@ -442,6 +442,8 @@ mod tests {
 
     use super::*;
     use crate::confirm_question::quit_question;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::copy::CopyIntent;
     use crate::features::pull_requests::create_question;
     use crate::git::FileEntry;
     use crate::git::status::EntryKind;
@@ -2031,9 +2033,9 @@ mod tests {
         }
 
         state.popups.clear();
-        state.update(crate::intent::AppIntent::CopyCommitText(
-            crate::clipboard::CopyWhat::Hash,
-        ));
+        state.update(crate::intent::AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(crate::clipboard::CopyWhat::Hash),
+        )));
         let (_, rows) = draw(&state, 80, 24);
         let bar = rows.last().unwrap();
         assert!(bar.contains("Copied hash: abc1234def"), "{bar:?}");

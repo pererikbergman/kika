@@ -3,15 +3,10 @@ use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
-use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::effect::Tag;
 use crate::features::command_log::CommandLogIntent;
-use crate::features::commits::custom_patch::{PatchAction, PatchChoice};
-use crate::features::commits::git::Tip;
-use crate::features::commits::reflog::Reflog;
-use crate::features::commits::rewrite::FixupBase;
-use crate::features::commits::rewrite::TodoFile;
+use crate::features::commits::CommitsIntent;
 use crate::features::conflicts::Choice;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::features::diff::renderers::ExternalRenderer;
@@ -23,15 +18,12 @@ use crate::features::worktrees::Worktree;
 use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
-use crate::git::bisect::BisectMark;
 use crate::git::blame::BlameLine;
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+use crate::git::commit_files::CommitRange;
 use crate::git::diff::{DiffChunk, DiffLine};
-use crate::git::log::{LogPage, Markers};
 use crate::git::patch::FilePatch;
 use crate::git::path::RepoPath;
-use crate::git::rebase_plan::{Direction, Edit};
 use crate::git::refs::RefsSnapshot;
 use crate::git::remote::{RemoteFailure, RemoteOp};
 use crate::git::remotes::Remote;
@@ -41,9 +33,8 @@ use crate::git::submodule::Submodule;
 use crate::git::tags::TagRef;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
-use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
-use crate::op::{GitOp, MergeStrategy, ResetMode};
+use crate::op::{GitOp, MergeStrategy};
 use crate::popup::PromptKind;
 use crate::prompts::PromptFacts;
 use crate::watch::WatchEvent;
@@ -93,8 +84,6 @@ pub enum AppIntent {
     MenuSelect,
     /// Ask "Quit Kika?" (the menu's Quit item).
     AskQuit,
-    /// Ask before resetting the bisect (the Bisect menu's reset item).
-    AskBisectReset,
     ConfirmYes,
     ConfirmNo,
     /// Ask for a line of text; the text comes back as the kind's intent.
@@ -768,171 +757,9 @@ pub enum AppIntent {
     PushTag,
 
     // --- commits ---
-    /// A page of the log finished; `tag` says which load, `skip` which
-    /// page. `Ok` also carries the unix time it was read at.
-    CommitsLoaded {
-        tag: Tag,
-        skip: usize,
-        result: Result<(LogPage, i64), String>,
-    },
-    /// The push and merge markers finished; `tag` says which load.
-    MarkersLoaded {
-        tag: Tag,
-        result: Result<Markers, String>,
-    },
-    /// The branch tips were read; `tag` says which load.
-    BranchTipsLoaded {
-        tag: Tag,
-        result: Result<Vec<Tip>, String>,
-    },
-    /// Move the commit cursor down or up.
-    CommitNext,
-    CommitPrev,
-    /// Show the selected commit's files in place of the log.
-    OpenCommitFiles,
-    /// Back from a commit's files to the log, at the same commit.
-    CloseCommitFiles,
-    /// Move the cursor in a commit's files down or up.
-    CommitFileNext,
-    CommitFilePrev,
-    /// A commit's files were read; `tag` says which load.
-    CommitFilesLoaded {
-        tag: Tag,
-        result: Result<Vec<CommitFile>, String>,
-    },
-    /// Show the Commits panel's other tab: the log or the reflog.
-    SwitchCommitsTab,
-    /// Type the path or the author git narrows the log to.
-    OpenLogFilter(LogFilterField),
-    /// Show the selected file's history in the Commits panel.
-    LogOfFile,
-    /// Ask before checking out the selected commit as a detached `HEAD`.
-    CheckoutCommit,
-    /// Make a commit that undoes the selected one.
-    RevertCommit,
-    /// Reset the current branch to the selected commit. A hard reset asks
-    /// first.
-    ResetTo(ResetMode),
-    /// Reset hard, as the question asked.
-    ConfirmResetHard,
-
-    // --- commits/reflog ---
-    /// Move the Reflog tab's selection down or up.
-    ReflogNext,
-    ReflogPrev,
-    /// `HEAD`'s reflog was read; `tag` says which load.
-    ReflogLoaded {
-        tag: Tag,
-        result: Result<Reflog, String>,
-    },
-    /// Reverse the last action, or reapply the last one undone. Each reads
-    /// the reflog afresh, then asks before anything moves.
-    Undo,
-    Redo,
-    /// Run the undo or redo the open question describes.
-    ConfirmTravel,
-
-    // --- commits/rewrite ---
-    /// Rewrite the selected commit with git's interactive rebase, or
-    /// change the selected todo row's action while a rebase is stopped.
-    RewriteCommit(Edit),
-    /// Move the selected commit or todo row up (newer) or down (older).
-    MoveCommit(Direction),
-    /// Stop the rebase after the selected commit, or toggle the stop
-    /// after the selected todo row.
-    InsertBreak,
-    /// Commit the staged change as a `fixup!` of the selected commit.
-    CreateFixup,
-    /// Ask, then fold every `fixup!` commit into the commit it fixes.
-    Autosquash,
-    /// Autosquash, as the question asked.
-    ConfirmAutosquash,
-    /// Drop a log range, as the question asked: the full ids it held then,
-    /// newest first, so a range that changed since is not dropped.
-    ConfirmDropRange(Vec<CommitId>),
-    /// Find which commit last touched the staged lines.
-    FindFixupBase,
-    /// The commits the staged lines come from, or why they are not known.
-    FixupBaseFound {
-        tag: Tag,
-        result: Result<FixupBase, String>,
-    },
-    /// The read of the commits a detached `HEAD` would leave behind: which
-    /// op was planned, from which `HEAD`, and what was found or why not.
-    LeftBehindChecked {
-        tag: Tag,
-        op: GitOp,
-        head: CommitId,
-        result: Result<Vec<CommitId>, String>,
-    },
-    /// Leave the commits behind, as the question asked.
-    ConfirmLeaveCommits,
-    /// The stopped rebase's todo list was read; `None` when there is none
-    /// to edit, as in a rebase that is not interactive.
-    RebaseTodoLoaded {
-        tag: Tag,
-        result: Result<Option<TodoFile>, String>,
-    },
-    /// An edited todo list was written, or why not.
-    RebaseTodoWritten {
-        tag: Tag,
-        result: Result<(), String>,
-    },
-
-    // --- commits/copy ---
-    /// Add the selected commit to the copied set, or take it out.
-    CopyCommit,
-    /// Empty the copied set.
-    ClearCopied,
-    /// Cherry-pick the copied commits onto the current branch.
-    PasteCommits,
-    /// Put the selected commit's hash, subject or message on the system
-    /// clipboard.
-    CopyCommitText(CopyWhat),
-    /// A commit's full message was read to copy it; `tag` says which read.
-    CommitMessageLoaded {
-        tag: Tag,
-        oid: CommitId,
-        result: Result<String, String>,
-    },
-
-    // --- commits/custom_patch ---
-    /// Pick the selected commit file whole into the custom patch, or drop
-    /// it.
-    PatchToggleFile,
-    /// Show what can be done with the custom patch.
-    OpenPatchMenu,
-    /// A rewrite chosen from the patch menu: ask its message first, or
-    /// ask whether to go ahead.
-    ChoosePatchAction(PatchChoice),
-    /// The new commit's message for "New commit after source", as typed.
-    PatchCommitMessage(String),
-    /// Run the rewrite, as the question asked.
-    ConfirmPatchAction(PatchAction),
-    /// Drop the custom patch. Only Kika's selection goes; the repository
-    /// does not change.
-    ResetPatch,
-
-    // --- commits/bisect ---
-    /// Mark the selected commit in the Commits panel; with no bisect in
-    /// progress, the mark starts one.
-    BisectSelected(BisectMark),
-    /// Mark the commit git checked out to test.
-    BisectHead(BisectMark),
-    /// End the bisect, as the question asked.
-    ConfirmBisectReset,
-
-    // --- commits/compare ---
-    /// Mark the selected commit or local branch to diff against, or clear
-    /// the mark when it is already there.
-    ToggleDiffMark,
-    /// Compare the diff mark with the selected local branch.
-    OpenDiff,
-    /// Both ends of a comparison were read as commits; `tag` says which.
-    DiffResolved {
-        tag: Tag,
-        result: Result<CommitRange, String>,
-    },
+    /// Everything the commits subtree does: the panel and its
+    /// sub-features. Its own `update` handles it.
+    Commits(CommitsIntent),
 }
 
 /// How far to scroll the diff pane.
@@ -947,6 +774,12 @@ pub enum Scroll {
 impl From<CommandLogIntent> for AppIntent {
     fn from(intent: CommandLogIntent) -> Self {
         Self::CommandLog(intent)
+    }
+}
+
+impl From<CommitsIntent> for AppIntent {
+    fn from(intent: CommitsIntent) -> Self {
+        Self::Commits(intent)
     }
 }
 

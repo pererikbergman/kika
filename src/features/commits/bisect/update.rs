@@ -2,15 +2,30 @@
 //! git checked out, asking before the reset and running it, and saying
 //! what a status load found.
 
+use super::BisectIntent;
 use crate::bisect;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
+use crate::features::commits::CommitsIntent;
 use crate::git::bisect::{BisectMark, BisectState};
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+
+/// The bisect's half of `update`, which `commits::update` passes
+/// `CommitsIntent::Bisect` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: BisectIntent) -> Vec<Effect> {
+    match intent {
+        BisectIntent::MarkSelected(mark) => return state.bisect_selected(mark),
+        BisectIntent::MarkHead(mark) => return state.bisect_head(mark),
+        BisectIntent::AskReset => state.ask_bisect_reset(),
+        BisectIntent::ConfirmReset => return state.bisect_reset(),
+    }
+    Vec::new()
+}
 
 /// Bisecting: marks from the Commits and Status panels, the reset, and
 /// saying what a status load found.
@@ -71,7 +86,9 @@ impl AppState {
             title: "Reset bisect".into(),
             text: bisect::reset_question(bisect::bisect_state(self)),
             answer: Answer::YOnly,
-            then: Then::Intent(Box::new(AppIntent::ConfirmBisectReset)),
+            then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::ConfirmReset,
+            )))),
             range: false,
             head: None,
         }
@@ -206,7 +223,9 @@ mod tests {
         let (_, op) = op_of(&press_char(&mut state, 's'));
         assert_eq!(op, bisect_mark(BisectMark::Skip, "c1", false));
         state.free_op();
-        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Good)));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::MarkSelected(BisectMark::Good),
+        ))));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c0", false));
     }
 
@@ -238,7 +257,9 @@ mod tests {
             state.files = files;
             state.branch = Some(branch);
             assert_eq!(
-                state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+                state.update(AppIntent::Commits(CommitsIntent::Bisect(
+                    BisectIntent::MarkSelected(BisectMark::Bad)
+                ))),
                 vec![]
             );
             assert_eq!(state.notice, Some(reason.into()));
@@ -246,7 +267,11 @@ mod tests {
         }
         let mut untracked_only = ready_to_bisect();
         untracked_only.files = vec![untracked("new.txt")];
-        op_of(&untracked_only.update(AppIntent::BisectSelected(BisectMark::Good)));
+        op_of(
+            &untracked_only.update(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::MarkSelected(BisectMark::Good),
+            ))),
+        );
     }
 
     #[test]
@@ -264,7 +289,9 @@ mod tests {
             assert_eq!(state.notice, Some(bisect::CUSTOM_TERMS.into()), "{c}");
         }
         assert_eq!(
-            state.update(AppIntent::BisectSelected(BisectMark::Bad)),
+            state.update(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::MarkSelected(BisectMark::Bad)
+            ))),
             vec![]
         );
         assert_eq!(state.held_seq(), None);
@@ -303,6 +330,11 @@ mod tests {
         }
         idle.update(AppIntent::MenuSelect);
         assert_eq!(idle.notice, Some(bisect::NO_BISECT.into()));
-        assert_eq!(idle.update(AppIntent::ConfirmBisectReset), vec![]);
+        assert_eq!(
+            idle.update(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::ConfirmReset
+            ))),
+            vec![]
+        );
     }
 }

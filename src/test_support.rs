@@ -7,7 +7,10 @@ use crate::features::branches::BranchesTab;
 use crate::features::branches::remotes::{RemoteLine, lines};
 use crate::features::commit::CommitEditor;
 use crate::features::commits::CommitFilesList;
+use crate::features::commits::CommitsIntent;
 use crate::features::commits::reflog::Reflog;
+use crate::features::commits::reflog::ReflogIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::filtered_list::{FilteredList, Row};
 use crate::forge::ForgeHost;
@@ -467,11 +470,11 @@ pub(crate) fn commits_load(effects: &[Effect]) -> (Tag, Option<String>, usize) {
 }
 
 pub(crate) fn commits_loaded(tag: Tag, skip: usize, page: LogPage) -> AppIntent {
-    AppIntent::CommitsLoaded {
+    AppIntent::Commits(CommitsIntent::PageLoaded {
         tag,
         skip,
         result: Ok((page, 1_000)),
-    }
+    })
 }
 
 /// The markers load in `effects`: its tag.
@@ -549,11 +552,11 @@ pub(crate) fn loads(effects: &[Effect]) -> Vec<(Tag, Option<String>, usize, LogQ
 /// Answer a page load; a short page that is not the last asks for
 /// the next one at once.
 pub(crate) fn answer(state: &mut AppState, tag: Tag, skip: usize, page: LogPage) -> Vec<Effect> {
-    state.update(AppIntent::CommitsLoaded {
+    state.update(AppIntent::Commits(CommitsIntent::PageLoaded {
         tag,
         skip,
         result: Ok((page, 1_000)),
-    })
+    }))
 }
 
 /// Started in a repository, the Commits panel focused on `n` commits.
@@ -602,10 +605,10 @@ pub(crate) fn two_commit_files() -> Vec<CommitFile> {
 /// Open `c5` and answer with `files`; returns the effects of the answer.
 pub(crate) fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect> {
     let (tag, _) = files_load(&press(state, KeyCode::Enter));
-    state.update(AppIntent::CommitFilesLoaded {
+    state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
         tag,
         result: Ok(files),
-    })
+    }))
 }
 
 /// A file, a rename and another file.
@@ -891,17 +894,20 @@ pub(crate) fn reset_op(mode: ResetMode) -> GitOp {
 /// Each move a detached `HEAD` checks first, as its intent and op.
 pub(crate) fn moves() -> [(AppIntent, GitOp); 4] {
     [
-        (AppIntent::CheckoutCommit, GitOp::CheckoutCommit(cid("c1"))),
         (
-            AppIntent::ResetTo(ResetMode::Soft),
+            AppIntent::Commits(CommitsIntent::Checkout),
+            GitOp::CheckoutCommit(cid("c1")),
+        ),
+        (
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
             reset_op(ResetMode::Soft),
         ),
         (
-            AppIntent::ResetTo(ResetMode::Mixed),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Mixed)),
             reset_op(ResetMode::Mixed),
         ),
         (
-            AppIntent::ResetTo(ResetMode::Hard),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
             reset_op(ResetMode::Hard),
         ),
     ]
@@ -914,12 +920,14 @@ pub(crate) fn checked(
 ) -> (AppState, Vec<Effect>) {
     let mut state = detached_on_commit();
     let (tag, op) = check_of(&state.update(intent));
-    let effects = state.update(AppIntent::LeftBehindChecked {
-        tag,
-        op,
-        head: cid("c0"),
-        result,
-    });
+    let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+        RewriteIntent::LeftBehindChecked {
+            tag,
+            op,
+            head: cid("c0"),
+            result,
+        },
+    )));
     (state, effects)
 }
 
@@ -1177,11 +1185,15 @@ pub(crate) fn commit_reflog(head: char) -> Reflog {
 /// `state` after an undo whose fresh reflog read answered with
 /// `reflog`.
 pub(crate) fn undo_with(state: &mut AppState, reflog: Reflog) -> Vec<Effect> {
-    let tag = reflog_tag(&state.update(AppIntent::Undo));
-    state.update(AppIntent::ReflogLoaded {
-        tag,
-        result: Ok(reflog),
-    })
+    let tag = reflog_tag(&state.update(AppIntent::Commits(CommitsIntent::Reflog(
+        ReflogIntent::Undo,
+    ))));
+    state.update(AppIntent::Commits(CommitsIntent::Reflog(
+        ReflogIntent::Loaded {
+            tag,
+            result: Ok(reflog),
+        },
+    )))
 }
 
 pub(crate) fn stash_entry(index: usize, oid: &str, subject: &str) -> StashEntry {

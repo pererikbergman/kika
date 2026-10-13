@@ -6,6 +6,8 @@ use super::fixup_base::{FixupBase, candidates_notice};
 use super::{autosquash_disabled, autosquash_plan, create_fixup_disabled, find_base_disabled};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::KeyScope;
@@ -161,7 +163,9 @@ pub(crate) fn autosquash_question() -> ConfirmQuestion {
         title: "Autosquash".into(),
         text: "Fold every fixup! commit into the commit it fixes? (y/n)".into(),
         answer: Answer::YOnly,
-        then: Then::Intent(Box::new(AppIntent::ConfirmAutosquash)),
+        then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::ConfirmAutosquash,
+        )))),
         range: false,
         head: None,
     }

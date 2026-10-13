@@ -9,6 +9,7 @@ use crate::diff_pane::DiffStart;
 use crate::diff_search::DiffSearch;
 use crate::effect::Effect;
 use crate::features::blame::BlameView;
+use crate::features::commits::CommitsIntent;
 use crate::features::commits::compare::MARK_CLEARED;
 use crate::features::review;
 use crate::git::FileEntry;
@@ -462,7 +463,7 @@ impl AppState {
         let close = match scope {
             KeyScope::Blame => AppIntent::CloseBlame,
             KeyScope::BlameCommit => AppIntent::CloseBlameCommit,
-            KeyScope::CommitFiles => AppIntent::CloseCommitFiles,
+            KeyScope::CommitFiles => AppIntent::Commits(CommitsIntent::CloseFiles),
             KeyScope::StashFiles => AppIntent::CloseStashFiles,
             _ => return vec![],
         };
