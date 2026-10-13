@@ -1,6 +1,8 @@
 //! The refresh planner: one table from each Git operation to the data it
 //! makes stale. New mutations add a row here instead of picking refreshes at
-//! each call site.
+//! each call site. [`Scope::Repo`] names everything a repository shows, for
+//! opening, entering, leaving or refreshing one. The executor that turns a
+//! [`RefreshPlan`] into loads is `apply_plan` in `reload.rs`.
 
 use std::collections::BTreeSet;
 
@@ -24,6 +26,12 @@ pub enum Scope {
     Commits,
     /// The Stash panel's list.
     Stash,
+    /// The forge's pull-request badges.
+    PullRequests,
+    /// Everything a repository shows: used when Kika opens, enters or
+    /// leaves a repository, or the user asks for a refresh. `expand`
+    /// turns it into its members.
+    Repo,
 }
 
 /// How the file selection survives a refresh.
@@ -40,9 +48,31 @@ pub struct RefreshPlan {
     pub selection: Selection,
 }
 
+impl RefreshPlan {
+    /// A plan that reloads `scopes` and what depends on them, keeping the
+    /// selected path.
+    pub fn of(scopes: &[Scope]) -> RefreshPlan {
+        RefreshPlan {
+            scopes: expand(scopes.iter().copied().collect()),
+            selection: Selection::KeepPath,
+        }
+    }
+}
+
 /// `(a, b)`: when `a` is stale, so is `b`. The selected file's diff depends
 /// on its status, because staging flips which side of it is shown.
-const DEPENDS: &[(Scope, Scope)] = &[(Scope::Files, Scope::Diff)];
+///
+/// A whole repository is its files, branch, branch list, log and stashes.
+/// It leaves out the pull-request badges, which load once the branch list
+/// lands, and the Submodules popup, which loads afresh each time it opens.
+const DEPENDS: &[(Scope, Scope)] = &[
+    (Scope::Files, Scope::Diff),
+    (Scope::Repo, Scope::Files),
+    (Scope::Repo, Scope::Branch),
+    (Scope::Repo, Scope::Branches),
+    (Scope::Repo, Scope::Commits),
+    (Scope::Repo, Scope::Stash),
+];
 
 /// The table. No `_` arm, so a new [`GitOp`] does not compile without a row.
 pub fn plan(op: &GitOp) -> RefreshPlan {
@@ -596,6 +626,33 @@ mod tests {
     #[test]
     fn diff_depends_on_nothing_else() {
         assert_eq!(expand(set(&[Scope::Diff])), set(&[Scope::Diff]));
+    }
+
+    #[test]
+    fn a_whole_repo_plan_is_everything_but_the_badges_and_submodules() {
+        assert_eq!(
+            RefreshPlan::of(&[Scope::Repo]),
+            RefreshPlan {
+                scopes: set(&[
+                    Scope::Repo,
+                    Scope::Files,
+                    Scope::Branch,
+                    Scope::Diff,
+                    Scope::Branches,
+                    Scope::Commits,
+                    Scope::Stash,
+                ]),
+                selection: Selection::KeepPath,
+            }
+        );
+    }
+
+    #[test]
+    fn the_badges_pull_in_nothing_else() {
+        assert_eq!(
+            RefreshPlan::of(&[Scope::PullRequests]).scopes,
+            set(&[Scope::PullRequests])
+        );
     }
 
     #[test]

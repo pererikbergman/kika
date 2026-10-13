@@ -118,10 +118,7 @@ impl AppState {
         self.switch_repo();
         self.files_loaded = false;
         let mut effects = vec![self.set_repo(&root)];
-        effects.extend(self.refresh_status());
-        effects.extend(self.reload_branches());
-        effects.extend(self.reload_commits());
-        effects.extend(self.reload_stashes());
+        effects.extend(self.reload_repo());
         effects
     }
 
@@ -149,10 +146,7 @@ impl AppState {
         if let Some(index) = parent.selected.filter(|&i| i < self.files.len()) {
             effects.extend(self.select(index));
         }
-        effects.extend(self.refresh_status());
-        effects.extend(self.reload_branches());
-        effects.extend(self.reload_commits());
-        effects.extend(self.reload_stashes());
+        effects.extend(self.reload_repo());
         effects
     }
 }
