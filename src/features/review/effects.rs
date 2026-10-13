@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::{self as pr_objects, CommitsHere};
+use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag, gh_cwd, unix_now};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
@@ -15,7 +16,6 @@ use crate::forge::task::ForgeContext;
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::remotes::RemoteName;
 use crate::intent::AppIntent;
 
@@ -29,8 +29,9 @@ pub(crate) fn load_queues(
     repo: Option<ForgeRepo>,
     limited: Vec<(ForgeHost, i64)>,
 ) {
-    tokio::spawn(async move {
-        let answer = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let Some(forge) = forge else {
                 // No forge client: nothing may reach the network.
                 return (None, Err(ReviewError::NoForgeHost));
@@ -44,13 +45,11 @@ pub(crate) fn load_queues(
             review::run(runner.as_ref(), &forge, &load, |gh, repo| {
                 gh.fetch_queues(repo)
             })
-        })
-        .await
+        },
         // A panic still answers, or the load would stay in flight.
-        .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
-        let (repo, result) = answer;
-        let _ = tx.send(AppIntent::ReviewQueuesLoaded { tag, repo, result });
-    });
+        |_| (None, Err(ReviewError::Status(ForgeStatus::Failed))),
+        move |(repo, result)| AppIntent::ReviewQueuesLoaded { tag, repo, result },
+    );
 }
 
 /// Read pull request `number`; always answered by one `PrDetailLoaded`.
@@ -65,8 +64,9 @@ pub(crate) fn load_detail(
     number: u64,
     limited: Vec<(ForgeHost, i64)>,
 ) {
-    tokio::spawn(async move {
-        let answer = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let Some(forge) = forge else {
                 return (None, Err(ReviewError::NoForgeHost));
             };
@@ -79,17 +79,15 @@ pub(crate) fn load_detail(
             review::run(runner.as_ref(), &forge, &load, |gh, repo| {
                 gh.fetch_detail(repo, number)
             })
-        })
-        .await
-        .unwrap_or((None, Err(ReviewError::Status(ForgeStatus::Failed))));
-        let (repo, result) = answer;
-        let _ = tx.send(AppIntent::PrDetailLoaded {
+        },
+        |_| (None, Err(ReviewError::Status(ForgeStatus::Failed))),
+        move |(repo, result)| AppIntent::PrDetailLoaded {
             tag,
             number,
             repo,
             result,
-        });
-    });
+        },
+    );
 }
 
 /// See whether `head` and `base` are here, and where to fetch the missing
@@ -103,9 +101,9 @@ pub(crate) fn check_commits(
     hosts: Vec<ForgeHost>,
     repo: ForgeRepo,
 ) {
-    tokio::spawn(async move {
-        // A panic still answers, or the files screen would wait forever.
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let missing = pr_objects::missing_commits(runner.as_ref(), &[&head, &base])?;
             if missing.is_empty() {
                 return Ok(CommitsHere::All);
@@ -114,15 +112,11 @@ pub(crate) fn check_commits(
                 oids: missing,
                 remote: review::fetch_remote(runner.as_ref(), &hosts, &repo),
             })
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("git cat-file crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::ReviewObjectsChecked { tag, result });
-    });
+        },
+        // A panic still answers, or the files screen would wait forever.
+        background::crashed("git cat-file"),
+        move |result| AppIntent::ReviewObjectsChecked { tag, result },
+    );
 }
 
 /// Fetch `oids` from `remote`, with git's questions asked through the
@@ -135,17 +129,17 @@ pub(crate) fn fetch_commits(
     oids: Vec<CommitId>,
     slot: AnswerSlot,
 ) {
-    tokio::spawn(async move {
-        let bridge_tx = tx.clone();
-        // A panic still answers, or `op_seq` would block every later op.
-        let result = tokio::task::spawn_blocking(move || {
+    let bridge_tx = tx.clone();
+    background::run(
+        tx,
+        move || {
             let bridge = Bridge::open(tag, bridge_tx, slot);
             pr_objects::fetch_commits(runner.as_ref(), &remote, &oids, bridge.env.as_ref())
-        })
-        .await
-        .unwrap_or_else(|e| Err(terminal_safe(format!("git crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::ReviewHeadFetched { tag, result });
-    });
+        },
+        // A panic still answers, or `op_seq` would block every later op.
+        background::crashed("git"),
+        move |result| AppIntent::ReviewHeadFetched { tag, result },
+    );
 }
 
 /// List the files the pull request changes; always answered by one
@@ -157,18 +151,12 @@ pub(crate) fn load_files(
     head: CommitId,
     base: CommitId,
 ) {
-    tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            pr_objects::pr_files(runner.as_ref(), &base, &head)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("git diff-tree crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::ReviewFilesLoaded { tag, result });
-    });
+    background::run(
+        tx,
+        move || pr_objects::pr_files(runner.as_ref(), &base, &head),
+        background::crashed("git diff-tree"),
+        move |result| AppIntent::ReviewFilesLoaded { tag, result },
+    );
 }
 
 /// Merge pull request `number` through `gh`; always answered by one
@@ -195,8 +183,9 @@ pub(crate) fn merge(
         });
         return;
     };
-    tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let cwd = gh_cwd(&forge);
             let gh = crate::forge::github::Gh {
                 runner: forge.gh.as_ref(),
@@ -206,16 +195,15 @@ pub(crate) fn merge(
                 now: unix_now(),
             };
             gh.merge_pull(&repo, number, method, &head_oid)
-        })
-        .await
+        },
         // A panic still answers, or the merge would stay in flight.
-        .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
-        let _ = tx.send(AppIntent::PullRequestMerged {
+        |_| Err(CreateError::Status(ForgeStatus::Failed)),
+        move |result| AppIntent::PullRequestMerged {
             tag,
             number,
             result,
-        });
-    });
+        },
+    );
 }
 
 #[cfg(test)]

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::head::read_head_message;
 use crate::intent::AppIntent;
 use crate::op::GitOp;
@@ -20,13 +20,13 @@ pub(crate) fn load_head_message(
     tx: UnboundedSender<AppIntent>,
     tag: Tag,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_head_message(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || read_head_message(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| Err(terminal_safe(format!("git log crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::HeadMessageLoaded { tag, result });
-    });
+        background::crashed("git log"),
+        move |result| AppIntent::HeadMessageLoaded { tag, result },
+    );
 }
 
 /// Read whether `op` may sign or run hooks, and report it as
@@ -37,14 +37,13 @@ pub(crate) fn probe(
     tag: Tag,
     op: GitOp,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_prompt_facts(runner.as_ref()).ok(),
         // Errors and panics both report `None`, which hands over.
-        let facts = tokio::task::spawn_blocking(move || read_prompt_facts(runner.as_ref()))
-            .await
-            .ok()
-            .and_then(Result::ok);
-        let _ = tx.send(AppIntent::CommitProbed { tag, op, facts });
-    });
+        |_| None,
+        move |facts| AppIntent::CommitProbed { tag, op, facts },
+    );
 }
 
 #[cfg(test)]

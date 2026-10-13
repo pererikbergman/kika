@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::diff::{Classifier, DiffChunk, DiffRequest, EmojiZwj, diff_command, terminal_safe};
@@ -84,9 +85,10 @@ impl DiffStreamer {
         let runner = Arc::clone(&self.runner);
         let tx = self.tx.clone();
         let emoji = self.emoji;
-        tokio::spawn(async move {
-            let reader_tx = tx.clone();
-            let reader = tokio::task::spawn_blocking(move || {
+        let reader_tx = tx.clone();
+        background::run_with(
+            tx,
+            move || {
                 stream(
                     runner.as_ref(),
                     &slot,
@@ -99,13 +101,15 @@ impl DiffStreamer {
                         let _ = reader_tx.send(AppIntent::DiffLoaded { tag, result });
                     },
                 );
-            });
+            },
             // A crash still reports back, or the pane would say "Loading…" forever.
-            if let Err(e) = reader.await {
-                let result = Err(format!("git diff crashed: {e}"));
-                let _ = tx.send(AppIntent::DiffLoaded { tag, result });
-            }
-        });
+            move |reader| {
+                reader.err().map(|e| AppIntent::DiffLoaded {
+                    tag,
+                    result: Err(format!("git diff crashed: {e}")),
+                })
+            },
+        );
     }
 
     /// Let stream `seq` read on to `want` lines. Ignored if it was superseded.

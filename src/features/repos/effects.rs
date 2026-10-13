@@ -8,9 +8,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::recent;
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::repo_root::init_repo;
 use crate::intent::AppIntent;
 
@@ -32,8 +32,9 @@ pub(crate) fn record(
 /// Load the recent list, recording `repo` first when given, and report
 /// it. A list that cannot be written is still shown as it was read.
 fn report(store: Option<PathBuf>, tx: UnboundedSender<AppIntent>, seq: u64, repo: Option<PathBuf>) {
-    tokio::spawn(async move {
-        let list = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let Some(store) = store else {
                 return Vec::new();
             };
@@ -43,20 +44,19 @@ fn report(store: Option<PathBuf>, tx: UnboundedSender<AppIntent>, seq: u64, repo
                 }
                 None => recent::load(&store),
             }
-        })
-        .await
-        .unwrap_or_default();
-        let _ = tx.send(AppIntent::RecentLoaded { seq, list });
-    });
+        },
+        |_| Vec::new(),
+        move |list| AppIntent::RecentLoaded { seq, list },
+    );
 }
 
 /// Make the launch directory a repository and report its top level.
 pub(crate) fn init(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || init_repo(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || init_repo(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| Err(terminal_safe(format!("git init crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::RepoInitialised { tag, result });
-    });
+        background::crashed("git init"),
+        move |result| AppIntent::RepoInitialised { tag, result },
+    );
 }

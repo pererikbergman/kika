@@ -11,6 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::fixup_base::find_fixup_base;
 use super::left_behind::read_left_behind;
 use super::todo::{TodoFile, nothing_done, serialize};
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::comment_prefix::read_comment_prefix;
@@ -30,34 +31,25 @@ pub(crate) fn load_todo(
     tag: Tag,
     string_too: bool,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_rebase_todo(runner.as_ref(), string_too),
         // A panic still reports back, or the panel would wait forever.
-        let result =
-            tokio::task::spawn_blocking(move || read_rebase_todo(runner.as_ref(), string_too))
-                .await
-                .unwrap_or_else(|e| {
-                    Err(terminal_safe(
-                        format!("Reading the todo list crashed: {e}").as_bytes(),
-                    ))
-                });
-        let _ = tx.send(AppIntent::RebaseTodoLoaded { tag, result });
-    });
+        background::crashed("Reading the todo list"),
+        move |result| AppIntent::RebaseTodoLoaded { tag, result },
+    );
 }
 
 /// Look for the commits the staged lines come from and report them as
 /// `FixupBaseFound`.
 pub(crate) fn find_base(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || find_fixup_base(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || find_fixup_base(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("Finding the fixup base crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::FixupBaseFound { tag, result });
-    });
+        background::crashed("Finding the fixup base"),
+        move |result| AppIntent::FixupBaseFound { tag, result },
+    );
 }
 
 /// List the commits moving the detached `head` to `target` would leave
@@ -70,24 +62,19 @@ pub(crate) fn check_left_behind(
     head: CommitId,
     target: CommitId,
 ) {
-    tokio::spawn(async move {
-        let from = head.clone();
+    let from = head.clone();
+    background::run(
+        tx,
+        move || read_left_behind(runner.as_ref(), &from, &target),
         // A panic still reports back, or the busy counter would stay raised.
-        let result =
-            tokio::task::spawn_blocking(move || read_left_behind(runner.as_ref(), &from, &target))
-                .await
-                .unwrap_or_else(|e| {
-                    Err(terminal_safe(
-                        format!("git rev-list crashed: {e}").as_bytes(),
-                    ))
-                });
-        let _ = tx.send(AppIntent::LeftBehindChecked {
+        background::crashed("git rev-list"),
+        move |result| AppIntent::LeftBehindChecked {
             tag,
             op,
             head,
             result,
-        });
-    });
+        },
+    );
 }
 
 /// Write the edited todo list and report it as `RebaseTodoWritten`.
@@ -99,19 +86,13 @@ pub(crate) fn write_todo(
     content: Vec<u8>,
     comment: Vec<u8>,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || write_rebase_todo(&path, &expected, &content, &comment),
         // A panic still reports back, or the todo would stay locked.
-        let result = tokio::task::spawn_blocking(move || {
-            write_rebase_todo(&path, &expected, &content, &comment)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("Writing the todo list crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::RebaseTodoWritten { tag, result });
-    });
+        background::crashed("Writing the todo list"),
+        move |result| AppIntent::RebaseTodoWritten { tag, result },
+    );
 }
 
 /// The todo list of the rebase in progress and its `done` list, from
