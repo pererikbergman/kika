@@ -6,6 +6,7 @@ use crate::clipboard::CopyWhat;
 use crate::features::commit::keys::{amend_disabled, commit_disabled};
 use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
+use crate::features::commits::keys::reset_disabled;
 use crate::features::files::keys::{files_stage_disabled, stage_all_disabled};
 use crate::features::operation::keys::merge_disabled;
 use crate::features::pull_requests::{
@@ -17,7 +18,7 @@ use crate::features::stash::keys::{
 use crate::git::bisect::BisectMark;
 use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
-use crate::keymap::{Reason, never, no_commit_selected, reset_disabled};
+use crate::keymap::{Reason, never, no_commit_selected};
 use crate::model::AppState;
 use crate::op::{MergeStrategy, ResetMode};
 use crate::popup::{ConfirmKind, PromptKind};

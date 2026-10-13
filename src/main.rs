@@ -2,7 +2,6 @@ mod app;
 mod bisect;
 mod cli;
 mod clipboard;
-mod commit_files;
 mod config;
 #[cfg(test)]
 mod config_docs;
@@ -15,7 +14,6 @@ mod effect;
 mod features;
 mod forge;
 mod git;
-mod gitignore;
 mod handoff;
 mod hunk_view;
 mod intent;

@@ -5,6 +5,7 @@
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
 use crate::features::commit::CommitEditor;
+use crate::features::commits::CommitFilesList;
 use crate::features::commits::reflog::Reflog;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::forge::ForgeHost;
@@ -35,6 +36,7 @@ use crate::keymap::{
 use crate::layout::{self, SidePanel};
 use crate::model::*;
 use crate::op::{GitOp, ResetMode};
+use crate::popup::Popup;
 use crate::view::{buffer_rows, render};
 use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -597,6 +599,21 @@ pub(crate) fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect
         tag,
         result: Ok(files),
     })
+}
+
+/// A commit's file list for `range` under `seq`, answered with `files`
+/// when set, for tests outside `commits` that put one in `state.commits`.
+pub(crate) fn commit_files_list(
+    range: CommitRange,
+    short_oid: &str,
+    seq: u64,
+    files: Option<Vec<CommitFile>>,
+) -> CommitFilesList {
+    let mut open = CommitFilesList::begin(range, short_oid.into(), seq);
+    if let Some(files) = files {
+        open.loaded(seq, Ok(files));
+    }
+    open
 }
 
 pub(crate) fn watch(state: &mut AppState, event: WatchEvent) -> Vec<Effect> {
@@ -1460,6 +1477,17 @@ pub(crate) fn with_a_fixup() -> AppState {
         kind: EntryKind::Changed,
     }];
     state
+}
+
+pub(crate) fn two_txt_files() -> AppState {
+    with_files(vec![untracked("a.txt"), untracked("b.txt")], 24).0
+}
+
+pub(crate) fn prompt_text(state: &AppState) -> &str {
+    match state.popups.last() {
+        Some(Popup::Prompt { input, .. }) => &input.text,
+        other => panic!("expected a prompt on top, got {other:?}"),
+    }
 }
 
 /// Screen helpers for view tests: draw a state into a test terminal and

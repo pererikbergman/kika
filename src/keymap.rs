@@ -6,8 +6,8 @@ use std::sync::LazyLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::commit_files::CommitFilesList;
 use crate::features::branches::{self, remotes, tags};
+use crate::features::commits::CommitFilesList;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::diff::{self, renderers};
 use crate::features::{
@@ -16,10 +16,8 @@ use crate::features::{
 };
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
-use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
-use crate::menu::MenuId;
 use crate::model::{AppState, Focus};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
@@ -1188,18 +1186,6 @@ pub(crate) fn no_commit_selected(state: &AppState) -> Option<Reason> {
     row.is_none().then_some("No commit selected".into())
 }
 
-/// Why `i` cannot add the selected file to `.gitignore`. A tracked file
-/// stays tracked whatever `.gitignore` says, and Kika never untracks one.
-pub(crate) fn ignore_disabled(state: &AppState) -> Option<Reason> {
-    if state.files.is_empty() {
-        return Some("No files".into());
-    }
-    match state.selected.and_then(|i| state.files.get(i)) {
-        Some(file) if file.kind == EntryKind::Untracked => None,
-        _ => Some("Only untracked files can be ignored".into()),
-    }
-}
-
 /// Why the diff cannot take focus: with a commit's files open, the hunks
 /// are its selected file's, picked for the custom patch, so the filter must
 /// show that file; otherwise the selected working-tree file's.
@@ -1376,20 +1362,6 @@ pub(crate) fn skip_disabled(state: &AppState) -> Option<Reason> {
     })
 }
 
-/// Why no action can run on the selected commit now: git runs one
-/// operation at a time, and the log needs a commit.
-pub(crate) fn commit_action_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else {
-        no_commit(state)
-    }
-}
-
-pub(crate) fn checkout_commit_disabled(state: &AppState) -> Option<Reason> {
-    commit_action_disabled(state).or_else(|| crate::bisect::head_move_disabled(state))
-}
-
 /// Another operation in progress would mix with this one's commits, and
 /// a bisect's `HEAD` is the commit it is testing, not one to build on.
 /// The bisect is checked here, not in [`resumable_operation`], which
@@ -1401,18 +1373,6 @@ pub(crate) fn in_progress_disabled(state: &AppState) -> Option<Reason> {
         .or_else(|| crate::bisect::head_move_disabled(state))
 }
 
-/// Why the selected commit cannot be reverted now. A merge commit needs a
-/// mainline chosen, which Kika does not ask for.
-pub(crate) fn revert_disabled(state: &AppState) -> Option<Reason> {
-    commit_action_disabled(state)
-        .or_else(|| in_progress_disabled(state))
-        .or_else(|| {
-            let row = state.commits.rows.get(state.commits.selected);
-            row.is_some_and(|r| r.parents.len() > 1)
-                .then_some("Cannot revert a merge commit".into())
-        })
-}
-
 /// A range spans log rows; the todo list above the log has none.
 pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
     state
@@ -1420,10 +1380,6 @@ pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
         .todo_selected
         .is_some()
         .then_some("Select a commit in the log first".into())
-}
-
-pub(crate) fn reset_disabled(state: &AppState) -> Option<Reason> {
-    commit_action_disabled(state).or_else(|| in_progress_disabled(state))
 }
 
 /// Why no fetch, pull or push may start: one needs a repository, and git
@@ -1490,26 +1446,6 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
     } else {
         None
     }
-}
-
-fn commits_open_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| no_commit(state))
-}
-
-fn commits_checkout_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| checkout_commit_disabled(state))
-}
-
-fn commits_revert_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| revert_disabled(state))
-}
-
-fn commits_reset_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| reset_disabled(state))
-}
-
-fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| ignore_disabled(state))
 }
 
 /// Why a rewrite cannot run on a log narrowed to a path or an author.
@@ -1771,143 +1707,6 @@ static CORE_FOCUS: &[Binding] = &[
     },
 ];
 
-// Chunk 11: commits
-static COMMITS_KEYS: &[Binding] = &[
-    Binding {
-        id: "commits.next",
-        // Not any modifiers on the arrow: Alt+Down moves the commit.
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::exact(KeyCode::Down, NONE),
-        ],
-        scope: KeyScope::Commits,
-        intent: AppIntent::CommitNext,
-        description: "Select the next commit",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "commits.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::exact(KeyCode::Up, NONE),
-        ],
-        scope: KeyScope::Commits,
-        intent: AppIntent::CommitPrev,
-        description: "Select the previous commit",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "commits.open",
-        keys: &[KeyPattern::any(KeyCode::Enter)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::OpenCommitFiles,
-        description: "Show the files the selected commit changed, or those changed from the diff mark to it",
-        label: "files",
-        bar: true,
-        disabled: commits_open_disabled,
-    },
-    Binding {
-        id: "commits.checkout",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::Commits,
-        intent: AppIntent::CheckoutCommit,
-        description: "Check out the selected commit as a detached HEAD, asking first",
-        label: "checkout",
-        bar: true,
-        disabled: commits_checkout_disabled,
-    },
-    Binding {
-        id: "commits.revert",
-        keys: &[KeyPattern::any(KeyCode::Char('R'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::RevertCommit,
-        description: "Make a commit that undoes the selected one",
-        label: "revert",
-        bar: true,
-        disabled: commits_revert_disabled,
-    },
-    Binding {
-        id: "commits.reset",
-        keys: &[KeyPattern::any(KeyCode::Char('X'))],
-        scope: KeyScope::Commits,
-        intent: AppIntent::OpenMenu(MenuId::Reset),
-        description: "Reset the current branch to the selected commit: soft, mixed or hard",
-        label: "reset",
-        bar: true,
-        disabled: commits_reset_disabled,
-    },
-];
-
-// Chunk 16: commits
-static COMMITS_FILES_NAV: &[Binding] = &[
-    Binding {
-        id: "commit_files.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::CommitFiles,
-        intent: AppIntent::CommitFileNext,
-        description: "Select the next file and show its change",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "commit_files.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::CommitFiles,
-        intent: AppIntent::CommitFilePrev,
-        description: "Select the previous file and show its change",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-];
-
-// Chunk 18: commits
-#[rustfmt::skip]
-static COMMITS_FILES_BACK: &[Binding] = &[
-    Binding {
-        id: "commit_files.back",
-        // Esc is `commit_files.escape`, which clears a search first and stands in
-        // for this one in the bar.
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('h'), NONE),
-            KeyPattern::any(KeyCode::Left),
-        ],
-        scope: KeyScope::CommitFiles,
-        intent: AppIntent::CloseCommitFiles,
-        description: "Back to the log, at the same commit",
-        label: "back",
-        bar: false,
-        disabled: never,
-    },
-];
-
-// Chunk 31: files
-#[rustfmt::skip]
-static FILES_IGNORE: &[Binding] = &[
-    Binding {
-        id: "files.ignore",
-        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenIgnore,
-        description: "Add to .gitignore",
-        label: "ignore",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: files_ignore_disabled,
-    },
-];
-
 // Chunk 41: core
 static CORE_POPUPS: &[Binding] = &[
     Binding {
@@ -2141,45 +1940,6 @@ static BRANCHES_DELETE_RANGE_CONFIRM: &[Binding] = &[
         id: "delete_range.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::DeleteRange,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 58: commits
-static COMMITS_RESET_HARD_CONFIRM: &[Binding] = &[
-    // As with deleting a branch, Enter is left unbound: a hard reset
-    // cannot be undone.
-    Binding {
-        id: "reset_hard.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::ResetHard,
-        intent: AppIntent::ConfirmResetHard,
-        description: "Yes, reset and throw away every uncommitted change",
-        label: "reset",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "reset_hard.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::ResetHard,
-        intent: AppIntent::ConfirmNo,
-        description: "No, keep the changes",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "reset_hard.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::ResetHard,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -2632,15 +2392,15 @@ static CHUNKS: &[&[Binding]] = &[
     custom_commands::keys::CUSTOM_COMMANDS_WORKSPACE,
     commits::reflog::keys::REFLOG_WORKSPACE,
     files::keys::FILES_NAV,
-    COMMITS_KEYS,
+    commits::keys::COMMITS_KEYS,
     commits::rewrite::keys::REWRITE_COMMITS,
     commits::rewrite::keys::REWRITE_TODO_COMMITS,
     commits::keys::COMMITS_SWITCH_TAB,
     commits::copy::keys::COPY_COMMITS,
     commits::reflog::keys::REFLOG_KEYS,
-    COMMITS_FILES_NAV,
+    commits::keys::COMMITS_FILES_NAV,
     commits::custom_patch::keys::CUSTOM_PATCH_COMMIT_FILES,
-    COMMITS_FILES_BACK,
+    commits::keys::COMMITS_FILES_BACK,
     stash::keys::STASH_KEYS,
     files::keys::FILES_STAGE,
     commit::keys::COMMIT_FROM_FILES,
@@ -2653,7 +2413,7 @@ static CHUNKS: &[&[Binding]] = &[
     blame::keys::BLAME_FILES,
     diff::keys::DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
-    FILES_IGNORE,
+    files::keys::FILES_IGNORE,
     diff::keys::DIFF_KEYS,
     renderers::keys::RENDERERS_DIFF,
     diff::keys::DIFF_LINES,
@@ -2682,7 +2442,7 @@ static CHUNKS: &[&[Binding]] = &[
     tags::keys::TAGS_DELETE_CONFIRM,
     BRANCHES_DELETE_RANGE_CONFIRM,
     remotes::keys::REMOTES_REMOVE_CONFIRM,
-    COMMITS_RESET_HARD_CONFIRM,
+    commits::keys::COMMITS_RESET_HARD_CONFIRM,
     commits::rewrite::keys::REWRITE_LEAVE_COMMITS_CONFIRM,
     stash::keys::STASH_DROP_CONFIRM,
     operation::keys::OPERATION_ABORT_CONFIRM,
@@ -2730,8 +2490,9 @@ mod tests {
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::{CommitId, CommitRange};
     use crate::git::rebase_plan::{Direction, Edit};
-    use crate::git::status::Head;
+    use crate::git::status::{EntryKind, Head};
     use crate::git::version;
+    use crate::menu::MenuId;
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
 
@@ -3615,53 +3376,6 @@ mod tests {
         assert_eq!(listed("branches.new"), Some(reset_first.clone()));
         // Renaming moves nothing.
         assert_eq!(listed("branches.rename"), Some(None));
-    }
-
-    #[test]
-    fn commit_actions_say_why_they_cannot_run() {
-        let row = |parents: &[&str]| crate::git::log::CommitRow {
-            oid: "abc".into(),
-            short_oid: "abc".into(),
-            parents: parents.iter().map(|p| p.to_string()).collect(),
-            author: "Ann".into(),
-            time: 0,
-            subject: "s".into(),
-            subject_altered: false,
-        };
-        let mut state = AppState::new(Context::Workspace);
-        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
-            assert_eq!(disabled(&state), Some("No commits".into()));
-        }
-        state.commits.rows = vec![row(&["p"])];
-        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
-            assert_eq!(disabled(&state), None);
-        }
-        state.commits.rows = vec![row(&["p", "q"])];
-        assert_eq!(
-            revert_disabled(&state),
-            Some("Cannot revert a merge commit".into())
-        );
-        assert_eq!(reset_disabled(&state), None);
-        assert_eq!(checkout_commit_disabled(&state), None);
-
-        state.commits.rows = vec![row(&["p"])];
-        state.branch = Some(crate::git::status::BranchStatus {
-            head: Head::Branch("main".into()),
-            upstream: None,
-            ahead_behind: None,
-            in_progress: vec![Operation::Revert],
-            bisect: None,
-        });
-        let busy = Some("Finish or abort the operation in progress");
-        assert_eq!(revert_disabled(&state).as_deref(), busy);
-        assert_eq!(reset_disabled(&state).as_deref(), busy);
-        // Git refuses a checkout that would lose work; it may go ahead.
-        assert_eq!(checkout_commit_disabled(&state), None);
-
-        state.op_seq = Some(1);
-        for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
-            assert_eq!(disabled(&state), Some(OP_RUNNING.into()));
-        }
     }
 
     #[test]

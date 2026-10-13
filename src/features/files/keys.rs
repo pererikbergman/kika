@@ -1,5 +1,5 @@
-//! The Files panel's navigation, stage, discard, open and menu key
-//! bindings, the discard question's keys, and the guards they use.
+//! The Files panel's navigation, stage, discard, open, ignore and menu
+//! key bindings, the discard question's keys, and the guards they use.
 //! `CHUNKS` in `keymap.rs` places every chunk, so their position there is
 //! behaviour.
 
@@ -106,6 +106,38 @@ pub(crate) static FILES_MENU: &[Binding] = &[
         disabled: never,
     },
 ];
+
+// Chunk 31: files
+#[rustfmt::skip]
+pub(crate) static FILES_IGNORE: &[Binding] = &[
+    Binding {
+        id: "files.ignore",
+        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenIgnore,
+        description: "Add to .gitignore",
+        label: "ignore",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: files_ignore_disabled,
+    },
+];
+
+/// Why `i` cannot add the selected file to `.gitignore`. A tracked file
+/// stays tracked whatever `.gitignore` says, and Kika never untracks one.
+pub(super) fn ignore_disabled(state: &AppState) -> Option<Reason> {
+    if state.files.is_empty() {
+        return Some("No files".into());
+    }
+    match state.selected.and_then(|i| state.files.get(i)) {
+        Some(file) if file.kind == EntryKind::Untracked => None,
+        _ => Some("Only untracked files can be ignored".into()),
+    }
+}
+
+fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| ignore_disabled(state))
+}
 
 // Chunk 44: files
 pub(crate) static FILES_DISCARD_CONFIRM: &[Binding] = &[
