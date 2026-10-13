@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
-use crate::effect::{Tag, gh_cwd, log_program, unix_now};
+use crate::effect::{Tag, log_program};
 use crate::forge::task::{ForgeContext, Load, run_load};
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::GitRunner;
@@ -50,7 +50,7 @@ pub(crate) fn load(
                         known: known.as_ref(),
                         limited: &limited,
                         top: std::fs::canonicalize(runner.workdir()).ok(),
-                        now: unix_now(),
+                        now: forge.now(),
                     };
                     run_load(runner.as_ref(), &forge, &load, &|intent| {
                         let _ = send.send(intent);
@@ -82,10 +82,9 @@ pub(crate) fn create(
     base: String,
     title: String,
 ) {
-    // No forge client, or a repository `[forge.allow]` leaves
-    // out (the model never asks for one): nothing may reach
-    // the network.
-    let Some(forge) = forge.filter(|_| host.allows(&repo)) else {
+    // No forge client: nothing may reach the network. The client itself
+    // refuses a repository `[forge.allow]` leaves out.
+    let Some(forge) = forge else {
         let _ = tx.send(AppIntent::PullRequestCreated {
             tag,
             result: Err(CreateError::Status(ForgeStatus::Failed)),
@@ -94,17 +93,7 @@ pub(crate) fn create(
     };
     background::run(
         tx,
-        move || {
-            let cwd = gh_cwd(&forge);
-            let gh = crate::forge::github::Gh {
-                runner: forge.gh.as_ref(),
-                sink: &forge.sink,
-                host: &host,
-                cwd,
-                now: unix_now(),
-            };
-            gh.create_pull(&repo, &head, &base, &title)
-        },
+        move || forge.create_pull(&host, &repo, &head, &base, &title),
         // A panic still answers, or the create would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
         move |result| AppIntent::PullRequestCreated { tag, result },

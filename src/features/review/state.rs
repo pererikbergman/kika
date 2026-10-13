@@ -6,7 +6,7 @@
 use super::files::PrFiles;
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::MergeMethod;
-use crate::forge::remote::matches;
+use crate::forge::remote::{allowed, matches};
 use crate::forge::review::{CheckStatus, PrDetail, PrSummary, QueueKind, Queues, ReviewError};
 use crate::forge::{ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::commit_files::CommitId;
@@ -297,9 +297,7 @@ impl AppState {
         }
         let repo = self.forge.repo.clone().or_else(|| self.review.repo.clone());
         if let Some(repo) = &repo {
-            let host = matches(repo, hosts)
-                .filter(|host| host.allows(repo))
-                .ok_or(ReviewProblem::NoForgeHost)?;
+            let host = allowed(repo, hosts).ok_or(ReviewProblem::NoForgeHost)?;
             if let Some(&until) = self.forge.limited.get(host.as_str())
                 && until > self.now
             {
@@ -704,15 +702,9 @@ pub(crate) mod tests {
             crate::forge::github::FakeGh::new().reply(crate::forge::github::answer(QUEUES));
         let host = github()[0].clone();
         let sink = crate::git::recording::CommandSink::new();
-        crate::forge::github::Gh {
-            runner: &runner,
-            sink: &sink,
-            host: &host,
-            cwd: "/c".into(),
-            now: NOW,
-        }
-        .fetch_queues(&repo())
-        .unwrap()
+        crate::forge::github::Gh::fixture(&runner, &sink, &host, NOW)
+            .fetch_queues(&repo())
+            .unwrap()
     }
 
     pub(crate) fn fixture_detail() -> PrDetail {
@@ -724,16 +716,10 @@ pub(crate) mod tests {
             crate::forge::github::FakeGh::new().reply(crate::forge::github::answer(answer));
         let host = github()[0].clone();
         let sink = crate::git::recording::CommandSink::new();
-        crate::forge::github::Gh {
-            runner: &runner,
-            sink: &sink,
-            host: &host,
-            cwd: "/c".into(),
-            now: NOW,
-        }
-        .fetch_detail(&repo(), 42)
-        .unwrap()
-        .unwrap()
+        crate::forge::github::Gh::fixture(&runner, &sink, &host, NOW)
+            .fetch_detail(&repo(), 42)
+            .unwrap()
+            .unwrap()
     }
 
     /// In review mode with the fixture's queues shown.
