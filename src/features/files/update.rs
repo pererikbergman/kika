@@ -10,7 +10,7 @@ use crate::git::safe_text::sanitize;
 use crate::list_filter;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
-use crate::popup::{DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
+use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
 
 impl AppState {
     /// Move by `delta` rows among those the filter shows.
@@ -180,11 +180,9 @@ impl AppState {
             GitOp::DiscardFiles { restore, delete } => (restore.len(), delete.len()),
             _ => (0, 0),
         };
-        self.popups.push(Popup::Discard(DiscardConfirm {
-            what: DiscardWhat::Range { restore, delete },
-            path: String::new(),
-            op,
-        }));
+        let what = DiscardWhat::Range { restore, delete };
+        self.popups
+            .push(Popup::Question(what.into_question(String::new(), op)));
     }
 }
 
@@ -631,14 +629,14 @@ mod tests {
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
         assert_eq!(press_char(&mut state, 'd'), vec![]);
-        let Some(Popup::Discard(confirm)) = state.popups.last() else {
+        let Some(Popup::Question(confirm)) = state.popups.last() else {
             panic!("expected the discard question, got {:?}", state.popups);
         };
         assert_eq!(
-            confirm.what.question(),
+            confirm.text,
             "Discard unstaged changes to 2 files and delete 1 untracked file? (y/n)"
         );
-        assert_eq!(confirm.what.title(), "Discard 3 files");
+        assert_eq!(confirm.title, "Discard 3 files");
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups.len(), 1, "Enter does not answer");
         assert_eq!(press_char(&mut state, 'n'), vec![]);

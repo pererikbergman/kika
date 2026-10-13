@@ -29,9 +29,10 @@
 //! sync's push uses too; `src/git/tags.rs`; the `GitOp` tag variants with
 //! their steps, refusals and refresh plan; and the tag branches of shared
 //! dispatch: the range delete arm, `key_focus`, `open_filter`,
-//! `toggle_range`, the `TagName` prompt submit, `Popup::DeleteTag`,
-//! `DeleteTagConfirm` and `range_delete.rs`. The parent owns
-//! `BranchesPanel` and the range question's builder (`lists.rs`).
+//! `toggle_range`, the `TagName` prompt submit and `range_delete.rs`. The
+//! delete question is built here (`delete_tag_question`) on the core
+//! `confirm_question.rs`. The parent owns `BranchesPanel` and the range
+//! question's builder (`lists.rs`).
 
 pub(crate) mod effects;
 pub(crate) mod git;
@@ -41,3 +42,6 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use list::{PendingTag, TagsList};
+// Core's popup tests build the question as the feature asks it.
+#[cfg(test)]
+pub(crate) use update::delete_tag_question;

@@ -3,6 +3,7 @@
 //! question. `CHUNKS` in `keymap.rs` places the chunks, so their
 //! position there is behaviour.
 
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
 use crate::list_filter::LogFilterField;
@@ -131,7 +132,7 @@ pub(crate) static REFLOG_TRAVEL_CONFIRM: &[Binding] = &[
     // commits, so only a deliberate y answers.
     Binding {
         id: "travel.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::Travel,
         intent: AppIntent::ConfirmTravel,
         description: "Yes, do what the question says",

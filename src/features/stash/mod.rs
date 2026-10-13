@@ -30,14 +30,15 @@
 //!
 //! What stays in core, and why:
 //! - `Focus::Stash`/`SidePanel::Stash`, `KeyScope::Stash`/`StashFiles`/
-//!   `DropStash`, `Popup::DropStash`, `PromptKind::StashMessage`/
+//!   `DropStash`, `PromptKind::StashMessage`/
 //!   `RenameStash`, `RangeKind::Stashes` and `range_delete.rs`: shared
 //!   core dispatch, as are the stash branches of `key_focus`,
 //!   `open_filter`, the filter apply, `list_escape` and `range_toggle`;
 //! - the refresh plan (`Scope::Stash`), the repository switch reset, and
 //!   `failure_title`/`failure_next`;
-//! - the `STASH` menu table (`menu.rs`), the drop question's rendering
-//!   (`popup_view.rs`) and the bottom bar (`view.rs`).
+//! - the `STASH` menu table (`menu.rs`), the confirm question module
+//!   (`confirm_question.rs`) the drop question is built on, and the
+//!   bottom bar (`view.rs`).
 //!
 //! Its git code:
 //! - `git.rs`: the list and an entry's files, `StashMode` and the argv
@@ -61,3 +62,6 @@ pub(crate) mod view;
 
 pub(crate) use git::{StashEntry, StashFile, StashMode, StashRef};
 pub(crate) use list::{StashDraft, StashList};
+// Core's popup tests build the question as the feature asks it.
+#[cfg(test)]
+pub(crate) use update::drop_stash_question;

@@ -4,7 +4,7 @@
 //! the bisect and copy children also use, so only a hex id reaches argv.
 
 use super::keys;
-use crate::confirm_question::{Answer, ConfirmQuestion};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::keymap::{KeyScope, Reason};
@@ -46,16 +46,6 @@ impl AppState {
         }
     }
 
-    /// Check out the commit the detached-checkout question asked about,
-    /// unless its guard now refuses it.
-    pub(crate) fn confirm_checkout_commit(&mut self) -> Vec<Effect> {
-        let op = self.commits.pending.take().map(GitOp::CheckoutCommit);
-        if op.as_ref().is_some_and(|op| self.confirm_refused(op)) {
-            return vec![];
-        }
-        self.start_op(Ok(op))
-    }
-
     /// Revert the selected commit on the terminal, so git's editor and the
     /// commit hooks work as on the command line.
     pub(crate) fn revert_commit(&mut self) -> Vec<Effect> {
@@ -92,14 +82,34 @@ pub(crate) fn reset_hard_question(
 ) -> ConfirmQuestion {
     ConfirmQuestion {
         scope: KeyScope::ResetHard,
-        title: "Reset hard",
+        title: "Reset hard".into(),
         text: format!(
             "Reset to {short_oid} and throw away every uncommitted change, staged and \
-             unstaged? Commits after it leave the branch."
+             unstaged? Commits after it leave the branch. (y/n)"
         ),
         answer: Answer::YOnly,
-        op,
+        then: Then::Op(op),
+        range: false,
         head,
+    }
+}
+
+/// "Check out this commit as a detached HEAD?" Git refuses to overwrite
+/// local changes, so nothing is lost and Enter may answer too (owner
+/// decision #227). `short_oid` names `id` as the log shows it. It has
+/// never re-checked `HEAD`, so `head` is `None`.
+pub(crate) fn checkout_question(short_oid: String, id: CommitId) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Confirm,
+        title: "Detached checkout".into(),
+        text: format!(
+            "Check out {short_oid} as a detached HEAD? You will be on no branch; \
+             new commits there belong to no branch until you create one. (y/n)"
+        ),
+        answer: Answer::YOrEnter,
+        then: Then::Op(GitOp::CheckoutCommit(id)),
+        range: false,
+        head: None,
     }
 }
 
@@ -119,23 +129,23 @@ mod tests {
     fn space_asks_before_a_detached_checkout_and_y_checks_out_the_commit() {
         let mut state = on_commit();
         assert_eq!(press_char(&mut state, ' '), vec![]);
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
-        );
-        assert_eq!(state.commits.pending, Some(cid("c1")));
+        let [Popup::Question(q)] = state.popups.as_slice() else {
+            panic!("expected the checkout question, got {:?}", state.popups);
+        };
+        assert_eq!(q.title, "Detached checkout");
+        assert_eq!(q.answer, Answer::YOrEnter);
+        assert_eq!(q.head, None);
         assert!(
-            state
-                .confirm_question(&ConfirmKind::DetachedCheckout)
+            q.text
                 .starts_with("Check out c1 as a detached HEAD? You will be on no branch;"),
         );
+        assert_eq!(state.key_focus(), KeyScope::Confirm);
         assert_eq!(state.held_seq(), None);
 
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
         assert_eq!(state.held_seq(), Some(tag.seq));
         assert_eq!(state.popups, []);
-        assert_eq!(state.commits.pending, None);
     }
 
     #[test]
@@ -144,6 +154,7 @@ mod tests {
         press_char(&mut state, ' ');
         let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
         assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
+        assert_eq!(state.popups, []);
     }
 
     #[test]
@@ -153,7 +164,6 @@ mod tests {
             press_char(&mut state, ' ');
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.commits.pending, None, "{code:?}");
             assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
@@ -268,11 +278,17 @@ mod tests {
     #[test]
     fn answering_the_hard_reset_does_nothing_without_the_question() {
         let mut state = on_commit();
-        assert_eq!(state.answer_question(KeyScope::ResetHard), vec![]);
+        assert_eq!(
+            state.answer_question(KeyScope::ResetHard, Answer::YOnly),
+            vec![]
+        );
         assert_eq!(state.popups, []);
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
         state.popups.push(Popup::Confirm(ConfirmKind::Quit));
-        assert_eq!(state.answer_question(KeyScope::ResetHard), vec![]);
+        assert_eq!(
+            state.answer_question(KeyScope::ResetHard, Answer::YOnly),
+            vec![]
+        );
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
         assert_eq!(state.held_seq(), None);

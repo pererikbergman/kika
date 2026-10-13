@@ -49,15 +49,16 @@
 //! - in core: `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
 //! - the `AppIntent` and `Effect` variants, `ConfirmKind::{Autosquash,
-//!   DropRange}` with its question, `Popup::LeaveCommits`, the popup key
+//!   DropRange}` with its question, `LeaveCommitsConfirm` (the leave
+//!   question's builder, shown as a `Popup::Question`), the popup key
 //!   scopes (`KeyScope::LeaveCommits` among them) and
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
 //! - `confirm_refused` (`model/confirm_guard.rs`), the guard every move
 //!   question re-checks, and `head_still` and `detached_head`
 //!   (`confirm_question.rs`, core), which the reset-hard question also
-//!   uses; the reset-hard question itself is built by the parent's
-//!   `reset_hard_question`;
+//!   uses; the reset-hard and detached-checkout questions themselves are
+//!   built by the parent's `reset_hard_question` and `checkout_question`;
 //! - `commits_range_disabled`, `CLEAR_RANGE_FIRST` and `CLEAR_LOG_FILTER`,
 //!   which other features' guards use too.
 

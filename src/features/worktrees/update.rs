@@ -5,11 +5,13 @@ use std::path::{Path, PathBuf};
 
 use super::list;
 use super::{Worktree, WorktreeList};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
+use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
-use crate::keymap;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
-use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind, RemoveWorktreeConfirm};
+use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 
 /// The Worktrees popup: listing, switching to, adding and removing worktrees.
 impl AppState {
@@ -195,22 +197,26 @@ impl AppState {
             return;
         };
         self.popups
-            .push(Popup::RemoveWorktree(RemoveWorktreeConfirm {
-                display: path.display().to_string(),
-                path,
-            }));
+            .push(Popup::Question(remove_worktree_question(path)));
     }
 
-    /// Remove the worktree the question named, never forced.
+    /// Remove the worktree the question named, never forced. While an op
+    /// runs the question stays open.
     pub(crate) fn confirm_remove_worktree(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::RemoveWorktree(_))) {
+        if !matches!(
+            self.popups.last(),
+            Some(Popup::Question(q)) if q.scope == KeyScope::RemoveWorktree
+        ) {
             return vec![];
         }
         if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
-        let Some(Popup::RemoveWorktree(confirm)) = self.popups.pop() else {
+        let Some(Then::RemoveWorktree(path)) = self
+            .take_question(KeyScope::RemoveWorktree, Answer::YOnly)
+            .map(|q| q.then)
+        else {
             return vec![];
         };
         let seq = self.take_seq();
@@ -220,7 +226,7 @@ impl AppState {
         list.action_seq = Some(seq);
         vec![Effect::RemoveWorktree {
             tag: self.user_tag(seq),
-            path: confirm.path,
+            path,
         }]
     }
 
@@ -248,6 +254,24 @@ impl AppState {
         if let Some(list) = self.worktree_list_mut() {
             list.pending_branch = None;
         }
+    }
+}
+
+/// "Remove this worktree?", carrying the path taken when it was asked, so
+/// a reload before the answer cannot change what is removed.
+pub(crate) fn remove_worktree_question(path: RepoPath) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::RemoveWorktree,
+        title: "Remove worktree".into(),
+        text: format!(
+            "Remove worktree {}? Git refuses if it has uncommitted or untracked \
+             changes. (y/n)",
+            path.display()
+        ),
+        answer: Answer::YOnly,
+        then: Then::RemoveWorktree(path),
+        range: false,
+        head: None,
     }
 }
 
@@ -763,13 +787,9 @@ mod tests {
         assert_eq!(press_char(&mut state, 'd'), vec![]);
         assert_eq!(state.key_focus(), KeyScope::RemoveWorktree);
         match state.popups.last() {
-            Some(Popup::RemoveWorktree(confirm)) => {
-                assert_eq!(confirm.path, RepoPath::from("/r/a-topic"));
-                assert!(
-                    confirm
-                        .question()
-                        .starts_with("Remove worktree /r/a-topic?")
-                );
+            Some(Popup::Question(q)) => {
+                assert_eq!(q.then, Then::RemoveWorktree(RepoPath::from("/r/a-topic")));
+                assert!(q.text.starts_with("Remove worktree /r/a-topic?"));
             }
             other => panic!("expected the question, got {other:?}"),
         }
@@ -786,6 +806,17 @@ mod tests {
             other => panic!("expected one RemoveWorktree, got {other:?}"),
         }
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
+    }
+
+    #[test]
+    fn y_while_an_op_runs_keeps_the_question_and_says_why() {
+        let mut state = with_worktrees(four_worktrees(), 1);
+        press_char(&mut state, 'd');
+        let asked = state.popups.clone();
+        state.hold_op(99);
+        assert_eq!(press_char(&mut state, 'y'), vec![]);
+        assert_eq!(state.popups, asked);
+        assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
     }
 
     #[test]

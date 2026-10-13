@@ -3,6 +3,7 @@
 //! `CHUNKS` in `keymap.rs` places every chunk, so their position there is
 //! behaviour.
 
+use crate::confirm_question::Answer;
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -145,7 +146,7 @@ pub(crate) static FILES_DISCARD_CONFIRM: &[Binding] = &[
     // answers yes elsewhere, and a discard cannot be undone.
     Binding {
         id: "discard_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DiscardConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, throw it away",

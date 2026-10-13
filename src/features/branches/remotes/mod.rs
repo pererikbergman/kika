@@ -34,9 +34,10 @@
 //! plan; the upstream code; and the remote branches of shared dispatch: the
 //! range remove arm, `key_focus`, `open_filter`, `toggle_range`, the
 //! `TrackBranch`, `RemoteName`, `RemoteUrl` and `RenameRemote` prompt
-//! submits and titles, `Popup::RemoveRemote`, `RemoveRemoteConfirm`, the
-//! refresh-all load and `range_delete.rs`. The parent owns `BranchesPanel`,
-//! the panel's `view.rs` and the range question's builder (`lists.rs`).
+//! submits and titles, the refresh-all load and `range_delete.rs`. The
+//! remove question is built here (`remove_remote_question`) on the core
+//! `confirm_question.rs`. The parent owns `BranchesPanel`, the panel's
+//! `view.rs` and the range question's builder (`lists.rs`).
 
 pub(crate) mod effects;
 pub(crate) mod git;
@@ -46,3 +47,6 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use list::{RemoteLine, RemotePending, RemotesList, lines};
+// Core's popup tests build the question as the feature asks it.
+#[cfg(test)]
+pub(crate) use update::remove_remote_question;
