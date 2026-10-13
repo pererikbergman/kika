@@ -751,16 +751,6 @@ impl StdinWriter {
     }
 }
 
-/// Where a create or merge runs `gh`: as for loads, the cache directory,
-/// never the repository, so `gh` reads no repository's git config.
-pub(crate) fn gh_cwd(forge: &ForgeContext) -> PathBuf {
-    forge
-        .cache_dir
-        .clone()
-        .filter(|dir| crate::forge::cache::ensure_dir(dir).is_ok())
-        .unwrap_or_else(std::env::temp_dir)
-}
-
 /// Seconds since the epoch, which relative commit dates count from.
 pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()

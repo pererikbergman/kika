@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::{self as pr_objects, CommitsHere};
 use crate::background;
-use crate::effect::{AnswerSlot, Bridge, Tag, gh_cwd, unix_now};
+use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::ForgeContext;
@@ -40,7 +40,7 @@ pub(crate) fn load_queues(
                 hosts: &hosts,
                 known: repo.as_ref(),
                 limited: &limited,
-                now: unix_now(),
+                now: forge.now(),
             };
             review::run(runner.as_ref(), &forge, &load, |gh, repo| {
                 gh.fetch_queues(repo)
@@ -74,7 +74,7 @@ pub(crate) fn load_detail(
                 hosts: &hosts,
                 known: repo.as_ref(),
                 limited: &limited,
-                now: unix_now(),
+                now: forge.now(),
             };
             review::run(runner.as_ref(), &forge, &load, |gh, repo| {
                 gh.fetch_detail(repo, number)
@@ -172,10 +172,9 @@ pub(crate) fn merge(
     method: MergeMethod,
     head_oid: CommitId,
 ) {
-    // No forge client, or a repository `[forge.allow]` leaves
-    // out (the model never asks for one): nothing may reach
-    // the network.
-    let Some(forge) = forge.filter(|_| host.allows(&repo)) else {
+    // No forge client: nothing may reach the network. The client itself
+    // refuses a repository `[forge.allow]` leaves out.
+    let Some(forge) = forge else {
         let _ = tx.send(AppIntent::PullRequestMerged {
             tag,
             number,
@@ -185,17 +184,7 @@ pub(crate) fn merge(
     };
     background::run(
         tx,
-        move || {
-            let cwd = gh_cwd(&forge);
-            let gh = crate::forge::github::Gh {
-                runner: forge.gh.as_ref(),
-                sink: &forge.sink,
-                host: &host,
-                cwd,
-                now: unix_now(),
-            };
-            gh.merge_pull(&repo, number, method, &head_oid)
-        },
+        move || forge.merge_pull(&host, &repo, number, method, &head_oid),
         // A panic still answers, or the merge would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
         move |result| AppIntent::PullRequestMerged {

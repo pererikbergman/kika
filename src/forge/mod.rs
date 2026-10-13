@@ -8,6 +8,7 @@
 
 pub mod allow;
 pub mod cache;
+pub mod client;
 pub mod github;
 pub mod head;
 pub mod merge;
