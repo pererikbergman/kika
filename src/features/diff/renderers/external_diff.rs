@@ -16,11 +16,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::ansi::StyledRow;
-use crate::git::diff::{
-    DiffRequest, EmojiZwj, diff_command, run_diff, sanitize, sanitize_body, terminal_safe,
-};
+use crate::git::diff::{DiffRequest, EmojiZwj, diff_command, run_diff, sanitize_body};
 use crate::git::patch::FilePatch;
 use crate::git::runner::{GitCommand, GitRunner};
+use crate::git::safe_text::{sanitize, terminal_safe};
 
 /// One configured renderer: the program and its arguments, as argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +148,8 @@ fn global_config(runner: &dyn GitRunner, key: &str) -> Option<String> {
     let cmd = GitCommand::new("config")
         .arg("--global")
         .arg("--get")
-        .arg(key);
+        .arg(key)
+        .user_env();
     let output = runner.run(&cmd).ok().filter(|o| o.success)?;
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
@@ -522,6 +522,8 @@ mod tests {
         assert_eq!(labels(&discover(&runner, None, None)), ["delta"]);
         // `expect` checked each argv in full, `--global` included.
         runner.assert_done();
+        // Read in the user's own env, as it always was.
+        assert_eq!(runner.process_envs(), [vec![], vec![]]);
     }
 
     #[test]

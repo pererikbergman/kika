@@ -6,9 +6,10 @@ use std::collections::HashSet;
 
 use super::branches::BranchName;
 use super::commit_files::CommitId;
-use super::diff::terminal_safe;
+use super::error::GitError;
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitOutput, GitRunner};
+use super::safe_text::terminal_safe;
 
 /// One commit of the log, as the Commits panel lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +127,8 @@ pub fn log_page(
         Some(_) => (skip, 0, skip + limit.max(skip)),
         None => (0, skip, limit),
     };
-    let output = run(runner, log_command(tip, skip, limit, query))?;
+    let cmd = log_command(tip, skip, limit, query);
+    let output = run(runner, &cmd)?;
     if !output.success {
         if tip.is_none() && !resolves(runner, "HEAD")? {
             return Ok(LogPage {
@@ -134,7 +136,7 @@ pub fn log_page(
                 done: true,
             });
         }
-        return Err(failure(&output, "git log failed"));
+        return Err(GitError::failed(&cmd, &output).message_or("git log failed"));
     }
     let rows = output
         .stdout
@@ -173,9 +175,9 @@ fn log_command(tip: Option<&str>, skip: usize, limit: usize, query: &LogQuery) -
     }
     cmd = cmd.arg(tip.unwrap_or("HEAD")).arg("--");
     if let Some(path) = &query.path {
-        cmd = cmd.arg(path.as_os_str()).env("GIT_LITERAL_PATHSPECS", "1");
+        cmd = cmd.arg(path.as_os_str());
     }
-    cmd
+    cmd.standard_env()
 }
 
 /// The commit local branch `name` points at. The argument starts with
@@ -185,7 +187,7 @@ pub fn branch_commit(runner: &dyn GitRunner, name: &BranchName) -> Result<Commit
     rev.extend(b"^{commit}");
     let output = run(
         runner,
-        GitCommand::new("rev-parse")
+        &GitCommand::new("rev-parse")
             .arg("-q")
             .arg("--verify")
             .arg(super::path::os_string(&rev)),
@@ -237,15 +239,13 @@ pub fn markers(runner: &dyn GitRunner) -> Result<Markers, String> {
         Some(main) => rev_list(runner, &["HEAD", &format!("^{main}")])?,
         None => None,
     };
-    let remotes = run(
-        runner,
-        GitCommand::new("for-each-ref")
-            .arg("--count=1")
-            .arg("--format=%(refname)")
-            .arg("refs/remotes"),
-    )?;
+    let remotes_cmd = GitCommand::new("for-each-ref")
+        .arg("--count=1")
+        .arg("--format=%(refname)")
+        .arg("refs/remotes");
+    let remotes = run(runner, &remotes_cmd)?;
     if !remotes.success {
-        return Err(failure(&remotes, "git for-each-ref failed"));
+        return Err(GitError::failed(&remotes_cmd, &remotes).message_or("git for-each-ref failed"));
     }
     let unpushed = if remotes.stdout.trim_ascii().is_empty() {
         None
@@ -268,7 +268,7 @@ fn main_branch(runner: &dyn GitRunner) -> Result<Option<String>, String> {
     ] {
         let output = run(
             runner,
-            GitCommand::new("rev-parse")
+            &GitCommand::new("rev-parse")
                 .arg("-q")
                 .arg("--verify")
                 .arg("--symbolic-full-name")
@@ -291,7 +291,7 @@ fn rev_list(runner: &dyn GitRunner, revs: &[&str]) -> Result<Option<HashSet<Stri
             .arg((MARKER_CAP + 1).to_string()),
         |cmd, rev| cmd.arg(*rev),
     );
-    let output = run(runner, cmd.arg("--"))?;
+    let output = run(runner, &cmd.arg("--"))?;
     if !output.success {
         return Ok(None);
     }
@@ -305,7 +305,7 @@ fn rev_list(runner: &dyn GitRunner, revs: &[&str]) -> Result<Option<HashSet<Stri
 fn resolves(runner: &dyn GitRunner, rev: &str) -> Result<bool, String> {
     let output = run(
         runner,
-        GitCommand::new("rev-parse")
+        &GitCommand::new("rev-parse")
             .arg("-q")
             .arg("--verify")
             .arg(rev),
@@ -313,25 +313,20 @@ fn resolves(runner: &dyn GitRunner, rev: &str) -> Result<bool, String> {
     Ok(output.success)
 }
 
-fn failure(output: &GitOutput, fallback: &str) -> String {
-    let message = terminal_safe(&output.stderr);
-    if message.is_empty() {
-        fallback.into()
-    } else {
-        message
-    }
-}
-
 /// Run a read-only query that must not take the index lock from the user.
-fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<GitOutput, String> {
-    let cmd = cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
+/// Only [`log_command`] passes a path, after `--`, which must be read
+/// literally; `--follow` comes only with it. The rest name no path, so
+/// the whole [`Standard`](super::runner::EnvProfile::Standard) profile fits
+/// every query here. A failed exit is the caller's to read.
+fn run(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
     runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))
+        .run(&cmd.clone().standard_env())
+        .map_err(|e| GitError::io(&e).to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::test_support::{STANDARD_ENV, env_list};
     use std::path::Path;
 
     use super::*;
@@ -705,10 +700,8 @@ mod tests {
             assert!(page.done && page.rows.is_empty(), "{text}");
         }
         fake.assert_done();
-        // No path, so no pathspec to read literally.
-        for env in fake.envs() {
-            assert!(!env.iter().any(|(k, _)| k == "GIT_LITERAL_PATHSPECS"));
-        }
+        // No path, so literal pathspecs are a no-op: the whole profile.
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 3]);
     }
 
     #[test]
@@ -726,12 +719,7 @@ mod tests {
             log_page(&fake, None, 0, 5, &query).unwrap();
         }
         fake.assert_done();
-        for env in fake.envs() {
-            assert!(
-                env.contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
-                "{env:?}"
-            );
-        }
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 2]);
     }
 
     #[test]
@@ -804,12 +792,7 @@ mod tests {
             ]
         );
         fake.assert_done();
-        for env in fake.envs() {
-            assert!(
-                env.contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
-                "{env:?}"
-            );
-        }
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 3]);
     }
 
     #[test]
@@ -826,6 +809,11 @@ mod tests {
         let follow = args.iter().position(|a| a == "--follow").unwrap();
         let tip = args.iter().position(|a| a == "abc").unwrap();
         assert!(follow < tip && tip < sep);
+        // The builder names its profile itself, literal pathspecs included.
+        assert_eq!(
+            cmd.process_env(),
+            crate::test_support::env_list(&crate::test_support::STANDARD_ENV)
+        );
     }
 
     #[test]
@@ -893,7 +881,6 @@ mod tests {
     #[test]
     fn every_query_is_lock_free_and_in_the_c_locale() {
         use crate::git::fake::{FakeRunner, ok};
-        use std::ffi::OsString;
 
         let fake = FakeRunner::new().expect(
             &[
@@ -914,10 +901,6 @@ mod tests {
         assert!(page.done);
         assert_eq!(page.rows[0].time, 5);
         fake.assert_done();
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(fake.envs(), [env]);
+        assert_eq!(fake.process_envs(), [env_list(&STANDARD_ENV)]);
     }
 }

@@ -6,7 +6,7 @@ use super::git::{toggle_all, toggle_for, toggle_many};
 use super::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::effect::{Effect, Tag};
 use crate::git::FileEntry;
-use crate::git::diff::sanitize;
+use crate::git::safe_text::sanitize;
 use crate::list_filter;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;

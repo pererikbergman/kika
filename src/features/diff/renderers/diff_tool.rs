@@ -218,7 +218,11 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
     if !matches!(entry.mode.as_slice(), b"100644" | b"100755") {
         return Err(not_regular(label));
     }
-    let size = GitCommand::new("cat-file").arg("-s").arg(&entry.oid.0);
+    // Object reads by id: the user's env, as they always ran.
+    let size = GitCommand::new("cat-file")
+        .arg("-s")
+        .arg(&entry.oid.0)
+        .user_env();
     let output = runner.run_checked(&size).map_err(|e| e.to_string())?;
     let size: u64 = String::from_utf8_lossy(&output.stdout)
         .trim()
@@ -227,7 +231,10 @@ fn blob(runner: &dyn GitRunner, entry: Option<Entry>, label: &str) -> Result<Vec
     if size > MAX_BYTES as u64 {
         return Err(too_large(label));
     }
-    let read = GitCommand::new("cat-file").arg("blob").arg(entry.oid.0);
+    let read = GitCommand::new("cat-file")
+        .arg("blob")
+        .arg(entry.oid.0)
+        .user_env();
     let output = runner.run_checked(&read).map_err(|e| e.to_string())?;
     Ok(output.stdout)
 }
@@ -405,7 +412,10 @@ mod tests {
         runner.assert_done();
         // The path read is literal and takes no lock; the blob reads, which
         // set no var, are left as they were.
-        assert_eq!(path_command("ls-files").env_profile(), EnvProfile::Standard);
+        assert_eq!(
+            path_command("ls-files").env_profile(),
+            Some(EnvProfile::Standard)
+        );
         assert_eq!(
             runner.process_envs(),
             [env_list(&STANDARD_ENV), vec![], vec![]]

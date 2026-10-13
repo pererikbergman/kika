@@ -313,9 +313,9 @@ pub(crate) fn patch_load(effects: &[Effect]) -> (Tag, DiffRequest) {
 }
 
 pub(crate) fn view(state: &AppState) -> &HunkView {
-    match &state.focus {
-        Focus::Diff(view) => view,
-        other => panic!("expected diff focus, got {other:?}"),
+    match state.hunk_view() {
+        Some(view) => view,
+        None => panic!("expected diff focus, got {:?}", state.focus),
     }
 }
 
@@ -1760,7 +1760,7 @@ pub(crate) mod screen {
         state.selected = Some(0);
         let mut view = HunkView::new("a.rs".into(), side);
         view.loaded(crate::git::patch::parse(bytes).unwrap(), 20);
-        state.focus = Focus::Diff(view);
+        state.focus_hunk_view(view);
         state
     }
 

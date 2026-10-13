@@ -4,8 +4,8 @@
 use std::ffi::OsString;
 
 use super::commit_files::CommitId;
-use super::diff::terminal_safe;
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::terminal_safe;
 
 /// A tag's short name as the raw bytes of its ref, so a name that is not
 /// UTF-8 reaches argv unchanged. Equality is on the bytes.
@@ -78,23 +78,14 @@ pub fn list_command() -> GitCommand {
              %(*objecttype)%00%(symref)%00%(creatordate:short)%00%(contents:subject)",
         )
         .arg("refs/tags")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// Every tag on a commit, newest first.
 pub fn list_tags(runner: &dyn GitRunner) -> Result<Vec<TagRef>, String> {
     let out = runner
-        .run(&list_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !out.success {
-        let message = terminal_safe(&out.stderr);
-        return Err(if message.is_empty() {
-            "git for-each-ref failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&list_command())
+        .map_err(|e| e.message_or("git for-each-ref failed"))?;
     Ok(parse_tags(&out.stdout))
 }
 
@@ -218,6 +209,8 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, git, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const C1: &str = "1111111111111111111111111111111111111111";
     const C2: &str = "2222222222222222222222222222222222222222";
@@ -346,13 +339,9 @@ mod tests {
         let tags = list_tags(&fake).unwrap();
         fake.assert_done();
         assert_eq!(tags.len(), 1);
-        assert_eq!(
-            fake.envs()[0],
-            [
-                ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-                ("LC_ALL".into(), "C".into()),
-            ]
-        );
+        // `refs/tags` is a ref pattern, not a pathspec.
+        assert_eq!(list_command().env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(fake.process_envs(), [env_list(&STANDARD_ENV)]);
     }
 
     #[test]

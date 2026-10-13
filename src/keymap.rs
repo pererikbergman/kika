@@ -1148,7 +1148,7 @@ pub(crate) const WHITESPACE_HIDDEN: &str = "Whitespace is hidden; press w to sta
 
 /// The Diff pane shows a `-w` diff, which hunk and line keys cannot apply.
 pub(crate) fn whitespace_hidden(state: &AppState) -> Option<Reason> {
-    let in_diff = matches!(state.focus, Focus::Diff(_));
+    let in_diff = state.focus == Focus::Diff;
     (in_diff && state.diff_options.ignore_whitespace).then_some(WHITESPACE_HIDDEN.into())
 }
 
@@ -1158,7 +1158,7 @@ pub const DISPLAY_ONLY: &str = "The diff tool view is display-only: press R for 
 
 /// The Diff pane shows a tool's rows, which hunk and line keys cannot act on.
 pub(crate) fn display_only(state: &AppState) -> Option<Reason> {
-    let in_diff = matches!(state.focus, Focus::Diff(_));
+    let in_diff = state.focus == Focus::Diff;
     (in_diff && state.display_only()).then_some(DISPLAY_ONLY.into())
 }
 
@@ -1231,8 +1231,7 @@ pub(crate) const NOT_IN_COMMIT: &str = "Not in a commit's change";
 /// The Diff pane shows a commit's change, which has no sides, nothing to
 /// discard and no hunk to edit before staging.
 pub(crate) fn in_commit(state: &AppState) -> Option<Reason> {
-    matches!(&state.focus, Focus::Diff(view) if view.commit.is_some())
-        .then_some(NOT_IN_COMMIT.into())
+    (state.hunk_view().is_some_and(|view| view.commit.is_some())).then_some(NOT_IN_COMMIT.into())
 }
 
 /// Why `d` cannot ask right now. What it would discard, and why that is
@@ -1247,8 +1246,8 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
         return Some(reason);
     }
-    match &state.focus {
-        Focus::Diff(view) if view.loading() => Some("Loading…".into()),
+    match state.hunk_view() {
+        Some(view) if view.loading() => Some("Loading…".into()),
         _ => no_file_selected(state),
     }
 }
@@ -1462,8 +1461,8 @@ pub(crate) fn no_branch_selected(state: &AppState) -> Option<Reason> {
 
 /// The search works on the built-in diff's hunks, outside line mode.
 fn search_disabled(state: &AppState) -> Option<Reason> {
-    match &state.focus {
-        Focus::Diff(view) if view.lines.is_some() => Some("Leave line mode first".into()),
+    match state.hunk_view() {
+        Some(view) if view.lines.is_some() => Some("Leave line mode first".into()),
         _ if state.rendered_shown().is_some() => Some("Search works in the built-in diff".into()),
         _ => None,
     }
@@ -1471,7 +1470,7 @@ fn search_disabled(state: &AppState) -> Option<Reason> {
 
 fn search_step_disabled(state: &AppState) -> Option<Reason> {
     search_disabled(state).or_else(|| {
-        let searched = matches!(&state.focus, Focus::Diff(view) if view.search.is_some());
+        let searched = state.hunk_view().is_some_and(|view| view.search.is_some());
         (!searched).then_some("Nothing searched yet (/)".into())
     })
 }

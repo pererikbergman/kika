@@ -7,8 +7,8 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use super::log::{CommandLog, CommandLogView, LogEntry, row_text};
-use crate::git::diff::sanitize;
 use crate::git::recording::CommandOutcome;
+use crate::git::safe_text::sanitize;
 use crate::view::{clip, elide_right, pad, width_of};
 
 /// The whole of `area`, since command lines are long: one row per shown

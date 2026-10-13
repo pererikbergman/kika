@@ -2,16 +2,18 @@ use crate::diff_search::{DiffSearch, reveal};
 use crate::effect::{Effect, Tag};
 use crate::git::diff::{DiffChunk, DiffLine, DiffRequest};
 use crate::git::path::RepoPath;
+use crate::hunk_view::HunkView;
 use crate::intent::Scroll;
-use crate::model::AppState;
+use crate::model::{AppState, Focus};
 
 /// Lines read beyond the bottom of the pane, so scrolling rarely waits on git.
 pub const DIFF_PREFETCH: usize = 200;
 
 /// What the Diff pane shows: the lines streamed so far for the selected file,
 /// plus where the user has scrolled to. Pure state; the streaming lives in
-/// `diff::stream`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `diff::stream`. Equality is the stream's: the hunk cursor is focus
+/// state, so two panes showing the same lines are equal whatever it holds.
+#[derive(Debug, Clone, Default, Eq)]
 pub struct DiffPane {
     /// The request whose chunks are accepted; older ones are dropped.
     pub seq: Option<u64>,
@@ -31,6 +33,51 @@ pub struct DiffPane {
     /// The text searched for and where it appears in the lines loaded so
     /// far. Kept across a reload of the same file, dropped for another.
     pub search: Option<DiffSearch>,
+    /// The hunk cursor while the pane has the keys. Read it through
+    /// `AppState::hunk_view`, which hides one left behind by a focus move.
+    pub hunks: Option<HunkView>,
+}
+
+impl PartialEq for DiffPane {
+    fn eq(&self, other: &Self) -> bool {
+        // Spelled out, so a new field has to choose a side.
+        let Self {
+            seq,
+            path,
+            lines,
+            done,
+            pending,
+            show_loading,
+            error,
+            scroll,
+            requested,
+            search,
+            hunks: _,
+        } = self;
+        (
+            seq,
+            path,
+            lines,
+            done,
+            pending,
+            show_loading,
+            error,
+            scroll,
+            requested,
+            search,
+        ) == (
+            &other.seq,
+            &other.path,
+            &other.lines,
+            &other.done,
+            &other.pending,
+            &other.show_loading,
+            &other.error,
+            &other.scroll,
+            &other.requested,
+            &other.search,
+        )
+    }
 }
 
 /// Where an opened diff starts.
@@ -72,9 +119,14 @@ impl DiffPane {
         }
     }
 
-    /// Nothing to show: no lines, no request, no search.
+    /// Nothing to show: no lines, no request, no search. The hunk cursor
+    /// stays: its life follows focus, not the stream.
     pub fn clear(&mut self) {
-        *self = Self::default();
+        let hunks = self.hunks.take();
+        *self = Self {
+            hunks,
+            ..Self::default()
+        };
     }
 
     /// Take a chunk of request `seq`; chunks of any other request are dropped.
@@ -181,6 +233,44 @@ impl DiffPane {
     }
 }
 
+/// The hunk cursor in `hunks` while `focus` is the Diff pane. It borrows
+/// only those two fields, so a caller holding it may still write others.
+pub(crate) fn focused_hunks<'a>(
+    focus: &Focus,
+    hunks: &'a Option<HunkView>,
+) -> Option<&'a HunkView> {
+    hunks.as_ref().filter(|_| *focus == Focus::Diff)
+}
+
+/// [`focused_hunks`], to change.
+pub(crate) fn focused_hunks_mut<'a>(
+    focus: &Focus,
+    hunks: &'a mut Option<HunkView>,
+) -> Option<&'a mut HunkView> {
+    hunks.as_mut().filter(|_| *focus == Focus::Diff)
+}
+
+/// The hunk cursor: only seen while the Diff pane has the keys, so one
+/// left behind after focus moved away never acts.
+impl AppState {
+    /// The hunk cursor, while the Diff pane has the keys.
+    pub(crate) fn hunk_view(&self) -> Option<&HunkView> {
+        focused_hunks(&self.focus, &self.diff.hunks)
+    }
+
+    /// [`Self::hunk_view`], to change.
+    pub(crate) fn hunk_view_mut(&mut self) -> Option<&mut HunkView> {
+        focused_hunks_mut(&self.focus, &mut self.diff.hunks)
+    }
+
+    /// Give the Diff pane the keys with `view` as its cursor: the only way
+    /// into `Focus::Diff`.
+    pub(crate) fn focus_hunk_view(&mut self, view: HunkView) {
+        self.diff.hunks = Some(view);
+        self.focus = Focus::Diff;
+    }
+}
+
 /// The request side of the Diff pane: every diff shown goes through
 /// `open_diff`, and every pane emptied through `close_diff`.
 impl AppState {
@@ -210,7 +300,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::diff::{DiffOptions, LineKind};
+    use crate::git::diff::{DiffOptions, DiffSide, LineKind};
     use crate::model::Context;
     use crate::test_support::changed;
 
@@ -328,6 +418,46 @@ mod tests {
         let mut pane = scrolled_and_searching();
         pane.clear();
         assert_eq!(pane, DiffPane::default());
+    }
+
+    #[test]
+    fn clearing_keeps_the_hunk_cursor_and_empties_the_rest() {
+        let mut pane = scrolled_and_searching();
+        let view = HunkView::new("a.rs".into(), DiffSide::Worktree);
+        pane.hunks = Some(view.clone());
+        pane.clear();
+        assert_eq!(pane.hunks, Some(view));
+        assert_eq!(pane, DiffPane::default());
+    }
+
+    #[test]
+    fn panes_are_equal_whatever_their_hunk_cursor() {
+        let mut pane = scrolled_and_searching();
+        let before = pane.clone();
+        pane.hunks = Some(HunkView::new("a.rs".into(), DiffSide::Worktree));
+        assert_eq!(pane, before);
+        pane.scroll += 1;
+        assert_ne!(pane, before, "a stream field still counts");
+    }
+
+    #[test]
+    fn focus_hunk_view_gives_the_pane_the_keys_and_the_cursor() {
+        let mut state = AppState::new(Context::Workspace);
+        let view = HunkView::new("a.rs".into(), DiffSide::Index);
+        state.focus_hunk_view(view.clone());
+        assert_eq!(state.focus, Focus::Diff);
+        assert_eq!(state.hunk_view(), Some(&view));
+        assert_eq!(state.hunk_view_mut(), Some(&mut view.clone()));
+    }
+
+    #[test]
+    fn a_cursor_left_behind_by_a_focus_move_is_never_seen() {
+        let mut state = AppState::new(Context::Workspace);
+        state.focus_hunk_view(HunkView::new("a.rs".into(), DiffSide::Worktree));
+        state.focus = Focus::Files;
+        assert!(state.diff.hunks.is_some(), "the cursor itself stays");
+        assert_eq!(state.hunk_view(), None);
+        assert_eq!(state.hunk_view_mut(), None);
     }
 
     #[test]

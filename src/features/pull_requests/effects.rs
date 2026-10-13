@@ -13,8 +13,8 @@ use crate::forge::task::{ForgeContext, Load, LoadEvent, run_load};
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
-use crate::git::diff::terminal_safe;
 use crate::git::recording::{CommandOutcome, CommandSink};
+use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
 /// Send the cached badges of the remote's forge repository, then, with

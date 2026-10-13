@@ -5,7 +5,7 @@
 use super::command::{CommandFailure, OutputMode, Target};
 use super::pending::PendingCommand;
 use crate::effect::Effect;
-use crate::git::diff::sanitize;
+use crate::git::safe_text::sanitize;
 use crate::handoff::HandOff;
 use crate::model::{AppState, Focus};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
@@ -58,11 +58,14 @@ impl AppState {
                     commit: None,
                 })
             }
-            Focus::Diff(view) => Some(Target {
-                path: view.path.clone(),
-                line: view.editor_line(),
-                commit: None,
-            }),
+            Focus::Diff => {
+                let view = self.hunk_view()?;
+                Some(Target {
+                    path: view.path.clone(),
+                    line: view.editor_line(),
+                    commit: None,
+                })
+            }
             Focus::Blame(view) => {
                 let line = view.selected();
                 Some(Target {

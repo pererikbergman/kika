@@ -232,11 +232,11 @@ mod tests {
             has_commit_command(&id("a1")),
             merge_base_command(&id("b0"), &id("a1")),
         ] {
-            assert_eq!(cmd.env_profile(), EnvProfile::Standard, "{cmd:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard), "{cmd:?}");
             assert_eq!(cmd.process_env(), query, "{cmd:?}");
         }
         let fetch = fetch_commits_command(&RemoteName::from("origin"), &[id("a1")]);
-        assert_eq!(fetch.env_profile(), EnvProfile::Locale);
+        assert_eq!(fetch.env_profile(), Some(EnvProfile::Locale));
         assert_eq!(
             fetch.process_env(),
             env_list(&[("LC_ALL", "C"), ("GIT_OPTIONAL_LOCKS", "0")])

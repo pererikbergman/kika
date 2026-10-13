@@ -3,8 +3,9 @@
 //! them. Lines led by it are skipped by git, so Kika must skip them too
 //! and nothing else.
 
-use super::diff::terminal_safe;
+use super::error::GitError;
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::terminal_safe;
 
 /// The prefix git uses when nothing else is set, and for `auto`: git
 /// picks a free character only for commit messages, never for the todo.
@@ -17,8 +18,7 @@ pub fn comment_config_command() -> GitCommand {
         .arg("-z")
         .arg("--get-regexp")
         .arg(r"^core\.comment(char|string)$")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The effective prefix from [`comment_config_command`]'s output, as a
@@ -63,9 +63,8 @@ pub fn parse_comment_config(stdout: &[u8], string_too: bool) -> Result<Vec<u8>, 
 /// The comment prefix git will use for the todo list. Blocking; run it
 /// from a task.
 pub fn read_comment_prefix(runner: &dyn GitRunner, string_too: bool) -> Result<Vec<u8>, String> {
-    let output = runner
-        .run(&comment_config_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+    let cmd = comment_config_command();
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if output.success {
         return parse_comment_config(&output.stdout, string_too);
     }
@@ -73,12 +72,7 @@ pub fn read_comment_prefix(runner: &dyn GitRunner, string_too: bool) -> Result<V
     if output.stdout.is_empty() && output.stderr.is_empty() {
         return Ok(DEFAULT.to_vec());
     }
-    let message = terminal_safe(&output.stderr);
-    Err(if message.is_empty() {
-        "git config failed".into()
-    } else {
-        message
-    })
+    Err(GitError::failed(&cmd, &output).message_or("git config failed"))
 }
 
 #[cfg(test)]
@@ -86,6 +80,8 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn parse(stdout: &[u8], string_too: bool) -> Result<Vec<u8>, String> {
         parse_comment_config(stdout, string_too)
@@ -188,13 +184,11 @@ mod tests {
         assert_eq!(read_comment_prefix(&runner, true), Ok(b";".to_vec()));
         assert_eq!(read_comment_prefix(&runner, false), Ok(b"#".to_vec()));
         runner.assert_done();
-        for env in runner.envs() {
-            assert!(
-                env.contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into())),
-                "{env:?}"
-            );
-            assert!(env.contains(&("LC_ALL".into(), "C".into())), "{env:?}");
-        }
+        assert_eq!(
+            comment_config_command().env_profile(),
+            Some(EnvProfile::Standard)
+        );
+        assert_eq!(runner.process_envs(), vec![env_list(&STANDARD_ENV); 3]);
     }
 
     #[test]

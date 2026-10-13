@@ -47,9 +47,7 @@ pub struct Upstream {
 /// Each remote's URL is read once, and only for a remote `git remote`
 /// lists, so no other text reaches a config key. Empty when git fails.
 pub fn read_upstreams(runner: &dyn GitRunner) -> HashMap<BranchName, Upstream> {
-    let cmd = GitCommand::new("for-each-ref")
-        .arg(UPSTREAM_FORMAT)
-        .arg("refs/heads");
+    let cmd = upstreams_command();
     let Some(output) = runner.run(&cmd).ok().filter(|o| o.success) else {
         return HashMap::new();
     };
@@ -92,6 +90,15 @@ pub fn read_upstreams(runner: &dyn GitRunner) -> HashMap<BranchName, Upstream> {
         .collect()
 }
 
+/// Every local branch with its upstream. Sets none of the standard vars,
+/// as it always has.
+fn upstreams_command() -> GitCommand {
+    GitCommand::new("for-each-ref")
+        .arg(UPSTREAM_FORMAT)
+        .arg("refs/heads")
+        .user_env()
+}
+
 /// Each branch's ref, its upstream's remote and the upstream's name there.
 const UPSTREAM_FORMAT: &str =
     "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)";
@@ -112,7 +119,7 @@ fn read_url(runner: &dyn GitRunner, name: &[u8]) -> Option<Vec<u8>> {
 
 /// The names `git remote` lists.
 fn list_remotes(runner: &dyn GitRunner) -> Option<Vec<Vec<u8>>> {
-    let listed = runner.run(&GitCommand::new("remote")).ok()?;
+    let listed = runner.run(&remotes_command()).ok()?;
     if !listed.success {
         return None;
     }
@@ -124,6 +131,11 @@ fn list_remotes(runner: &dyn GitRunner) -> Option<Vec<Vec<u8>>> {
             .map(<[u8]>::to_vec)
             .collect(),
     )
+}
+
+/// `git remote`, in the user's own env like the other reads here.
+fn remotes_command() -> GitCommand {
+    GitCommand::new("remote").user_env()
 }
 
 /// `origin`, or the only remote there is.
@@ -146,12 +158,14 @@ fn url_command(name: &[u8], get: &str) -> GitCommand {
         .arg("-z")
         .arg(get)
         .arg(os_string(&key))
+        .user_env()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
 
     #[test]
     fn origin_is_used_when_present() {
@@ -166,6 +180,15 @@ mod tests {
             Some(b"git@github.com:o/r.git".to_vec())
         );
         fake.assert_done();
+        // These reads always ran in the user's own env.
+        assert_eq!(fake.process_envs(), [vec![], vec![]]);
+        for cmd in [
+            remotes_command(),
+            upstreams_command(),
+            url_command(b"origin", "--get"),
+        ] {
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{cmd:?}");
+        }
     }
 
     #[test]

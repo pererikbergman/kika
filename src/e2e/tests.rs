@@ -948,7 +948,7 @@ async fn the_recent_list_switches_repositories_and_back_restores_the_view() {
     app.intent(AppIntent::OpenRepo(a_top.clone())).await;
     assert_eq!(app.state().repo, Some(a_top));
     assert_eq!(app.selected_line().as_deref(), Some("M a2.txt"));
-    assert!(matches!(app.state().focus, Focus::Diff(_)));
+    assert!(matches!(app.state().focus, Focus::Diff));
     app.assert_screen_contains("+two");
     assert_eq!(app.state().status_error, None);
 }

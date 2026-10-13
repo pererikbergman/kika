@@ -15,8 +15,8 @@ use crate::forge::{
 };
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::remotes::RemoteName;
+use crate::git::safe_text::terminal_safe;
 use crate::keymap::{Reason, no_commit_selected};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};

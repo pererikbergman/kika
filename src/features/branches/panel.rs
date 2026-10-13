@@ -6,7 +6,7 @@ use super::remotes::RemotesList;
 use super::tags::{PendingTag, TagsList};
 use crate::filtered_list::{FilteredList, Row};
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::diff::terminal_safe;
+use crate::git::safe_text::terminal_safe;
 use crate::intent::Scroll;
 
 /// Which list the Branches panel shows.
