@@ -10,9 +10,9 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::git::conflict_marker_size;
 use super::state::MAX_CONFLICT_FILE;
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 use crate::worktree_file;
@@ -26,22 +26,18 @@ pub(crate) fn load(
     tag: Tag,
     path: RepoPath,
 ) {
-    tokio::spawn(async move {
-        let read = path.clone();
-        // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || {
+    let read = path.clone();
+    background::run(
+        tx,
+        move || {
             let size = conflict_marker_size(runner.as_ref(), &read)?;
             let bytes = worktree_file::read(&workdir, &read, MAX_CONFLICT_FILE)?;
             Ok((bytes, size))
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("Reading the file crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::ConflictLoaded { tag, path, result });
-    });
+        },
+        // A panic still reports back, or the busy counter would stay raised.
+        background::crashed("Reading the file"),
+        move |result| AppIntent::ConflictLoaded { tag, path, result },
+    );
 }
 
 /// Replace the file at `path` under `workdir` with `content`, only while
@@ -54,18 +50,12 @@ pub(crate) fn write(
     expected: Vec<u8>,
     content: Vec<u8>,
 ) {
-    tokio::spawn(async move {
-        let target = path.clone();
+    let target = path.clone();
+    background::run(
+        tx,
+        move || worktree_file::replace(&workdir, &target, &expected, &content).map(|()| content),
         // A panic still reports back, or `op_seq` would block every later op.
-        let result = tokio::task::spawn_blocking(move || {
-            worktree_file::replace(&workdir, &target, &expected, &content).map(|()| content)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            Err(terminal_safe(
-                format!("Writing the file crashed: {e}").as_bytes(),
-            ))
-        });
-        let _ = tx.send(AppIntent::ResolvedWritten { tag, path, result });
-    });
+        background::crashed("Writing the file"),
+        move |result| AppIntent::ResolvedWritten { tag, path, result },
+    );
 }
