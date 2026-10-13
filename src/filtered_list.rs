@@ -3,31 +3,43 @@
 //! which rows show, which a range covers and whether a load still counts.
 //! The matching rules themselves are `list_filter`'s.
 //!
-//! The Stash panel and the Branches panel's Local, Remotes and Tags tabs
-//! are on it. Where those lists used to differ, a per-row policy on
-//! [`Row`] keeps each one's behaviour:
-//! - On a failed load the stash list clears its rows, and the branch,
-//!   remote and tag lists keep their last ones, which may be out of date:
+//! The Stash panel and an entry's files, the Branches panel's Local,
+//! Remotes and Tags tabs, the Worktrees and Submodules popups, the Reflog
+//! tab and a commit's files are on it. Where those lists used to differ,
+//! a per-row policy on [`Row`] keeps each one's behaviour:
+//! - On a failed load most lists clear their rows; the branch, remote,
+//!   tag and reflog lists keep their last ones, which may be out of date:
 //!   [`Row::KEEP_ROWS_ON_ERROR`].
+//! - On a reload most lists keep the cursor on the same row; the
+//!   worktree, submodule and reflog lists keep it at the same place,
+//!   clamped. The reflog grows at the top on every operation, so
+//!   following the row would walk the cursor down: [`Row::FOLLOW_ROW`].
 //! - A remote's header row shows when any of its branches does, not only
 //!   when its own name matches: [`Row::visible`].
 //!
-//! The other panel lists still carry their own copies, which differ in
-//! small ways; each is absorbed as follows when it moves here, without a
-//! change in behaviour:
-//! - `move_by` returns `()` on some lists and `bool` on others. Here it
-//!   says whether the cursor moved; callers that ignored it write
-//!   `{ list.move_by(1); }`.
-//! - A list whose selection is an `Option<usize>` is `None` exactly when
+//! Small differences between the old per-panel copies are absorbed so:
+//! - `move_by` says whether the cursor moved; callers that ignored it
+//!   write `{ list.move_by(1); }`.
+//! - A list whose selection was an `Option<usize>` is `None` exactly when
 //!   it is empty: `selected_row()` answers that.
-//! - Some lists check their load's seq themselves and some only the
-//!   generation, in `update.rs`. `loaded(tag, generation, ..)` checks
-//!   both, so those outside checks move in here. A list that truly has no
-//!   tag would get an `apply(result)` that skips the check.
-//! - A list that keeps its cursor by place only, never following a row
-//!   (worktrees), would use a variant, or `Key = ()`.
+//! - `loaded(tag, generation, ..)` checks both the seq and the
+//!   generation, so the checks the handlers made themselves live here.
+//! - A caller that needs to know whether a filter moved the cursor
+//!   compares `selected` before and after `set_filter`.
+//!
+//! Lists not on it yet: the Commits log (it loads in pages, with graph
+//! rows and the rebase todo beside it) and the Files panel (its selection
+//! drives the diff).
+//!
+//! Other lists:
 //! - A list whose rows live outside it (the command log, drawn from the
 //!   log it is handed) is out of reach of this module.
+//! - A list whose one cursor and filter serve several row sets (the
+//!   review queue, showing whichever of its loaded queues is picked) is
+//!   out of reach of this module.
+//! - A list whose one seq follows a staged load (a pull request's files,
+//!   `PrFiles`: check, fetch, then list) rather than one read of its rows
+//!   is out of reach of this module.
 
 use crate::effect::Tag;
 use crate::list_filter;
@@ -43,6 +55,10 @@ pub(crate) trait Row {
     /// Whether a failed load keeps the rows already shown, rather than
     /// clearing them.
     const KEEP_ROWS_ON_ERROR: bool = false;
+    /// Whether a reload keeps the cursor on the same row (by key) rather
+    /// than on the same place, clamped. A list that grows at the top on
+    /// every operation (the reflog) keeps its place instead.
+    const FOLLOW_ROW: bool = true;
 
     /// The indexes of `rows` a non-empty `filter` shows, in list order. By
     /// default each row shows when its own text matches; rows that show
@@ -96,15 +112,19 @@ impl<R: Row> FilteredList<R> {
 
     /// Apply a result if it is the load in flight in this repository's
     /// `generation`. The cursor stays on the same row if it is still
-    /// listed, else on the same place, clamped. Returns whether it was
-    /// applied.
+    /// listed (unless [`Row::FOLLOW_ROW`] is off), else on the same place,
+    /// clamped. Returns whether it was applied.
     pub fn loaded(&mut self, tag: Tag, generation: u64, result: Result<Vec<R>, String>) -> bool {
         if tag.generation != generation || self.seq != Some(tag.seq) {
             return false;
         }
         self.seq = None;
         self.loaded = true;
-        let was = self.selected_row().map(Row::key);
+        let was = if R::FOLLOW_ROW {
+            self.selected_row().map(Row::key)
+        } else {
+            None
+        };
         match result {
             Ok(rows) => {
                 self.rows = rows;
@@ -352,6 +372,40 @@ mod tests {
         assert_eq!(list.rows, [Kept(1), Kept(2)]);
         assert_eq!((list.loaded, list.error.as_deref()), (true, Some("bad")));
         assert_eq!((list.seq, list.selected), (None, 1), "the cursor stays");
+    }
+
+    /// A row whose cursor stays at its place on a reload.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Placed(u32);
+
+    impl Row for Placed {
+        type Key = u32;
+        const FOLLOW_ROW: bool = false;
+        fn key(&self) -> u32 {
+            self.0
+        }
+        fn filter_text(&self) -> String {
+            self.0.to_string()
+        }
+    }
+
+    #[test]
+    fn a_reload_keeps_the_cursor_by_place_when_the_row_type_asks() {
+        let placed = |ids: &[u32]| ids.iter().map(|&id| Placed(id)).collect::<Vec<_>>();
+        let mut list = FilteredList::default();
+        list.begin(1);
+        assert!(list.loaded(tag(1), GENERATION, Ok(placed(&[1, 2, 3]))));
+        assert!(list.move_by(1));
+        // A new row on top: the cursor stays at its place, now on `1`.
+        list.begin(2);
+        assert!(list.loaded(tag(2), GENERATION, Ok(placed(&[0, 1, 2, 3]))));
+        assert_eq!(list.selected, 1);
+        assert_eq!(list.selected_row(), Some(&Placed(1)));
+        // Fewer rows than the place: the last.
+        list.move_by(2);
+        list.begin(3);
+        assert!(list.loaded(tag(3), GENERATION, Ok(placed(&[0, 1]))));
+        assert_eq!(list.selected, 1);
     }
 
     /// A row in groups: a header shows when any row under it does.

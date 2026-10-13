@@ -81,8 +81,8 @@ impl AppState {
             return vec![];
         }
         self.commits.tab = self.commits.tab.other();
-        let reflog = &self.commits.reflog;
-        let unread = reflog.data.is_none() && reflog.error.is_none() && reflog.seq.is_none();
+        let reflog = &self.commits.reflog.list;
+        let unread = !reflog.loaded && reflog.seq.is_none();
         if self.commits.tab == CommitsTab::Reflog && unread {
             self.load_reflog(true)
         } else {
@@ -180,13 +180,10 @@ impl AppState {
     ) -> Vec<Effect> {
         // Every user effect reports back once, stale or not.
         self.user_done(tag);
-        if tag.generation != self.generation {
-            return vec![];
-        }
         let Some(open) = &mut self.commits.open else {
             return vec![];
         };
-        if !open.loaded(tag.seq, result) {
+        if !open.list.loaded(tag, self.generation, result) {
             return vec![];
         }
         if open.selected_file().is_none() {
@@ -201,7 +198,7 @@ impl AppState {
             .commits
             .open
             .as_mut()
-            .is_some_and(|open| open.move_by(delta));
+            .is_some_and(|open| open.list.move_by(delta));
         if moved {
             self.commit_file_diff(DiffStart::Keep)
         } else {
@@ -398,7 +395,7 @@ mod tests {
         assert!(tag.user);
         assert_eq!(state.busy_count(), busy + 1);
         let open = state.commits.open.as_ref().unwrap();
-        assert_eq!((open.short_oid.as_str(), open.loaded), ("c5", false));
+        assert_eq!((open.short_oid.as_str(), open.list.loaded), ("c5", false));
         assert_eq!(state.key_focus(), KeyScope::CommitFiles);
         assert_eq!(state.commits.selected, 5);
     }
@@ -477,7 +474,7 @@ mod tests {
             }));
             assert_eq!(effects, vec![]);
             assert_eq!(state.busy_count(), busy - 1);
-            assert!(!state.commits.open.as_ref().unwrap().loaded);
+            assert!(!state.commits.open.as_ref().unwrap().list.loaded);
         }
     }
 

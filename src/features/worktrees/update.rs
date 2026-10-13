@@ -24,7 +24,7 @@ impl AppState {
 
     pub(crate) fn move_worktree_cursor(&mut self, delta: isize) {
         if let Some(list) = self.worktree_list_mut() {
-            list.move_cursor(delta);
+            list.list.move_by(delta);
         }
     }
 
@@ -52,7 +52,7 @@ impl AppState {
         }
         let seq = self.take_seq();
         if let Some(list) = self.worktree_list_mut() {
-            list.seq = seq;
+            list.list.begin(seq);
         }
         vec![Effect::LoadWorktrees {
             tag: self.user_tag(seq),
@@ -61,13 +61,9 @@ impl AppState {
 
     pub(crate) fn worktrees_loaded(&mut self, tag: Tag, result: Result<Vec<Worktree>, String>) {
         self.user_done(tag);
-        if tag.generation != self.generation {
-            return;
-        }
-        if let Some(list) = self.worktree_list_mut()
-            && list.seq == tag.seq
-        {
-            list.loaded(result);
+        let generation = self.generation;
+        if let Some(list) = self.worktree_list_mut() {
+            list.list.loaded(tag, generation, result);
         }
     }
 
@@ -357,7 +353,7 @@ mod tests {
             result: Ok(four_worktrees()),
         });
         assert_eq!(state.busy_count(), busy);
-        assert_eq!(the_worktree_list(&state).items, Some(four_worktrees()));
+        assert_eq!(the_worktree_list(&state).list.rows, four_worktrees());
     }
 
     #[test]
@@ -426,7 +422,7 @@ mod tests {
     }
 
     fn worktree_rows(state: &AppState) -> Vec<usize> {
-        the_worktree_list(state).visible()
+        the_worktree_list(state).list.visible()
     }
 
     #[test]
@@ -438,9 +434,13 @@ mod tests {
         assert_eq!(input.target, InputTarget::WorktreesFilter);
         assert_eq!(input.target.prompt(), "/");
         type_text(&mut state, "gone");
-        assert_eq!(the_worktree_list(&state).filter, "gone");
+        assert_eq!(the_worktree_list(&state).list.filter, "gone");
         assert_eq!(worktree_rows(&state), [2]);
-        assert_eq!(the_worktree_list(&state).cursor, 2, "moved to a shown row");
+        assert_eq!(
+            the_worktree_list(&state).list.selected,
+            2,
+            "moved to a shown row"
+        );
         // Smart case: an uppercase char makes the match exact.
         press(&mut state, KeyCode::Backspace);
         press(&mut state, KeyCode::Backspace);
@@ -457,7 +457,7 @@ mod tests {
             press_char(&mut state, 'z');
         }
         assert_eq!(
-            the_worktree_list(&state).filter.chars().count(),
+            the_worktree_list(&state).list.filter.chars().count(),
             list_filter::MAX_INPUT
         );
         assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
@@ -479,7 +479,7 @@ mod tests {
         assert_eq!(state.input.as_ref().unwrap().line.text, "topic");
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.input, None);
-        assert_eq!(the_worktree_list(&state).filter, "");
+        assert_eq!(the_worktree_list(&state).list.filter, "");
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
     }
 
@@ -490,7 +490,7 @@ mod tests {
         type_text(&mut state, "topic");
         press(&mut state, KeyCode::Enter);
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(the_worktree_list(&state).filter, "");
+        assert_eq!(the_worktree_list(&state).list.filter, "");
         assert_eq!(state.key_focus(), KeyScope::Worktrees, "still open");
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
         assert!(state.popups.is_empty());
@@ -506,7 +506,7 @@ mod tests {
 
         // Opened again, the list starts unfiltered.
         worktrees_tag(&press_char(&mut state, 'W'));
-        assert_eq!(the_worktree_list(&state).filter, "");
+        assert_eq!(the_worktree_list(&state).list.filter, "");
     }
 
     #[test]
@@ -900,7 +900,7 @@ mod tests {
             tag: stale,
             result: Ok(four_worktrees()),
         });
-        assert_eq!(the_worktree_list(&state).items, None);
+        assert!(!the_worktree_list(&state).list.loaded);
         assert_eq!(state.busy_count(), busy - 2);
 
         // An add whose popup was closed, and a remove from an older ask.

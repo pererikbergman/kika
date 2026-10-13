@@ -195,11 +195,14 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         let mut list = SubmoduleList::loading(0);
-        list.loaded(Ok(vec![Submodule {
-            path: "sub".into(),
-            oid: "abc".into(),
-            state: SubmoduleState::UpToDate,
-        }]));
+        crate::test_support::load_list(
+            &mut list.list,
+            Ok(vec![Submodule {
+                path: "sub".into(),
+                oid: "abc".into(),
+                state: SubmoduleState::UpToDate,
+            }]),
+        );
         state.popups = vec![Popup::Submodules(list)];
         assert_eq!(state.key_focus(), KeyScope::Submodules);
         let run = |k| match resolve(

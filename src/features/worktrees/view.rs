@@ -25,8 +25,9 @@ pub fn render_worktrees(
     area: Rect,
 ) {
     let room = usize::from(area.width.saturating_sub(2));
-    let visible = list.visible();
-    let rows: Vec<String> = match (&list.items, &list.error) {
+    let visible = list.list.visible();
+    let items = &list.list.rows;
+    let rows: Vec<String> = match (list.list.loaded, &list.list.error) {
         (_, Some(error)) => {
             let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
             wrap(&safe.join("\n"), room.saturating_sub(2).max(1))
@@ -34,23 +35,23 @@ pub fn render_worktrees(
                 .map(|row| format!(" {row} "))
                 .collect()
         }
-        (None, None) => vec![" Loading… ".into()],
-        (Some(items), None) if items.is_empty() => vec![" No worktrees ".into()],
-        (Some(_), None) if visible.is_empty() => vec![" No matches ".into()],
-        (Some(items), None) => visible
+        (false, None) => vec![" Loading… ".into()],
+        (true, None) if items.is_empty() => vec![" No worktrees ".into()],
+        (true, None) if visible.is_empty() => vec![" No matches ".into()],
+        (true, None) => visible
             .iter()
             .map(|&i| row(&items[i], is_current(state, &items[i]), room))
             .collect(),
     };
     // The cursor's place among the rows drawn.
     let cursor = (top && list.selected().is_some())
-        .then(|| visible.iter().position(|&i| i == list.cursor))
+        .then(|| visible.iter().position(|&i| i == list.list.selected))
         .flatten();
     // As `centered` will cut it: the screen may be shorter than the list.
     let height = (rows.len() + 2).min(usize::from(area.height));
     let shown = height.saturating_sub(2).max(1);
-    let total = list.items.as_ref().map_or(0, Vec::len);
-    let title = title(&list.filter, visible.len(), total, cursor, shown, room);
+    let total = items.len();
+    let title = title(&list.list.filter, visible.len(), total, cursor, shown, room);
     let width = rows
         .iter()
         .map(|row| width_of(row))
@@ -173,13 +174,14 @@ mod tests {
     use crate::list_filter::{InputTarget, ListInput};
     use crate::model::Context;
     use crate::popup::{LineInput, Popup};
+    use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
 
     const OID: &str = "abcdef1234567890abcdef1234567890abcdef12";
 
     fn state_with(out: &[u8], repo: &str) -> AppState {
         let mut list = WorktreeList::loading(0);
-        list.loaded(Ok(parse_list(out, 0)));
+        load_list(&mut list.list, Ok(parse_list(out, 0)));
         let mut state =
             AppState::new(Context::Workspace).with_location(Some(repo.into()), "/".into());
         state.popups = vec![Popup::Worktrees(list)];
@@ -218,7 +220,7 @@ mod tests {
         );
         let mut state = state_with(out.as_bytes(), "/r/wt-feature");
         if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
-            list.move_cursor(2);
+            list.list.move_by(2);
         }
         let (buffer, rows) = draw(&state);
         line_with(&rows, " Worktrees ");
@@ -267,7 +269,7 @@ mod tests {
         state.popups = vec![Popup::Worktrees(WorktreeList::loading(0))];
         line_with(&draw(&state).1, "Loading…");
         let mut list = WorktreeList::loading(0);
-        list.loaded(Err("fatal: \x1b[2Jbroken".into()));
+        load_list(&mut list.list, Err("fatal: \x1b[2Jbroken".into()));
         state.popups = vec![Popup::Worktrees(list)];
         let (_, rows) = draw(&state);
         line_with(&rows, "broken");
@@ -296,7 +298,7 @@ mod tests {
         }
         let mut state = state_with(out.as_bytes(), "/r/main");
         if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
-            list.move_cursor(n as isize);
+            list.list.move_by(n as isize);
         }
         state
     }
@@ -369,8 +371,7 @@ mod tests {
     fn filtered(n: usize, filter: &str) -> AppState {
         let mut state = many(n);
         if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
-            list.filter = filter.into();
-            list.reconcile();
+            list.list.set_filter(filter.into());
         }
         state.input = Some(ListInput {
             target: InputTarget::WorktreesFilter,
@@ -385,8 +386,7 @@ mod tests {
         // text while the list is narrowed by the part that can match.
         let mut state = filtered(5, "wt-\x1b[2J\x07");
         if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
-            list.filter = "wt-2".into();
-            list.reconcile();
+            list.list.set_filter("wt-2".into());
         }
         let (buffer, rows) = draw(&state);
         assert!(
@@ -407,8 +407,7 @@ mod tests {
 
         // A hostile filter is drawn, never run, in the title.
         if let Some(Popup::Worktrees(list)) = state.popups.last_mut() {
-            list.filter = "x\x1b[31m\x07".into();
-            list.reconcile();
+            list.list.set_filter("x\x1b[31m\x07".into());
         }
         let (buffer, rows) = draw(&state);
         assert!(

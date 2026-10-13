@@ -1118,9 +1118,9 @@ async fn a_submodule_is_listed_updated_entered_and_left() {
 
     let states = |app: &Harness| match app.state().popups.last() {
         Some(Popup::Submodules(list)) => list
-            .items
+            .list
+            .rows
             .iter()
-            .flatten()
             .map(|s| (s.path.display().to_string(), s.state))
             .collect::<Vec<_>>(),
         other => panic!("expected the Submodules popup, got {other:?}"),
@@ -2575,7 +2575,8 @@ async fn the_log_narrows_to_a_renamed_file_or_an_author_and_two_commits_compare(
     assert_eq!(open.range.oid.as_str(), last.trim());
     assert_eq!(open.range.parent.as_ref().unwrap().as_str(), first.trim());
     let shown: Vec<(char, String)> = open
-        .files
+        .list
+        .rows
         .iter()
         .map(|f| (f.status, f.path.display().to_string()))
         .collect();

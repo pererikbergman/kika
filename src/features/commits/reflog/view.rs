@@ -15,7 +15,7 @@ use crate::view::{elide_right, no_matches, reversed, scrolled, width_of};
 pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Vec<Line<'static>> {
     let dim = Style::new().fg(Color::DarkGray);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if let Some(error) = &list.error {
+    if let Some(error) = &list.list.error {
         // Already terminal-safe: git's stderr through `terminal_safe`.
         lines.extend(
             error
@@ -24,28 +24,29 @@ pub(crate) fn reflog_lines(list: &ReflogList, height: usize, width: usize) -> Ve
         );
         lines.push(Line::from("Press r to retry"));
     }
-    let Some(reflog) = &list.data else {
-        if list.error.is_none() {
+    if list.head.is_none() {
+        if list.list.error.is_none() {
             lines.push(Line::from("Loading…"));
         }
         return lines;
-    };
-    if reflog.entries.is_empty() {
+    }
+    let entries = &list.list.rows;
+    if entries.is_empty() {
         lines.push(Line::styled("No reflog yet", dim));
         return lines;
     }
-    let visible = list.visible();
+    let visible = list.list.visible();
     if visible.is_empty() {
         lines.push(no_matches());
         return lines;
     }
     let room = height.saturating_sub(lines.len()).max(1);
     lines.extend(
-        scrolled(&visible, Some(list.selected), room)
+        scrolled(&visible, Some(list.list.selected), room)
             .iter()
             .map(|&i| {
-                let line = entry_line(&reflog.entries[i], width);
-                if i == list.selected {
+                let line = entry_line(&entries[i], width);
+                if i == list.list.selected {
                     reversed(line, width)
                 } else {
                     line
@@ -87,8 +88,10 @@ mod tests {
 
     use crate::features::commits::CommitsTab;
     use crate::features::commits::reflog::git::{Reflog, parse_records};
+    use crate::features::commits::reflog::list::ReflogHead;
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{AppState, Context, Focus};
+    use crate::test_support::load_reflog_list;
     use crate::view::{buffer_rows, render};
 
     fn showing(bytes: &[u8]) -> AppState {
@@ -98,10 +101,13 @@ mod tests {
         state.expanded = SidePanel::Commits;
         state.screen_mode = ScreenMode::Full;
         state.commits.tab = CommitsTab::Reflog;
-        state.commits.reflog.data = Some(Reflog {
-            entries: parse_records(bytes),
-            ..Reflog::default()
-        });
+        load_reflog_list(
+            &mut state.commits.reflog,
+            Ok(Reflog {
+                entries: parse_records(bytes),
+                ..Reflog::default()
+            }),
+        );
         state
     }
 
@@ -131,7 +137,7 @@ mod tests {
     #[test]
     fn the_selected_row_is_reversed_and_follows_the_cursor() {
         let mut state = showing(include_bytes!("../../../git/fixtures/reflog/commit.bin"));
-        state.commits.reflog.selected = 1;
+        state.commits.reflog.list.selected = 1;
         let buffer = draw(&state, 100, 20);
         let rows = buffer_rows(&buffer);
         let y = rows
@@ -177,7 +183,7 @@ mod tests {
     #[test]
     fn a_filter_shows_only_matching_rows_and_draws_sanitised_in_the_title() {
         let mut state = showing(include_bytes!("../../../git/fixtures/reflog/checkout.bin"));
-        state.commits.reflog.set_filter("aaa".into());
+        state.commits.reflog.list.set_filter("aaa".into());
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "aaaaaaa commit (initial) root");
         line_with(&rows, "Reflog · /aaa 1 of 4");
@@ -188,6 +194,7 @@ mod tests {
         state
             .commits
             .reflog
+            .list
             .set_filter("x\x1b[2J\u{202E}\r\0".into());
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "No matches");
@@ -200,7 +207,7 @@ mod tests {
             );
         }
         // With no filter the tabs come back.
-        state.commits.reflog.set_filter(String::new());
+        state.commits.reflog.list.set_filter(String::new());
         line_with(
             &buffer_rows(&draw(&state, 100, 20)),
             "Commits · Log [Reflog]",
@@ -222,11 +229,11 @@ mod tests {
             })
             .collect();
         let mut state = showing(&bytes);
-        state.commits.reflog.set_filter("keep".into());
+        state.commits.reflog.list.set_filter("keep".into());
         for _ in 0..5 {
-            state.commits.reflog.move_by(1);
+            state.commits.reflog.list.move_by(1);
         }
-        assert_eq!(state.commits.reflog.selected, 10);
+        assert_eq!(state.commits.reflog.list.selected, 10);
         let rows = buffer_rows(&draw(&state, 60, 6));
         line_with(&rows, "keep10");
         assert!(!rows.iter().any(|r| r.contains("drop")), "{rows:#?}");
@@ -235,12 +242,12 @@ mod tests {
     #[test]
     fn placeholders_say_loading_empty_or_the_error() {
         let mut state = showing(b"");
-        state.commits.reflog.data = None;
+        state.commits.reflog.head = None;
         line_with(&buffer_rows(&draw(&state, 100, 20)), "Loading…");
-        state.commits.reflog.data = Some(Reflog::default());
+        state.commits.reflog.head = Some(ReflogHead::default());
         line_with(&buffer_rows(&draw(&state, 100, 20)), "No reflog yet");
-        state.commits.reflog.data = None;
-        state.commits.reflog.error = Some("Could not read the reflog: fatal: x".into());
+        state.commits.reflog.head = None;
+        state.commits.reflog.list.error = Some("Could not read the reflog: fatal: x".into());
         let rows = buffer_rows(&draw(&state, 100, 20));
         line_with(&rows, "! Could not read the reflog: fatal: x");
         line_with(&rows, "Press r to retry");
@@ -254,7 +261,7 @@ mod tests {
         for (w, h) in [(20, 5), (1, 1), (3, 3)] {
             draw(&state, w, h);
         }
-        state.commits.reflog.error =
+        state.commits.reflog.list.error =
             Some(format!("Could not read the reflog: {}", "x".repeat(300)));
         let rows = buffer_rows(&draw(&state, 80, 24));
         line_with(&rows, "! Could not read the reflog: xxx");

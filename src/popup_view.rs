@@ -145,7 +145,8 @@ fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: R
     let title = " Submodules ";
     // Text columns inside the borders.
     let room = usize::from(area.width.saturating_sub(2));
-    let rows: Vec<String> = match (&list.items, &list.error) {
+    let items = &list.list.rows;
+    let rows: Vec<String> = match (list.list.loaded, &list.list.error) {
         (_, Some(error)) => {
             let safe: Vec<String> = error.lines().map(|l| sanitize(l.as_bytes())).collect();
             wrap(&safe.join("\n"), room.saturating_sub(2).max(1))
@@ -153,9 +154,9 @@ fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: R
                 .map(|row| format!(" {row} "))
                 .collect()
         }
-        (None, None) => vec![" Loading… ".into()],
-        (Some(items), None) if items.is_empty() => vec![" No submodules ".into()],
-        (Some(items), None) => items
+        (false, None) => vec![" Loading… ".into()],
+        (true, None) if items.is_empty() => vec![" No submodules ".into()],
+        (true, None) => items
             .iter()
             .map(|sub| {
                 let oid: String = sub.oid.chars().take(SHORT_OID).collect();
@@ -168,7 +169,7 @@ fn render_submodules(list: &SubmoduleList, top: bool, frame: &mut Frame, area: R
             })
             .collect(),
     };
-    let cursor = (top && list.selected().is_some()).then_some(list.cursor);
+    let cursor = (top && list.selected().is_some()).then_some(list.list.selected);
     let width = rows
         .iter()
         .map(|row| width_of(row))
@@ -445,6 +446,7 @@ mod tests {
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::copy::CopyIntent;
     use crate::features::pull_requests::create_question;
+    use crate::filtered_list::FilteredList;
     use crate::git::FileEntry;
     use crate::git::status::EntryKind;
     use crate::git::submodule::{Submodule, SubmoduleState};
@@ -1636,10 +1638,13 @@ mod tests {
 
     fn submodules(items: Option<Vec<Submodule>>, error: Option<&str>) -> Popup {
         Popup::Submodules(SubmoduleList {
-            seq: 0,
-            items,
-            error: error.map(str::to_string),
-            cursor: 1,
+            list: FilteredList {
+                loaded: items.is_some() || error.is_some(),
+                rows: items.unwrap_or_default(),
+                error: error.map(str::to_string),
+                selected: 1,
+                ..FilteredList::default()
+            },
         })
     }
 
@@ -1746,10 +1751,12 @@ mod tests {
             .map(|i| sub(&format!("sub{i}"), "1234567", SubmoduleState::UpToDate))
             .collect();
         state.popups = vec![Popup::Submodules(SubmoduleList {
-            seq: 0,
-            items: Some(items),
-            error: None,
-            cursor: 9,
+            list: FilteredList {
+                rows: items,
+                selected: 9,
+                loaded: true,
+                ..FilteredList::default()
+            },
         })];
         // Six rows: the bar leaves five, so three of the ten rows show.
         let (buffer, rows) = draw(&state, 40, 6);
