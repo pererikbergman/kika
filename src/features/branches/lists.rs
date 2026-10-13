@@ -135,7 +135,9 @@ mod tests {
 
     use super::*;
     use crate::confirm_question::{ConfirmQuestion, Then};
+    use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
+    use crate::features::branches::tags::TagsIntent;
     use crate::git::branches::{Branch, Track};
     use crate::git::commit_files::CommitId;
     use crate::git::remotes::{Remote, RemoteBranch, RemoteName};
@@ -527,7 +529,9 @@ mod tests {
         let mut state = tags();
         load_list(&mut state.branches.tags, Ok(vec![]));
         state.branches.tags.range_anchor = Some("gone".into());
-        state.update(AppIntent::DeleteTag);
+        state.update(AppIntent::Branches(BranchesIntent::Tags(
+            TagsIntent::Delete,
+        )));
         assert_eq!(state.notice, Some("No tag in the selection".into()));
         assert_eq!(state.popups, []);
     }

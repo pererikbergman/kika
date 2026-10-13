@@ -5,20 +5,22 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::TagsIntent;
 use crate::background;
 use crate::effect::Tag;
+use crate::features::branches::BranchesIntent;
 use crate::git::GitRunner;
 use crate::git::tags::list_tags;
 use crate::intent::AppIntent;
 
-/// List the tags and report them as `TagsLoaded`.
+/// List the tags and report them as `TagsIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || list_tags(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git for-each-ref"),
-        move |result| AppIntent::TagsLoaded { tag, result },
+        move |result| AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Loaded { tag, result })),
     );
 }
 
@@ -29,6 +31,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::tags::TagsIntent;
     use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
 
@@ -55,10 +59,10 @@ mod tests {
         runtime.spawn(Effect::LoadTags { tag });
 
         match rx.recv().await {
-            Some(AppIntent::TagsLoaded {
+            Some(AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Loaded {
                 tag: got,
                 result: Ok(tags),
-            }) => {
+            }))) => {
                 assert_eq!(got, tag);
                 assert_eq!(tags.len(), 1);
                 assert_eq!(tags[0].name.display(), "v1");

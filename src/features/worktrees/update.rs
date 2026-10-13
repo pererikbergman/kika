@@ -579,8 +579,8 @@ mod tests {
     /// `a` pressed with the Branches panel on `wip`, which no worktree has.
     fn asking_for_wip() -> AppState {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
+        next_branch(&mut state);
         state.repo = Some("/r/a".into());
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
         state.update(AppIntent::WorktreesLoaded {
@@ -623,7 +623,7 @@ mod tests {
                 git_branch("feat/x", false, true),
             ],
         ));
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
         state.update(AppIntent::WorktreesLoaded {
             tag,

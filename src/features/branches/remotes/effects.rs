@@ -5,20 +5,27 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use super::RemotesIntent;
 use crate::background;
 use crate::effect::Tag;
+use crate::features::branches::BranchesIntent;
 use crate::git::GitRunner;
 use crate::git::remotes::list_remotes;
 use crate::intent::AppIntent;
 
-/// List the remotes and report them as `RemotesLoaded`.
+/// List the remotes and report them as `RemotesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || list_remotes(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git for-each-ref"),
-        move |result| AppIntent::RemotesLoaded { tag, result },
+        move |result| {
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Loaded {
+                tag,
+                result,
+            }))
+        },
     );
 }
 
@@ -29,6 +36,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
     use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
 
@@ -60,10 +69,10 @@ mod tests {
         runtime.spawn(Effect::LoadRemotes { tag });
 
         match rx.recv().await {
-            Some(AppIntent::RemotesLoaded {
+            Some(AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Loaded {
                 tag: got,
                 result: Ok(remotes),
-            }) => {
+            }))) => {
                 assert_eq!(got, tag);
                 assert_eq!(remotes.len(), 1);
                 assert_eq!(remotes[0].branches[0].display(), "origin/main");

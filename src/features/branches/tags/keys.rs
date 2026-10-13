@@ -4,7 +4,9 @@
 //! is behaviour. The push guard and its helpers stay in core, because sync
 //! starts the push through them too.
 
+use super::TagsIntent;
 use crate::confirm_question::Answer;
+use crate::features::branches::BranchesIntent;
 use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -50,7 +52,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Tags,
-        intent: AppIntent::TagNext,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Next)),
         description: "Select the next tag",
         label: "",
         bar: false,
@@ -63,7 +65,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Tags,
-        intent: AppIntent::TagPrev,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Prev)),
         description: "Select the previous tag",
         label: "",
         bar: false,
@@ -73,7 +75,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "tags.delete",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Tags,
-        intent: AppIntent::DeleteTag,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Delete)),
         description: "Delete the selected tag here, not on any remote, asking first",
         label: "delete",
         bar: true,
@@ -84,7 +86,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "tags.push",
         keys: &[KeyPattern::any(KeyCode::Char('P'))],
         scope: KeyScope::Tags,
-        intent: AppIntent::PushTag,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Push)),
         description: "Push the selected tag to the upstream's remote, or the only remote",
         label: "push tag",
         bar: true,
@@ -94,7 +96,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "tags.switch_tab",
         keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
         scope: KeyScope::Tags,
-        intent: AppIntent::SwitchBranchesTab,
+        intent: AppIntent::Branches(BranchesIntent::SwitchTab),
         description: "Show the local branches",
         label: "local",
         bar: true,
@@ -104,7 +106,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "tags.prev_tab",
         keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
         scope: KeyScope::Tags,
-        intent: AppIntent::PrevBranchesTab,
+        intent: AppIntent::Branches(BranchesIntent::PrevTab),
         description: "Show the remotes and their branches",
         label: "remotes",
         bar: false,
@@ -114,7 +116,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "commits.tag",
         keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::NewTag,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::New)),
         description: "Tag the selected commit with a lightweight tag",
         label: "tag",
         bar: true,
@@ -124,7 +126,7 @@ pub(crate) static TAGS_KEYS: &[Binding] = &[
         id: "commits.tag_annotated",
         keys: &[KeyPattern::any(KeyCode::Char('T'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::NewAnnotatedTag,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::NewAnnotated)),
         description: "Tag the selected commit with an annotated tag and a message",
         label: "annotated tag",
         bar: false,
@@ -140,7 +142,7 @@ pub(crate) static TAGS_DELETE_CONFIRM: &[Binding] = &[
         id: "delete_tag.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::DeleteTag,
-        intent: AppIntent::ConfirmDeleteTag,
+        intent: AppIntent::Branches(BranchesIntent::Tags(TagsIntent::ConfirmDelete)),
         description: "Yes, delete the tag here",
         label: "delete",
         bar: true,
@@ -216,8 +218,14 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(ran(plain('t')), AppIntent::NewTag);
-        assert_eq!(ran(shift_t), AppIntent::NewAnnotatedTag);
+        assert_eq!(
+            ran(plain('t')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::New))
+        );
+        assert_eq!(
+            ran(shift_t),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::NewAnnotated))
+        );
         assert!(!REPO_LOCKED.contains(&"commits.tag"));
         assert!(!REPO_LOCKED.contains(&"commits.tag_annotated"));
     }
@@ -245,7 +253,10 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(ran(plain('y')), AppIntent::ConfirmDeleteTag);
+        assert_eq!(
+            ran(plain('y')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::ConfirmDelete))
+        );
         assert_eq!(ran(plain('n')), AppIntent::ConfirmNo);
         assert_eq!(
             ran(key(KeyCode::Esc, KeyModifiers::NONE)),

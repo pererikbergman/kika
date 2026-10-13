@@ -7,6 +7,8 @@
 //! its four ops (`git.rs`).
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `RemotesIntent`, nested in `BranchesIntent::Remotes`,
+//!   and the free function `update` that `branches::update` passes it to;
 //! - the types [`RemotesList`], [`RemoteLine`] and [`RemotePending`], and
 //!   `lines`, which flattens a load's remotes into the tab's rows;
 //! - the handlers in `update.rs`: `remotes_loaded`, `move_remote`,
@@ -42,12 +44,15 @@
 
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod list;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use intent::RemotesIntent;
 pub(crate) use list::{RemoteLine, RemotePending, RemotesList, lines};
+pub(crate) use update::update;
 // Core's popup tests build the question as the feature asks it.
 #[cfg(test)]
 pub(crate) use update::remove_remote_question;

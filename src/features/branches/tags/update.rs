@@ -2,8 +2,8 @@
 //! Tags tab, making a tag from the Commits panel, and deleting and pushing
 //! the selected tag.
 
-use super::PendingTag;
 use super::keys;
+use super::{PendingTag, TagsIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
@@ -13,7 +13,29 @@ use crate::git::tags::{TagRef, validate_tag_name};
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
+
+/// The Tags tab's half of `update`, which `branches::update` passes
+/// `BranchesIntent::Tags` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: TagsIntent) -> Vec<Effect> {
+    match intent {
+        TagsIntent::Loaded { tag, result } => return state.tags_loaded(tag, result),
+        TagsIntent::Next => return state.move_tag(1),
+        TagsIntent::Prev => return state.move_tag(-1),
+        TagsIntent::New => state.ask_tag_name(false),
+        TagsIntent::NewAnnotated => state.ask_tag_name(true),
+        TagsIntent::Named(text) => return state.tag_named(text),
+        TagsIntent::Messaged(text) => return state.tag_messaged(&text),
+        TagsIntent::Delete if state.branches.tags.range_anchor.is_some() => {
+            state.ask_delete_range(RangeKind::Tags)
+        }
+        TagsIntent::Delete => state.ask_delete_tag(),
+        TagsIntent::ConfirmDelete => return state.confirm_delete_tag(),
+        TagsIntent::Push => return state.push_tag(),
+    }
+    Vec::new()
+}
 
 /// Tags: made from the Commits panel, deleted and pushed from the Tags
 /// tab. The commit, and the tag asked about, are taken when the prompt or
@@ -218,7 +240,9 @@ pub(crate) fn delete_tag_question(name: String, op: GitOp) -> ConfirmQuestion {
 #[cfg(test)]
 mod tests {
     use crate::confirm_question::Then;
+    use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
+    use crate::features::branches::tags::TagsIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::model::{AppState, Context, Focus};
@@ -266,16 +290,20 @@ mod tests {
         let mut state = with_branches();
         let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
         let newer = tags_tag(&state.update(AppIntent::RefreshStatus));
-        state.update(AppIntent::TagsLoaded {
-            tag,
-            result: Ok(two_tags()),
-        });
+        state.update(AppIntent::Branches(BranchesIntent::Tags(
+            TagsIntent::Loaded {
+                tag,
+                result: Ok(two_tags()),
+            },
+        )));
         assert!(!state.branches.tags.loaded);
         state.generation += 1;
-        state.update(AppIntent::TagsLoaded {
-            tag: newer,
-            result: Ok(two_tags()),
-        });
+        state.update(AppIntent::Branches(BranchesIntent::Tags(
+            TagsIntent::Loaded {
+                tag: newer,
+                result: Ok(two_tags()),
+            },
+        )));
         assert!(!state.branches.tags.loaded);
     }
 
@@ -379,7 +407,12 @@ mod tests {
         assert!(state.branches.pending_tag.is_some());
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.branches.pending_tag, None);
-        assert_eq!(state.update(AppIntent::TagNamed("v1".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Tags(
+                TagsIntent::Named("v1".into())
+            ))),
+            vec![]
+        );
     }
 
     #[test]
@@ -393,7 +426,10 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
-        assert_eq!(state.update(AppIntent::NewTag), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Tags(TagsIntent::New))),
+            vec![]
+        );
         assert_eq!(state.notice, Some("No commit".into()));
         assert_eq!(state.popups, []);
     }
@@ -429,7 +465,12 @@ mod tests {
             press_char(&mut state, 'd');
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, [], "{key:?}");
-            assert_eq!(state.update(AppIntent::ConfirmDeleteTag), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Branches(BranchesIntent::Tags(
+                    TagsIntent::ConfirmDelete
+                ))),
+                vec![]
+            );
         }
     }
 

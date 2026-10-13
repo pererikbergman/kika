@@ -3,7 +3,9 @@
 //! places both chunks, so their position there is behaviour. The tag push
 //! guard and its helpers stay in core, because sync and tags use them too.
 
+use super::RemotesIntent;
 use crate::confirm_question::Answer;
+use crate::features::branches::BranchesIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never, op_running,
@@ -75,7 +77,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Remotes,
-        intent: AppIntent::RemoteNext,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Next)),
         description: "Select the next remote or remote branch",
         label: "",
         bar: false,
@@ -88,7 +90,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Remotes,
-        intent: AppIntent::RemotePrev,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Prev)),
         description: "Select the previous remote or remote branch",
         label: "",
         bar: false,
@@ -98,7 +100,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.checkout",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Remotes,
-        intent: AppIntent::TrackRemoteBranch,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track)),
         description: "Check out the selected remote branch as a new branch tracking it",
         label: "checkout",
         bar: true,
@@ -108,7 +110,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.add",
         keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
         scope: KeyScope::Remotes,
-        intent: AppIntent::AddRemote,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Add)),
         description: "Add a remote; fetch to see its branches",
         label: "add",
         bar: true,
@@ -119,7 +121,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.rename",
         keys: &[KeyPattern::any(KeyCode::Char('R'))],
         scope: KeyScope::Remotes,
-        intent: AppIntent::RenameRemote,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Rename)),
         description: "Rename the selected remote",
         label: "rename",
         bar: true,
@@ -129,7 +131,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.remove",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Remotes,
-        intent: AppIntent::RemoveRemote,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Remove)),
         description: "Remove the selected remote and its remote-tracking branches, asking first",
         label: "remove",
         bar: true,
@@ -139,7 +141,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.switch_tab",
         keys: &[KeyPattern::exact(KeyCode::Char(']'), NONE)],
         scope: KeyScope::Remotes,
-        intent: AppIntent::SwitchBranchesTab,
+        intent: AppIntent::Branches(BranchesIntent::SwitchTab),
         description: "Show the tags",
         label: "tags",
         bar: true,
@@ -149,7 +151,7 @@ pub(crate) static REMOTES_KEYS: &[Binding] = &[
         id: "remotes.prev_tab",
         keys: &[KeyPattern::exact(KeyCode::Char('['), NONE)],
         scope: KeyScope::Remotes,
-        intent: AppIntent::PrevBranchesTab,
+        intent: AppIntent::Branches(BranchesIntent::PrevTab),
         description: "Show the local branches",
         label: "local",
         bar: false,
@@ -165,7 +167,7 @@ pub(crate) static REMOTES_REMOVE_CONFIRM: &[Binding] = &[
         id: "remove_remote.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::RemoveRemote,
-        intent: AppIntent::ConfirmRemoveRemote,
+        intent: AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::ConfirmRemove)),
         description: "Yes, remove the remote and its remote-tracking branches",
         label: "remove",
         bar: true,
@@ -226,7 +228,10 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(ran(plain('y')), AppIntent::ConfirmRemoveRemote);
+        assert_eq!(
+            ran(plain('y')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::ConfirmRemove))
+        );
         assert_eq!(ran(plain('n')), AppIntent::ConfirmNo);
         assert_eq!(
             ran(key(KeyCode::Esc, KeyModifiers::NONE)),
