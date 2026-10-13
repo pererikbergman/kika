@@ -5,7 +5,12 @@
 //! (`effects.rs`) and its git plumbing: reading, adding and removing
 //! worktrees (`git.rs`) and marking a new one untrusted (`trust.rs`).
 //!
+//! Its intents are nested (ADR-0002): core wraps [`WorktreesIntent`] in
+//! `AppIntent::Worktrees`, and its one `update` arm calls [`update`] here.
+//! Switching to a worktree is the shared core intent `OpenRepo`.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`WorktreesIntent`] and the free function [`update`];
 //! - the types [`Worktree`] and [`WorktreeList`], and the guard
 //!   [`worktrees_disabled`];
 //! - the queries `worktree_list()` and `worktree_list_mut()` on `AppState`;
@@ -29,6 +34,7 @@
 
 pub(crate) mod effects;
 mod git;
+mod intent;
 pub(crate) mod keys;
 mod list;
 mod trust;
@@ -36,7 +42,9 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use git::Worktree;
+pub(crate) use intent::WorktreesIntent;
 pub(crate) use list::{WorktreeList, worktrees_disabled};
+pub(crate) use update::update;
 
 use crate::model::AppState;
 use crate::popup::Popup;

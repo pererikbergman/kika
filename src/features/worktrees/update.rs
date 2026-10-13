@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::WorktreesIntent;
 use super::list;
 use super::{Worktree, WorktreeList};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
@@ -12,6 +13,28 @@ use crate::intent::AppIntent;
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
+
+/// The Worktrees popup's half of `update`: core's one
+/// `AppIntent::Worktrees` arm lands here. A free function, so its name
+/// cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: WorktreesIntent) -> Vec<Effect> {
+    match intent {
+        WorktreesIntent::OpenList => return state.open_worktrees(),
+        WorktreesIntent::Loaded { tag, result } => state.worktrees_loaded(tag, result),
+        WorktreesIntent::Next => state.move_worktree_cursor(1),
+        WorktreesIntent::Prev => state.move_worktree_cursor(-1),
+        WorktreesIntent::Open => return state.open_worktree(),
+        WorktreesIntent::Add => state.ask_worktree_path(),
+        WorktreesIntent::AddAt(text) => return state.add_worktree_at(text),
+        WorktreesIntent::Added { tag, result } => return state.worktree_added(tag, result),
+        WorktreesIntent::Remove => state.ask_remove_worktree(),
+        WorktreesIntent::ConfirmRemove => return state.confirm_remove_worktree(),
+        WorktreesIntent::Removed { tag, result } => {
+            return state.worktree_removed(tag, result);
+        }
+    }
+    Vec::new()
+}
 
 /// The Worktrees popup: listing, switching to, adding and removing worktrees.
 impl AppState {
@@ -324,10 +347,10 @@ mod tests {
         let mut state = with_branches();
         state.repo = Some("/r/a".into());
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag,
             result: Ok(items),
-        });
+        }));
         for _ in 0..cursor {
             press_char(&mut state, 'j');
         }
@@ -348,10 +371,10 @@ mod tests {
         assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
         assert_eq!(*the_worktree_list(&state), WorktreeList::loading(tag.seq));
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag,
             result: Ok(four_worktrees()),
-        });
+        }));
         assert_eq!(state.busy_count(), busy);
         assert_eq!(the_worktree_list(&state).list.rows, four_worktrees());
     }
@@ -583,10 +606,10 @@ mod tests {
         next_branch(&mut state);
         state.repo = Some("/r/a".into());
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag,
             result: Ok(four_worktrees()),
-        });
+        }));
         assert_eq!(press_char(&mut state, 'a'), vec![]);
         state
     }
@@ -625,10 +648,10 @@ mod tests {
         ));
         next_branch(&mut state);
         let tag = worktrees_tag(&press_char(&mut state, 'W'));
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag,
             result: Ok(vec![]),
-        });
+        }));
         press_char(&mut state, 'a');
         assert!(matches!(
             state.popups.last(),
@@ -677,7 +700,7 @@ mod tests {
         assert_eq!(state.notice, Some("Type a path for the worktree".into()));
         assert_eq!(state.key_focus(), KeyScope::Prompt);
         assert_eq!(
-            state.update(AppIntent::AddWorktreeAt("a\tb".into())),
+            state.update(AppIntent::Worktrees(WorktreesIntent::AddAt("a\tb".into()))),
             vec![]
         );
         assert_eq!(
@@ -719,10 +742,10 @@ mod tests {
     #[test]
     fn a_finished_add_says_so_and_reloads_the_list_and_branches() {
         let (mut state, tag) = adding();
-        let effects = state.update(AppIntent::WorktreeAdded {
+        let effects = state.update(AppIntent::Worktrees(WorktreesIntent::Added {
             tag,
             result: Ok("/r/a-wip".into()),
-        });
+        }));
         assert_eq!(
             state.notice,
             Some("Worktree added; Enter switches to it".into())
@@ -739,10 +762,10 @@ mod tests {
         );
 
         let (mut state, tag) = adding();
-        state.update(AppIntent::WorktreeAdded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Added {
             tag,
             result: Err("fatal: '/r/a-wip' already exists".into()),
-        });
+        }));
         match state.popups.last() {
             Some(Popup::Error(error)) => assert_eq!(error.title, "Could not add worktree"),
             other => panic!("expected the error, got {other:?}"),
@@ -810,7 +833,7 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::RemoveWorktree);
 
         // A reload that moves the cursor does not change the answer.
-        state.update(AppIntent::WorktreeNext);
+        state.update(AppIntent::Worktrees(WorktreesIntent::Next));
         match &press_char(&mut state, 'y')[..] {
             [Effect::RemoveWorktree { tag, path }] => {
                 assert_eq!(*path, RepoPath::from("/r/a-topic"));
@@ -851,10 +874,10 @@ mod tests {
             other => panic!("expected RemoveWorktree, got {other:?}"),
         };
         let mut failed = state.clone();
-        let effects = state.update(AppIntent::WorktreeRemoved {
+        let effects = state.update(AppIntent::Worktrees(WorktreesIntent::Removed {
             tag,
             result: Ok(()),
-        });
+        }));
         assert_eq!(state.notice, Some("Worktree removed".into()));
         assert!(
             effects
@@ -867,10 +890,10 @@ mod tests {
                 .any(|e| matches!(e, Effect::LoadBranches { .. }))
         );
 
-        failed.update(AppIntent::WorktreeRemoved {
+        failed.update(AppIntent::Worktrees(WorktreesIntent::Removed {
             tag,
             result: Err("fatal: contains modified or untracked files".into()),
-        });
+        }));
         match failed.popups.last() {
             Some(Popup::Error(error)) => {
                 assert_eq!(error.title, "Could not remove worktree");
@@ -886,20 +909,20 @@ mod tests {
         let mut state = with_branches();
         state.repo = Some("/r/a".into());
         let old = worktrees_tag(&press_char(&mut state, 'W'));
-        let new = worktrees_tag(&state.update(AppIntent::OpenWorktrees));
+        let new = worktrees_tag(&state.update(AppIntent::Worktrees(WorktreesIntent::OpenList)));
         let busy = state.busy_count();
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag: old,
             result: Ok(four_worktrees()),
-        });
+        }));
         let stale = Tag {
             generation: new.generation + 1,
             ..new
         };
-        state.update(AppIntent::WorktreesLoaded {
+        state.update(AppIntent::Worktrees(WorktreesIntent::Loaded {
             tag: stale,
             result: Ok(four_worktrees()),
-        });
+        }));
         assert!(!the_worktree_list(&state).list.loaded);
         assert_eq!(state.busy_count(), busy - 2);
 
@@ -908,10 +931,10 @@ mod tests {
         state.update(AppIntent::PopPopup);
         let busy = state.busy_count();
         assert_eq!(
-            state.update(AppIntent::WorktreeAdded {
+            state.update(AppIntent::Worktrees(WorktreesIntent::Added {
                 tag,
                 result: Err("boom".into()),
-            }),
+            })),
             vec![]
         );
         assert!(state.popups.is_empty());
@@ -928,10 +951,10 @@ mod tests {
             ..tag
         };
         assert_eq!(
-            state.update(AppIntent::WorktreeRemoved {
+            state.update(AppIntent::Worktrees(WorktreesIntent::Removed {
                 tag: old,
                 result: Err("boom".into()),
-            }),
+            })),
             vec![]
         );
         assert_eq!(state.key_focus(), KeyScope::Worktrees);
@@ -940,10 +963,10 @@ mod tests {
             ..tag
         };
         assert_eq!(
-            state.update(AppIntent::WorktreeRemoved {
+            state.update(AppIntent::Worktrees(WorktreesIntent::Removed {
                 tag: gone,
                 result: Ok(()),
-            }),
+            })),
             vec![]
         );
     }

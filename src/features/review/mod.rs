@@ -9,7 +9,14 @@
 //! (`effects.rs`). The credential plumbing that `FetchReviewCommits`
 //! shares with sync, `src/forge` and the merge question popup stay in core.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`ReviewIntent`] in
+//! `AppIntent::Review`, and its one `update` arm calls [`update`] here.
+//! `update.rs` holds only that function; it dispatches to the handlers in
+//! `state.rs`, `files.rs` and `merge.rs`. The review guards on core arms
+//! (`ScrollDiff`, `OpenSearch`, `DiffEscape`) stay in core.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`ReviewIntent`] and the free function [`update`];
 //! - the types [`ReviewState`], [`ReviewScreen`] and [`PrMerging`], which
 //!   `AppState` holds, and [`CommitsHere`] and [`PrFileRow`], which intents
 //!   carry;
@@ -33,13 +40,17 @@
 pub(crate) mod effects;
 mod files;
 mod git;
+mod intent;
 pub(crate) mod keys;
 mod markdown;
 mod merge;
 mod state;
+mod update;
 pub(crate) mod view;
 
 pub(crate) use files::review_diff_focused;
 pub(crate) use git::{CommitsHere, PrFileRow};
+pub(crate) use intent::ReviewIntent;
 pub(crate) use merge::PrMerging;
 pub(crate) use state::{ReviewScreen, ReviewState, queue_keys_disabled};
+pub(crate) use update::update;

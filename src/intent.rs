@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
@@ -15,19 +14,16 @@ use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::diff::DiffIntent;
 use crate::features::files::FilesIntent;
 use crate::features::operation::OperationIntent;
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::features::repos::ReposIntent;
-use crate::features::review::{CommitsHere, PrFileRow};
-use crate::features::stash::{StashEntry, StashFile};
+use crate::features::review::ReviewIntent;
+use crate::features::stash::StashIntent;
+use crate::features::submodules::SubmodulesIntent;
 use crate::features::sync::SyncIntent;
-use crate::features::worktrees::Worktree;
-use crate::forge::review::{PrDetail, Queues, ReviewError};
-use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
+use crate::features::worktrees::WorktreesIntent;
 use crate::git::askpass::Secret;
-use crate::git::branches::BranchName;
-use crate::git::commit_files::CommitRange;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
-use crate::git::submodule::Submodule;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
@@ -202,99 +198,19 @@ pub enum AppIntent {
     Commit(CommitIntent),
 
     // --- stash ---
-    /// The stash list was read; `tag` says which load.
-    StashesLoaded {
-        tag: Tag,
-        result: Result<Vec<StashEntry>, String>,
-    },
-    /// Move the stash cursor down or up.
-    StashNext,
-    StashPrev,
-    /// Show the selected stash's files in place of the list.
-    OpenStashFiles,
-    /// Back from a stash's files to the list, at the same entry.
-    CloseStashFiles,
-    /// Move the cursor in a stash's files down or up.
-    StashFileNext,
-    StashFilePrev,
-    /// A stash's files were read; `tag` says which load.
-    StashFilesLoaded {
-        tag: Tag,
-        result: Result<Vec<StashFile>, String>,
-    },
-    /// Apply the selected stash and keep it.
-    ApplyStash,
-    /// Apply the selected stash and drop it.
-    PopStash,
-    /// Ask before dropping the selected stash.
-    DropStash,
-    /// Drop the stash the question was about.
-    ConfirmDropStash,
-    /// Ask for a new message for the selected stash.
-    RenameStash,
-    /// The new message typed for the stash the prompt was about.
-    RenameStashTo(String),
-    /// Ask for a message, then stash every tracked change.
-    StashAll,
-    /// Ask for a message, then stash every change, untracked files too.
-    StashIncludingUntracked,
-    /// Ask for a message, then stash only the staged changes.
-    StashStaged,
-    /// Ask for a message, then stash only the selected file.
-    StashFile,
-    /// The message typed for the stash being made; empty for git's own.
-    StashMessageAnswered(String),
+    /// Everything the Stash panel does, its files too; its own `update`
+    /// handles it.
+    Stash(StashIntent),
 
     // --- submodules ---
-    /// Open the list of submodules and load it.
-    OpenSubmodules,
-    /// The submodule list was read; `tag` says which load.
-    SubmodulesLoaded {
-        tag: Tag,
-        result: Result<Vec<Submodule>, String>,
-    },
-    /// Move the submodule cursor down or up.
-    SubmoduleNext,
-    SubmodulePrev,
-    /// Initialize or update the submodule under the cursor.
-    InitSubmodule,
-    UpdateSubmodule,
-    /// Work in the submodule under the cursor as if Kika started there.
-    EnterSubmodule,
-    /// Back to the repository the current one was entered from.
-    LeaveSubmodule,
+    /// Everything the Submodules popup does, entering and leaving a
+    /// submodule too; its own `update` handles it.
+    Submodules(SubmodulesIntent),
 
     // --- worktrees ---
-    /// Open the list of worktrees and load it.
-    OpenWorktrees,
-    /// The worktree list was read; `tag` says which load.
-    WorktreesLoaded {
-        tag: Tag,
-        result: Result<Vec<Worktree>, String>,
-    },
-    /// Move the worktree cursor down or up.
-    WorktreeNext,
-    WorktreePrev,
-    /// Switch Kika to the worktree under the cursor.
-    OpenWorktree,
-    /// Ask where to add a worktree for the Branches panel's local branch.
-    AddWorktree,
-    /// The typed path for the worktree `AddWorktree` asked about.
-    AddWorktreeAt(String),
-    /// A worktree add finished: where it was made, or why not.
-    WorktreeAdded {
-        tag: Tag,
-        result: Result<PathBuf, String>,
-    },
-    /// Ask before removing the worktree under the cursor.
-    RemoveWorktree,
-    /// Remove the worktree the question named.
-    ConfirmRemoveWorktree,
-    /// A worktree remove finished.
-    WorktreeRemoved {
-        tag: Tag,
-        result: Result<(), String>,
-    },
+    /// Everything the Worktrees popup does; its own `update` handles it.
+    /// Switching to a worktree is the shared `OpenRepo`.
+    Worktrees(WorktreesIntent),
 
     // --- repos ---
     /// Everything the recent list and `git init` do; its own `update`
@@ -329,118 +245,13 @@ pub enum AppIntent {
     Operation(OperationIntent),
 
     // --- pull_requests ---
-    /// The remote is on none of the forge hosts: no badges.
-    ForgeRepoNone {
-        tag: Tag,
-    },
-    /// The forge repository found, and its cached badges; `None` is a miss.
-    PullRequestsCached {
-        tag: Tag,
-        repo: ForgeRepo,
-        badges: Option<HashMap<BranchName, PrBadge>>,
-    },
-    /// The forge answered, or why it could not. `limited_until` is set
-    /// when GitHub rate limited the host: no call is made before it.
-    PullRequestsFetched {
-        tag: Tag,
-        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
-        limited_until: Option<i64>,
-    },
-    /// Open the selected branch's pull request, or its merge requests, in
-    /// the browser the global config names.
-    OpenForgeUrl,
-    /// Put the selected branch's pull request or merge request list URL
-    /// on the clipboard.
-    CopyForgeUrl,
-    /// Ask the forge again for the branches' pull requests, at the user's
-    /// request: only on an opted-in host, never past a running call or a
-    /// rate limit.
-    RefreshPullRequests,
-    /// The browser could not be started, and why.
-    OpenUrlFailed(String),
-    /// Start a pull request for the selected branch: pick the target
-    /// remote and base branch where more than one fits, then the title.
-    CreatePrStart,
-    /// Move the pick list's cursor down or up.
-    PickNext,
-    PickPrev,
-    /// Take the row under the pick list's cursor.
-    PickSelect,
-    /// The title the pull request prompt was accepted with.
-    PullRequestTitled(String),
-    /// Create the pull request the open question describes.
-    ConfirmCreatePullRequest,
-    /// GitHub answered a create: the new number and page, or why not.
-    PullRequestCreated {
-        tag: Tag,
-        result: Result<(u64, String), CreateError>,
-    },
+    /// Everything the pull request badges, forge links, creating a pull
+    /// request and the pick list do; its own `update` handles it.
+    PullRequests(PullRequestsIntent),
 
     // --- review ---
-    /// Leave the workspace for review mode and load its queues.
-    EnterReview,
-    /// Show the next review queue, or the previous one.
-    NextQueue,
-    PrevQueue,
-    /// Open the pull request under the cursor in the queue.
-    OpenPr,
-    /// Back from a pull request to its queue, or from the queue to the
-    /// workspace.
-    CloseReviewDetail,
-    /// Ask GitHub again for what review mode shows.
-    RefreshReview,
-    /// Open a failing check's page in the browser, picking one when
-    /// several fail.
-    OpenCheckDetails,
-    /// Merge the open pull request: pick a method when several are
-    /// allowed, then ask.
-    OpenMergePr,
-    /// Merge the pull request the open question describes.
-    ConfirmMergePr,
-    /// GitHub answered a merge of pull request `number`, or why not.
-    PullRequestMerged {
-        tag: Tag,
-        number: u64,
-        result: Result<(), CreateError>,
-    },
-    /// Move the queue's cursor, or scroll the pull request, by a line.
-    ReviewNext,
-    ReviewPrev,
-    /// The review queues, or why not; `repo` is the repository found,
-    /// when one was.
-    ReviewQueuesLoaded {
-        tag: Tag,
-        repo: Option<ForgeRepo>,
-        result: Result<Queues, ReviewError>,
-    },
-    /// Pull request `number`, `None` when GitHub has no such one, or why
-    /// it could not be read; `repo` as for the queues.
-    PrDetailLoaded {
-        tag: Tag,
-        number: u64,
-        repo: Option<ForgeRepo>,
-        result: Result<Option<PrDetail>, ReviewError>,
-    },
-    /// Show the open pull request's changed files and their diff.
-    OpenReviewFiles,
-    /// Move the keys between the file list and the diff on the files screen.
-    ToggleReviewFilesFocus,
-    /// Whether the pull request's head and base commits are here, or why
-    /// git could not say.
-    ReviewObjectsChecked {
-        tag: Tag,
-        result: Result<CommitsHere, String>,
-    },
-    /// The fetch of the missing commits ended, or why it failed.
-    ReviewHeadFetched {
-        tag: Tag,
-        result: Result<(), String>,
-    },
-    /// The merge base to head range and its changed files, or why not.
-    ReviewFilesLoaded {
-        tag: Tag,
-        result: Result<(CommitRange, Vec<PrFileRow>), String>,
-    },
+    /// Everything review mode does; its own `update` handles it.
+    Review(ReviewIntent),
 
     // --- branches ---
     /// Everything the branches subtree does: the panel and its Remotes
@@ -531,6 +342,36 @@ impl From<OperationIntent> for AppIntent {
 impl From<ReposIntent> for AppIntent {
     fn from(intent: ReposIntent) -> Self {
         Self::Repos(intent)
+    }
+}
+
+impl From<StashIntent> for AppIntent {
+    fn from(intent: StashIntent) -> Self {
+        Self::Stash(intent)
+    }
+}
+
+impl From<SubmodulesIntent> for AppIntent {
+    fn from(intent: SubmodulesIntent) -> Self {
+        Self::Submodules(intent)
+    }
+}
+
+impl From<WorktreesIntent> for AppIntent {
+    fn from(intent: WorktreesIntent) -> Self {
+        Self::Worktrees(intent)
+    }
+}
+
+impl From<PullRequestsIntent> for AppIntent {
+    fn from(intent: PullRequestsIntent) -> Self {
+        Self::PullRequests(intent)
+    }
+}
+
+impl From<ReviewIntent> for AppIntent {
+    fn from(intent: ReviewIntent) -> Self {
+        Self::Review(intent)
     }
 }
 

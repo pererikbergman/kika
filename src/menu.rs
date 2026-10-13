@@ -17,13 +17,17 @@ use crate::features::files::FilesIntent;
 use crate::features::files::keys::{files_stage_disabled, stage_all_disabled};
 use crate::features::operation::OperationIntent;
 use crate::features::operation::keys::merge_disabled;
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::features::pull_requests::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
 use crate::features::repos::ReposIntent;
+use crate::features::stash::StashIntent;
 use crate::features::stash::keys::{
     stash_all_disabled, stash_file_disabled, stash_staged_disabled, stash_untracked_disabled,
 };
+use crate::features::submodules::SubmodulesIntent;
+use crate::features::worktrees::WorktreesIntent;
 use crate::git::bisect::BisectMark;
 use crate::intent::AppIntent;
 use crate::keymap::{Reason, never, no_commit_selected};
@@ -108,12 +112,12 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Submodules…",
-        intent: AppIntent::OpenSubmodules,
+        intent: AppIntent::Submodules(SubmodulesIntent::Open),
         disabled: never,
     },
     MenuItem {
         label: "Worktrees…",
-        intent: AppIntent::OpenWorktrees,
+        intent: AppIntent::Worktrees(WorktreesIntent::OpenList),
         disabled: crate::features::worktrees::worktrees_disabled,
     },
     MenuItem {
@@ -251,22 +255,22 @@ static RESET: &[MenuItem] = &[
 static STASH: &[MenuItem] = &[
     MenuItem {
         label: "Stash all changes…",
-        intent: AppIntent::StashAll,
+        intent: AppIntent::Stash(StashIntent::All),
         disabled: stash_all_disabled,
     },
     MenuItem {
         label: "Stash all, including untracked…",
-        intent: AppIntent::StashIncludingUntracked,
+        intent: AppIntent::Stash(StashIntent::IncludingUntracked),
         disabled: stash_untracked_disabled,
     },
     MenuItem {
         label: "Stash staged changes only…",
-        intent: AppIntent::StashStaged,
+        intent: AppIntent::Stash(StashIntent::Staged),
         disabled: stash_staged_disabled,
     },
     MenuItem {
         label: "Stash selected files…",
-        intent: AppIntent::StashFile,
+        intent: AppIntent::Stash(StashIntent::File),
         disabled: stash_file_disabled,
     },
 ];
@@ -335,17 +339,17 @@ static COPY: &[MenuItem] = &[
 static PULL_REQUEST: &[MenuItem] = &[
     MenuItem {
         label: "Open in browser",
-        intent: AppIntent::OpenForgeUrl,
+        intent: AppIntent::PullRequests(PullRequestsIntent::OpenForgeUrl),
         disabled: open_url_disabled,
     },
     MenuItem {
         label: "Copy URL",
-        intent: AppIntent::CopyForgeUrl,
+        intent: AppIntent::PullRequests(PullRequestsIntent::CopyForgeUrl),
         disabled: copy_url_disabled,
     },
     MenuItem {
         label: "Create pull request…",
-        intent: AppIntent::CreatePrStart,
+        intent: AppIntent::PullRequests(PullRequestsIntent::CreateStart),
         disabled: create_disabled,
     },
 ];

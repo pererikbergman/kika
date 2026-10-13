@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::git::{self as pr_objects, CommitsHere};
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
+use crate::features::review::ReviewIntent;
 use crate::forge::merge::MergeMethod;
 use crate::forge::review::{self, ReviewError, ReviewLoad};
 use crate::forge::task::ForgeContext;
@@ -48,7 +49,7 @@ pub(crate) fn load_queues(
         },
         // A panic still answers, or the load would stay in flight.
         |_| (None, Err(ReviewError::Status(ForgeStatus::Failed))),
-        move |(repo, result)| AppIntent::ReviewQueuesLoaded { tag, repo, result },
+        move |(repo, result)| AppIntent::Review(ReviewIntent::QueuesLoaded { tag, repo, result }),
     );
 }
 
@@ -81,11 +82,13 @@ pub(crate) fn load_detail(
             })
         },
         |_| (None, Err(ReviewError::Status(ForgeStatus::Failed))),
-        move |(repo, result)| AppIntent::PrDetailLoaded {
-            tag,
-            number,
-            repo,
-            result,
+        move |(repo, result)| {
+            AppIntent::Review(ReviewIntent::PrDetailLoaded {
+                tag,
+                number,
+                repo,
+                result,
+            })
         },
     );
 }
@@ -115,7 +118,7 @@ pub(crate) fn check_commits(
         },
         // A panic still answers, or the files screen would wait forever.
         background::crashed("git cat-file"),
-        move |result| AppIntent::ReviewObjectsChecked { tag, result },
+        move |result| AppIntent::Review(ReviewIntent::ObjectsChecked { tag, result }),
     );
 }
 
@@ -138,7 +141,7 @@ pub(crate) fn fetch_commits(
         },
         // A panic still answers, or `op_seq` would block every later op.
         background::crashed("git"),
-        move |result| AppIntent::ReviewHeadFetched { tag, result },
+        move |result| AppIntent::Review(ReviewIntent::HeadFetched { tag, result }),
     );
 }
 
@@ -155,7 +158,7 @@ pub(crate) fn load_files(
         tx,
         move || pr_objects::pr_files(runner.as_ref(), &base, &head),
         background::crashed("git diff-tree"),
-        move |result| AppIntent::ReviewFilesLoaded { tag, result },
+        move |result| AppIntent::Review(ReviewIntent::FilesLoaded { tag, result }),
     );
 }
 
@@ -175,11 +178,11 @@ pub(crate) fn merge(
     // No forge client: nothing may reach the network. The client itself
     // refuses a repository `[forge.allow]` leaves out.
     let Some(forge) = forge else {
-        let _ = tx.send(AppIntent::PullRequestMerged {
+        let _ = tx.send(AppIntent::Review(ReviewIntent::Merged {
             tag,
             number,
             result: Err(CreateError::Status(ForgeStatus::Failed)),
-        });
+        }));
         return;
     };
     background::run(
@@ -187,10 +190,12 @@ pub(crate) fn merge(
         move || forge.merge_pull(&host, &repo, number, method, &head_oid),
         // A panic still answers, or the merge would stay in flight.
         |_| Err(CreateError::Status(ForgeStatus::Failed)),
-        move |result| AppIntent::PullRequestMerged {
-            tag,
-            number,
-            result,
+        move |result| {
+            AppIntent::Review(ReviewIntent::Merged {
+                tag,
+                number,
+                result,
+            })
         },
     );
 }
@@ -202,6 +207,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime};
+    use crate::features::review::ReviewIntent;
     use crate::forge::merge::MergeMethod;
     use crate::forge::review::ReviewError;
     use crate::forge::task::ForgeContext;
@@ -235,11 +241,11 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::ReviewQueuesLoaded {
+            Some(AppIntent::Review(ReviewIntent::QueuesLoaded {
                 tag: forge_tag(),
                 repo: None,
                 result: Err(ReviewError::NoForgeHost),
-            })
+            }))
         );
 
         let gh = Arc::new(FakeGh::new().reply(answer(DETAIL)));
@@ -257,12 +263,12 @@ mod tests {
             limited: vec![],
         });
         match rx.recv().await {
-            Some(AppIntent::PrDetailLoaded {
+            Some(AppIntent::Review(ReviewIntent::PrDetailLoaded {
                 number: 42,
                 repo: Some(found),
                 result: Ok(Some(detail)),
                 ..
-            }) => {
+            })) => {
                 assert_eq!(found, repo);
                 assert_eq!(detail.number, 42);
             }
@@ -303,11 +309,11 @@ mod tests {
         runtime.spawn(merge.clone());
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestMerged {
+            Some(AppIntent::Review(ReviewIntent::Merged {
                 tag: forge_tag(),
                 number: 42,
                 result: Ok(()),
-            })
+            }))
         );
         git.assert_done();
         let [call] = gh.calls().try_into().unwrap();
@@ -322,11 +328,11 @@ mod tests {
         Runtime::new(git, tx).spawn(merge);
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestMerged {
+            Some(AppIntent::Review(ReviewIntent::Merged {
                 tag: forge_tag(),
                 number: 42,
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
+            }))
         );
         assert_eq!(gh.calls().len(), 1);
     }
@@ -360,11 +366,11 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::PullRequestMerged {
+            Some(AppIntent::Review(ReviewIntent::Merged {
                 tag: forge_tag(),
                 number: 42,
                 result: Err(CreateError::Status(ForgeStatus::Failed)),
-            })
+            }))
         );
         git.assert_done();
         assert_eq!(gh.calls(), []);

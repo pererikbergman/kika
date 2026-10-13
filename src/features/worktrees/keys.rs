@@ -7,6 +7,7 @@ use super::list::{
     add_worktree_disabled, open_worktree_disabled, remove_worktree_disabled, worktrees_disabled,
 };
 use crate::confirm_question::Answer;
+use crate::features::worktrees::WorktreesIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -18,7 +19,7 @@ pub(crate) static WORKTREES_WORKSPACE: &[Binding] = &[
         id: "workspace.worktrees",
         keys: &[KeyPattern::any(KeyCode::Char('W'))],
         scope: KeyScope::Workspace,
-        intent: AppIntent::OpenWorktrees,
+        intent: AppIntent::Worktrees(WorktreesIntent::OpenList),
         description: "Show worktrees, to switch to, add or remove one",
         label: "worktrees",
         bar: false,
@@ -35,7 +36,7 @@ pub(crate) static WORKTREES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Worktrees,
-        intent: AppIntent::WorktreeNext,
+        intent: AppIntent::Worktrees(WorktreesIntent::Next),
         description: "Select the next worktree",
         label: "",
         bar: false,
@@ -48,7 +49,7 @@ pub(crate) static WORKTREES_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Worktrees,
-        intent: AppIntent::WorktreePrev,
+        intent: AppIntent::Worktrees(WorktreesIntent::Prev),
         description: "Select the previous worktree",
         label: "",
         bar: false,
@@ -58,7 +59,7 @@ pub(crate) static WORKTREES_KEYS: &[Binding] = &[
         id: "worktrees.open",
         keys: &[KeyPattern::any(KeyCode::Enter)],
         scope: KeyScope::Worktrees,
-        intent: AppIntent::OpenWorktree,
+        intent: AppIntent::Worktrees(WorktreesIntent::Open),
         description: "Switch to the selected worktree",
         label: "switch",
         bar: true,
@@ -68,7 +69,7 @@ pub(crate) static WORKTREES_KEYS: &[Binding] = &[
         id: "worktrees.add",
         keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
         scope: KeyScope::Worktrees,
-        intent: AppIntent::AddWorktree,
+        intent: AppIntent::Worktrees(WorktreesIntent::Add),
         description: "Add a worktree for the local branch selected in the Branches panel",
         label: "add",
         bar: true,
@@ -78,7 +79,7 @@ pub(crate) static WORKTREES_KEYS: &[Binding] = &[
         id: "worktrees.remove",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Worktrees,
-        intent: AppIntent::RemoveWorktree,
+        intent: AppIntent::Worktrees(WorktreesIntent::Remove),
         description: "Remove the selected linked worktree",
         label: "remove",
         bar: true,
@@ -133,7 +134,7 @@ pub(crate) static WORKTREES_REMOVE_CONFIRM: &[Binding] = &[
         id: "remove_worktree.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::RemoveWorktree,
-        intent: AppIntent::ConfirmRemoveWorktree,
+        intent: AppIntent::Worktrees(WorktreesIntent::ConfirmRemove),
         description: "Yes, remove the worktree and its directory",
         label: "remove",
         bar: true,
@@ -193,7 +194,7 @@ mod tests {
                 key(KeyCode::Char('W'), shift),
             );
             assert!(
-                matches!(found, Resolution::Run(b) if b.intent == OpenWorktrees),
+                matches!(found, Resolution::Run(b) if b.intent == Worktrees(WorktreesIntent::OpenList)),
                 "{scope:?}"
             );
         }
@@ -226,12 +227,21 @@ mod tests {
             Resolution::Disabled(reason) => panic!("{k:?} disabled: {reason}"),
             Resolution::Unbound | Resolution::Command(_) => None,
         };
-        assert_eq!(run(plain('j')), Some(WorktreeNext));
-        assert_eq!(run(key(KeyCode::Down, none)), Some(WorktreeNext));
-        assert_eq!(run(plain('k')), Some(WorktreePrev));
-        assert_eq!(run(key(KeyCode::Up, none)), Some(WorktreePrev));
-        assert_eq!(run(key(KeyCode::Enter, none)), Some(OpenWorktree));
-        assert_eq!(run(plain('d')), Some(RemoveWorktree));
+        assert_eq!(run(plain('j')), Some(Worktrees(WorktreesIntent::Next)));
+        assert_eq!(
+            run(key(KeyCode::Down, none)),
+            Some(Worktrees(WorktreesIntent::Next))
+        );
+        assert_eq!(run(plain('k')), Some(Worktrees(WorktreesIntent::Prev)));
+        assert_eq!(
+            run(key(KeyCode::Up, none)),
+            Some(Worktrees(WorktreesIntent::Prev))
+        );
+        assert_eq!(
+            run(key(KeyCode::Enter, none)),
+            Some(Worktrees(WorktreesIntent::Open))
+        );
+        assert_eq!(run(plain('d')), Some(Worktrees(WorktreesIntent::Remove)));
         assert_eq!(run(key(KeyCode::Esc, none)), Some(ListEscape));
         assert_eq!(run(plain('q')), Some(PopPopup));
         assert_eq!(run(plain('/')), Some(OpenFilter));
@@ -307,7 +317,7 @@ mod tests {
         }
         assert_eq!(
             from(KeyScope::RemoveWorktree, plain('y')),
-            Some(AppIntent::ConfirmRemoveWorktree)
+            Some(AppIntent::Worktrees(WorktreesIntent::ConfirmRemove))
         );
         for k in [plain('n'), key(KeyCode::Esc, KeyModifiers::NONE)] {
             assert_eq!(

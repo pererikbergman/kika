@@ -4,7 +4,11 @@
 //! handlers (`update.rs`), its key bindings and guards (`keys.rs`) and the
 //! load behind `Effect::LoadSubmodules` (`effects.rs`).
 //!
-//! Its `pub(crate)` API: the type [`SubmoduleList`]; the query methods
+//! Its intents are nested (ADR-0002): core wraps [`SubmodulesIntent`] in
+//! `AppIntent::Submodules`, and its one `update` arm calls [`update`] here.
+//!
+//! Its `pub(crate)` API: the type [`SubmoduleList`]; the intent enum
+//! [`SubmodulesIntent`] and the free function [`update`]; the query methods
 //! `selected_submodule()` and `nested()` on `AppState`; `reload_submodules()`,
 //! which the core refresh plan calls; the chunks
 //! `keys::{SUBMODULES_WORKSPACE, SUBMODULES_FILES, SUBMODULES_KEYS}`; and
@@ -25,11 +29,14 @@
 //! `render_submodules` in `popup_view.rs`.
 
 pub(crate) mod effects;
+mod intent;
 pub(crate) mod keys;
 mod list;
 mod update;
 
+pub(crate) use intent::SubmodulesIntent;
 pub(crate) use list::SubmoduleList;
+pub(crate) use update::update;
 
 use crate::git::path::RepoPath;
 use crate::git::submodule::Submodule;

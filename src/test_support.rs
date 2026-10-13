@@ -17,10 +17,13 @@ use crate::features::commits::reflog::ReflogIntent;
 use crate::features::commits::rewrite::RewriteIntent;
 use crate::features::diff::DiffIntent;
 use crate::features::files::FilesIntent;
+use crate::features::pull_requests::PullRequestsIntent;
+use crate::features::stash::StashIntent;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
+use crate::features::submodules::SubmodulesIntent;
 use crate::features::sync::SyncIntent;
 use crate::filtered_list::{FilteredList, Row};
-use crate::forge::ForgeHost;
+use crate::forge::{ForgeHost, ForgeStatus, PrBadge};
 use crate::git::FileEntry;
 use crate::git::GitRunner;
 use crate::git::bisect::{BisectMark, BisectState};
@@ -54,6 +57,7 @@ use crate::watch::WatchEvent;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 
@@ -430,10 +434,10 @@ pub(crate) fn with_submodules(subs: Vec<Submodule>) -> AppState {
     let mut state = state.with_location(Some(TOP.into()), TOP.into());
     state.update(AppIntent::Files(FilesIntent::Next));
     let tag = submodules_tag(&press_char(&mut state, 'S'));
-    state.update(AppIntent::SubmodulesLoaded {
+    state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
         tag,
         result: Ok(subs),
-    });
+    }));
     state
 }
 
@@ -1110,6 +1114,20 @@ pub(crate) fn edit_hunk_intent() -> AppIntent {
     AppIntent::Diff(DiffIntent::EditHunk)
 }
 
+/// The forge's answer to a badge load for `tag`. Core builds the pull
+/// requests intent, so tests in other features need not name it.
+pub(crate) fn pull_requests_fetched(
+    tag: Tag,
+    result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+    limited_until: Option<i64>,
+) -> AppIntent {
+    AppIntent::PullRequests(PullRequestsIntent::Fetched {
+        tag,
+        result,
+        limited_until,
+    })
+}
+
 pub(crate) const PUSH: RemoteOp = RemoteOp::Push {
     force_with_lease: false,
 };
@@ -1366,10 +1384,10 @@ pub(crate) fn load_stashes(state: &mut AppState, entries: Vec<StashEntry>) {
         [Effect::LoadStashes { tag }] => *tag,
         other => panic!("expected one LoadStashes, got {other:?}"),
     };
-    state.update(AppIntent::StashesLoaded {
+    state.update(AppIntent::Stash(StashIntent::Loaded {
         tag,
         result: Ok(entries),
-    });
+    }));
 }
 
 /// `three_files` in the worktree, `three_stashes` in the list, the
@@ -1409,10 +1427,10 @@ pub(crate) fn tracked_and_untracked() -> Vec<StashFile> {
 /// Open `stash@{1}` and answer with its two files.
 pub(crate) fn stash_opened(state: &mut AppState) -> Vec<Effect> {
     let (tag, _) = stash_files_load(&press(state, KeyCode::Enter));
-    state.update(AppIntent::StashFilesLoaded {
+    state.update(AppIntent::Stash(StashIntent::FilesLoaded {
         tag,
         result: Ok(tracked_and_untracked()),
-    })
+    }))
 }
 
 pub(crate) fn stash_ref(index: usize, oid: &str) -> StashRef {

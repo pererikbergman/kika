@@ -16,9 +16,12 @@ use crate::features::commits::CommitsIntent;
 use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::files::FilesIntent;
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::features::repos::RecentList;
+use crate::features::stash::StashIntent;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
+use crate::features::worktrees::WorktreesIntent;
 use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
@@ -567,8 +570,8 @@ impl PromptKind {
             }
             PromptKind::NewBranch => AppIntent::Branches(BranchesIntent::CreateNamed(text)),
             PromptKind::RenameBranch => AppIntent::Branches(BranchesIntent::RenameTo(text)),
-            PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
-            PromptKind::RenameStash => AppIntent::RenameStashTo(text),
+            PromptKind::StashMessage => AppIntent::Stash(StashIntent::MessageAnswered(text)),
+            PromptKind::RenameStash => AppIntent::Stash(StashIntent::RenameTo(text)),
             PromptKind::TrackBranch => {
                 AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(text)))
             }
@@ -582,7 +585,7 @@ impl PromptKind {
                 AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::RenameTo(text)))
             }
             PromptKind::SetUpstream => AppIntent::Branches(BranchesIntent::SetUpstreamTo(text)),
-            PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
+            PromptKind::WorktreePath => AppIntent::Worktrees(WorktreesIntent::AddAt(text)),
             PromptKind::TagName => {
                 AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Named(text)))
             }
@@ -590,7 +593,9 @@ impl PromptKind {
                 AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(text)))
             }
             PromptKind::IgnorePattern => AppIntent::Files(FilesIntent::IgnorePatternAnswered(text)),
-            PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
+            PromptKind::PullRequestTitle => {
+                AppIntent::PullRequests(PullRequestsIntent::Titled(text))
+            }
             PromptKind::PatchCommitMessage => AppIntent::Commits(CommitsIntent::CustomPatch(
                 CustomPatchIntent::CommitMessage(text),
             )),
@@ -756,12 +761,12 @@ mod tests {
         assert_eq!(PromptKind::StashMessage.title(), "Stash message (optional)");
         assert_eq!(
             PromptKind::StashMessage.submit("wip".into()),
-            AppIntent::StashMessageAnswered("wip".into())
+            AppIntent::Stash(StashIntent::MessageAnswered("wip".into()))
         );
         assert_eq!(PromptKind::RenameStash.title(), "Rename stash");
         assert_eq!(
             PromptKind::RenameStash.submit("new".into()),
-            AppIntent::RenameStashTo("new".into())
+            AppIntent::Stash(StashIntent::RenameTo("new".into()))
         );
     }
 

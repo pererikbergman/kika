@@ -9,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::git::{StashEntry, list_stashes, stash_files};
 use crate::background;
 use crate::effect::Tag;
+use crate::features::stash::StashIntent;
 use crate::git::GitRunner;
 use crate::intent::AppIntent;
 
@@ -19,7 +20,7 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
         move || list_stashes(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
         background::crashed("git stash list"),
-        move |result| AppIntent::StashesLoaded { tag, result },
+        move |result| AppIntent::Stash(StashIntent::Loaded { tag, result }),
     );
 }
 
@@ -35,7 +36,7 @@ pub(crate) fn load_files(
         move || stash_files(runner.as_ref(), &entry),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git diff-tree"),
-        move |result| AppIntent::StashFilesLoaded { tag, result },
+        move |result| AppIntent::Stash(StashIntent::FilesLoaded { tag, result }),
     );
 }
 
@@ -46,6 +47,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::stash::StashIntent;
     use crate::git::fake::{FakeRunner, ok};
     use crate::intent::AppIntent;
     use crate::test_support::HostilePanic;
@@ -84,10 +86,10 @@ mod tests {
         let runtime = Runtime::new(runner.clone(), tx);
 
         runtime.spawn(Effect::LoadStashes { tag });
-        let Some(AppIntent::StashesLoaded {
+        let Some(AppIntent::Stash(StashIntent::Loaded {
             tag: got,
             result: Ok(entries),
-        }) = rx.recv().await
+        })) = rx.recv().await
         else {
             panic!("expected StashesLoaded");
         };
@@ -98,10 +100,10 @@ mod tests {
             tag,
             entry: entries[0].clone(),
         });
-        let Some(AppIntent::StashFilesLoaded {
+        let Some(AppIntent::Stash(StashIntent::FilesLoaded {
             tag: got,
             result: Ok(files),
-        }) = rx.recv().await
+        })) = rx.recv().await
         else {
             panic!("expected StashFilesLoaded");
         };
@@ -113,10 +115,10 @@ mod tests {
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
         runtime.spawn(Effect::LoadStashes { tag });
         match rx.recv().await {
-            Some(AppIntent::StashesLoaded {
+            Some(AppIntent::Stash(StashIntent::Loaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(
                     message.starts_with("git stash list crashed: "),
@@ -130,10 +132,10 @@ mod tests {
             entry: entries[0].clone(),
         });
         match rx.recv().await {
-            Some(AppIntent::StashFilesLoaded {
+            Some(AppIntent::Stash(StashIntent::FilesLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(!message.contains(char::is_control), "{message:?}");
             }

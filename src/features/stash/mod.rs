@@ -6,7 +6,11 @@
 //! and `Effect::LoadStashFiles` are its effects. Its git ops run through
 //! the core op slot.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`StashIntent`] in
+//! `AppIntent::Stash`, and its one `update` arm calls [`update`] here.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`StashIntent`] and the free function [`update`];
 //! - the state types `StashList` and `StashDraft` (`list.rs`). The list
 //!   itself is a core `FilteredList<StashEntry>` in `StashList::list`;
 //! - `keys::{STASH_KEYS, STASH_FROM_FILES, STASH_DROP_CONFIRM}` and the
@@ -50,10 +54,11 @@
 //!   `push_with_fixups`, which `run_op` delegates to.
 //!
 //! `StashEntry`, `StashFile`, `StashMode` and `StashRef` are re-exported
-//! for core, which names them in `GitOp`, `AppIntent` and `Effect`.
+//! for core, which names them in `GitOp` and `Effect`.
 
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 pub(crate) mod list;
 pub(crate) mod push;
@@ -61,7 +66,9 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use git::{StashEntry, StashFile, StashMode, StashRef};
+pub(crate) use intent::StashIntent;
 pub(crate) use list::{StashDraft, StashList};
+pub(crate) use update::update;
 // Core's popup tests build the question as the feature asks it.
 #[cfg(test)]
 pub(crate) use update::drop_stash_question;

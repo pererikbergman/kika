@@ -9,6 +9,7 @@ use std::ffi::OsString;
 use crate::clipboard::CopyWhat;
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
+use crate::features::pull_requests::PullRequestsIntent;
 use crate::forge::remote::{allowed, matches};
 use crate::forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
 use crate::forge::{
@@ -211,7 +212,9 @@ pub(crate) fn create_question(state: &AppState) -> ConfirmQuestion {
         title: "Create pull request".into(),
         text,
         answer: Answer::YOnly,
-        then: Then::Intent(Box::new(AppIntent::ConfirmCreatePullRequest)),
+        then: Then::Intent(Box::new(AppIntent::PullRequests(
+            PullRequestsIntent::ConfirmCreate,
+        ))),
         range: false,
         head: None,
     }
@@ -761,7 +764,7 @@ mod tests {
     fn copy_url_gives_the_github_pull_request_page() {
         let mut state = one_remote();
         state.forge.badges.insert("topic".into(), badge(7));
-        let effects = state.update(AppIntent::CopyForgeUrl);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::CopyForgeUrl));
         let url = "https://github.com/acme/widgets/pull/7";
         assert_eq!(effects, [Effect::Clipboard(url.into())]);
         assert_eq!(
@@ -777,7 +780,7 @@ mod tests {
             "https://gitlab.example.com/grp/proj.git",
             &["main"],
         )]);
-        let effects = state.update(AppIntent::CopyForgeUrl);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::CopyForgeUrl));
         assert_eq!(
             effects,
             [Effect::Clipboard(
@@ -834,7 +837,7 @@ mod tests {
     fn open_in_browser_hands_the_url_as_the_last_argument() {
         let mut state = one_remote();
         state.forge.badges.insert("topic".into(), badge(12));
-        let effects = state.update(AppIntent::OpenForgeUrl);
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::OpenForgeUrl));
         let mut argv = browser();
         argv.push("https://github.com/acme/widgets/pull/12".into());
         assert_eq!(effects, [Effect::OpenUrl { argv }]);
@@ -860,7 +863,10 @@ mod tests {
             reason(&state, "Open in browser").as_deref(),
             Some(NO_BROWSER)
         );
-        assert_eq!(state.update(AppIntent::OpenForgeUrl), vec![]);
+        assert_eq!(
+            state.update(AppIntent::PullRequests(PullRequestsIntent::OpenForgeUrl)),
+            vec![]
+        );
         assert_eq!(state.notice.as_deref(), Some(NO_BROWSER));
         assert_eq!(reason(&state, "Copy URL"), None);
 
@@ -908,7 +914,7 @@ mod tests {
     #[test]
     fn one_remote_and_one_base_go_straight_to_the_title() {
         let mut state = one_remote();
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         // `topic` itself is no base, so `main` is the only one.
         assert_eq!(
             top_prompt(&state),
@@ -926,7 +932,7 @@ mod tests {
     #[test]
     fn submitting_the_title_keeps_the_draft_for_the_question() {
         let mut state = one_remote();
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         assert_eq!(state.update(AppIntent::SubmitPrompt), vec![]);
         assert_eq!(asked(&state).title, "Create pull request");
         assert_eq!(
@@ -945,7 +951,7 @@ mod tests {
                 &["main"],
             ),
         ]);
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         let list = top_pick(&state);
         assert_eq!(list.rows.len(), 2);
         for row in &list.rows {
@@ -961,7 +967,7 @@ mod tests {
     #[test]
     fn the_question_puts_the_answer_keys_first_and_cuts_a_long_title() {
         let mut state = one_remote();
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         answer_title(&mut state, &"t".repeat(200));
         let question = asked(&state).text.clone();
         let lines: Vec<&str> = question.lines().collect();
@@ -978,7 +984,7 @@ mod tests {
     #[test]
     fn an_empty_title_is_asked_again() {
         let mut state = one_remote();
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         answer_title(&mut state, "   ");
         assert_eq!(
             state.notice.as_deref(),
@@ -1006,15 +1012,15 @@ mod tests {
             // Another host is never a target.
             remote("mirror", "https://gitlab.example.com/x/widgets", &["main"]),
         ]);
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         let list = top_pick(&state);
         assert_eq!(list.purpose, PickPurpose::TargetRemote);
         assert_eq!(
             list.rows,
             ["origin  acme/widgets", "upstream  acme-org/widgets"]
         );
-        state.update(AppIntent::PickNext);
-        state.update(AppIntent::PickSelect);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickNext));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickSelect));
         let list = top_pick(&state);
         assert_eq!(list.purpose, PickPurpose::BaseBranch);
         // On another remote, its own `topic` is a base like any other.
@@ -1034,10 +1040,10 @@ mod tests {
                 &["main", "dev"],
             ),
         ]);
-        state.update(AppIntent::CreatePrStart);
-        state.update(AppIntent::PickNext);
-        state.update(AppIntent::PickSelect);
-        state.update(AppIntent::PickSelect);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickNext));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickSelect));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickSelect));
         answer_title(&mut state, "Add login");
         assert_eq!(
             state.key_focus(),
@@ -1070,13 +1076,13 @@ mod tests {
     #[test]
     fn y_from_the_same_repository_sends_the_bare_head_and_n_cancels() {
         let mut state = one_remote();
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         state.update(AppIntent::SubmitPrompt);
         assert_eq!(press_char(&mut state, 'n'), vec![]);
         assert!(state.popups.is_empty());
         assert_eq!(state.pr_draft, None);
 
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         state.update(AppIntent::SubmitPrompt);
         let (_, target, head, base, _) = created(&press_char(&mut state, 'y'));
         assert_eq!(target, repo("acme", "widgets"));
@@ -1089,7 +1095,7 @@ mod tests {
             origin(&["main", "topic"]),
             remote("upstream", "https://github.com/acme-org/widgets", &["main"]),
         ]);
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         assert!(state.pr_draft.is_some());
         press(&mut state, crossterm::event::KeyCode::Esc);
         assert!(state.popups.is_empty());
@@ -1111,7 +1117,10 @@ mod tests {
             "git@github.com:other/repo.git",
             &["main", "topic"],
         )]);
-        assert_eq!(state.update(AppIntent::CreatePrStart), vec![]);
+        assert_eq!(
+            state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart)),
+            vec![]
+        );
         assert_eq!(state.notice.as_deref(), Some(NOT_ALLOWED));
         assert_eq!(state.pr_draft, None);
         assert!(state.popups.is_empty());
@@ -1123,7 +1132,7 @@ mod tests {
             remote("origin", "git@github.com:me/repo.git", &["main", "topic"]),
             remote("upstream", "https://github.com/acme/repo", &["main"]),
         ]);
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         let draft = state.pr_draft.as_ref().unwrap();
         assert_eq!(draft.targets, [("upstream".into(), repo("acme", "repo"))]);
         state.update(AppIntent::SubmitPrompt);
@@ -1134,7 +1143,7 @@ mod tests {
 
     /// Run a create from `state` to its effect; the effect's tag.
     fn start_create(state: &mut AppState) -> Tag {
-        state.update(AppIntent::CreatePrStart);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
         state.update(AppIntent::SubmitPrompt);
         created(&press_char(state, 'y')).0
     }
@@ -1143,10 +1152,10 @@ mod tests {
     fn a_created_pull_request_shows_its_badge_at_once_and_refreshes() {
         let mut state = one_remote();
         let tag = start_create(&mut state);
-        let effects = state.update(AppIntent::PullRequestCreated {
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag,
             result: Ok((42, "https://github.com/acme/widgets/pull/42".into())),
-        });
+        }));
         let want = PrBadge {
             number: 42,
             state: PrState::Open,
@@ -1171,18 +1180,18 @@ mod tests {
         let Some(Effect::LoadPullRequests { tag: load, .. }) = effects.first() else {
             unreachable!()
         };
-        state.update(AppIntent::PullRequestsCached {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Cached {
             tag: *load,
             repo: repo("acme", "widgets"),
             badges: Some(Default::default()),
-        });
+        }));
         assert_eq!(state.forge.badges.get(&"topic".into()), Some(&want));
         // Its answer does, and takes over.
-        state.update(AppIntent::PullRequestsFetched {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Fetched {
             tag: *load,
             result: Ok([("topic".into(), badge(42))].into()),
             limited_until: None,
-        });
+        }));
         assert_eq!(state.forge.badges.get(&"topic".into()), Some(&badge(42)));
         assert!(state.forge.created.is_empty());
     }
@@ -1193,15 +1202,15 @@ mod tests {
             origin(&["main", "topic"]),
             remote("upstream", "https://github.com/acme-org/widgets", &["main"]),
         ]);
-        state.update(AppIntent::CreatePrStart);
-        state.update(AppIntent::PickNext);
-        state.update(AppIntent::PickSelect);
+        state.update(AppIntent::PullRequests(PullRequestsIntent::CreateStart));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickNext));
+        state.update(AppIntent::PullRequests(PullRequestsIntent::PickSelect));
         state.update(AppIntent::SubmitPrompt);
         let (tag, ..) = created(&press_char(&mut state, 'y'));
-        let effects = state.update(AppIntent::PullRequestCreated {
+        let effects = state.update(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag,
             result: Ok((5, "https://github.com/acme-org/widgets/pull/5".into())),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert!(state.forge.badges.is_empty());
         assert_eq!(
@@ -1215,12 +1224,12 @@ mod tests {
         let mut state = one_remote();
         let busy = state.busy_count();
         let tag = start_create(&mut state);
-        state.update(AppIntent::PullRequestCreated {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag,
             result: Err(CreateError::Refused(
                 "Validation Failed: A pull request already exists for acme:topic.".into(),
             )),
-        });
+        }));
         assert_eq!(state.busy_count(), busy);
         match state.popups.as_slice() {
             [Popup::Error(error)] => {
@@ -1232,12 +1241,12 @@ mod tests {
 
         let mut state = one_remote();
         let tag = start_create(&mut state);
-        state.update(AppIntent::PullRequestCreated {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag,
             result: Err(CreateError::RateLimited {
                 until: 1_700_000_100,
             }),
-        });
+        }));
         assert!(state.popups.is_empty());
         assert_eq!(state.forge.limited.get("github.com"), Some(&1_700_000_100));
         assert_eq!(state.forge.limited_until, Some(1_700_000_100));
@@ -1259,10 +1268,10 @@ mod tests {
             seq: tag.seq + 1,
             ..tag
         };
-        state.update(AppIntent::PullRequestCreated {
+        state.update(AppIntent::PullRequests(PullRequestsIntent::Created {
             tag: stale,
             result: Ok((1, String::new())),
-        });
+        }));
         assert!(state.forge.badges.is_empty());
         assert!(state.pr_create.is_some());
     }

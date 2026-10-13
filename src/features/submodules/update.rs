@@ -2,6 +2,7 @@
 //! popup's list, running init and update on the selected submodule, and
 //! entering and leaving a submodule.
 
+use super::SubmodulesIntent;
 use super::keys::{enter_submodule_disabled, leave_submodule_disabled};
 use super::list::SubmoduleList;
 use crate::effect::{Effect, Tag};
@@ -9,6 +10,23 @@ use crate::git::submodule::Submodule;
 use crate::model::{AppState, Context, ParentRepo};
 use crate::op::GitOp;
 use crate::popup::Popup;
+
+/// The Submodules feature's half of `update`: core's one
+/// `AppIntent::Submodules` arm lands here. A free function, so its name
+/// cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: SubmodulesIntent) -> Vec<Effect> {
+    match intent {
+        SubmodulesIntent::Open => return state.open_submodules(),
+        SubmodulesIntent::Loaded { tag, result } => state.submodules_loaded(tag, result),
+        SubmodulesIntent::Next => state.move_submodule_cursor(1),
+        SubmodulesIntent::Prev => state.move_submodule_cursor(-1),
+        SubmodulesIntent::Init => return state.init_submodule(),
+        SubmodulesIntent::Update => return state.update_submodule(),
+        SubmodulesIntent::Enter => return state.enter_submodule(),
+        SubmodulesIntent::Leave => return state.leave_submodule(),
+    }
+    Vec::new()
+}
 
 /// The Submodules popup and entering and leaving a submodule.
 impl AppState {
@@ -174,10 +192,10 @@ mod tests {
         assert_eq!(*submodule_list(&state), SubmoduleList::loading(tag.seq));
 
         let subs = vec![submodule("sub", SubmoduleState::UpToDate)];
-        state.update(AppIntent::SubmodulesLoaded {
+        state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
             tag,
             result: Ok(subs.clone()),
-        });
+        }));
         assert_eq!(submodule_list(&state).list.rows, subs);
         assert_eq!(state.busy_count(), busy);
     }
@@ -203,28 +221,28 @@ mod tests {
             seq: old.seq + 100,
             ..old
         };
-        state.update(AppIntent::SubmodulesLoaded {
+        state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
             tag: stale_seq,
             result: Ok(subs.clone()),
-        });
+        }));
         let stale_generation = Tag {
             generation: old.generation + 1,
             ..old
         };
-        state.update(AppIntent::SubmodulesLoaded {
+        state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
             tag: stale_generation,
             result: Ok(subs.clone()),
-        });
+        }));
         assert!(!submodule_list(&state).list.loaded);
         assert_eq!(state.busy_count(), 0);
 
         // Closed before the answer: nothing comes back.
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.popups, []);
-        state.update(AppIntent::SubmodulesLoaded {
+        state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
             tag: old,
             result: Ok(subs),
-        });
+        }));
         assert_eq!(state.popups, []);
         assert!(!state.should_quit);
     }
@@ -291,7 +309,7 @@ mod tests {
         assert!(list.list.loaded);
 
         // Closed: only the files reload.
-        let (tag, op) = op_of(&state.update(AppIntent::UpdateSubmodule));
+        let (tag, op) = op_of(&state.update(AppIntent::Submodules(SubmodulesIntent::Update)));
         state.popups.clear();
         let effects = state.update(AppIntent::OpFinished {
             tag,
@@ -396,7 +414,10 @@ mod tests {
     fn enter_waits_for_a_running_op() {
         let mut state = with_submodules(vec![submodule("a", SubmoduleState::UpToDate)]);
         state.hold_op(99);
-        assert_eq!(state.update(AppIntent::EnterSubmodule), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Submodules(SubmodulesIntent::Enter)),
+            vec![]
+        );
         assert_eq!(
             state.notice,
             Some("Wait for the operation to finish".into())
@@ -450,11 +471,11 @@ mod tests {
     fn nested_submodules_stack_their_paths() {
         let mut state = with_submodules(vec![submodule("outer", SubmoduleState::UpToDate)]);
         press(&mut state, KeyCode::Enter);
-        let tag = submodules_tag(&state.update(AppIntent::OpenSubmodules));
-        state.update(AppIntent::SubmodulesLoaded {
+        let tag = submodules_tag(&state.update(AppIntent::Submodules(SubmodulesIntent::Open)));
+        state.update(AppIntent::Submodules(SubmodulesIntent::Loaded {
             tag,
             result: Ok(vec![submodule("inner", SubmoduleState::UpToDate)]),
-        });
+        }));
         let effects = press(&mut state, KeyCode::Enter);
         assert_eq!(
             set_repo(&effects[0]),
