@@ -17,9 +17,9 @@
 //!   `switch_commits_tab`, `commits_loaded`, `markers_loaded`,
 //!   `branch_tips_loaded`, `open_commit_files`, `commit_files_loaded`,
 //!   `move_commit_file` and `commit_file_diff`; in `actions.rs`:
-//!   `commit_for_action`, `ask_checkout_commit`, `confirm_checkout_commit`,
-//!   `revert_commit`, `reset_to` and the `reset_hard_question`
-//!   constructor; and in `log_query.rs`: `open_log_filter`,
+//!   `commit_for_action`, `ask_checkout_commit`, `revert_commit`,
+//!   `reset_to` and the `reset_hard_question` and `checkout_question`
+//!   constructors; and in `log_query.rs`: `open_log_filter`,
 //!   `accept_log_query`, `set_log_query` and `log_of_file`;
 //! - the chunks `keys::{COMMITS_KEYS, COMMITS_SWITCH_TAB,
 //!   COMMITS_FILES_NAV, COMMITS_FILES_BACK, COMMITS_RESET_HARD_CONFIRM,
@@ -47,9 +47,9 @@
 //! (`key_focus`, `open_filter`, the filter apply and `list_escape`);
 //! `commit_source_disabled`, `no_commit`, `in_progress_disabled` and
 //! `list_guard`, which core's own guards and other features' share;
-//! `REPO_LOCKED`; the confirm popups (`ConfirmKind::DetachedCheckout`,
-//! `Popup::Question`) and their views; `confirm_question.rs`, which
-//! answers the hard-reset question and re-checks `HEAD` (`head_still`);
+//! `REPO_LOCKED`; the confirm popup (`Popup::Question`) and its view;
+//! `confirm_question.rs`, which answers the hard-reset and
+//! detached-checkout questions and re-checks `HEAD` (`head_still`);
 //! and `model/confirm_guard.rs`, which re-checks every move question's
 //! guard on `y`. `op.rs` keeps the `Reset` and `Revert` argv arms of
 //! `op_command`.
@@ -78,7 +78,7 @@ pub(crate) mod rewrite;
 mod update;
 pub(crate) mod view;
 
-pub(crate) use actions::reset_hard_question;
+pub(crate) use actions::{checkout_question, reset_hard_question};
 pub(crate) use commit_files::CommitFilesList;
 pub(crate) use panel::{CommitsPanel, CommitsTab, PAGE};
 

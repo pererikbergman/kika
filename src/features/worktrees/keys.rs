@@ -6,6 +6,7 @@
 use super::list::{
     add_worktree_disabled, open_worktree_disabled, remove_worktree_disabled, worktrees_disabled,
 };
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -130,7 +131,7 @@ pub(crate) static WORKTREES_REMOVE_CONFIRM: &[Binding] = &[
     // Enter is left unbound: the worktree's directory goes with it.
     Binding {
         id: "remove_worktree.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::RemoveWorktree,
         intent: AppIntent::ConfirmRemoveWorktree,
         description: "Yes, remove the worktree and its directory",

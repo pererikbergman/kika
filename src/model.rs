@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
 use crate::effect::{Effect, Tag};
@@ -58,9 +59,7 @@ use crate::menu;
 use crate::op::GitOp;
 use crate::op_slot::OpSlot;
 use crate::pick_list::{PickList, PickPurpose};
-use crate::popup::{
-    ConfirmKind, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind,
-};
+use crate::popup::{ConfirmKind, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
 use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
@@ -981,7 +980,6 @@ impl AppState {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
             }
             AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
-            AppIntent::ConfirmCheckoutCommit => return self.confirm_checkout_commit(),
             AppIntent::RevertCommit => return self.revert_commit(),
             AppIntent::CopyCommit if self.commits.range_anchor.is_some() => self.copy_range(),
             AppIntent::CopyCommit => self.copy_commit(),
@@ -1006,7 +1004,9 @@ impl AppState {
             AppIntent::IgnorePatternAnswered(text) => return self.ignore_answered(text),
             AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
             AppIntent::ResetTo(mode) => return self.reset_to(mode),
-            AppIntent::ConfirmResetHard => return self.answer_question(KeyScope::ResetHard),
+            AppIntent::ConfirmResetHard => {
+                return self.answer_question(KeyScope::ResetHard, Answer::YOnly);
+            }
             AppIntent::LeftBehindChecked {
                 tag,
                 op,
@@ -1225,25 +1225,15 @@ impl AppState {
             Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
-            Some(Popup::Discard(_)) => return KeyScope::DiscardConfirm,
-            Some(Popup::DeleteBranch(_)) => return KeyScope::DeleteBranch,
-            Some(Popup::RemoveRemote(_)) => return KeyScope::RemoveRemote,
-            Some(Popup::DeleteTag(_)) => return KeyScope::DeleteTag,
-            Some(Popup::DeleteRange(_)) => return KeyScope::DeleteRange,
             Some(Popup::Question(q)) => return q.scope,
-            Some(Popup::LeaveCommits(_)) => return KeyScope::LeaveCommits,
-            Some(Popup::DropStash(_)) => return KeyScope::DropStash,
             Some(Popup::Submodules(_)) => return KeyScope::Submodules,
             Some(Popup::Worktrees(_)) => return KeyScope::Worktrees,
-            Some(Popup::RemoveWorktree(_)) => return KeyScope::RemoveWorktree,
             Some(Popup::Recent(_)) => return KeyScope::Recent,
             Some(Popup::PickList(_)) => return KeyScope::PickList,
             // Ssh's yes/no kind is answered like any other question.
             Some(Popup::Credential(prompt)) if prompt.confirm => return KeyScope::Confirm,
             Some(Popup::Credential(_)) => return KeyScope::Credential,
-            Some(Popup::Travel(_)) => return KeyScope::Travel,
             Some(Popup::CommandLog(_)) => return KeyScope::CommandLog,
-            Some(Popup::MergePullRequest(_)) => return KeyScope::MergePullRequest,
         }
         match self.commit {
             CommitFlow::Closed => {}
@@ -1354,6 +1344,9 @@ impl AppState {
 
     /// Close the question on top and run its answer, if it has one.
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
+        if let Some(Popup::Question(q)) = self.popups.last() {
+            return self.answer_confirm_question(q.scope, yes);
+        }
         match self.popups.pop() {
             // Only `ConfirmCreatePullRequest` creates; yes here keeps the
             // question, no closes it and drops the draft.
@@ -1366,9 +1359,6 @@ impl AppState {
                 vec![]
             }
             Some(Popup::Confirm(kind)) => {
-                if kind == ConfirmKind::DetachedCheckout && !yes {
-                    self.commits.pending = None;
-                }
                 let answer = if yes { Some(kind.yes()) } else { kind.no() };
                 answer.map_or_else(Vec::new, |intent| self.update(intent))
             }
@@ -1376,40 +1366,40 @@ impl AppState {
                 // Ssh reads an exit of 0 with "yes" as allowed.
                 vec![Effect::AnswerCredential(yes.then(|| Secret::new("yes")))]
             }
-            Some(Popup::Discard(confirm)) if yes => {
-                // The range was what was asked about; it is done with.
-                if matches!(confirm.what, DiscardWhat::Range { .. }) {
-                    self.files_anchor = None;
-                }
-                self.start_op(Ok(Some(confirm.op)))
-            }
-            Some(Popup::Discard(_)) => vec![],
-            // Only `ConfirmDeleteBranch` deletes, only a question's own yes
-            // key (`ConfirmResetHard` for a hard reset) answers it, only
-            // `ConfirmLeaveCommits` leaves commits behind, only
-            // `ConfirmRemoveRemote` removes, only `ConfirmDeleteTag` deletes
-            // a tag, only `ConfirmDeleteRange` deletes a range, only
-            // `ConfirmTravel` undoes or redoes and only `ConfirmDropStash`
-            // drops a stash; yes here keeps the question, no closes it.
-            Some(
-                Popup::DeleteBranch(_)
-                | Popup::Question(_)
-                | Popup::LeaveCommits(_)
-                | Popup::RemoveRemote(_)
-                | Popup::DeleteTag(_)
-                | Popup::DeleteRange(_)
-                | Popup::Travel(_)
-                | Popup::DropStash(_),
-            ) if !yes => vec![],
-            // Only `ConfirmRemoveWorktree` removes a worktree.
-            Some(Popup::RemoveWorktree(_)) if !yes => vec![],
-            // Only `ConfirmMergePr` merges a pull request.
-            Some(Popup::MergePullRequest(_)) if !yes => vec![],
             // Not a question: leave it where it was.
             other => {
                 self.popups.extend(other);
                 vec![]
             }
+        }
+    }
+
+    /// Answer the question on top, asked in `scope`. No closes any
+    /// question. Yes answers only a discard and the detached checkout:
+    /// every other question answers only to its own intent (such as
+    /// `ConfirmDeleteBranch` or `ConfirmResetHard`), so yes here keeps it
+    /// open.
+    fn answer_confirm_question(&mut self, scope: KeyScope, yes: bool) -> Vec<Effect> {
+        if !yes {
+            self.popups.pop();
+            return vec![];
+        }
+        match scope {
+            KeyScope::DiscardConfirm => {
+                let Some(q) = self.take_question(scope, Answer::YOnly) else {
+                    return vec![];
+                };
+                // The range was what was asked about; it is done with.
+                if q.range {
+                    self.files_anchor = None;
+                }
+                match q.then {
+                    Then::Op(op) => self.start_op(Ok(Some(op))),
+                    _ => vec![],
+                }
+            }
+            KeyScope::Confirm => self.answer_question(scope, Answer::YOrEnter),
+            _ => vec![],
         }
     }
 
@@ -1426,27 +1416,26 @@ impl AppState {
         if self.focus == Focus::Files && self.files_anchor.is_some() {
             return self.ask_discard_range();
         }
-        match self.discard_confirm() {
-            Ok(Some(confirm)) => self.popups.push(Popup::Discard(confirm)),
+        match self.discard_question() {
+            Ok(Some(question)) => self.popups.push(Popup::Question(question)),
             Ok(None) => {}
             Err(reason) => self.notice = Some(reason.into()),
         }
     }
 
     /// What `d` would discard from the current focus, fixed now.
-    fn discard_confirm(&self) -> Result<Option<DiscardConfirm>, &'static str> {
+    fn discard_question(&self) -> Result<Option<ConfirmQuestion>, &'static str> {
         let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
             return Ok(None);
         };
         // Deleting a file is said as such, whatever was selected in it.
-        let confirm = |what, path: &RepoPath, op: GitOp| DiscardConfirm {
-            what: if matches!(op, GitOp::DeleteUntracked(_)) {
+        let confirm = |what, path: &RepoPath, op: GitOp| {
+            let what = if matches!(op, GitOp::DeleteUntracked(_)) {
                 DiscardWhat::Untracked
             } else {
                 what
-            },
-            path: path.display().to_string(),
-            op,
+            };
+            what.into_question(path.display().to_string(), op)
         };
         let view = match (&self.focus, self.hunk_view()) {
             (Focus::Files, _) => {
@@ -1547,30 +1536,22 @@ impl AppState {
             .map_or_else(|| kind.title().to_string(), |t| sanitize(t.as_bytes()))
     }
 
-    /// A yes/no question's text. The detached checkout names the commit
-    /// it was asked about.
+    /// A yes/no question's text.
     pub fn confirm_question(&self, kind: &ConfirmKind) -> Cow<'static, str> {
-        match (kind, &self.commits.pending) {
-            (ConfirmKind::DetachedCheckout, Some(id)) => {
-                let short = self.commits.short_oid(id);
-                Cow::Owned(format!(
-                    "Check out {short} as a detached HEAD? You will be on no branch; \
-                     new commits there belong to no branch until you create one. (y/n)"
-                ))
-            }
-            (ConfirmKind::Abort(Operation::Bisect), _) => {
+        match kind {
+            ConfirmKind::Abort(Operation::Bisect) => {
                 Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
             }
-            (ConfirmKind::CreatePullRequest, _) => match pull_requests::question(self) {
+            ConfirmKind::CreatePullRequest => match pull_requests::question(self) {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
-            (ConfirmKind::CustomPatch(action), _) => match self.patch_question(action) {
+            ConfirmKind::CustomPatch(action) => match self.patch_question(action) {
                 Some(question) => Cow::Owned(question),
                 None => Cow::Borrowed(kind.question()),
             },
             // Only the count: subjects and the filter are not drawn here.
-            (ConfirmKind::DropRange(ids), _) => Cow::Owned(format!(
+            ConfirmKind::DropRange(ids) => Cow::Owned(format!(
                 "Drop {} commits and their changes from the history? (y/n)",
                 ids.len()
             )),
@@ -2251,6 +2232,7 @@ use crate::features::commits::custom_patch::NO_PATCH;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::diff_pane::DIFF_PREFETCH;
     use crate::git::diff::DiffSide;
     use crate::git::status::{EntryKind, RepoStatus};
@@ -2259,7 +2241,7 @@ mod tests {
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
     use crate::op::ResetMode;
-    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
+    use crate::popup::{DiscardWhat, PromptKind};
     use crate::refresh::{RefreshPlan, Scope};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -3066,9 +3048,9 @@ mod tests {
         assert_eq!(prompt_text(&state), "b.t");
     }
 
-    fn discard_popup(state: &AppState) -> &DiscardConfirm {
+    fn discard_popup(state: &AppState) -> &ConfirmQuestion {
         match state.popups.as_slice() {
-            [Popup::Discard(confirm)] => confirm,
+            [Popup::Question(q)] if q.scope == KeyScope::DiscardConfirm => q,
             other => panic!("expected one discard popup, got {other:?}"),
         }
     }
@@ -3079,11 +3061,8 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
         assert_eq!(
             discard_popup(&state),
-            &DiscardConfirm {
-                what: DiscardWhat::File,
-                path: "a.rs".into(),
-                op: GitOp::DiscardWorktree(vec!["a.rs".into()]),
-            }
+            &DiscardWhat::File
+                .into_question("a.rs".into(), GitOp::DiscardWorktree(vec!["a.rs".into()]))
         );
         assert_eq!(state.key_focus(), KeyScope::DiscardConfirm);
         assert_eq!(state.held_seq(), None);
@@ -3122,17 +3101,33 @@ mod tests {
     }
 
     #[test]
+    fn only_a_yes_to_a_range_discard_forgets_the_files_range() {
+        // A one-file range and a single file build the same op; only the
+        // question knows which was asked.
+        let op = || GitOp::DiscardWorktree(vec!["a.rs".into()]);
+        let range = DiscardWhat::Range {
+            restore: 1,
+            delete: 0,
+        };
+        for (what, anchor) in [(DiscardWhat::File, Some("b.rs".into())), (range, None)] {
+            let (mut state, _) = with_files(three_files(), 24);
+            state.files_anchor = Some("b.rs".into());
+            state.popups = vec![Popup::Question(what.into_question("a.rs".into(), op()))];
+            let (_, ran) = op_of(&state.update(AppIntent::ConfirmYes));
+            assert_eq!(ran, op(), "{what:?}");
+            assert_eq!(state.files_anchor, anchor, "{what:?}");
+        }
+    }
+
+    #[test]
     fn d_on_an_untracked_file_asks_to_delete_it() {
         let (mut state, _) = with_files(three_files(), 24);
         select_path(&mut state, "c.txt");
         press(&mut state, KeyCode::Char('d'));
         assert_eq!(
             discard_popup(&state),
-            &DiscardConfirm {
-                what: DiscardWhat::Untracked,
-                path: "c.txt".into(),
-                op: GitOp::DeleteUntracked(vec!["c.txt".into()]),
-            }
+            &DiscardWhat::Untracked
+                .into_question("c.txt".into(), GitOp::DeleteUntracked(vec!["c.txt".into()]))
         );
     }
 
@@ -3179,11 +3174,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             discard_popup(&state),
-            &DiscardConfirm {
-                what: DiscardWhat::Hunk,
-                path: "a.rs".into(),
-                op: GitOp::ApplyWorktree { patch: expected },
-            }
+            &DiscardWhat::Hunk
+                .into_question("a.rs".into(), GitOp::ApplyWorktree { patch: expected })
         );
         let (_, op) = op_of(&press(&mut state, KeyCode::Char('y')));
         assert!(matches!(op, GitOp::ApplyWorktree { .. }), "{op:?}");
@@ -3194,16 +3186,22 @@ mod tests {
         let mut state = focused(three_files(), ONE_HUNK);
         press(&mut state, KeyCode::Char('d'));
         let confirm = discard_popup(&state);
-        assert_eq!(confirm.what, DiscardWhat::Hunk);
-        assert_eq!(confirm.op, GitOp::DiscardWorktree(vec!["a.rs".into()]));
+        assert_eq!(confirm.title, DiscardWhat::Hunk.title());
+        assert_eq!(
+            confirm.then,
+            Then::Op(GitOp::DiscardWorktree(vec!["a.rs".into()]))
+        );
 
         let new_file = b"diff --git a/n.txt b/n.txt\nnew file mode 100644\n\
             --- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n";
         let mut state = focused(vec![untracked("n.txt")], new_file);
         press(&mut state, KeyCode::Char('d'));
         let confirm = discard_popup(&state);
-        assert_eq!(confirm.what, DiscardWhat::Untracked);
-        assert_eq!(confirm.op, GitOp::DeleteUntracked(vec!["n.txt".into()]));
+        assert_eq!(confirm.title, DiscardWhat::Untracked.title());
+        assert_eq!(
+            confirm.then,
+            Then::Op(GitOp::DeleteUntracked(vec!["n.txt".into()]))
+        );
     }
 
     #[test]
@@ -3220,11 +3218,8 @@ mod tests {
         .unwrap();
         assert_eq!(
             discard_popup(&state),
-            &DiscardConfirm {
-                what: DiscardWhat::Lines,
-                path: "a.rs".into(),
-                op: GitOp::ApplyWorktree { patch: expected },
-            }
+            &DiscardWhat::Lines
+                .into_question("a.rs".into(), GitOp::ApplyWorktree { patch: expected })
         );
     }
 
@@ -3448,7 +3443,7 @@ mod tests {
         state.free_op();
         press_char(&mut state, 'd');
         assert!(
-            matches!(state.popups.as_slice(), [Popup::Discard(_)]),
+            matches!(state.popups.as_slice(), [Popup::Question(_)]),
             "{:?}",
             state.popups
         );
@@ -4566,7 +4561,9 @@ mod tests {
     /// Answer the open question with `y`, as the key does.
     fn answer_yes(state: &mut AppState) -> Vec<Effect> {
         match state.popups.last() {
-            Some(Popup::LeaveCommits(_)) => state.update(AppIntent::ConfirmLeaveCommits),
+            Some(Popup::Question(q)) if q.scope == KeyScope::LeaveCommits => {
+                state.update(AppIntent::ConfirmLeaveCommits)
+            }
             _ => press_char(state, 'y'),
         }
     }
@@ -4581,7 +4578,6 @@ mod tests {
         assert_eq!(state.notice, Some(reason.into()), "{name}");
         assert_eq!(state.popups, [], "{name}");
         assert_eq!(state.held_seq(), None, "{name}");
-        assert_eq!(state.commits.pending, None, "{name}");
     }
 
     #[test]
@@ -4656,7 +4652,6 @@ mod tests {
             );
         }
         assert_eq!(state.popups, []);
-        assert_eq!(state.commits.pending, None);
         assert_eq!(state.held_seq(), None);
     }
 

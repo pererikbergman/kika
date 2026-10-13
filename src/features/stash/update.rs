@@ -6,13 +6,14 @@ use super::git::{StashEntry, StashFile, StashMode, StashRef};
 use super::keys;
 use super::list::{StashDraft, StashFilesList};
 use super::push::{self, StashSet};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::diff_pane::DiffStart;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
-use crate::keymap;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
-use crate::popup::{DeleteRangeConfirm, DropStashConfirm, LineInput, Popup, PromptKind, RangeKind};
+use crate::popup::{DeleteRangeConfirm, LineInput, Popup, PromptKind, RangeKind};
 
 /// Said when a range's stash is refused because its files changed while
 /// the message was typed.
@@ -150,11 +151,11 @@ impl AppState {
             return;
         };
         let stash = entry.stash_ref();
-        let confirm = DropStashConfirm {
-            label: format!("{}: {}", stash.arg(), entry.subject),
-            op: GitOp::StashDrop(stash),
-        };
-        self.popups.push(Popup::DropStash(confirm));
+        let question = drop_stash_question(
+            &format!("{}: {}", stash.arg(), entry.subject),
+            GitOp::StashDrop(stash),
+        );
+        self.popups.push(Popup::Question(question));
     }
 
     /// Every entry in the range, each with its place and id as listed
@@ -178,13 +179,7 @@ impl AppState {
 
     /// Drop as the open question asked, and only if one is open.
     pub(crate) fn confirm_drop_stash(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::DropStash(_))) {
-            return vec![];
-        }
-        let Some(Popup::DropStash(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
+        self.answer_question(KeyScope::DropStash, Answer::YOnly)
     }
 
     /// Ask for a new message, starting from the current one, keeping the
@@ -325,6 +320,21 @@ impl AppState {
             restore,
             unstage,
         })))
+    }
+}
+
+/// "Drop this stash?", carrying the op chosen when it was asked, so a
+/// reload before the answer cannot change which entry goes. `label` is
+/// `stash@{N}: <subject>`, already terminal-safe.
+pub(crate) fn drop_stash_question(label: &str, op: GitOp) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::DropStash,
+        title: "Drop stash".into(),
+        text: format!("Drop {label}? It cannot be recovered from the stash list. (y/n)"),
+        answer: Answer::YOnly,
+        then: Then::Op(op),
+        range: false,
+        head: None,
     }
 }
 
@@ -560,10 +570,10 @@ mod tests {
     fn d_asks_and_only_confirm_drops_the_stash_chosen_when_asked() {
         let mut state = on_stash_one();
         assert_eq!(press_char(&mut state, 'd'), vec![]);
-        let asked = Popup::DropStash(DropStashConfirm {
-            label: "stash@{1}: On main: one".into(),
-            op: GitOp::StashDrop(stash_ref(1, "a1")),
-        });
+        let asked = Popup::Question(drop_stash_question(
+            "stash@{1}: On main: one",
+            GitOp::StashDrop(stash_ref(1, "a1")),
+        ));
         assert_eq!(state.popups, std::slice::from_ref(&asked));
         assert_eq!(state.key_focus(), KeyScope::DropStash);
 
@@ -658,12 +668,12 @@ mod tests {
         let mut state = stash_range_of_three();
         assert_eq!(press_char(&mut state, 'd'), vec![]);
         let confirm = match state.popups.as_slice() {
-            [Popup::DeleteRange(confirm)] => confirm.clone(),
+            [Popup::Question(q)] => q.clone(),
             other => panic!("expected the range question, got {other:?}"),
         };
-        assert_eq!(confirm.title(), "Drop stashes");
+        assert_eq!(confirm.title, "Drop stashes");
         assert_eq!(
-            confirm.question(),
+            confirm.text,
             "Drop 3 stashes (stash@{0}, stash@{1}, stash@{2})? \
              They cannot be recovered from the stash list. (y/n)"
         );

@@ -47,65 +47,11 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 render_prompt(&state.prompt_title(*kind), input, top, frame, area)
             }
             Popup::Error(error) => render_error(error, frame, area),
-            Popup::Discard(confirm) => {
-                let what = confirm.what;
-                // A range has no one path to name; its counts are the question.
-                let text = if confirm.path.is_empty() {
-                    what.question().into_owned()
-                } else {
-                    format!("{}\n{}", what.question(), confirm.path)
-                };
-                render_question(&format!(" {} ", what.title()), &text, frame, area)
-            }
-            Popup::DeleteBranch(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
-            Popup::RemoveRemote(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
-            Popup::DeleteTag(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
-            Popup::DeleteRange(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
-            Popup::Question(q) => {
-                render_question(&format!(" {} ", q.title), &q.question(), frame, area)
-            }
-            Popup::LeaveCommits(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
-            Popup::DropStash(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
+            Popup::Question(q) => render_question(&format!(" {} ", q.title), &q.text, frame, area),
             Popup::Submodules(list) => render_submodules(list, top, frame, area),
             Popup::Worktrees(list) => {
                 crate::features::worktrees::view::render_worktrees(state, list, top, frame, area)
             }
-            Popup::RemoveWorktree(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
             Popup::Recent(list) => render_recent(state, list, top, frame, area),
             Popup::PickList(list) => render_pick_list(list, top, frame, area),
             Popup::Credential(prompt) if prompt.confirm => {
@@ -113,21 +59,9 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 render_question(CREDENTIAL_TITLE, &text, frame, area)
             }
             Popup::Credential(prompt) => render_credential(prompt, top, frame, area),
-            Popup::Travel(confirm) => render_question(
-                &format!(" {} ", confirm.title),
-                &confirm.question(),
-                frame,
-                area,
-            ),
             Popup::CommandLog(view) => {
                 command_log::view::render(&state.command_log, view, top, frame, area)
             }
-            Popup::MergePullRequest(confirm) => render_question(
-                &format!(" {} ", confirm.title()),
-                &confirm.question(),
-                frame,
-                area,
-            ),
         }
     }
 }
@@ -519,7 +453,7 @@ mod tests {
     use crate::model::Context;
     use crate::op::GitOp;
     use crate::popup::PromptKind;
-    use crate::popup::{ConfirmKind, DeleteBranchConfirm, DiscardConfirm, DiscardWhat};
+    use crate::popup::{ConfirmKind, DiscardWhat};
     use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
 
@@ -1000,11 +934,10 @@ mod tests {
     #[test]
     fn the_discard_question_names_the_file_and_only_y_discards() {
         let mut state = workspace(&["src/a.rs"]);
-        state.popups = vec![Popup::Discard(DiscardConfirm {
-            what: DiscardWhat::File,
-            path: "src/a.rs".into(),
-            op: GitOp::DiscardWorktree(vec!["src/a.rs".into()]),
-        })];
+        state.popups = vec![Popup::Question(DiscardWhat::File.into_question(
+            "src/a.rs".into(),
+            GitOp::DiscardWorktree(vec!["src/a.rs".into()]),
+        ))];
         let (_, rows) = draw(&state, 80, 12);
         assert!(contains(&rows, " Discard file "), "{rows:#?}");
         assert!(
@@ -1026,13 +959,13 @@ mod tests {
     }
 
     fn delete_branch(force: bool) -> Popup {
-        Popup::DeleteBranch(DeleteBranchConfirm {
-            name: "topic".into(),
-            op: GitOp::DeleteBranch {
+        Popup::Question(crate::features::branches::delete_branch_question(
+            "topic".into(),
+            GitOp::DeleteBranch {
                 name: "topic".into(),
                 force,
             },
-        })
+        ))
     }
 
     #[test]
@@ -1064,8 +997,11 @@ mod tests {
     #[test]
     fn the_detached_checkout_question_names_the_commit() {
         let mut state = workspace(&["a.rs"]);
-        state.commits.pending = crate::git::commit_files::CommitId::parse("abcdef0123");
-        state.popups = vec![Popup::Confirm(ConfirmKind::DetachedCheckout)];
+        let id = crate::git::commit_files::CommitId::parse("abcdef0123").unwrap();
+        let short_oid = state.commits.short_oid(&id);
+        state.popups = vec![Popup::Question(
+            crate::features::commits::checkout_question(short_oid, id),
+        )];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Detached checkout "), "{rows:#?}");
         assert!(
@@ -1238,21 +1174,25 @@ mod tests {
             ("confirm", Popup::Confirm(ConfirmKind::CreatePullRequest)),
             (
                 "merge",
-                Popup::MergePullRequest(crate::popup::MergePrConfirm {
-                    number: 7,
-                    title: "Make the widget cache 組織 🦀 ".repeat(6),
-                    base: "main".into(),
-                    head: "topic".into(),
-                    method: crate::forge::merge::MergeMethod::Squash,
-                    head_oid: crate::git::commit_files::CommitId::parse(&"a".repeat(40)).unwrap(),
-                    repo: crate::forge::ForgeRepo {
-                        host: "github.com".into(),
-                        owner: "acme".into(),
-                        name: "widgets".into(),
-                    },
-                    host: crate::forge::ForgeHost::parse("github.com").unwrap(),
-                    unstable: true,
-                }),
+                Popup::Question(
+                    crate::popup::MergePrConfirm {
+                        number: 7,
+                        title: "Make the widget cache 組織 🦀 ".repeat(6),
+                        base: "main".into(),
+                        head: "topic".into(),
+                        method: crate::forge::merge::MergeMethod::Squash,
+                        head_oid: crate::git::commit_files::CommitId::parse(&"a".repeat(40))
+                            .unwrap(),
+                        repo: crate::forge::ForgeRepo {
+                            host: "github.com".into(),
+                            owner: "acme".into(),
+                            name: "widgets".into(),
+                        },
+                        host: crate::forge::ForgeHost::parse("github.com").unwrap(),
+                        unstable: true,
+                    }
+                    .into_question(),
+                ),
             ),
         ];
         popups
@@ -1371,13 +1311,16 @@ mod tests {
         use crate::git::commit_files::CommitId;
         use crate::popup::LeaveCommitsConfirm;
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
-            op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
-            head: CommitId::parse("fedcba9").unwrap(),
-            head_short_oid: "fedcba9".into(),
-            short_oid: "abc1234".into(),
-            left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
-        })];
+        state.popups = vec![Popup::Question(
+            LeaveCommitsConfirm {
+                op: GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap()),
+                head: CommitId::parse("fedcba9").unwrap(),
+                head_short_oid: "fedcba9".into(),
+                short_oid: "abc1234".into(),
+                left: vec!["c1a2b3c".into(), "d4e5f6a".into(), "0b1c2d3".into()],
+            }
+            .into_question(),
+        )];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Leave commits behind "), "{rows:#?}");
         assert!(contains(&rows, "leave 3 commits"), "{rows:#?}");
@@ -1396,16 +1339,19 @@ mod tests {
         use crate::op::ResetMode;
         use crate::popup::LeaveCommitsConfirm;
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::LeaveCommits(LeaveCommitsConfirm {
-            op: GitOp::Reset {
-                to: CommitId::parse("abc1234").unwrap(),
-                mode: ResetMode::Hard,
-            },
-            head: CommitId::parse("fedcba9").unwrap(),
-            head_short_oid: "fedcba9".into(),
-            short_oid: "abc1234".into(),
-            left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
-        })];
+        state.popups = vec![Popup::Question(
+            LeaveCommitsConfirm {
+                op: GitOp::Reset {
+                    to: CommitId::parse("abc1234").unwrap(),
+                    mode: ResetMode::Hard,
+                },
+                head: CommitId::parse("fedcba9").unwrap(),
+                head_short_oid: "fedcba9".into(),
+                short_oid: "abc1234".into(),
+                left: (0..8).map(|i| format!("{i}{i}{i}{i}{i}{i}{i}")).collect(),
+            }
+            .into_question(),
+        )];
         state
     }
 
@@ -1430,15 +1376,16 @@ mod tests {
     fn the_drop_stash_question_names_the_entry_and_offers_no_enter() {
         use crate::features::stash::StashRef;
         use crate::git::commit_files::CommitId;
-        use crate::popup::DropStashConfirm;
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::DropStash(DropStashConfirm {
-            label: "stash@{1}: On main: wip".into(),
-            op: GitOp::StashDrop(StashRef {
-                index: 1,
-                oid: CommitId::parse("abc").unwrap(),
-            }),
-        })];
+        state.popups = vec![Popup::Question(
+            crate::features::stash::drop_stash_question(
+                "stash@{1}: On main: wip",
+                GitOp::StashDrop(StashRef {
+                    index: 1,
+                    oid: CommitId::parse("abc").unwrap(),
+                }),
+            ),
+        )];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Drop stash "), "{rows:#?}");
         assert!(
@@ -1458,25 +1405,26 @@ mod tests {
     fn the_travel_question_shows_every_preview_line_and_offers_no_enter() {
         use crate::features::commits::reflog::{Direction, Expected, Step};
         use crate::git::commit_files::CommitId;
-        use crate::popup::TravelConfirm;
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::Travel(TravelConfirm {
-            title: "Undo",
-            preview: vec![
-                "Undo: commit: second".into(),
-                "Branch main moves from ccccccc to bbbbbbb.".into(),
-                "Files change to match bbbbbbb.".into(),
-                "Commits after bbbbbbb leave main; redo brings them back.".into(),
-            ],
-            op: GitOp::Travel {
-                direction: Direction::Undo,
-                step: Step::MoveTo(CommitId::parse("bbb").unwrap()),
-                expect: Expected {
-                    head_ref: Some(b"refs/heads/main".to_vec()),
-                    oid: CommitId::parse("ccc").unwrap(),
+        state.popups = vec![Popup::Question(
+            crate::features::commits::reflog::travel_question(
+                "Undo",
+                &[
+                    "Undo: commit: second".into(),
+                    "Branch main moves from ccccccc to bbbbbbb.".into(),
+                    "Files change to match bbbbbbb.".into(),
+                    "Commits after bbbbbbb leave main; redo brings them back.".into(),
+                ],
+                GitOp::Travel {
+                    direction: Direction::Undo,
+                    step: Step::MoveTo(CommitId::parse("bbb").unwrap()),
+                    expect: Expected {
+                        head_ref: Some(b"refs/heads/main".to_vec()),
+                        oid: CommitId::parse("ccc").unwrap(),
+                    },
                 },
-            },
-        })];
+            ),
+        )];
         let (_, rows) = draw(&state, 100, 14);
         assert!(contains(&rows, " Undo "), "{rows:#?}");
         for line in [

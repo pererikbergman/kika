@@ -2,13 +2,14 @@
 //! `HEAD` moves, find the commits nothing else reaches and ask before
 //! leaving them to the reflog.
 
+use crate::confirm_question::Answer;
 use crate::effect::{Effect, Tag};
-use crate::features::commits::reset_hard_question;
+use crate::features::commits::{checkout_question, reset_hard_question};
 use crate::git::commit_files::CommitId;
 use crate::keymap::KeyScope;
 use crate::model::AppState;
 use crate::op::{GitOp, ResetMode};
-use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup};
+use crate::popup::{ErrorPopup, LeaveCommitsConfirm, Popup};
 
 /// The left-behind check in flight, and where the user was when it
 /// started. Its answer only asks if they are still there, so a key meant
@@ -54,9 +55,9 @@ impl AppState {
     fn move_head_now(&mut self, op: GitOp, head: Option<CommitId>) -> Vec<Effect> {
         match op {
             GitOp::CheckoutCommit(id) => {
-                self.commits.pending = Some(id);
+                let short_oid = self.commits.short_oid(&id);
                 self.popups
-                    .push(Popup::Confirm(ConfirmKind::DetachedCheckout));
+                    .push(Popup::Question(checkout_question(short_oid, id)));
                 vec![]
             }
             GitOp::Reset {
@@ -119,32 +120,22 @@ impl AppState {
         let short_oid = self.commits.short_oid(target);
         let left = left.iter().map(|id| self.commits.short_oid(id)).collect();
         let head_short_oid = self.commits.short_oid(&head);
-        self.popups.push(Popup::LeaveCommits(LeaveCommitsConfirm {
+        let question = LeaveCommitsConfirm {
             op,
             head,
             head_short_oid,
             short_oid,
             left,
-        }));
+        }
+        .into_question();
+        self.popups.push(Popup::Question(question));
         vec![]
     }
 
     /// Run the op the open question carries, and only if one is open, its
     /// guard still allows it and `HEAD` is still where it was asked from.
     pub(crate) fn confirm_leave_commits(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::LeaveCommits(_))) {
-            return vec![];
-        }
-        let Some(Popup::LeaveCommits(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        if self.confirm_refused(&confirm.op) {
-            return vec![];
-        }
-        if !self.head_still(Some(&confirm.head)) {
-            return vec![];
-        }
-        self.start_op(Ok(Some(confirm.op)))
+        self.answer_question(KeyScope::LeaveCommits, Answer::YOnly)
     }
 }
 
@@ -153,7 +144,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use crate::effect::Tag;
-    use crate::features::commits::reset_hard_question;
+    use crate::features::commits::{checkout_question, reset_hard_question};
     use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
@@ -174,7 +165,6 @@ mod tests {
             assert!(tag.user, "{intent:?}");
             assert_eq!(state.busy_count(), busy + 1, "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
-            assert_eq!(state.commits.pending, None, "{intent:?}");
             assert_eq!(state.held_seq(), None, "{intent:?}");
         }
     }
@@ -186,7 +176,7 @@ mod tests {
         assert_eq!(state.update(AppIntent::CheckoutCommit), vec![]);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
+            [Popup::Question(checkout_question("c1".into(), cid("c1")))]
         );
 
         let mut state = on_commit();
@@ -201,9 +191,8 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
+            [Popup::Question(checkout_question("c1".into(), cid("c1")))]
         );
-        assert_eq!(state.commits.pending, Some(cid("c1")));
 
         for mode in [ResetMode::Soft, ResetMode::Mixed] {
             let (state, effects) = checked(AppIntent::ResetTo(mode), Ok(vec![]));
@@ -237,29 +226,32 @@ mod tests {
             assert_eq!(state.held_seq(), None, "{intent:?}");
             assert_eq!(
                 state.popups,
-                [Popup::LeaveCommits(LeaveCommitsConfirm {
-                    op: planned,
-                    head: cid("c0"),
-                    head_short_oid: "c0".into(),
-                    short_oid: "c1".into(),
-                    left: vec!["a0".into(), "a1".into(), "a2".into()],
-                })],
+                [Popup::Question(
+                    LeaveCommitsConfirm {
+                        op: planned,
+                        head: cid("c0"),
+                        head_short_oid: "c0".into(),
+                        short_oid: "c1".into(),
+                        left: vec!["a0".into(), "a1".into(), "a2".into()],
+                    }
+                    .into_question()
+                )],
                 "{intent:?}"
             );
             assert_eq!(state.key_focus(), KeyScope::LeaveCommits);
-            let Some(Popup::LeaveCommits(ask)) = state.popups.last() else {
+            let Some(Popup::Question(ask)) = state.popups.last() else {
                 unreachable!()
             };
-            let question = ask.question();
+            let question = &ask.text;
             assert!(question.contains("3 commits"), "{question}");
             assert!(question.contains("(a0, a1, a2)"), "{question}");
         }
 
         let (state, _) = checked(AppIntent::CheckoutCommit, Ok(ids(7)));
-        let Some(Popup::LeaveCommits(ask)) = state.popups.last() else {
+        let Some(Popup::Question(ask)) = state.popups.last() else {
             panic!("{:?}", state.popups)
         };
-        let question = ask.question();
+        let question = &ask.text;
         assert!(
             question.contains("(a0, a1, a2, a3, a4 and 2 more)"),
             "{question}"
@@ -316,7 +308,6 @@ mod tests {
             assert_eq!(state.popups, []);
             assert_eq!(state.notice, Some("HEAD moved; try again".into()));
             assert_eq!(state.held_seq(), None);
-            assert_eq!(state.commits.pending, None);
         }
 
         // Back on a branch is a move too.
@@ -367,7 +358,7 @@ mod tests {
                 result: Ok(ids(2)),
             });
             assert!(
-                matches!(state.popups.as_slice(), [Popup::LeaveCommits(_)]),
+                matches!(state.popups.as_slice(), [Popup::Question(_)]),
                 "{intent:?}: {:?}",
                 state.popups
             );
@@ -435,7 +426,6 @@ mod tests {
                     let case = format!("{name} {intent:?}");
                     assert_eq!(effects, vec![], "{case}");
                     assert_eq!(state.popups, popups, "{case}");
-                    assert_eq!(state.commits.pending, None, "{case}");
                     assert_eq!(state.held_seq(), None, "{case}");
                     assert_eq!(
                         state.notice,

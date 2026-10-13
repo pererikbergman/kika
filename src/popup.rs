@@ -7,7 +7,7 @@ use std::fmt;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::confirm_question::ConfirmQuestion;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::features::command_log::CommandLogView;
 use crate::features::commits::custom_patch::PatchAction;
 use crate::features::repos::RecentList;
@@ -17,11 +17,10 @@ use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
 use crate::git::commit_files::CommitId;
-use crate::git::path::RepoPath;
 use crate::git::repo_state::Operation;
 use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
-use crate::keymap::KeyPress;
+use crate::keymap::{KeyPress, KeyScope};
 use crate::menu::MenuId;
 use crate::op::GitOp;
 use crate::pick_list::PickList;
@@ -39,32 +38,18 @@ pub enum Popup {
         input: LineInput,
     },
     Error(ErrorPopup),
-    Discard(DiscardConfirm),
-    DeleteBranch(DeleteBranchConfirm),
-    /// A question that only its own yes key answers, such as a hard reset.
+    /// A question that only its own yes keys answer, such as a discard, a
+    /// delete or a hard reset.
     Question(ConfirmQuestion),
-    /// Moving a detached `HEAD` would leave commits only the reflog has.
-    LeaveCommits(LeaveCommitsConfirm),
-    DropStash(DropStashConfirm),
-    RemoveRemote(RemoveRemoteConfirm),
-    DeleteTag(DeleteTagConfirm),
-    /// Delete the branches or tags of a range, remove its remotes, or drop
-    /// its stashes.
-    DeleteRange(DeleteRangeConfirm),
     Submodules(SubmoduleList),
     Worktrees(WorktreeList),
-    RemoveWorktree(RemoveWorktreeConfirm),
     Recent(RecentList),
     /// One row to pick, such as a pull request's target remote.
     PickList(PickList),
     /// Git or ssh asks something for a running fetch, pull or push.
     Credential(CredentialPrompt),
-    /// "Undo this?" or "Redo this?", with what would happen.
-    Travel(TravelConfirm),
     /// The git commands Kika ran; the entries live in `AppState`.
     CommandLog(CommandLogView),
-    /// "Merge this pull request?" It reaches GitHub, so only `y` answers.
-    MergePullRequest(MergePrConfirm),
 }
 
 /// A question from git or ssh, and what the user has typed so far. The
@@ -188,16 +173,6 @@ impl fmt::Debug for SecretInput {
     }
 }
 
-/// "Throw this work away?" Unlike [`ConfirmKind`], it carries the op chosen
-/// when it was asked, so a refresh before the answer cannot change what goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DiscardConfirm {
-    pub what: DiscardWhat,
-    /// The file's display path, already terminal-safe.
-    pub path: String,
-    pub op: GitOp,
-}
-
 /// What a discard throws away, so the question can say so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscardWhat {
@@ -246,6 +221,27 @@ impl DiscardWhat {
             .into(),
         }
     }
+
+    /// The question, then the file's display path (already terminal-safe)
+    /// on its own line; a range has no one path, so its counts are the
+    /// question. `op` is fixed now, so a refresh before the answer cannot
+    /// change what goes, and only `y` answers.
+    pub fn into_question(self, path: String, op: GitOp) -> ConfirmQuestion {
+        let text = if path.is_empty() {
+            self.question().into_owned()
+        } else {
+            format!("{}\n{path}", self.question())
+        };
+        ConfirmQuestion {
+            scope: KeyScope::DiscardConfirm,
+            title: self.title(),
+            text,
+            answer: Answer::YOnly,
+            then: Then::Op(op),
+            range: matches!(self, DiscardWhat::Range { .. }),
+            head: None,
+        }
+    }
 }
 
 /// `1 file` or `n files`.
@@ -262,46 +258,9 @@ fn untracked(n: usize) -> String {
     format!("{n} untracked {}", if n == 1 { "file" } else { "files" })
 }
 
-/// "Delete this branch?" Like [`DiscardConfirm`], it carries the op chosen
-/// when it was asked. A branch whose commits are not merged is asked about
-/// in stronger words, and only a force delete answers it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteBranchConfirm {
-    /// The branch's display name, already terminal-safe.
-    pub name: String,
-    pub op: GitOp,
-}
-
-impl DeleteBranchConfirm {
-    /// Whether answering deletes with `-D`, so only `D` may answer.
-    pub fn force(&self) -> bool {
-        matches!(self.op, GitOp::DeleteBranch { force: true, .. })
-    }
-
-    pub fn title(&self) -> &'static str {
-        if self.force() {
-            "Force delete branch"
-        } else {
-            "Delete branch"
-        }
-    }
-
-    pub fn question(&self) -> String {
-        let name = &self.name;
-        if self.force() {
-            format!(
-                "{name} is not fully merged; its commits may be lost.\n\
-                 Press D to force delete, n or Esc to cancel"
-            )
-        } else {
-            format!("Delete branch {name}? (y/n)")
-        }
-    }
-}
-
 /// "Leave these commits behind?" Asked before a detached `HEAD` moves off
-/// commits that no branch, tag or remote-tracking branch reaches. Like
-/// [`DeleteBranchConfirm`], it carries the op planned when it was asked.
+/// commits that no branch, tag or remote-tracking branch reaches. It
+/// carries the op planned when it was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaveCommitsConfirm {
     pub op: GitOp,
@@ -365,47 +324,19 @@ impl LeaveCommitsConfirm {
             }
         }
     }
-}
 
-/// "Undo this?" or "Redo this?" Like [`DeleteBranchConfirm`], it carries the
-/// op planned when it was asked, so a reload before the answer cannot
-/// change what moves.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TravelConfirm {
-    /// `Undo` or `Redo`.
-    pub title: &'static str,
-    /// What will happen, line by line, already terminal-safe.
-    pub preview: Vec<String>,
-    pub op: GitOp,
-}
-
-impl TravelConfirm {
-    pub fn question(&self) -> String {
-        format!("{}\n(y/n)", self.preview.join("\n"))
-    }
-}
-
-/// "Remove this remote?" Like [`DeleteBranchConfirm`], it carries the op
-/// chosen when it was asked, so a reload before the answer cannot change
-/// the target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoveRemoteConfirm {
-    /// The remote's display name, already terminal-safe.
-    pub name: String,
-    pub op: GitOp,
-}
-
-impl RemoveRemoteConfirm {
-    pub fn title(&self) -> &'static str {
-        "Remove remote"
-    }
-
-    pub fn question(&self) -> String {
-        format!(
-            "Remove remote {}? Its remote-tracking branches are deleted, and \
-             branches tracking it lose their upstream. (y/n)",
-            self.name
-        )
+    /// The question `y` alone answers. It runs nothing once `HEAD` has
+    /// moved off `head`.
+    pub fn into_question(self) -> ConfirmQuestion {
+        ConfirmQuestion {
+            scope: KeyScope::LeaveCommits,
+            title: self.title().into(),
+            text: self.question(),
+            answer: Answer::YOnly,
+            range: false,
+            head: Some(self.head),
+            then: Then::Op(self.op),
+        }
     }
 }
 
@@ -455,28 +386,18 @@ impl MergePrConfirm {
         }
         text
     }
-}
 
-/// "Delete this tag?" Like [`DeleteBranchConfirm`], it carries the op
-/// chosen when it was asked, so a reload before the answer cannot change
-/// the target.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeleteTagConfirm {
-    /// The tag's display name, already terminal-safe.
-    pub name: String,
-    pub op: GitOp,
-}
-
-impl DeleteTagConfirm {
-    pub fn title(&self) -> &'static str {
-        "Delete tag"
-    }
-
-    pub fn question(&self) -> String {
-        format!(
-            "Delete tag {}? It is not deleted on any remote. (y/n)",
-            self.name
-        )
+    /// The question `y` alone answers, since it reaches GitHub.
+    pub fn into_question(self) -> ConfirmQuestion {
+        ConfirmQuestion {
+            scope: KeyScope::MergePullRequest,
+            title: self.title().into(),
+            text: self.question(),
+            answer: Answer::YOnly,
+            then: Then::MergePr(Box::new(self)),
+            range: false,
+            head: None,
+        }
     }
 }
 
@@ -489,9 +410,8 @@ pub enum RangeKind {
     Stashes,
 }
 
-/// "Delete these?" over a range. Like [`DeleteBranchConfirm`], it carries
-/// the op chosen when it was asked, so a reload before the answer cannot
-/// change the targets.
+/// "Delete these?" over a range. It carries the op chosen when it was
+/// asked, so a reload before the answer cannot change the targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRangeConfirm {
     pub kind: RangeKind,
@@ -557,51 +477,18 @@ impl DeleteRangeConfirm {
         };
         format!("{verb} {count} {noun} ({names})?{note}{kept} (y/n)")
     }
-}
 
-/// "Remove this worktree?" It carries the path taken when it was asked,
-/// so a reload before the answer cannot change what is removed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoveWorktreeConfirm {
-    /// The path's display form, already terminal-safe.
-    pub display: String,
-    pub path: RepoPath,
-}
-
-impl RemoveWorktreeConfirm {
-    pub fn title(&self) -> &'static str {
-        "Remove worktree"
-    }
-
-    pub fn question(&self) -> String {
-        format!(
-            "Remove worktree {}? Git refuses if it has uncommitted or untracked \
-             changes. (y/n)",
-            self.display
-        )
-    }
-}
-
-/// "Drop this stash?" Like [`DeleteBranchConfirm`], it carries the op chosen
-/// when it was asked, so a reload before the answer cannot change which
-/// entry goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DropStashConfirm {
-    /// `stash@{N}: <subject>`, already terminal-safe.
-    pub label: String,
-    pub op: GitOp,
-}
-
-impl DropStashConfirm {
-    pub fn title(&self) -> &'static str {
-        "Drop stash"
-    }
-
-    pub fn question(&self) -> String {
-        format!(
-            "Drop {}? It cannot be recovered from the stash list. (y/n)",
-            self.label
-        )
+    /// The question `y` alone answers; a yes forgets the range.
+    pub fn into_question(self) -> ConfirmQuestion {
+        ConfirmQuestion {
+            scope: KeyScope::DeleteRange,
+            title: self.title().into(),
+            text: self.question(),
+            answer: Answer::YOnly,
+            range: true,
+            head: None,
+            then: Then::Op(self.op),
+        }
     }
 }
 
@@ -616,10 +503,6 @@ pub enum ConfirmKind {
     Abort(Operation),
     /// Every block of the conflict view's file is picked: stage it?
     StageResolved,
-    /// Check out the commit kept in the Commits panel's `pending` as a
-    /// detached `HEAD`. Git refuses to overwrite local changes, so nothing
-    /// is lost and Enter may answer.
-    DetachedCheckout,
     /// Fold every `fixup!` commit into its target. It rewrites commits
     /// the user may not be looking at, so only `y` answers.
     Autosquash,
@@ -647,7 +530,6 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Revert) => "Abort revert",
             ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
             ConfirmKind::StageResolved => "Stage resolved file",
-            ConfirmKind::DetachedCheckout => "Detached checkout",
             ConfirmKind::Autosquash => "Autosquash",
             ConfirmKind::CreatePullRequest => "Create pull request",
             ConfirmKind::CustomPatch(_) => "Custom patch",
@@ -689,13 +571,6 @@ impl ConfirmKind {
             ConfirmKind::StageResolved => {
                 "Every conflict in this file is resolved. Stage it? (y/n)"
             }
-            // `AppState::confirm_question` names the commit; this is the
-            // fallback when it cannot.
-            ConfirmKind::DetachedCheckout => {
-                "Check out this commit as a detached HEAD? You will be on no \
-                 branch; new commits there belong to no branch until you \
-                 create one. (y/n)"
-            }
             ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
             // `AppState::confirm_question` names the repository, branches
             // and title; this is the fallback when it cannot.
@@ -718,7 +593,6 @@ impl ConfirmKind {
             ConfirmKind::Abort(Operation::Bisect) => AppIntent::ConfirmBisectReset,
             ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(*op),
             ConfirmKind::StageResolved => AppIntent::StageResolved,
-            ConfirmKind::DetachedCheckout => AppIntent::ConfirmCheckoutCommit,
             ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
             ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
             ConfirmKind::CustomPatch(action) => AppIntent::ConfirmPatchAction(action.clone()),
@@ -732,7 +606,6 @@ impl ConfirmKind {
             | ConfirmKind::ForcePush
             | ConfirmKind::Abort(_)
             | ConfirmKind::StageResolved
-            | ConfirmKind::DetachedCheckout
             | ConfirmKind::Autosquash
             | ConfirmKind::CreatePullRequest
             | ConfirmKind::CustomPatch(_)
@@ -949,16 +822,16 @@ mod tests {
     fn the_drop_stash_question_names_the_entry_and_says_it_is_gone_for_good() {
         use crate::features::stash::StashRef;
         use crate::git::commit_files::CommitId;
-        let ask = DropStashConfirm {
-            label: "stash@{2}: On main: wip".into(),
-            op: GitOp::StashDrop(StashRef {
+        let ask = crate::features::stash::drop_stash_question(
+            "stash@{2}: On main: wip",
+            GitOp::StashDrop(StashRef {
                 index: 2,
                 oid: CommitId::parse("abc").unwrap(),
             }),
-        };
-        assert_eq!(ask.title(), "Drop stash");
+        );
+        assert_eq!(ask.title, "Drop stash");
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Drop stash@{2}: On main: wip? It cannot be recovered from the stash list. (y/n)"
         );
     }
@@ -979,11 +852,13 @@ mod tests {
 
     #[test]
     fn the_detached_checkout_question_warns_and_yes_checks_out() {
-        let ask = ConfirmKind::DetachedCheckout;
-        assert_eq!(ask.title(), "Detached checkout");
-        assert!(ask.question().contains("detached HEAD"));
-        assert_eq!(ask.yes(), AppIntent::ConfirmCheckoutCommit);
-        assert_eq!(ask.no(), None);
+        use crate::git::commit_files::CommitId;
+        let id = CommitId::parse("abc1234").unwrap();
+        let ask = crate::features::commits::checkout_question("abc1234".into(), id.clone());
+        assert_eq!(ask.title, "Detached checkout");
+        assert!(ask.text.contains("detached HEAD"));
+        assert_eq!(ask.answer, Answer::YOrEnter);
+        assert_eq!(ask.then, Then::Op(GitOp::CheckoutCommit(id)));
     }
 
     #[test]
@@ -1000,13 +875,13 @@ mod tests {
         );
         assert_eq!(ask.title, "Reset hard");
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Reset to abc1234 and throw away every uncommitted change, staged and \
              unstaged? Commits after it leave the branch. (y/n)"
         );
     }
 
-    fn leave(op: GitOp, count: usize) -> LeaveCommitsConfirm {
+    fn leave(op: GitOp, count: usize) -> ConfirmQuestion {
         LeaveCommitsConfirm {
             op,
             head: crate::git::commit_files::CommitId::parse("fedcba9").unwrap(),
@@ -1014,6 +889,7 @@ mod tests {
             short_oid: "abc1234".into(),
             left: (0..count).map(|i| format!("{i}{i}{i}")).collect(),
         }
+        .into_question()
     }
 
     fn reset(mode: crate::op::ResetMode) -> GitOp {
@@ -1028,16 +904,16 @@ mod tests {
         use crate::git::commit_files::CommitId;
         let checkout = GitOp::CheckoutCommit(CommitId::parse("abc1234").unwrap());
         let ask = leave(checkout.clone(), 3);
-        assert_eq!(ask.title(), "Leave commits behind");
+        assert_eq!(ask.title, "Leave commits behind");
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Check out abc1234 and leave 3 commits that no branch or tag reaches behind \
              (000, 111, 222)? Afterwards only the reflog has them. To keep them, press n, \
              then run: git branch <name> fedcba9 (y/n)"
         );
         assert!(
             leave(checkout, 1)
-                .question()
+                .text
                 .contains("leave 1 commit that no branch")
         );
     }
@@ -1045,7 +921,7 @@ mod tests {
     #[test]
     fn the_leave_commits_question_lists_five_then_how_many_more() {
         use crate::op::ResetMode;
-        let q = leave(reset(ResetMode::Soft), 7).question();
+        let q = leave(reset(ResetMode::Soft), 7).text;
         assert!(q.starts_with("Reset to abc1234 and leave 7 commits"), "{q}");
         assert!(q.contains("(000, 111, 222, 333, 444 and 2 more)"), "{q}");
         assert!(!q.contains("555"), "{q}");
@@ -1055,7 +931,7 @@ mod tests {
     #[test]
     fn the_hard_reset_version_warns_about_the_changes_first() {
         use crate::op::ResetMode;
-        let q = leave(reset(ResetMode::Hard), 2).question();
+        let q = leave(reset(ResetMode::Hard), 2).text;
         assert!(
             q.starts_with(
                 "Reset hard to abc1234: every uncommitted change, staged and unstaged, \
@@ -1079,13 +955,13 @@ mod tests {
             reset(ResetMode::Mixed),
             reset(ResetMode::Hard),
         ] {
-            let q = leave(op, 2).question();
+            let q = leave(op, 2).text;
             assert!(
                 q.ends_with("To keep them, press n, then run: git branch <name> fedcba9 (y/n)"),
                 "{q}"
             );
         }
-        let q = leave(reset(ResetMode::Hard), 1).question();
+        let q = leave(reset(ResetMode::Hard), 1).text;
         assert!(
             q.contains("1 commit that no branch or tag reaches is left"),
             "{q}"
@@ -1096,10 +972,10 @@ mod tests {
     fn the_travel_question_is_the_preview_then_y_or_n() {
         use crate::features::commits::reflog::{Direction, Expected, Step};
         use crate::git::commit_files::CommitId;
-        let ask = TravelConfirm {
-            title: "Undo",
-            preview: vec!["Undo: commit: x".into(), "Branch main moves.".into()],
-            op: GitOp::Travel {
+        let ask = crate::features::commits::reflog::travel_question(
+            "Undo",
+            &["Undo: commit: x".into(), "Branch main moves.".into()],
+            GitOp::Travel {
                 direction: Direction::Undo,
                 step: Step::MoveTo(CommitId::parse("abc").unwrap()),
                 expect: Expected {
@@ -1107,8 +983,8 @@ mod tests {
                     oid: CommitId::parse("def").unwrap(),
                 },
             },
-        };
-        assert_eq!(ask.question(), "Undo: commit: x\nBranch main moves.\n(y/n)");
+        );
+        assert_eq!(ask.text, "Undo: commit: x\nBranch main moves.\n(y/n)");
     }
 
     #[test]
@@ -1171,18 +1047,20 @@ mod tests {
 
     #[test]
     fn a_merged_branch_is_asked_plainly_and_an_unmerged_one_with_a_warning() {
-        let ask = |force| DeleteBranchConfirm {
-            name: "topic".into(),
-            op: GitOp::DeleteBranch {
-                name: "topic".into(),
-                force,
-            },
+        let ask = |force| {
+            crate::features::branches::delete_branch_question(
+                "topic".into(),
+                GitOp::DeleteBranch {
+                    name: "topic".into(),
+                    force,
+                },
+            )
         };
-        assert!(!ask(false).force());
-        assert_eq!(ask(false).question(), "Delete branch topic? (y/n)");
-        assert!(ask(true).force());
+        assert_eq!(ask(false).answer, Answer::YOnly);
+        assert_eq!(ask(false).text, "Delete branch topic? (y/n)");
+        assert_eq!(ask(true).answer, Answer::Force);
         assert_eq!(
-            ask(true).question(),
+            ask(true).text,
             "topic is not fully merged; its commits may be lost.\n\
              Press D to force delete, n or Esc to cancel"
         );
@@ -1233,27 +1111,28 @@ mod tests {
             PromptKind::TagMessage.submit(t()),
             AppIntent::TagMessaged(t())
         );
-        let ask = DeleteTagConfirm {
-            name: "v1".into(),
-            op: GitOp::DeleteTag {
+        let ask = crate::features::branches::tags::delete_tag_question(
+            "v1".into(),
+            GitOp::DeleteTag {
                 name: "v1".into(),
                 oid: "1".repeat(40),
             },
-        };
+        );
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Delete tag v1? It is not deleted on any remote. (y/n)"
         );
-        assert_eq!(ask.title(), "Delete tag");
+        assert_eq!(ask.title, "Delete tag");
     }
 
-    fn range(kind: RangeKind, names: &[&str], skipped: &[(&str, usize)]) -> DeleteRangeConfirm {
+    fn range(kind: RangeKind, names: &[&str], skipped: &[(&str, usize)]) -> ConfirmQuestion {
         DeleteRangeConfirm {
             kind,
             names: names.iter().map(|n| n.to_string()).collect(),
             skipped: skipped.iter().map(|(w, n)| (w.to_string(), *n)).collect(),
             op: GitOp::DeleteBranches(vec![]),
         }
+        .into_question()
     }
 
     #[test]
@@ -1264,27 +1143,27 @@ mod tests {
             &[("not fully merged", 1), ("current", 1)],
         );
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Delete 3 branches (a, b, c)? Kept: 1 not fully merged, 1 current. (y/n)"
         );
-        assert_eq!(ask.title(), "Delete branches");
+        assert_eq!(ask.title, "Delete branches");
         let ask = range(RangeKind::Branches, &["a"], &[("current", 0)]);
-        assert_eq!(ask.question(), "Delete 1 branch (a)? (y/n)");
+        assert_eq!(ask.text, "Delete 1 branch (a)? (y/n)");
         assert_eq!(
-            range(RangeKind::Tags, &["v1", "v2"], &[]).question(),
+            range(RangeKind::Tags, &["v1", "v2"], &[]).text,
             "Delete 2 tags (v1, v2)? They are not deleted on any remote. (y/n)"
         );
         assert_eq!(
-            range(RangeKind::Tags, &["v1"], &[]).question(),
+            range(RangeKind::Tags, &["v1"], &[]).text,
             "Delete 1 tag (v1)? It is not deleted on any remote. (y/n)"
         );
         assert_eq!(
-            range(RangeKind::Remotes, &["a", "b"], &[]).question(),
+            range(RangeKind::Remotes, &["a", "b"], &[]).text,
             "Remove 2 remotes (a, b)? Their remote-tracking branches are deleted, \
              and branches tracking them lose their upstream. (y/n)"
         );
         assert_eq!(
-            range(RangeKind::Remotes, &["a"], &[("not configured", 2)]).question(),
+            range(RangeKind::Remotes, &["a"], &[("not configured", 2)]).text,
             "Remove 1 remote (a)? Its remote-tracking branches are deleted, \
              and branches tracking it lose their upstream. Kept: 2 not configured. (y/n)"
         );
@@ -1297,14 +1176,14 @@ mod tests {
             &["stash@{1}", "stash@{2}", "stash@{3}"],
             &[],
         );
-        assert_eq!(ask.title(), "Drop stashes");
+        assert_eq!(ask.title, "Drop stashes");
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Drop 3 stashes (stash@{1}, stash@{2}, stash@{3})? \
              They cannot be recovered from the stash list. (y/n)"
         );
         assert_eq!(
-            range(RangeKind::Stashes, &["stash@{0}"], &[]).question(),
+            range(RangeKind::Stashes, &["stash@{0}"], &[]).text,
             "Drop 1 stash (stash@{0})? It cannot be recovered from the stash list. (y/n)"
         );
     }
@@ -1312,7 +1191,7 @@ mod tests {
     #[test]
     fn a_long_range_lists_five_names_and_counts_the_rest() {
         let names = ["a", "b", "c", "d", "e", "f", "g"];
-        let question = range(RangeKind::Tags, &names, &[]).question();
+        let question = range(RangeKind::Tags, &names, &[]).text;
         assert!(
             question.starts_with("Delete 7 tags (a, b, c, d, e and 2 more)?"),
             "{question}"
@@ -1321,11 +1200,11 @@ mod tests {
 
     #[test]
     fn the_remove_remote_question_names_it_and_its_branches() {
-        let ask = RemoveRemoteConfirm {
-            name: "fork".into(),
-            op: GitOp::RemoveRemote("fork".into()),
-        };
-        let question = ask.question();
+        let ask = crate::features::branches::remotes::remove_remote_question(
+            "fork".into(),
+            GitOp::RemoveRemote("fork".into()),
+        );
+        let question = ask.text;
         assert!(question.starts_with("Remove remote fork?"), "{question}");
         assert!(
             question.contains("remote-tracking branches are deleted"),

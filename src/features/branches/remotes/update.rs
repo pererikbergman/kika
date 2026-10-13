@@ -5,13 +5,14 @@
 use super::RemotePending;
 use super::keys;
 use super::lines;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
 use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
-use crate::keymap::{self, Reason};
+use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{LineInput, Popup, PromptKind, RemoveRemoteConfirm};
+use crate::popup::{LineInput, Popup, PromptKind};
 
 /// Loading the Remotes tab and moving its selection.
 impl AppState {
@@ -193,26 +194,37 @@ impl AppState {
         else {
             return;
         };
-        self.popups.push(Popup::RemoveRemote(RemoveRemoteConfirm {
-            name: name.display(),
-            op: GitOp::RemoveRemote(name),
-        }));
+        let question = remove_remote_question(name.display(), GitOp::RemoveRemote(name));
+        self.popups.push(Popup::Question(question));
     }
 
     /// Remove the remote the open question names, and only if one is open.
     pub(crate) fn confirm_remove_remote(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::RemoveRemote(_))) {
-            return vec![];
-        }
-        let Some(Popup::RemoveRemote(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
+        self.answer_question(KeyScope::RemoveRemote, Answer::YOnly)
+    }
+}
+
+/// "Remove this remote?", carrying the op chosen when it was asked, so a
+/// reload before the answer cannot change the target. `name` is the
+/// remote's display name, already terminal-safe.
+pub(crate) fn remove_remote_question(name: String, op: GitOp) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::RemoveRemote,
+        title: "Remove remote".into(),
+        text: format!(
+            "Remove remote {name}? Its remote-tracking branches are deleted, and \
+             branches tracking it lose their upstream. (y/n)"
+        ),
+        answer: Answer::YOnly,
+        then: Then::Op(op),
+        range: false,
+        head: None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::confirm_question::Then;
     use crate::effect::Effect;
     use crate::features::branches::BranchesTab;
     use crate::features::branches::remotes::RemoteLine;
@@ -475,9 +487,9 @@ mod tests {
         press_char(&mut state, 'd');
         assert_eq!(state.key_focus(), KeyScope::RemoveRemote);
         match state.popups.as_slice() {
-            [Popup::RemoveRemote(confirm)] => {
-                assert_eq!(confirm.name, "origin");
-                assert_eq!(confirm.op, GitOp::RemoveRemote("origin".into()));
+            [Popup::Question(q)] => {
+                assert!(q.text.starts_with("Remove remote origin?"), "{}", q.text);
+                assert_eq!(q.then, Then::Op(GitOp::RemoveRemote("origin".into())));
             }
             other => panic!("expected the question, got {other:?}"),
         }

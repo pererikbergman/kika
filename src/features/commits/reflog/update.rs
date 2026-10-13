@@ -5,11 +5,13 @@
 use super::git::Reflog;
 use super::keys::undo_disabled;
 use super::undo;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::status::EntryKind;
+use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{Popup, TravelConfirm};
+use crate::popup::Popup;
 
 /// The Reflog tab, undo and redo.
 impl AppState {
@@ -116,28 +118,41 @@ impl AppState {
             dirty: self.files.iter().any(|f| f.kind != EntryKind::Untracked),
         };
         match undo::plan(direction, reflog, &ctx) {
-            Ok(plan) => self.popups.push(Popup::Travel(TravelConfirm {
-                title: plan.direction.title(),
-                preview: plan.preview,
-                op: GitOp::Travel {
+            Ok(plan) => self.popups.push(Popup::Question(travel_question(
+                plan.direction.title(),
+                &plan.preview,
+                GitOp::Travel {
                     direction: plan.direction,
                     step: plan.step,
                     expect: plan.expect,
                 },
-            })),
+            ))),
             Err(message) => self.set_op_error(message),
         }
     }
 
     /// Undo or redo as the open question said, and only if one is open.
     pub(crate) fn confirm_travel(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::Travel(_))) {
-            return vec![];
-        }
-        let Some(Popup::Travel(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
+        self.answer_question(KeyScope::Travel, Answer::YOnly)
+    }
+}
+
+/// "Undo this?" or "Redo this?": what will happen, line by line (already
+/// terminal-safe), then how to answer. It carries the op planned when it
+/// was asked, so a reload before the answer cannot change what moves.
+pub(crate) fn travel_question(
+    title: &'static str,
+    preview: &[String],
+    op: GitOp,
+) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Travel,
+        title: title.into(),
+        text: format!("{}\n(y/n)", preview.join("\n")),
+        answer: Answer::YOnly,
+        then: Then::Op(op),
+        range: false,
+        head: None,
     }
 }
 
@@ -186,16 +201,16 @@ mod tests {
         assert_eq!(state.commits.reflog.planning, None);
         assert_eq!(
             state.popups,
-            [Popup::Travel(TravelConfirm {
-                title: "Undo",
-                preview: vec![
+            [Popup::Question(travel_question(
+                "Undo",
+                &[
                     "Undo: commit: second".into(),
                     "Branch main moves from ccccccc to bbbbbbb.".into(),
                     "Files change to match bbbbbbb; ignored files in the way are replaced.".into(),
                     "Commits after bbbbbbb leave main; redo brings them back.".into(),
                 ],
-                op: undo_commit_op(),
-            })]
+                undo_commit_op(),
+            ))]
         );
         assert_eq!(state.key_focus(), KeyScope::Travel);
         assert_eq!(state.held_seq(), None);
@@ -477,7 +492,7 @@ mod tests {
         });
         assert!(!leaks(&loaded), "{loaded:?}");
         match state.popups.as_slice() {
-            [Popup::Travel(confirm)] => assert_eq!(confirm.op, undo_commit_op()),
+            [Popup::Question(q)] => assert_eq!(q.then, Then::Op(undo_commit_op())),
             other => panic!("expected the undo question, got {other:?}"),
         }
         let ran = press_char(&mut state, 'y');

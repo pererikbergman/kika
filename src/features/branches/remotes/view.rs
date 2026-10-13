@@ -338,13 +338,14 @@ mod tests {
 
     #[test]
     fn the_remove_question_is_shown_whole_at_80_by_24() {
+        use crate::features::branches::remotes::update::remove_remote_question;
         use crate::op::GitOp;
-        use crate::popup::{Popup, RemoveRemoteConfirm};
+        use crate::popup::Popup;
         let mut state = focused(vec![remote("origin", Some("/srv/r"), &["main"])]);
-        state.popups.push(Popup::RemoveRemote(RemoveRemoteConfirm {
-            name: "origin".into(),
-            op: GitOp::RemoveRemote("origin".into()),
-        }));
+        state.popups.push(Popup::Question(remove_remote_question(
+            "origin".into(),
+            GitOp::RemoveRemote("origin".into()),
+        )));
         let rows = draw(&state, 80, 24);
         let text: String = rows
             .iter()

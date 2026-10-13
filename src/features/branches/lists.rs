@@ -134,6 +134,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+    use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::features::branches::BranchesTab;
     use crate::git::branches::{Branch, Track};
     use crate::git::commit_files::CommitId;
@@ -322,9 +323,9 @@ mod tests {
             .collect()
     }
 
-    fn range_popup(state: &AppState) -> &DeleteRangeConfirm {
+    fn range_popup(state: &AppState) -> &ConfirmQuestion {
         match state.popups.as_slice() {
-            [Popup::DeleteRange(confirm)] => confirm,
+            [Popup::Question(q)] if q.scope == KeyScope::DeleteRange => q,
             other => panic!("expected the range question, got {other:?}"),
         }
     }
@@ -422,12 +423,12 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::DeleteRange);
         let confirm = range_popup(&state);
         assert_eq!(
-            confirm.question(),
+            confirm.text,
             "Delete 2 branches (a, b)? Kept: 1 not fully merged, 1 current. (y/n)"
         );
         assert_eq!(
-            confirm.op,
-            GitOp::DeleteBranches(vec!["a".into(), "b".into()])
+            confirm.then,
+            Then::Op(GitOp::DeleteBranches(vec!["a".into(), "b".into()]))
         );
 
         for code in [KeyCode::Enter, KeyCode::Char('x'), KeyCode::Char('D')] {
@@ -463,7 +464,7 @@ mod tests {
         key(&mut state, 'd');
         let confirm = range_popup(&state);
         assert_eq!(
-            confirm.question(),
+            confirm.text,
             "Delete 3 tags (v3, v2, v1)? They are not deleted on any remote. (y/n)"
         );
         press(&mut state, KeyCode::Enter);
@@ -490,7 +491,7 @@ mod tests {
         key(&mut state, 'd');
         let confirm = range_popup(&state);
         assert_eq!(
-            confirm.question(),
+            confirm.text,
             "Remove 2 remotes (fork, origin)? Their remote-tracking branches are deleted, \
              and branches tracking them lose their upstream. Kept: 1 not configured. (y/n)"
         );

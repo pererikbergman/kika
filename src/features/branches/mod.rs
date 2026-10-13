@@ -61,3 +61,6 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use panel::{BranchesPanel, BranchesTab};
+// Core's popup tests build the question as the feature asks it.
+#[cfg(test)]
+pub(crate) use update::delete_branch_question;

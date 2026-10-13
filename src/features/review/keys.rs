@@ -7,6 +7,7 @@ use super::merge::merge_disabled;
 use super::state::{
     open_check_disabled, open_pr_disabled, queue_keys_disabled, refresh_review_disabled,
 };
+use crate::confirm_question::Answer;
 use crate::intent::{AppIntent, Scroll};
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never};
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -244,7 +245,7 @@ pub(crate) static REVIEW_MERGE_CONFIRM: &[Binding] = &[
     // Enter is left unbound.
     Binding {
         id: "merge_pr.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::MergePullRequest,
         intent: AppIntent::ConfirmMergePr,
         description: "Yes, merge the pull request on GitHub",

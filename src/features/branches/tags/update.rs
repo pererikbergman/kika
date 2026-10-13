@@ -4,15 +4,16 @@
 
 use super::PendingTag;
 use super::keys;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
 use crate::git::commit_files::CommitId;
 use crate::git::remote::RemoteOp;
 use crate::git::tags::{TagRef, validate_tag_name};
-use crate::keymap;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{DeleteTagConfirm, LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind};
 
 /// Tags: made from the Commits panel, deleted and pushed from the Tags
 /// tab. The commit, and the tag asked about, are taken when the prompt or
@@ -156,21 +157,13 @@ impl AppState {
             name: tag.name.clone(),
             oid: tag.ref_oid.clone(),
         };
-        self.popups.push(Popup::DeleteTag(DeleteTagConfirm {
-            name: tag.name.display(),
-            op,
-        }));
+        let question = delete_tag_question(tag.name.display(), op);
+        self.popups.push(Popup::Question(question));
     }
 
     /// Delete the tag the open question names, and only if one is open.
     pub(crate) fn confirm_delete_tag(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::DeleteTag(_))) {
-            return vec![];
-        }
-        let Some(Popup::DeleteTag(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
+        self.answer_question(KeyScope::DeleteTag, Answer::YOnly)
     }
 
     /// Push the selected tag to the remote Kika chooses; the network only
@@ -194,8 +187,24 @@ impl AppState {
     }
 }
 
+/// "Delete this tag?", carrying the op chosen when it was asked, so a
+/// reload before the answer cannot change the target. `name` is the tag's
+/// display name, already terminal-safe.
+pub(crate) fn delete_tag_question(name: String, op: GitOp) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::DeleteTag,
+        title: "Delete tag".into(),
+        text: format!("Delete tag {name}? It is not deleted on any remote. (y/n)"),
+        answer: Answer::YOnly,
+        then: Then::Op(op),
+        range: false,
+        head: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::confirm_question::Then;
     use crate::features::branches::BranchesTab;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
@@ -386,9 +395,9 @@ mod tests {
             oid: "b".repeat(40),
         };
         match state.popups.as_slice() {
-            [Popup::DeleteTag(confirm)] => {
-                assert_eq!(confirm.name, "v2");
-                assert_eq!(confirm.op, expected);
+            [Popup::Question(q)] => {
+                assert!(q.text.starts_with("Delete tag v2?"), "{}", q.text);
+                assert_eq!(q.then, Then::Op(expected.clone()));
             }
             other => panic!("expected the question, got {other:?}"),
         }

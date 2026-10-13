@@ -3,6 +3,7 @@
 //! places both chunks, so their position there is behaviour. The tag push
 //! guard and its helpers stay in core, because sync and tags use them too.
 
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, list_guard, never, op_running,
@@ -162,7 +163,7 @@ pub(crate) static REMOTES_REMOVE_CONFIRM: &[Binding] = &[
     // branches go with it.
     Binding {
         id: "remove_remote.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::RemoveRemote,
         intent: AppIntent::ConfirmRemoveRemote,
         description: "Yes, remove the remote and its remote-tracking branches",
@@ -206,10 +207,12 @@ mod tests {
     #[test]
     fn the_remove_remote_question_answers_only_to_y_n_and_esc() {
         let mut state = AppState::new(Context::Workspace);
-        state.popups = vec![Popup::RemoveRemote(crate::popup::RemoveRemoteConfirm {
-            name: "fork".into(),
-            op: crate::op::GitOp::RemoveRemote("fork".into()),
-        })];
+        state.popups = vec![Popup::Question(
+            super::super::update::remove_remote_question(
+                "fork".into(),
+                crate::op::GitOp::RemoveRemote("fork".into()),
+            ),
+        )];
         let resolve_in = |key| {
             resolve(
                 registry(),
