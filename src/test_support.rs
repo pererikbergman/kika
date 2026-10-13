@@ -1412,6 +1412,20 @@ pub(crate) fn argv(cmd: &GitCommand) -> Vec<String> {
         .collect()
 }
 
+/// The whole env of a read: the `Standard` profile's vars, spelled out so
+/// a test pins them rather than repeating the profile table.
+pub(crate) const STANDARD_ENV: [(&str, &str); 3] = [
+    ("LC_ALL", "C"),
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("GIT_LITERAL_PATHSPECS", "1"),
+];
+
+/// `pairs` as `GitCommand::process_env` and `FakeRunner::process_envs`
+/// list them, to compare a command's whole env.
+pub(crate) fn env_list(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    pairs.iter().map(|(k, v)| (k.into(), v.into())).collect()
+}
+
 /// A repository on `main` with one commit, and `origin`: a local bare
 /// repository holding `main` and `feature`, fetched once.
 pub(crate) fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::TempDir) {

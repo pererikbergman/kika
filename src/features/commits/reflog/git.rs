@@ -350,6 +350,7 @@ pub(crate) fn travel_command(direction: Direction, step: &Step) -> GitCommand {
         Step::CheckoutBranch(name) => checkout_command(name),
         Step::CheckoutDetached(oid) => detached_checkout(oid),
     }
+    .write_env()
     .env("GIT_REFLOG_ACTION", direction.marker())
 }
 
@@ -360,6 +361,7 @@ mod tests {
     use super::*;
     use crate::features::commits::reflog::undo::Expected;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
     use crate::op::{GitOp, HEAD_MOVED, op_command, run_op};
     use crate::test_support::{argv, cid as oid, rev_parse, two_commit_repo};
 
@@ -692,18 +694,25 @@ mod tests {
         for (op, expected, marker) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
+            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
             let envs: Vec<_> = cmd
-                .envs()
+                .process_env()
                 .iter()
-                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .map(|(k, v)| {
+                    (
+                        k.to_str().unwrap().to_owned(),
+                        v.to_str().unwrap().to_owned(),
+                    )
+                })
                 .collect();
             assert_eq!(
                 envs,
                 [
-                    ("GIT_REFLOG_ACTION", marker),
-                    ("GIT_LITERAL_PATHSPECS", "1"),
                     ("LC_ALL", "C"),
-                ],
+                    ("GIT_LITERAL_PATHSPECS", "1"),
+                    ("GIT_REFLOG_ACTION", marker),
+                ]
+                .map(|(k, v)| (k.to_owned(), v.to_owned())),
                 "{op:?}"
             );
         }

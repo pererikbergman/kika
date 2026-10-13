@@ -15,9 +15,9 @@ use crate::git::bisect::BisectMark;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
+use crate::git::error::GitError;
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan::RebasePlan;
-use crate::git::remote::redact_userinfo;
 use crate::git::remotes::{RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
 use crate::git::runner::{GitCommand, GitOutput, GitRunner};
@@ -341,13 +341,14 @@ impl GitOp {
     }
 }
 
-/// The command for `op`. Unlike reads, these need `index.lock`, so
-/// `GIT_OPTIONAL_LOCKS=0` is not set. File names come from the repo, so they
-/// are read literally, never as globs or pathspec magic. A commit adds no
-/// env at all: its hooks inherit it, and must see what they would see
-/// outside Kika. Git runs hooks with stdin closed, so the message on stdin
-/// never reaches them. Merges, rebases, reverts and their continue, skip
-/// and abort add none for the same reason.
+/// The command for `op`. Unlike reads, these need `index.lock`, so most
+/// run with [`EnvProfile::Write`](crate::git::runner::EnvProfile::Write):
+/// no `GIT_OPTIONAL_LOCKS=0`, and file names from the repo read literally,
+/// never as globs or pathspec magic. A commit runs in the user's env: its
+/// hooks inherit it, and must see what they would see outside Kika. Git
+/// runs hooks with stdin closed, so the message on stdin never reaches
+/// them. Merges, rebases, reverts, their continue, skip and abort, and
+/// bisects run in the user's env for the same reason.
 pub fn op_command(op: &GitOp) -> GitCommand {
     let with_paths = |cmd: GitCommand, paths: &[RepoPath]| {
         paths
@@ -457,17 +458,23 @@ pub fn op_command(op: &GitOp) -> GitCommand {
                 MergeStrategy::NoFastForward => "--no-ff",
                 MergeStrategy::Squash => "--squash",
             };
-            return GitCommand::new("merge").arg(flag).arg(branch.full_ref());
+            return GitCommand::new("merge")
+                .arg(flag)
+                .arg(branch.full_ref())
+                .user_env();
         }
-        GitOp::Rebase { onto } => return GitCommand::new("rebase").arg(onto.full_ref()),
-        GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()),
+        GitOp::Rebase { onto } => {
+            return GitCommand::new("rebase").arg(onto.full_ref()).user_env();
+        }
+        GitOp::Revert(oid) => return GitCommand::new("revert").arg(oid.as_str()).user_env(),
         // Ids are hex digits only, so none is read as an option.
         GitOp::CherryPick(picks) => {
             return picks
                 .iter()
                 .fold(GitCommand::new("cherry-pick"), |cmd, pick| {
                     cmd.arg(pick.as_str())
-                });
+                })
+                .user_env();
         }
         GitOp::InteractiveRebase(plan) => return rewrite::git::rebase_command(plan),
         // Its first step; the rest run from
@@ -476,17 +483,23 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             return op_command(&GitOp::InteractiveRebase(plan.clone()));
         }
         GitOp::Continue(operation) => {
-            return GitCommand::new(operation.subcommand()).arg("--continue");
+            return GitCommand::new(operation.subcommand())
+                .arg("--continue")
+                .user_env();
         }
         // Git rejects `merge --skip` without touching anything; no key
         // builds it. `cherry-pick --skip` and `revert --skip` need git 2.23,
         // and an older one rejects them the same way.
         GitOp::Skip(operation) => {
             debug_assert!(operation.can_skip(), "{operation:?} cannot be skipped");
-            return GitCommand::new(operation.subcommand()).arg("--skip");
+            return GitCommand::new(operation.subcommand())
+                .arg("--skip")
+                .user_env();
         }
         GitOp::Abort(operation) => {
-            return GitCommand::new(operation.subcommand()).arg("--abort");
+            return GitCommand::new(operation.subcommand())
+                .arg("--abort")
+                .user_env();
         }
         // A bisect checks commits out, so hooks run and see the user's env,
         // as for a merge. Only fixed words and hex digits reach argv;
@@ -495,13 +508,15 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::BisectMark { mark, commit, .. } => {
             return GitCommand::new("bisect")
                 .arg(mark.word())
-                .arg(commit.as_str());
+                .arg(commit.as_str())
+                .user_env();
         }
-        GitOp::BisectReset => return GitCommand::new("bisect").arg("reset"),
+        GitOp::BisectReset => return GitCommand::new("bisect").arg("reset").user_env(),
         // The user's tool runs on the terminal and keeps their locale, so
         // no `LC_ALL`; the name is still read literally.
         GitOp::MergeTool(path) => {
             return with_paths(GitCommand::new("mergetool"), std::slice::from_ref(path))
+                .user_env()
                 .env("GIT_LITERAL_PATHSPECS", "1");
         }
         GitOp::Commit {
@@ -523,7 +538,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
             };
         }
     };
-    cmd.env("GIT_LITERAL_PATHSPECS", "1").env("LC_ALL", "C")
+    cmd.write_env()
 }
 
 /// Switch to the local branch `name`. A short name, since a full ref
@@ -565,12 +580,10 @@ pub fn op_steps(op: &GitOp) -> Vec<GitOp> {
     }
 }
 
-/// Run `op`. Failures carry git's message, made safe to draw since it can
-/// quote repo-controlled paths. A commit's, a merge's, a revert's or a
-/// stash apply's failure also carries stdout: hooks print to stderr, but
-/// git says "nothing to commit" and names each conflict on stdout. A
-/// bisect's does too: git says there why a mark failed, such as "merge base
-/// is bad", or which commits are left when only skipped ones remain.
+/// Run `op`. Failures carry git's message as a [`GitError`] gives it: made
+/// safe to draw, since it can quote repo-controlled paths, and with any
+/// URL's credentials removed. Some ops' failures also carry stdout; see
+/// [`reports_on_stdout`].
 ///
 /// A stash action first checks its entry is still where it was chosen,
 /// and `--staged` first checks git is new enough.
@@ -642,35 +655,33 @@ fn run_op_with(
     if matches!(op, GitOp::SubmoduleUpdate(_)) && ssh_is_default(runner, env_set) {
         cmd = cmd.env("GIT_SSH_COMMAND", BATCH_SSH);
     }
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if output.success {
         return Ok(());
     }
-    let message = match op {
-        GitOp::Commit { .. }
-        | GitOp::Merge { .. }
-        | GitOp::Revert(_)
-        | GitOp::StashApply(_)
-        | GitOp::StashPop(_)
-        | GitOp::CherryPick(_)
-        | GitOp::BisectMark { .. }
-        | GitOp::BisectReset => stderr_and_stdout(&output),
-        // Git quotes a remote's URL in these errors, and it can carry a
-        // token.
-        GitOp::CheckoutTracking { .. }
-        | GitOp::SetUpstream { .. }
-        | GitOp::UnsetUpstream(_)
-        | GitOp::AddRemote { .. }
-        | GitOp::RenameRemote { .. }
-        | GitOp::RemoveRemote(_)
-        | GitOp::RemoveRemotes(_) => redact_userinfo(&terminal_safe(&output.stderr)),
-        _ => terminal_safe(&output.stderr),
+    let error = if reports_on_stdout(op) {
+        GitError::failed_with_stdout(&cmd, &output)
+    } else {
+        GitError::failed(&cmd, &output)
     };
-    if message.is_empty() {
-        let subcommand = cmd.subcommand().to_string_lossy();
-        return Err(format!("git {subcommand} failed"));
-    }
-    Err(message)
+    Err(error.to_string())
+}
+
+/// Whether git reports `op`'s failure on stdout as well as stderr: hooks
+/// print to stderr, but git says "nothing to commit" and names each
+/// conflict on stdout, and a bisect says there why a mark failed.
+fn reports_on_stdout(op: &GitOp) -> bool {
+    matches!(
+        op,
+        GitOp::Commit { .. }
+            | GitOp::Merge { .. }
+            | GitOp::Revert(_)
+            | GitOp::StashApply(_)
+            | GitOp::StashPop(_)
+            | GitOp::CherryPick(_)
+            | GitOp::BisectMark { .. }
+            | GitOp::BisectReset
+    )
 }
 
 /// Both of git's streams, made safe to draw, for commands that report
@@ -729,7 +740,7 @@ fn ssh_is_default(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> boo
     let cmd = GitCommand::new("config")
         .arg("--get")
         .arg("core.sshCommand")
-        .env("LC_ALL", "C");
+        .standard_env();
     // Unset is exit 1 with nothing on stderr.
     matches!(runner.run(&cmd), Ok(out) if !out.success && out.stderr.is_empty())
 }
@@ -738,9 +749,13 @@ fn ssh_is_default(runner: &dyn GitRunner, env_set: &dyn Fn(&str) -> bool) -> boo
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::GitOutput;
-    use crate::test_support::{argv, dirty_repo, file_entry as entry, paths};
-    use std::ffi::OsString;
+    use crate::git::runner::{EnvProfile, GitOutput};
+    use crate::test_support::{
+        STANDARD_ENV, argv, dirty_repo, env_list as env, file_entry as entry, paths,
+    };
+
+    /// The env of an op that takes the index lock.
+    const WRITE: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")];
 
     #[test]
     fn merge_and_rebase_name_the_branch_by_its_full_ref_and_set_no_env() {
@@ -779,7 +794,8 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{op:?}");
+            assert!(cmd.process_env().is_empty(), "{op:?}: {:?}", cmd.envs());
             assert_eq!(cmd.input(), None, "{op:?}");
         }
     }
@@ -800,7 +816,8 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert!(cmd.envs().is_empty(), "{op:?}: {:?}", cmd.envs());
+            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{op:?}");
+            assert!(cmd.process_env().is_empty(), "{op:?}: {:?}", cmd.envs());
         }
     }
 
@@ -808,10 +825,358 @@ mod tests {
     fn the_merge_tool_reads_the_path_literally_and_keeps_the_users_locale() {
         let cmd = op_command(&GitOp::MergeTool("-x".into()));
         assert_eq!(argv(&cmd), ["mergetool", "--", "-x"]);
+        assert_eq!(cmd.env_profile(), EnvProfile::UserEnv);
         assert_eq!(
-            cmd.envs(),
-            [("GIT_LITERAL_PATHSPECS".into(), "1".into())],
+            cmd.process_env(),
+            env(&[("GIT_LITERAL_PATHSPECS", "1")]),
             "no LC_ALL"
+        );
+    }
+
+    /// Which variant `op` is, numbered so the table below must name every
+    /// one: a new variant fails to compile here until it is listed.
+    fn variant(op: &GitOp) -> usize {
+        match op {
+            GitOp::Stage(_) => 0,
+            GitOp::Unstage(_) => 1,
+            GitOp::StageAll => 2,
+            GitOp::UnstageAll => 3,
+            GitOp::Commit { .. } => 4,
+            GitOp::ApplyCached { .. } => 5,
+            GitOp::DiscardWorktree(_) => 6,
+            GitOp::DeleteUntracked(_) => 7,
+            GitOp::DiscardFiles { .. } => 8,
+            GitOp::ApplyWorktree { .. } => 9,
+            GitOp::ApplyEdited { .. } => 10,
+            GitOp::SubmoduleInit(_) => 11,
+            GitOp::SubmoduleUpdate(_) => 12,
+            GitOp::Checkout(_) => 13,
+            GitOp::Merge { .. } => 14,
+            GitOp::Rebase { .. } => 15,
+            GitOp::InteractiveRebase(_) => 16,
+            GitOp::CustomPatch { .. } => 17,
+            GitOp::Continue(_) => 18,
+            GitOp::Skip(_) => 19,
+            GitOp::Abort(_) => 20,
+            GitOp::CheckoutCommit(_) => 21,
+            GitOp::Revert(_) => 22,
+            GitOp::CherryPick(_) => 23,
+            GitOp::Reset { .. } => 24,
+            GitOp::CreateBranch { .. } => 25,
+            GitOp::RenameBranch { .. } => 26,
+            GitOp::DeleteBranch { .. } => 27,
+            GitOp::DeleteBranches(_) => 28,
+            GitOp::MergeTool(_) => 29,
+            GitOp::StashPush { .. } => 30,
+            GitOp::StashApply(_) => 31,
+            GitOp::StashPop(_) => 32,
+            GitOp::StashDrop(_) => 33,
+            GitOp::StashDrops(_) => 34,
+            GitOp::StashRename { .. } => 35,
+            GitOp::CheckoutTracking { .. } => 36,
+            GitOp::SetUpstream { .. } => 37,
+            GitOp::UnsetUpstream(_) => 38,
+            GitOp::AddRemote { .. } => 39,
+            GitOp::RenameRemote { .. } => 40,
+            GitOp::RemoveRemote(_) => 41,
+            GitOp::RemoveRemotes(_) => 42,
+            GitOp::Travel { .. } => 43,
+            GitOp::CreateTag { .. } => 44,
+            GitOp::DeleteTag { .. } => 45,
+            GitOp::DeleteTags(_) => 46,
+            GitOp::BisectMark { .. } => 47,
+            GitOp::BisectReset => 48,
+        }
+    }
+
+    /// Vars as `(key, value)` pairs.
+    type Env<'a> = &'a [(&'a str, &'a str)];
+
+    #[test]
+    fn every_op_declares_its_env() {
+        use crate::git::commit_files::CommitRange;
+        use crate::git::rebase_plan::{encode, sample};
+        use crate::git::remotes::RemoteBranch;
+        use crate::sequence_editor::PLAN_ENV;
+        use std::collections::BTreeSet;
+
+        let id = |digit: &str| CommitId::parse(&digit.repeat(40)).unwrap();
+        let stash = StashRef {
+            index: 1,
+            oid: id("5"),
+        };
+        let upstream = RemoteBranch {
+            remote: "origin".into(),
+            short: b"main".to_vec(),
+            refname: b"refs/remotes/origin/main".to_vec(),
+        };
+        let push = |mode, paths: &[&str]| GitOp::StashPush {
+            mode,
+            message: None,
+            paths: paths.iter().map(|&p| p.into()).collect(),
+            restore: vec![],
+            unstage: vec![],
+        };
+        let travel = |step| GitOp::Travel {
+            direction: Direction::Undo,
+            step,
+            expect: Expected {
+                head_ref: None,
+                oid: id("d"),
+            },
+        };
+        let plan = sample();
+        let plan_env = encode(&plan.steps);
+        let commit = GitOp::Commit {
+            message: Some("m".into()),
+            stage_all: false,
+            amend: false,
+            no_verify: false,
+            fixup: None,
+        };
+        let marker = [("GIT_REFLOG_ACTION", "kika undo")];
+        let undo_env = [WRITE.as_slice(), marker.as_slice()].concat();
+        let update_env = [WRITE.as_slice(), &[("GIT_TERMINAL_PROMPT", "0")]].concat();
+        let rebase_env = [(PLAN_ENV, plan_env.as_str())];
+        use EnvProfile::{Locale, UserEnv, Write};
+        let w: &[(&str, &str)] = &WRITE;
+        let none: &[(&str, &str)] = &[];
+        let cases: Vec<(GitOp, EnvProfile, Env)> = vec![
+            (GitOp::Stage(paths(&["a"])), Write, w),
+            (GitOp::Unstage(paths(&["a"])), Write, w),
+            (GitOp::StageAll, Write, w),
+            (GitOp::UnstageAll, Write, w),
+            (commit, UserEnv, none),
+            (
+                GitOp::ApplyCached {
+                    patch: vec![],
+                    reverse: true,
+                },
+                Write,
+                w,
+            ),
+            (GitOp::DiscardWorktree(paths(&["a"])), Write, w),
+            (GitOp::DeleteUntracked(paths(&["a"])), Write, w),
+            (
+                GitOp::DiscardFiles {
+                    restore: paths(&["a"]),
+                    delete: paths(&["b"]),
+                },
+                Write,
+                w,
+            ),
+            (GitOp::ApplyWorktree { patch: vec![] }, Write, w),
+            (GitOp::ApplyEdited { patch: vec![] }, Write, w),
+            (GitOp::SubmoduleInit("s".into()), Write, w),
+            (GitOp::SubmoduleUpdate("s".into()), Write, &update_env),
+            (GitOp::Checkout("main".into()), Write, w),
+            (
+                GitOp::Merge {
+                    branch: "f".into(),
+                    strategy: MergeStrategy::NoFastForward,
+                },
+                UserEnv,
+                none,
+            ),
+            (GitOp::Rebase { onto: "f".into() }, UserEnv, none),
+            (GitOp::InteractiveRebase(plan.clone()), UserEnv, &rebase_env),
+            (
+                GitOp::CustomPatch {
+                    plan: plan.clone(),
+                    action: PatchAction::Remove,
+                    picks: CustomPatch::new(
+                        CommitRange {
+                            oid: id("b"),
+                            parent: Some(id("c")),
+                        },
+                        "bbbbbbb".into(),
+                    ),
+                    orig_head: id("a"),
+                },
+                UserEnv,
+                &rebase_env,
+            ),
+            (GitOp::Continue(Operation::Rebase), UserEnv, none),
+            (GitOp::Skip(Operation::CherryPick), UserEnv, none),
+            (GitOp::Abort(Operation::Merge), UserEnv, none),
+            (GitOp::CheckoutCommit(id("a")), Write, w),
+            (GitOp::Revert(id("a")), UserEnv, none),
+            (GitOp::CherryPick(vec![id("a")]), UserEnv, none),
+            (
+                GitOp::Reset {
+                    to: id("a"),
+                    mode: ResetMode::Mixed,
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::CreateBranch {
+                    name: "n".into(),
+                    from: "main".into(),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::RenameBranch {
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::DeleteBranch {
+                    name: "a".into(),
+                    force: true,
+                },
+                Write,
+                w,
+            ),
+            (GitOp::DeleteBranches(vec!["a".into()]), Write, w),
+            (
+                GitOp::MergeTool("a".into()),
+                UserEnv,
+                &[("GIT_LITERAL_PATHSPECS", "1")],
+            ),
+            (push(StashMode::All, &[]), Write, w),
+            (push(StashMode::Staged, &[]), Write, w),
+            (push(StashMode::IncludeUntracked, &["a"]), Write, w),
+            // Its `:/` clean must not be read literally.
+            (
+                push(StashMode::IncludeUntracked, &[]),
+                Locale,
+                &[("LC_ALL", "C")],
+            ),
+            (GitOp::StashApply(stash.clone()), Write, w),
+            (GitOp::StashPop(stash.clone()), Write, w),
+            (GitOp::StashDrop(stash.clone()), Write, w),
+            (GitOp::StashDrops(vec![stash.clone()]), Write, w),
+            (
+                GitOp::StashRename {
+                    stash: stash.clone(),
+                    message: "m".into(),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::CheckoutTracking {
+                    name: "main".into(),
+                    from: upstream.clone(),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::SetUpstream {
+                    branch: "main".into(),
+                    upstream,
+                },
+                Write,
+                w,
+            ),
+            (GitOp::UnsetUpstream("main".into()), Write, w),
+            (
+                GitOp::AddRemote {
+                    name: "o".into(),
+                    url: "https://h/r".into(),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::RenameRemote {
+                    from: "a".into(),
+                    to: "b".into(),
+                },
+                Write,
+                w,
+            ),
+            (GitOp::RemoveRemote("a".into()), Write, w),
+            (GitOp::RemoveRemotes(vec!["a".into()]), Write, w),
+            (travel(Step::MoveTo(id("a"))), Write, &undo_env),
+            (
+                travel(Step::CheckoutBranch("main".into())),
+                Write,
+                &undo_env,
+            ),
+            (travel(Step::CheckoutDetached(id("a"))), Write, &undo_env),
+            (
+                GitOp::CreateTag {
+                    name: "v1".into(),
+                    target: id("a"),
+                    message: Some("m".into()),
+                },
+                Write,
+                w,
+            ),
+            (
+                GitOp::DeleteTag {
+                    name: "v1".into(),
+                    oid: OID.into(),
+                },
+                Write,
+                w,
+            ),
+            (GitOp::DeleteTags(vec![("v1".into(), OID.into())]), Write, w),
+            (
+                GitOp::BisectMark {
+                    mark: BisectMark::Good,
+                    commit: id("a"),
+                    start: true,
+                },
+                UserEnv,
+                none,
+            ),
+            (GitOp::BisectReset, UserEnv, none),
+        ];
+
+        let listed: BTreeSet<usize> = cases.iter().map(|(op, ..)| variant(op)).collect();
+        assert_eq!(listed, (0..=48).collect(), "a variant is missing");
+        for (op, profile, expected) in &cases {
+            let cmd = op_command(op);
+            assert_eq!(cmd.env_profile(), *profile, "{op:?}");
+            assert_eq!(cmd.process_env(), env(expected), "{op:?}");
+        }
+    }
+
+    /// A URL in git's message loses its credentials, whatever the op.
+    #[test]
+    fn a_failed_submodule_update_hides_the_token_git_quoted() {
+        let op = GitOp::SubmoduleUpdate("sub".into());
+        let runner = FakeRunner::new().expect(SSH_CONFIG, fail("")).expect(
+            &["submodule", "update", "--init", "--", "sub"],
+            fail("fatal: clone of 'https://u:tok@h/x' failed\n"),
+        );
+
+        let error = run_op_with(&runner, &op, &|_| false).unwrap_err();
+
+        assert!(!error.contains("tok"), "{error}");
+        assert!(error.contains("https://h/x"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_merge_hides_the_token_on_stdout_and_still_names_the_conflict() {
+        let op = GitOp::Merge {
+            branch: "feature".into(),
+            strategy: MergeStrategy::NoFastForward,
+        };
+        let output = GitOutput {
+            success: false,
+            stdout: b"From https://u:tok@h/x\nCONFLICT (content): Merge conflict in a.txt\n"
+                .to_vec(),
+            stderr: b"Automatic merge failed\n".to_vec(),
+        };
+        let runner = FakeRunner::new().expect(&["merge", "--no-ff", "refs/heads/feature"], output);
+
+        let error = run_op(&runner, &op).unwrap_err();
+
+        assert!(!error.contains("tok"), "{error}");
+        assert!(
+            error.contains("CONFLICT (content): Merge conflict in a.txt"),
+            "{error}"
         );
     }
 
@@ -967,33 +1332,26 @@ mod tests {
             let runner = FakeRunner::new().expect(argv, ok(b""));
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
             runner.assert_done();
-            let envs = runner.envs();
-            assert!(
-                envs[0].contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into())),
-                "{op:?}: {envs:?}"
-            );
-            assert!(
-                envs[0].contains(&("LC_ALL".into(), "C".into())),
-                "{op:?}: {envs:?}"
-            );
+            assert_eq!(runner.process_envs(), [env(&WRITE)], "{op:?}");
         }
     }
 
     #[test]
     fn submodule_ops_name_one_path_literally_and_update_never_prompts() {
-        let literal = ("GIT_LITERAL_PATHSPECS".into(), "1".into());
-        let c = ("LC_ALL".into(), "C".into());
-        let no_prompt = ("GIT_TERMINAL_PROMPT".into(), "0".into());
         let cases = [
             (
                 GitOp::SubmoduleInit("libs/a b".into()),
                 &["submodule", "init", "--", "libs/a b"][..],
-                vec![literal.clone(), c.clone()],
+                env(&WRITE),
             ),
             (
                 GitOp::SubmoduleUpdate("libs/a b".into()),
                 &["submodule", "update", "--init", "--", "libs/a b"][..],
-                vec![no_prompt, literal, c],
+                env(&[
+                    ("LC_ALL", "C"),
+                    ("GIT_LITERAL_PATHSPECS", "1"),
+                    ("GIT_TERMINAL_PROMPT", "0"),
+                ]),
             ),
         ];
         for (op, argv, env) in cases {
@@ -1005,10 +1363,12 @@ mod tests {
             let runner = runner.expect(argv, ok(b""));
             assert_eq!(run_op_with(&runner, &op, &|_| false), Ok(()), "{op:?}");
             runner.assert_done();
-            let envs = runner.envs();
+            let envs = runner.process_envs();
             let mut env = env;
             if update {
                 env.push(("GIT_SSH_COMMAND".into(), BATCH_SSH.into()));
+                // The config read takes no lock and names no path.
+                assert_eq!(envs[0], self::env(&STANDARD_ENV), "{op:?}");
             }
             assert_eq!(envs.last(), Some(&env), "{op:?}");
         }
@@ -1105,14 +1465,7 @@ mod tests {
             assert_eq!(run_op(&runner, &op), Ok(()), "{op:?}");
             runner.assert_done();
             assert_eq!(runner.inputs(), [None], "{op:?}");
-            assert_eq!(
-                runner.envs(),
-                [vec![
-                    ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
-                    ("LC_ALL".into(), "C".into())
-                ]],
-                "{op:?}"
-            );
+            assert_eq!(runner.process_envs(), [env(&WRITE)], "{op:?}");
         }
     }
 
@@ -1126,13 +1479,7 @@ mod tests {
         assert_eq!(run_op(&runner, &op), Ok(()));
         runner.assert_done();
         assert_eq!(runner.inputs(), [Some(b"the patch\n".to_vec())]);
-        assert_eq!(
-            runner.envs(),
-            [vec![
-                ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
-                ("LC_ALL".into(), "C".into())
-            ]]
-        );
+        assert_eq!(runner.process_envs(), [env(&WRITE)]);
     }
 
     /// `d.txt` committed as `head`, `staged` in the index, `work` in the
@@ -1282,11 +1629,7 @@ mod tests {
         };
         assert_eq!(run_op(&runner, &op), Ok(()));
         runner.assert_done();
-        assert_eq!(runner.envs().len(), 2);
-        for env in runner.envs() {
-            let literal = (OsString::from("GIT_LITERAL_PATHSPECS"), OsString::from("1"));
-            assert!(env.contains(&literal), "{env:?}");
-        }
+        assert_eq!(runner.process_envs(), [env(&WRITE), env(&WRITE)]);
     }
 
     #[test]

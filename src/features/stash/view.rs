@@ -133,6 +133,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::*;
+    use crate::diff_pane::DiffStart;
     use crate::features::stash::StashFile;
     use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
     use crate::git::diff::{DiffChunk, DiffLine, LineKind};
@@ -401,7 +402,9 @@ mod tests {
     fn the_diff_pane_draws_the_open_stashs_file_diff() {
         let mut state = opened(Some(Ok(vec![stash_file('M', "src/lib.rs", false)])));
         state.screen_mode = ScreenMode::Normal;
-        state.diff.begin(9, &"src/lib.rs".into(), 20);
+        state
+            .diff
+            .open(9, &"src/lib.rs".into(), 20, DiffStart::Keep);
         state.diff.apply(
             9,
             Ok(DiffChunk {

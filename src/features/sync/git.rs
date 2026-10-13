@@ -3,36 +3,28 @@
 //! must never stop to ask for a password: nobody is there to type it, and
 //! the prompt would draw over the screen.
 
-use crate::git::diff::terminal_safe;
 use crate::git::runner::{GitCommand, GitRunner};
 
 /// Fetch every remote, quietly, failing instead of prompting for
-/// credentials or an SSH passphrase.
+/// credentials or an SSH passphrase. Only the locale: a fetch may gc and
+/// run the `pre-auto-gc` hook, which keeps the user's other vars.
 pub fn fetch_command() -> GitCommand {
     GitCommand::new("fetch")
         .arg("--all")
         .arg("--quiet")
         .arg("--no-write-fetch-head")
+        .locale_env()
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("SSH_ASKPASS_REQUIRE", "force")
         .env("SSH_ASKPASS", "false")
-        .env("LC_ALL", "C")
 }
 
 /// Run [`fetch_command`]. A failure carries git's message, safe to draw.
 pub fn run_fetch(runner: &dyn GitRunner) -> Result<(), String> {
-    let output = runner
-        .run(&fetch_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if output.success {
-        return Ok(());
-    }
-    let message = terminal_safe(&output.stderr);
-    Err(if message.is_empty() {
-        "git fetch failed".into()
-    } else {
-        message
-    })
+    runner
+        .run_checked(&fetch_command())
+        .map(drop)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -41,6 +33,7 @@ mod tests {
 
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
 
     const ARGV: &[&str] = &["fetch", "--all", "--quiet", "--no-write-fetch-head"];
 
@@ -52,12 +45,13 @@ mod tests {
 
         fake.assert_done();
         let env: Vec<(OsString, OsString)> = vec![
+            ("LC_ALL".into(), "C".into()),
             ("GIT_TERMINAL_PROMPT".into(), "0".into()),
             ("SSH_ASKPASS_REQUIRE".into(), "force".into()),
             ("SSH_ASKPASS".into(), "false".into()),
-            ("LC_ALL".into(), "C".into()),
         ];
-        assert_eq!(fake.envs(), [env]);
+        assert_eq!(fetch_command().env_profile(), EnvProfile::Locale);
+        assert_eq!(fake.process_envs(), [env]);
         assert_eq!(fake.inputs(), [None]);
     }
 
