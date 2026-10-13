@@ -1,12 +1,33 @@
 //! Copy and paste's `update` handlers: copying the selected commit or a
 //! range into the copied set, and pasting the set as a cherry-pick.
 
+use super::CopyIntent;
 use super::copied::CopiedCommit;
 use super::keys;
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
+
+/// Copying commits' half of `update`, which `commits::update` passes
+/// `CommitsIntent::Copy` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CopyIntent) -> Vec<Effect> {
+    match intent {
+        CopyIntent::Toggle if state.commits.range_anchor.is_some() => state.copy_range(),
+        CopyIntent::Toggle => state.copy_commit(),
+        CopyIntent::Clear => {
+            state.copied.clear();
+            state.notice = Some("Cleared copied commits".into());
+        }
+        CopyIntent::Paste => return state.paste_commits(),
+        CopyIntent::CopyText(what) => return state.copy_commit_text(what),
+        CopyIntent::MessageLoaded { tag, oid, result } => {
+            return state.commit_message_loaded(tag, oid, result);
+        }
+    }
+    Vec::new()
+}
 
 /// Copying commits and pasting them onto the current branch.
 impl AppState {
@@ -78,6 +99,8 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::copy::CopyIntent;
     use crate::git::repo_state::Operation;
     use crate::git::status::Head;
     use crate::intent::AppIntent;
@@ -126,7 +149,10 @@ mod tests {
             merge.notice,
             Some("Cannot cherry-pick a merge commit".into())
         );
-        assert_eq!(merge.update(AppIntent::CopyCommit), vec![]);
+        assert_eq!(
+            merge.update(AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Toggle))),
+            vec![]
+        );
         assert_eq!(merge.copied.ids(), [cid(COPIED_OID)]);
     }
 
@@ -188,7 +214,11 @@ mod tests {
             setup(&mut state);
             assert_eq!(press_char(&mut state, 'v'), vec![], "{case}");
             assert_eq!(state.notice, Some(reason.into()), "{case}");
-            assert_eq!(state.update(AppIntent::PasteCommits), vec![], "{case}");
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Paste))),
+                vec![],
+                "{case}"
+            );
         }
     }
 

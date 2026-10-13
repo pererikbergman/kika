@@ -164,6 +164,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::features::commits::CommitsIntent;
     use crate::features::commits::reset_hard_question;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
@@ -252,7 +253,10 @@ mod tests {
     #[test]
     fn enter_and_confirm_yes_leave_the_hard_reset_question_and_y_runs_it() {
         let mut state = on_commit();
-        assert_eq!(state.update(AppIntent::ResetTo(ResetMode::Hard)), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard))),
+            vec![]
+        );
         let asked = state.popups.clone();
         assert!(matches!(asked.as_slice(), [Popup::Question(_)]));
 
@@ -280,22 +284,32 @@ mod tests {
             ("detached", &detached_elsewhere as &dyn Fn(&mut AppState)),
             ("branch", &onto_a_branch),
         ] {
-            let (mut state, _) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
+            let (mut state, _) = checked(
+                AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
+                Ok(vec![]),
+            );
             let asked_from = match state.popups.as_slice() {
                 [Popup::Question(q)] => q.head.clone(),
                 popups => panic!("{name}: {popups:?}"),
             };
             assert_eq!(asked_from, Some(cid("c0")), "{name}");
             move_head(&mut state);
-            assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![], "{name}");
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)),
+                vec![],
+                "{name}"
+            );
             assert_eq!(state.popups, [], "{name}");
             assert_eq!(state.notice, Some("HEAD moved; try again".into()), "{name}");
             assert_eq!(state.held_seq(), None, "{name}");
         }
 
         // Where it was asked from, the answer runs the planned reset.
-        let (mut state, _) = checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![]));
-        let (_, op) = op_of(&state.update(AppIntent::ConfirmResetHard));
+        let (mut state, _) = checked(
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
+            Ok(vec![]),
+        );
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)));
         assert_eq!(op, reset_op(ResetMode::Hard));
     }
 
@@ -303,13 +317,16 @@ mod tests {
     fn the_hard_reset_question_waits_for_an_operation_in_progress() {
         for operation in [Operation::Merge, Operation::Rebase] {
             let mut state = on_commit();
-            state.update(AppIntent::ResetTo(ResetMode::Hard));
+            state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)));
             let mut branch = on_branch("main");
             branch.in_progress = vec![operation];
             state.branch = Some(branch);
             let reason = crate::keymap::in_progress_disabled(&state);
             assert!(reason.is_some(), "{operation:?}");
-            assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::ConfirmResetHard)),
+                vec![]
+            );
             assert_eq!(state.notice, reason, "{operation:?}");
             assert_eq!(state.popups, [], "{operation:?}");
             assert_eq!(state.held_seq(), None, "{operation:?}");

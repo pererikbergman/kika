@@ -5,6 +5,10 @@
 //! are its key bindings. Its git ops run through the core op slot.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `BisectIntent`, nested in `CommitsIntent::Bisect`,
+//!   and the free function `update` that `commits::update` passes it to.
+//!   Core's `SkipOperation` arm builds `BisectIntent::MarkHead` when only
+//!   a bisect is in progress;
 //! - `keys::{BISECT_COMMITS, BISECT_STATUS}`;
 //! - the handlers in `update.rs`: `bisect_selected`, `bisect_head`,
 //!   `ask_bisect_reset` (with its `bisect_reset_question`), `bisect_reset`
@@ -27,9 +31,13 @@
 //!   feature's Status panel draws;
 //! - `src/git/bisect.rs`, which `git/status` reads;
 //! - the `update()` dispatch arms and the `bisect::bisect_only` guards,
-//!   the Bisect menu (`MenuId::Bisect`) and its `AskBisectReset` intent,
+//!   the Bisect menu (`MenuId::Bisect`) and its `BisectIntent::AskReset` intent,
 //!   and the `op_command`/`run_op` arms in `op.rs`.
 
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod update;
+
+pub(crate) use intent::BisectIntent;
+pub(crate) use update::update;

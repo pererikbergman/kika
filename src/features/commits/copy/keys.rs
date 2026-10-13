@@ -3,6 +3,8 @@
 //! copy menu. `CHUNKS` in `keymap.rs` places the chunk, so its position
 //! there is behaviour.
 
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::copy::CopyIntent;
 use crate::git::status::{EntryKind, Head};
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -77,7 +79,7 @@ pub(crate) static COPY_COMMITS: &[Binding] = &[
         id: "commits.copy",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::CopyCommit,
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Toggle)),
         description: "Add the selected commit to the copied set, or take it out",
         label: "copy",
         bar: true,
@@ -87,7 +89,7 @@ pub(crate) static COPY_COMMITS: &[Binding] = &[
         id: "commits.paste",
         keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::PasteCommits,
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Paste)),
         description: "Cherry-pick the copied commits onto the current branch, oldest first",
         label: "paste",
         bar: true,
@@ -97,7 +99,7 @@ pub(crate) static COPY_COMMITS: &[Binding] = &[
         id: "commits.clear_copied",
         keys: &[KeyPattern::any(KeyCode::Char('C'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::ClearCopied,
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Clear)),
         description: "Clear the copied set",
         label: "clear",
         bar: false,
@@ -156,11 +158,17 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{k:?}: {other:?}"),
         };
-        assert_eq!(run(plain('c')), CopyCommit);
-        assert_eq!(run(plain('v')), PasteCommits);
+        assert_eq!(
+            run(plain('c')),
+            Commits(CommitsIntent::Copy(CopyIntent::Toggle))
+        );
+        assert_eq!(
+            run(plain('v')),
+            Commits(CommitsIntent::Copy(CopyIntent::Paste))
+        );
         assert_eq!(
             run(key(KeyCode::Char('C'), KeyModifiers::SHIFT)),
-            ClearCopied
+            Commits(CommitsIntent::Copy(CopyIntent::Clear))
         );
         assert!(binding("commits.copy").bar && binding("commits.paste").bar);
         assert!(!binding("commits.clear_copied").bar);

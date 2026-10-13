@@ -13,6 +13,8 @@
 //! `CheckLeftBehind` and the `GitOp::InteractiveRebase` argv.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `RewriteIntent`, nested in `CommitsIntent::Rewrite`,
+//!   and the free function `update` that `commits::update` passes it to;
 //! - the todo types `RebaseTodo`, `Rewrite` and `TodoFile` (`todo.rs`),
 //!   and `FixupBase`, which `intent.rs` carries;
 //! - `LeftBehindCheck`, the check in flight that `AppState` holds;
@@ -67,6 +69,7 @@ pub(crate) mod effects;
 mod fixup;
 pub(crate) mod fixup_base;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod leave_commits;
 mod left_behind;
@@ -75,8 +78,10 @@ mod todo;
 mod update;
 
 pub(crate) use fixup_base::FixupBase;
+pub(crate) use intent::RewriteIntent;
 pub(crate) use leave_commits::LeftBehindCheck;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
+pub(crate) use update::update;
 
 #[cfg(test)]
 pub(crate) use fixup::autosquash_question;
