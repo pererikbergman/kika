@@ -4228,7 +4228,7 @@ mod tests {
 
     #[test]
     fn esc_clear_leads_a_commits_files_bar_while_it_has_a_filter_then_clear_search() {
-        use crate::commit_files::CommitFilesList;
+        use crate::features::commits::CommitFilesList;
         use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
         let mut state = AppState::new(Context::Workspace);
         state.files_loaded = true;

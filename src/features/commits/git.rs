@@ -1,5 +1,6 @@
 //! Where every local branch points, so a history rewrite can tell which
-//! branches sit on the commits it would replace.
+//! branches sit on the commits it would replace, and the argv that checks
+//! out a commit with no branch.
 
 use crate::git::commit_files::CommitId;
 use crate::git::diff::terminal_safe;
@@ -80,9 +81,21 @@ pub fn left_behind(branch: &[u8]) -> String {
     )
 }
 
+/// Check out `oid` with no branch. The id is hex digits only, so it cannot
+/// be read as an option; `--` keeps it from being read as a path.
+pub(crate) fn detached_checkout(oid: &CommitId) -> GitCommand {
+    GitCommand::new("checkout")
+        .arg("-q")
+        .arg("--detach")
+        .arg(oid.as_str())
+        .arg("--")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::op::{GitOp, ResetMode, op_command, run_op};
+    use crate::test_support::{argv, rev_parse, two_commit_repo};
 
     fn row(digit: char) -> CommitRow {
         CommitRow {
@@ -168,5 +181,136 @@ mod tests {
             "Branch feature sits on these commits; Git 2.38 or newer moves it along"
         );
         assert!(!left_behind(b"refs/heads/x\x1b]0;t\x07").contains('\x1b'));
+    }
+
+    fn oid(text: &str) -> CommitId {
+        CommitId::parse(text).unwrap()
+    }
+
+    #[test]
+    fn checkout_and_reset_name_the_commit_before_the_path_separator() {
+        let cases: [(GitOp, &[&str]); 4] = [
+            (
+                GitOp::CheckoutCommit(oid("abc123")),
+                &["checkout", "-q", "--detach", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Soft,
+                },
+                &["reset", "-q", "--soft", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Mixed,
+                },
+                &["reset", "-q", "--mixed", "abc123", "--"],
+            ),
+            (
+                GitOp::Reset {
+                    to: oid("abc123"),
+                    mode: ResetMode::Hard,
+                },
+                &["reset", "-q", "--hard", "abc123", "--"],
+            ),
+        ];
+        for (op, expected) in cases {
+            let cmd = op_command(&op);
+            assert_eq!(argv(&cmd), expected, "{op:?}");
+            let envs: Vec<_> = cmd
+                .envs()
+                .iter()
+                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+                .collect();
+            assert_eq!(
+                envs,
+                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")],
+                "{op:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn revert_is_plain_git_revert_and_sets_no_env() {
+        let cmd = op_command(&GitOp::Revert(oid("abc123")));
+        assert_eq!(argv(&cmd), ["revert", "abc123"]);
+        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
+        assert_eq!(cmd.input(), None);
+    }
+
+    #[test]
+    fn checkout_commit_leaves_head_detached_at_it_in_real_git() {
+        use crate::git::fake::{git, try_git};
+
+        let (tmp, first) = two_commit_repo();
+        let dir = tmp.path();
+        let runner = crate::git::CliRunner::isolated(dir);
+        run_op(&runner, &GitOp::CheckoutCommit(first.clone())).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD"), first);
+        assert!(
+            !try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+            "HEAD is on a branch"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
+    }
+
+    #[test]
+    fn revert_makes_a_commit_on_head_that_undoes_the_change_in_real_git() {
+        use crate::git::fake::git;
+
+        let (tmp, _) = two_commit_repo();
+        let dir = tmp.path();
+        let second = rev_parse(dir, "HEAD");
+        let runner = crate::git::CliRunner::isolated(dir).with_env("GIT_EDITOR", "true");
+        run_op(&runner, &GitOp::Revert(second.clone())).unwrap();
+        assert_eq!(rev_parse(dir, "HEAD^"), second);
+        assert_eq!(git(dir, &["show", "HEAD:a.txt"]), b"one\n");
+        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"3\n");
+        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
+    }
+
+    #[test]
+    fn each_reset_mode_keeps_what_it_says_in_real_git() {
+        use crate::git::fake::git;
+
+        let cases = [
+            (ResetMode::Soft, "M  a.txt\n"),
+            (ResetMode::Mixed, " M a.txt\n"),
+            (ResetMode::Hard, ""),
+        ];
+        for (mode, status) in cases {
+            let (tmp, first) = two_commit_repo();
+            let dir = tmp.path();
+            let runner = crate::git::CliRunner::isolated(dir);
+            run_op(
+                &runner,
+                &GitOp::Reset {
+                    to: first.clone(),
+                    mode,
+                },
+            )
+            .unwrap();
+            assert_eq!(rev_parse(dir, "HEAD"), first, "{mode:?}");
+            // The branch moved with it; HEAD is still on it.
+            assert!(
+                crate::git::fake::try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
+                "{mode:?}"
+            );
+            assert_eq!(
+                String::from_utf8(git(dir, &["status", "--porcelain"])).unwrap(),
+                status,
+                "{mode:?}"
+            );
+            let worktree = std::fs::read_to_string(dir.join("a.txt")).unwrap();
+            let expected = if mode == ResetMode::Hard {
+                "one\n"
+            } else {
+                "two\n"
+            };
+            assert_eq!(worktree, expected, "{mode:?}");
+        }
     }
 }

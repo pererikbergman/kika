@@ -5,9 +5,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::clipboard::{self, CopyWhat};
-use crate::commit_files::CommitFilesList;
 use crate::config::ConfigError;
-use crate::diff_mark::{DiffEnd, DiffMark};
+use crate::diff_mark::DiffMark;
 use crate::diff_pane::DiffPane;
 use crate::diff_search::DiffSearch;
 use crate::effect::{Effect, Tag};
@@ -37,7 +36,7 @@ use crate::git::FileEntry;
 use crate::git::askpass::Secret;
 use crate::git::bisect::BisectMark;
 use crate::git::branches::{Branch, BranchName};
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
+use crate::git::commit_files::CommitId;
 use crate::git::diff::{
     DiffOptions, DiffRequest, DiffSide, EmojiZwj, MAX_CONTEXT, MIN_CONTEXT, sanitize,
 };
@@ -57,7 +56,7 @@ use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
 use crate::list_input::RANGE_FILES_CHANGED;
 use crate::menu;
-use crate::op::{GitOp, MergeStrategy, ResetMode};
+use crate::op::{GitOp, MergeStrategy};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
     ConfirmKind, CredentialPrompt, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup,
@@ -1006,13 +1005,7 @@ impl AppState {
                 return self.start_op(Ok(Some(GitOp::Abort(operation))));
             }
             AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
-            AppIntent::ConfirmCheckoutCommit => {
-                let op = self.commits.pending.take().map(GitOp::CheckoutCommit);
-                if op.as_ref().is_some_and(|op| self.confirm_refused(op)) {
-                    return vec![];
-                }
-                return self.start_op(Ok(op));
-            }
+            AppIntent::ConfirmCheckoutCommit => return self.confirm_checkout_commit(),
             AppIntent::RevertCommit => return self.revert_commit(),
             AppIntent::CopyCommit if self.commits.range_anchor.is_some() => self.copy_range(),
             AppIntent::CopyCommit => self.copy_commit(),
@@ -2191,101 +2184,6 @@ impl AppState {
 /// A commit opened to its files from the Commits panel. The Diff pane
 /// shows the selected file's change in that commit until it closes.
 impl AppState {
-    /// Open the selected commit's files in place of the log. A user
-    /// effect, so the busy indicator shows while git lists them.
-    fn open_commit_files(&mut self) -> Vec<Effect> {
-        if self.context != Context::Workspace
-            || self.focus != Focus::Commits
-            || self.commits.open.is_some()
-        {
-            return vec![];
-        }
-        let Some(row) = self.commits.rows.get(self.commits.selected) else {
-            return vec![];
-        };
-        if let Some(mark) = &self.diff_mark
-            && let Some(id) = CommitId::parse(&row.oid)
-            && !matches!(mark, DiffMark::Commit { id: marked, .. } if *marked == id)
-        {
-            let target = row.short_oid.clone();
-            return self.open_comparison(DiffEnd::Commit(id), target);
-        }
-        let range = match CommitRange::of(row) {
-            Ok(range) => range,
-            Err(message) => {
-                self.commits.error = Some(message);
-                return vec![];
-            }
-        };
-        let short_oid = row.short_oid.clone();
-        let seq = self.take_seq();
-        self.commits.open = Some(CommitFilesList::begin(range.clone(), short_oid, seq));
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
-        vec![Effect::LoadCommitFiles { tag, range }]
-    }
-
-    /// Show the first file's diff, or nothing for a commit with no files.
-    fn commit_files_loaded(
-        &mut self,
-        tag: Tag,
-        result: Result<Vec<CommitFile>, String>,
-    ) -> Vec<Effect> {
-        // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if tag.generation != self.generation {
-            return vec![];
-        }
-        let Some(open) = &mut self.commits.open else {
-            return vec![];
-        };
-        if !open.loaded(tag.seq, result) {
-            return vec![];
-        }
-        if open.selected_file().is_none() {
-            self.diff = DiffPane::default();
-            return vec![Effect::CancelDiff];
-        }
-        // Another commit's file: start at its top, whatever was shown.
-        self.diff.path = None;
-        self.commit_file_diff()
-    }
-
-    fn move_commit_file(&mut self, delta: isize) -> Vec<Effect> {
-        let moved = self
-            .commits
-            .open
-            .as_mut()
-            .is_some_and(|open| open.move_by(delta));
-        if moved {
-            self.commit_file_diff()
-        } else {
-            vec![]
-        }
-    }
-
-    /// Stream the selected commit file's diff, if one is selected.
-    pub(crate) fn commit_file_diff(&mut self) -> Vec<Effect> {
-        let request = self.commits.open.as_ref().and_then(|open| {
-            let file = open.selected_file()?;
-            Some(DiffRequest::for_commit_file(
-                &open.range,
-                file,
-                self.diff_options,
-            ))
-        });
-        match request {
-            Some(request) => self.stream_diff(request),
-            None => vec![],
-        }
-    }
-
     /// Stream the open commit's or stash's file again, as when it was
     /// picked; nothing when neither is open.
     pub(super) fn reload_open_file_diff(&mut self) -> Vec<Effect> {
@@ -2446,48 +2344,6 @@ impl AppState {
         }
     }
 
-    /// The selected commit's id and short id, or why no action may run on
-    /// it now, said in the bar. Only an id of hex digits reaches argv.
-    pub(crate) fn commit_for_action(
-        &mut self,
-        disabled: fn(&AppState) -> Option<Reason>,
-    ) -> Option<(CommitId, String)> {
-        if self.context != Context::Workspace {
-            return None;
-        }
-        if let Some(reason) = disabled(self) {
-            self.notice = Some(reason);
-            return None;
-        }
-        let row = self.commits.rows.get(self.commits.selected)?;
-        match CommitId::parse(&row.oid) {
-            Some(id) => Some((id, row.short_oid.clone())),
-            None => {
-                self.notice = Some("Not a commit id git can use".into());
-                None
-            }
-        }
-    }
-
-    /// Ask before leaving the branch: commits made on a detached `HEAD`
-    /// belong to no branch. From a detached `HEAD`, look first for the
-    /// commits the move would leave behind.
-    fn ask_checkout_commit(&mut self) -> Vec<Effect> {
-        match self.commit_for_action(keymap::checkout_commit_disabled) {
-            Some((id, _)) => self.move_head(GitOp::CheckoutCommit(id.clone()), id),
-            None => vec![],
-        }
-    }
-
-    /// Revert the selected commit on the terminal, so git's editor and the
-    /// commit hooks work as on the command line.
-    fn revert_commit(&mut self) -> Vec<Effect> {
-        match self.commit_for_action(keymap::revert_disabled) {
-            Some((id, _)) => self.run_op_where_it_belongs(GitOp::Revert(id)),
-            None => vec![],
-        }
-    }
-
     /// Copy the selected commit's hash, short hash or subject now, or
     /// read its full message first. Pure, so it works while an operation
     /// runs.
@@ -2558,40 +2414,6 @@ impl AppState {
                 vec![]
             }
         }
-    }
-
-    /// Reset to the selected commit. Soft and mixed keep the work; hard
-    /// throws it away, so it asks first. From a detached `HEAD`, look
-    /// first for the commits the reset would leave behind.
-    fn reset_to(&mut self, mode: ResetMode) -> Vec<Effect> {
-        let Some((to, _)) = self.commit_for_action(keymap::reset_disabled) else {
-            return vec![];
-        };
-        self.move_head(
-            GitOp::Reset {
-                to: to.clone(),
-                mode,
-            },
-            to,
-        )
-    }
-
-    /// Reset hard as the open question asked, and only if one is open, its
-    /// guard still allows it and `HEAD` has not moved since.
-    fn confirm_reset_hard(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::ResetHard(_))) {
-            return vec![];
-        }
-        let Some(Popup::ResetHard(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        if self.confirm_refused(&confirm.op) {
-            return vec![];
-        }
-        if !self.head_still(confirm.head.as_ref()) {
-            return vec![];
-        }
-        self.start_op(Ok(Some(confirm.op)))
     }
 }
 
@@ -2909,13 +2731,15 @@ use crate::features::commits::custom_patch::NO_PATCH;
 mod tests {
     use super::*;
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::commits::CommitFilesList;
     use crate::git::diff::{DiffChunk, DiffSide};
     use crate::git::status::{EntryKind, RepoStatus};
     use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
     use crate::keymap::KeyPress;
     use crate::menu::MenuId;
-    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind, ResetHardConfirm};
+    use crate::op::ResetMode;
+    use crate::popup::{DiscardConfirm, DiscardWhat, PromptKind};
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -4597,108 +4421,6 @@ mod tests {
     use crate::git::commit_files::CommitFile;
 
     #[test]
-    fn enter_opens_the_commit_against_its_first_parent_as_a_user_load() {
-        let mut state = on_commit_five();
-        let busy = state.busy;
-
-        let (tag, range) = files_load(&press(&mut state, KeyCode::Enter));
-
-        assert_eq!(range, range_of("c5", "c6"));
-        assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
-        let open = state.commits.open.as_ref().unwrap();
-        assert_eq!((open.short_oid.as_str(), open.loaded), ("c5", false));
-        assert_eq!(state.key_focus(), KeyScope::CommitFiles);
-        assert_eq!(state.commits.selected, 5);
-    }
-
-    #[test]
-    fn a_commit_whose_id_or_parent_is_not_hex_opens_nothing_and_says_why() {
-        for (oid, parent) in [("--output=x", "c6"), ("c5", "-p")] {
-            let mut state = on_commit_five();
-            state.commits.rows[5].oid = oid.into();
-            state.commits.rows[5].parents = vec![parent.into()];
-
-            assert_eq!(state.update(AppIntent::OpenCommitFiles), vec![]);
-
-            assert_eq!(state.commits.open, None);
-            let error = state.commits.error.as_deref().unwrap();
-            assert!(error.starts_with("not a commit id"), "{error}");
-        }
-    }
-
-    #[test]
-    fn enter_with_no_commits_is_disabled() {
-        let mut state = on_commit_five();
-        state.commits.rows.clear();
-        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.notice, Some("No commits".into()));
-    }
-
-    #[test]
-    fn the_loaded_files_show_the_first_ones_diff_in_that_commit_and_j_the_next() {
-        let mut state = on_commit_five();
-        let busy = state.busy;
-        let range = range_of("c5", "c6");
-
-        let effects = opened(&mut state, two_commit_files());
-
-        assert_eq!(state.busy, busy);
-        let request = diff_request(&effects);
-        assert_eq!(request.commit, Some(range.clone()));
-        assert_eq!(request.path, "src/lib.rs".into());
-        assert_eq!(state.diff.path, Some("src/lib.rs".into()));
-
-        let request = diff_request(&press(&mut state, KeyCode::Char('j')));
-        assert_eq!(request.commit, Some(range));
-        assert_eq!(
-            (request.path, request.orig_path),
-            ("new.rs".into(), Some("old.rs".into()))
-        );
-        // The ends of the list load nothing more.
-        assert_eq!(press(&mut state, KeyCode::Down), vec![]);
-        let request = diff_request(&state.update(AppIntent::CommitFilePrev));
-        assert_eq!(request.path, "src/lib.rs".into());
-    }
-
-    #[test]
-    fn a_stale_or_other_repositorys_file_list_is_dropped_but_lowers_busy() {
-        let stale: [fn(Tag) -> Tag; 2] = [
-            |tag| Tag {
-                seq: tag.seq + 1,
-                ..tag
-            },
-            |tag| Tag {
-                generation: tag.generation + 1,
-                ..tag
-            },
-        ];
-        for stale in stale {
-            let mut state = on_commit_five();
-            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
-            let busy = state.busy;
-            let effects = state.update(AppIntent::CommitFilesLoaded {
-                tag: stale(tag),
-                result: Ok(two_commit_files()),
-            });
-            assert_eq!(effects, vec![]);
-            assert_eq!(state.busy, busy - 1);
-            assert!(!state.commits.open.as_ref().unwrap().loaded);
-        }
-    }
-
-    #[test]
-    fn a_commit_with_no_files_or_a_failed_list_empties_the_diff() {
-        for result in [Ok(vec![]), Err("bad object".to_string())] {
-            let mut state = on_commit_five();
-            let (tag, _) = files_load(&press(&mut state, KeyCode::Enter));
-            let effects = state.update(AppIntent::CommitFilesLoaded { tag, result });
-            assert_eq!(effects, vec![Effect::CancelDiff]);
-            assert_eq!(state.diff, DiffPane::default());
-        }
-    }
-
-    #[test]
     fn esc_goes_back_to_the_same_commit_and_reloads_the_worktree_diff() {
         let mut state = on_commit_five();
         opened(&mut state, two_commit_files());
@@ -5410,187 +5132,6 @@ mod tests {
         }
     }
 
-    // --- Checkout, revert and reset of a commit ---
-
-    #[test]
-    fn space_asks_before_a_detached_checkout_and_y_checks_out_the_commit() {
-        let mut state = on_commit();
-        assert_eq!(press_char(&mut state, ' '), vec![]);
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::DetachedCheckout)]
-        );
-        assert_eq!(state.commits.pending, Some(cid("c1")));
-        assert!(
-            state
-                .confirm_question(&ConfirmKind::DetachedCheckout)
-                .starts_with("Check out c1 as a detached HEAD? You will be on no branch;"),
-        );
-        assert_eq!(state.op_seq, None);
-
-        let (tag, op) = op_of(&press_char(&mut state, 'y'));
-        assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
-        assert_eq!(state.op_seq, Some(tag.seq));
-        assert_eq!(state.popups, []);
-        assert_eq!(state.commits.pending, None);
-    }
-
-    #[test]
-    fn enter_also_answers_the_detached_checkout() {
-        let mut state = on_commit();
-        press_char(&mut state, ' ');
-        let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
-        assert_eq!(op, GitOp::CheckoutCommit(cid("c1")));
-    }
-
-    #[test]
-    fn n_or_esc_keeps_the_branch_and_forgets_the_commit() {
-        for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            let mut state = on_commit();
-            press_char(&mut state, ' ');
-            assert_eq!(press(&mut state, code), vec![], "{code:?}");
-            assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.commits.pending, None, "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
-        }
-    }
-
-    #[test]
-    fn capital_r_reverts_the_selected_commit_on_the_terminal() {
-        let mut state = on_commit();
-        let (tag, op) = attached_of(&press_char(&mut state, 'R'));
-        assert_eq!(op, GitOp::Revert(cid("c1")));
-        assert_eq!(state.op_seq, Some(tag.seq));
-    }
-
-    #[test]
-    fn a_revert_is_refused_on_a_merge_while_an_op_runs_or_during_an_operation() {
-        let mut merge = on_commit();
-        merge.commits.rows[1].parents = vec!["c2".into(), "d0".into()];
-        assert_eq!(press_char(&mut merge, 'R'), vec![]);
-        assert_eq!(merge.notice, Some("Cannot revert a merge commit".into()));
-        assert_eq!(merge.update(AppIntent::RevertCommit), vec![]);
-        assert_eq!(merge.op_seq, None);
-
-        let mut running = on_commit();
-        running.op_seq = Some(9);
-        assert_eq!(press_char(&mut running, 'R'), vec![]);
-        assert_eq!(running.notice, Some(keymap::OP_RUNNING.into()));
-        assert_eq!(running.update(AppIntent::RevertCommit), vec![]);
-
-        let mut reverting = on_commit();
-        let mut branch = on_branch("main");
-        branch.in_progress = vec![Operation::Revert];
-        reverting.branch = Some(branch);
-        assert_eq!(press_char(&mut reverting, 'R'), vec![]);
-        assert_eq!(
-            reverting.notice,
-            Some("Finish or abort the operation in progress".into())
-        );
-        assert_eq!(reverting.update(AppIntent::RevertCommit), vec![]);
-        assert_eq!(reverting.op_seq, None);
-    }
-
-    #[test]
-    fn capital_x_opens_the_reset_menu_and_soft_and_mixed_reset_at_once() {
-        for (moves, mode) in [(0, ResetMode::Soft), (1, ResetMode::Mixed)] {
-            let mut state = on_commit();
-            assert_eq!(press_char(&mut state, 'X'), vec![]);
-            assert_eq!(
-                state.popups,
-                [Popup::Menu {
-                    id: MenuId::Reset,
-                    cursor: 0
-                }]
-            );
-            for _ in 0..moves {
-                press_char(&mut state, 'j');
-            }
-            let (_, op) = op_of(&press(&mut state, KeyCode::Enter));
-            assert_eq!(
-                op,
-                GitOp::Reset {
-                    to: cid("c1"),
-                    mode
-                }
-            );
-            assert_eq!(state.popups, []);
-        }
-    }
-
-    #[test]
-    fn a_hard_reset_asks_first_and_only_y_resets() {
-        let mut state = on_commit();
-        press_char(&mut state, 'X');
-        press_char(&mut state, 'j');
-        press_char(&mut state, 'j');
-        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        let hard = GitOp::Reset {
-            to: cid("c1"),
-            mode: ResetMode::Hard,
-        };
-        assert_eq!(
-            state.popups,
-            [Popup::ResetHard(ResetHardConfirm {
-                short_oid: "c1".into(),
-                op: hard.clone(),
-                head: None,
-            })]
-        );
-        assert_eq!(state.key_focus(), KeyScope::ResetHard);
-        assert_eq!(state.op_seq, None);
-
-        // Enter is not an answer: the question stays and nothing runs.
-        assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.popups.len(), 1);
-        assert_eq!(state.op_seq, None);
-
-        let (_, op) = op_of(&press_char(&mut state, 'y'));
-        assert_eq!(op, hard);
-        assert_eq!(state.popups, []);
-    }
-
-    #[test]
-    fn n_or_esc_closes_the_hard_reset_question() {
-        for code in [KeyCode::Char('n'), KeyCode::Esc] {
-            let mut state = on_commit();
-            state.update(AppIntent::ResetTo(ResetMode::Hard));
-            assert_eq!(state.popups.len(), 1, "{code:?}");
-            assert_eq!(press(&mut state, code), vec![], "{code:?}");
-            assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
-        }
-    }
-
-    #[test]
-    fn confirm_reset_hard_does_nothing_without_the_question() {
-        let mut state = on_commit();
-        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
-        assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
-        assert_eq!(state.op_seq, None);
-    }
-
-    #[test]
-    fn a_reset_waits_for_the_operation_in_progress() {
-        let mut state = on_commit();
-        let mut branch = on_branch("main");
-        branch.in_progress = vec![Operation::Merge];
-        state.branch = Some(branch);
-        assert_eq!(press_char(&mut state, 'X'), vec![]);
-        assert_eq!(state.popups, []);
-        assert_eq!(
-            state.notice,
-            Some("Finish or abort the operation in progress".into())
-        );
-        for mode in [ResetMode::Soft, ResetMode::Hard] {
-            assert_eq!(state.update(AppIntent::ResetTo(mode)), vec![]);
-        }
-        assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
-    }
-
     // --- Re-checking the guards when a move question is answered ---
 
     const IN_PROGRESS: &str = "Finish or abort the operation in progress";
@@ -6201,8 +5742,8 @@ mod tests {
         let guards: [fn(&AppState) -> Option<Reason>; 6] = [
             crate::features::commit::keys::commit_disabled,
             crate::features::commit::keys::amend_disabled,
-            keymap::checkout_commit_disabled,
-            keymap::reset_disabled,
+            crate::features::commits::keys::checkout_commit_disabled,
+            crate::features::commits::keys::reset_disabled,
             crate::features::operation::keys::merge_disabled,
             crate::features::branches::keys::new_branch_disabled,
         ];
