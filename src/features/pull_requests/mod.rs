@@ -21,7 +21,7 @@
 //! - `commit_url_disabled` and `commit_page` read the selected commit
 //!   (commits);
 //! - `pick_select` dispatches to `pick_check` and `pick_merge_method`
-//!   (review);
+//!   (review), accepted cross-feature calls listed in ADR-0001's Outcome;
 //! - `REFRESH_LIMITED`, `same_repo` and `ForgeState::record_rate_limit`,
 //!   which review's merge shares, live in `src/forge`;
 //! - core calls `load_pull_requests` when a branch list loads

@@ -79,9 +79,8 @@ fn has_unstaged(entry: &FileEntry) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::path::RepoPath;
     use crate::op::run_op;
-    use crate::test_support::file_entry as entry;
+    use crate::test_support::{file_entry as entry, paths};
 
     fn stage(paths: &[&str]) -> Option<GitOp> {
         Some(GitOp::Stage(paths.iter().map(|&p| p.into()).collect()))
@@ -89,10 +88,6 @@ mod tests {
 
     fn unstage(paths: &[&str]) -> Option<GitOp> {
         Some(GitOp::Unstage(paths.iter().map(|&p| p.into()).collect()))
-    }
-
-    fn paths(paths: &[&str]) -> Vec<RepoPath> {
-        paths.iter().map(|&p| p.into()).collect()
     }
 
     #[test]

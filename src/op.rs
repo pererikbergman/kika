@@ -739,7 +739,7 @@ mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::runner::GitOutput;
-    use crate::test_support::{argv, dirty_repo, file_entry as entry};
+    use crate::test_support::{argv, dirty_repo, file_entry as entry, paths};
     use std::ffi::OsString;
 
     #[test]
@@ -947,10 +947,6 @@ mod tests {
             assert!(run_op(&runner, &op).is_err(), "{op:?}");
             runner.assert_done();
         }
-    }
-
-    fn paths(paths: &[&str]) -> Vec<RepoPath> {
-        paths.iter().map(|&p| p.into()).collect()
     }
 
     #[test]
