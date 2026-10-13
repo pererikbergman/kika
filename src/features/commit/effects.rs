@@ -15,7 +15,7 @@ use crate::intent::AppIntent;
 use crate::op::GitOp;
 use crate::prompts::read_prompt_facts;
 
-/// Read `HEAD`'s message and report it as `HeadMessageLoaded`.
+/// Read `HEAD`'s message and report it as `CommitIntent::HeadMessageLoaded`.
 pub(crate) fn load_head_message(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -31,7 +31,7 @@ pub(crate) fn load_head_message(
 }
 
 /// Read whether `op` may sign or run hooks, and report it as
-/// `CommitProbed`.
+/// `CommitIntent::Probed`.
 pub(crate) fn probe(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

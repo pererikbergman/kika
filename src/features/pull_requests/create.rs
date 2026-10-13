@@ -201,7 +201,7 @@ fn question(state: &AppState) -> Option<String> {
 
 /// "Create the pull request?", asked once the draft has its title. It
 /// reaches GitHub, so only `y` answers it: never Enter. Only
-/// `ConfirmCreatePullRequest` creates, from the draft as it is then.
+/// `PullRequestsIntent::ConfirmCreate` creates, from the draft as it is then.
 pub(crate) fn create_question(state: &AppState) -> ConfirmQuestion {
     let text = question(state).unwrap_or_else(|| {
         // The fallback when the draft cannot be named.

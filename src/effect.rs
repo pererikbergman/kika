@@ -114,7 +114,7 @@ pub enum Effect {
         tag: Tag,
     },
     /// Add `line` to the worktree's top-level `.gitignore`, creating it if
-    /// need be; always answered by one `IgnoreWritten`.
+    /// need be; always answered by one `FilesIntent::IgnoreWritten`.
     AppendIgnore {
         tag: Tag,
         line: Vec<u8>,
@@ -135,12 +135,13 @@ pub enum Effect {
     },
     /// Stop the current diff stream and its `git` process.
     CancelDiff,
-    /// Report `DiffSlow` after [`DIFF_LOADING_DELAY`], so fast loads never flash "Loading…".
+    /// Report `DiffIntent::Slow` after [`DIFF_LOADING_DELAY`], so fast
+    /// loads never flash "Loading…".
     DiffLoadingDelay {
         tag: Tag,
     },
     /// Load the whole diff of one file as a patch; always answered by one
-    /// `PatchLoaded`.
+    /// `DiffIntent::PatchLoaded`.
     LoadPatch {
         tag: Tag,
         request: DiffRequest,
@@ -149,11 +150,11 @@ pub enum Effect {
     // --- diff/renderers ---
     /// Find the configured diff renderers: the global `[diff] pager`, then
     /// git's global pagers, then the global `[diff] tool`. Answered by one
-    /// `RenderersFound`.
+    /// `RenderersIntent::Found`.
     FindRenderers,
     /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
     /// a tool on both sides of its file. Always answered by one
-    /// `DiffRendered`.
+    /// `RenderersIntent::Rendered`.
     RenderDiff {
         tag: Tag,
         request: DiffRequest,
@@ -163,68 +164,68 @@ pub enum Effect {
 
     // --- commit ---
     /// Read `HEAD`'s message to amend it; always answered by one
-    /// `HeadMessageLoaded`.
+    /// `CommitIntent::HeadMessageLoaded`.
     LoadHeadMessage {
         tag: Tag,
     },
     /// Read what decides whether the commit `op` needs the terminal;
-    /// always answered by one `CommitProbed`.
+    /// always answered by one `CommitIntent::Probed`.
     ProbeCommit {
         tag: Tag,
         op: GitOp,
     },
 
     // --- stash ---
-    /// Read the stash list; always answered by one `StashesLoaded`.
+    /// Read the stash list; always answered by one `StashIntent::Loaded`.
     LoadStashes {
         tag: Tag,
     },
     /// List the files `entry` holds; always answered by one
-    /// `StashFilesLoaded`.
+    /// `StashIntent::FilesLoaded`.
     LoadStashFiles {
         tag: Tag,
         entry: StashEntry,
     },
 
     // --- submodules ---
-    /// List the submodules; always answered by one `SubmodulesLoaded`.
+    /// List the submodules; always answered by one `SubmodulesIntent::Loaded`.
     LoadSubmodules {
         tag: Tag,
     },
 
     // --- worktrees ---
-    /// List the worktrees; always answered by one `WorktreesLoaded`.
+    /// List the worktrees; always answered by one `WorktreesIntent::Loaded`.
     LoadWorktrees {
         tag: Tag,
     },
     /// Check the typed `path`, then add a worktree for `branch` there;
-    /// always answered by one `WorktreeAdded`.
+    /// always answered by one `WorktreesIntent::Added`.
     AddWorktree {
         tag: Tag,
         path: String,
         branch: BranchName,
     },
     /// Remove the linked worktree at `path`, never forced; always
-    /// answered by one `WorktreeRemoved`.
+    /// answered by one `WorktreesIntent::Removed`.
     RemoveWorktree {
         tag: Tag,
         path: RepoPath,
     },
 
     // --- repos ---
-    /// Read the recent-repositories list; answered by `RecentLoaded`
+    /// Read the recent-repositories list; answered by `ReposIntent::Loaded`
     /// with the same `seq`.
     LoadRecent {
         seq: u64,
     },
-    /// Put `path` first in the recent list; answered by `RecentLoaded`
+    /// Put `path` first in the recent list; answered by `ReposIntent::Loaded`
     /// with the new list and the same `seq`.
     RecordRecent {
         path: PathBuf,
         seq: u64,
     },
     /// Make the runner's directory a repository; always answered by one
-    /// `RepoInitialised`.
+    /// `ReposIntent::Initialised`.
     InitRepo {
         tag: Tag,
     },
@@ -232,7 +233,7 @@ pub enum Effect {
     // --- custom_commands ---
     /// Run the user's command in the background, in the repository's
     /// workdir, with its output captured; always answered by one
-    /// `CommandFinished`.
+    /// `CustomCommandsIntent::Finished`.
     RunCommand {
         title: String,
         argv: Vec<OsString>,
@@ -243,13 +244,13 @@ pub enum Effect {
     CancelCommand,
 
     // --- blame ---
-    /// Blame `path` in the worktree; always answered by one `BlameLoaded`.
+    /// Blame `path` in the worktree; always answered by one `BlameIntent::Loaded`.
     LoadBlame {
         tag: Tag,
         path: RepoPath,
     },
     /// Read commit `oid`'s message and diff; always answered by one
-    /// `CommitLoaded`.
+    /// `BlameIntent::CommitLoaded`.
     LoadCommit {
         tag: Tag,
         oid: String,
@@ -257,13 +258,13 @@ pub enum Effect {
 
     // --- conflicts ---
     /// Read conflicted `path` from the worktree and its marker size;
-    /// always answered by one `ConflictLoaded` for the same `path`.
+    /// always answered by one `ConflictsIntent::Loaded` for the same `path`.
     LoadConflict {
         tag: Tag,
         path: RepoPath,
     },
     /// Write `content` over `path`, only while it still holds `expected`;
-    /// always answered by one `ResolvedWritten` for the same `path`.
+    /// always answered by one `ConflictsIntent::ResolvedWritten` for the same `path`.
     WriteResolved {
         tag: Tag,
         path: RepoPath,
@@ -272,12 +273,12 @@ pub enum Effect {
     },
 
     // --- sync ---
-    /// Fetch every remote; always answered by one `FetchFinished`.
+    /// Fetch every remote; always answered by one `SyncIntent::FetchFinished`.
     Fetch {
         tag: Tag,
     },
     /// Fetch, pull or push, with git's and ssh's questions sent as
-    /// `CredentialAsked`; always answered by one `RemoteFinished`.
+    /// `CredentialAsked`; always answered by one `SyncIntent::RemoteFinished`.
     Remote {
         tag: Tag,
         op: RemoteOp,
@@ -286,8 +287,9 @@ pub enum Effect {
     // --- pull_requests ---
     /// Find the forge repository of the remote and send its cached badges,
     /// then, with `refresh`, ask the forge for `branches`. Answered by
-    /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
-    /// `PullRequestsFetched`. With no `hosts` it only answers `ForgeRepoNone`.
+    /// `PullRequestsIntent::RepoNone`, or `PullRequestsIntent::Cached` and
+    /// then, with `refresh`, `PullRequestsIntent::Fetched`. With no `hosts`
+    /// it only answers `PullRequestsIntent::RepoNone`.
     /// A `known` repository is used as is, without reading the remote.
     /// A host in `limited` is not asked before its second has passed.
     LoadPullRequests {
@@ -300,12 +302,12 @@ pub enum Effect {
     },
     /// Start the browser the global config names: `argv` is its argv with
     /// the URL last, run without a shell and never waited on here. Only
-    /// a failure to start answers, with `OpenUrlFailed`.
+    /// a failure to start answers, with `PullRequestsIntent::OpenUrlFailed`.
     OpenUrl {
         argv: Vec<OsString>,
     },
     /// Open a pull request on `repo` through `gh`, on the configured
-    /// `host`; always answered by one `PullRequestCreated`.
+    /// `host`; always answered by one `PullRequestsIntent::Created`.
     CreatePullRequest {
         tag: Tag,
         host: ForgeHost,
@@ -319,7 +321,7 @@ pub enum Effect {
     // --- review ---
     /// Merge pull request `number` of `repo` by `method` through `gh`, on
     /// the configured `host`, only while its head is still `head_oid`;
-    /// always answered by one `PullRequestMerged`.
+    /// always answered by one `ReviewIntent::Merged`.
     MergePullRequest {
         tag: Tag,
         host: ForgeHost,
@@ -331,7 +333,7 @@ pub enum Effect {
     /// Read the review queues of the remote's repository: `repo` when an
     /// earlier load found it, else the remote is read and matched against
     /// `hosts`. A host in `limited` is not asked before its second has
-    /// passed. Always answered by one `ReviewQueuesLoaded`.
+    /// passed. Always answered by one `ReviewIntent::QueuesLoaded`.
     LoadReviewQueues {
         tag: Tag,
         hosts: Vec<ForgeHost>,
@@ -339,7 +341,7 @@ pub enum Effect {
         limited: Vec<(ForgeHost, i64)>,
     },
     /// Read pull request `number`, found as for `LoadReviewQueues`. Always
-    /// answered by one `PrDetailLoaded`.
+    /// answered by one `ReviewIntent::PrDetailLoaded`.
     LoadPrDetail {
         tag: Tag,
         hosts: Vec<ForgeHost>,
@@ -350,7 +352,7 @@ pub enum Effect {
     /// See whether a pull request's `head` and `base` commits are here;
     /// for missing ones, find the remote of `repo` on one of `hosts` to
     /// fetch them from. Local only. Always answered by one
-    /// `ReviewObjectsChecked`.
+    /// `ReviewIntent::ObjectsChecked`.
     CheckReviewCommits {
         tag: Tag,
         head: CommitId,
@@ -360,14 +362,14 @@ pub enum Effect {
     },
     /// Fetch `oids` from `remote` by id, with git's and ssh's questions
     /// sent as `CredentialAsked`. Always answered by one
-    /// `ReviewHeadFetched`.
+    /// `ReviewIntent::HeadFetched`.
     FetchReviewCommits {
         tag: Tag,
         remote: RemoteName,
         oids: Vec<CommitId>,
     },
     /// The merge base of `base` and `head`, and the files the pull request
-    /// changes from it. Always answered by one `ReviewFilesLoaded`.
+    /// changes from it. Always answered by one `ReviewIntent::FilesLoaded`.
     LoadReviewFiles {
         tag: Tag,
         head: CommitId,

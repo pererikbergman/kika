@@ -30,7 +30,7 @@ pub(crate) enum RemotesIntent {
     AddUrl(String),
     /// Ask for a new name for the selected remote, the old one filled in.
     Rename,
-    /// The new name, typed into the `RenameRemote` prompt.
+    /// The new name, typed into the `PromptKind::RenameRemote` prompt.
     RenameTo(String),
     /// Ask before removing the selected remote.
     Remove,

@@ -32,8 +32,9 @@ use crate::popup::PromptKind;
 use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
-/// Variants are grouped by the feature that owns them: core first, then the
-/// features in the order of ADR-0001's layout.
+/// Core variants come first, then the few intents shared by features, then
+/// one variant per top-level feature wrapping its intent enum, in the order
+/// of ADR-0001's layout (ADR-0002).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppIntent {
     // --- core: keys and loop ---

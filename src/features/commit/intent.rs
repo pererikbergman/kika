@@ -16,7 +16,7 @@ pub(crate) enum CommitIntent {
     /// Nothing was staged: yes, stage everything and commit.
     ConfirmStageAll,
     /// Close the commit popup; the index is left as it is. A typed
-    /// message is only thrown away after `DiscardCommit`.
+    /// message is only thrown away after `Discard`.
     Cancel,
     /// Yes, throw the typed message away.
     Discard,
@@ -42,7 +42,7 @@ pub(crate) enum CommitIntent {
     ToggleNoVerify,
     /// Write the message in the user's editor, then commit with it.
     EditExternally,
-    /// The editor opened by `EditCommitExternally` has closed: the message
+    /// The editor opened by `EditExternally` has closed: the message
     /// to commit, `None` if the user emptied it.
     MessageEdited {
         result: Result<Option<String>, String>,

@@ -13,7 +13,7 @@ use crate::features::custom_commands::CustomCommandsIntent;
 use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
-/// Run a captured command in `workdir` and send `CommandFinished` back.
+/// Run a captured command in `workdir` and send `CustomCommandsIntent::Finished` back.
 /// The returned handle cancels it.
 pub(crate) fn run(
     workdir: PathBuf,

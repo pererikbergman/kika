@@ -12,7 +12,7 @@ use crate::git::GitRunner;
 use crate::git::submodule::read_submodules;
 use crate::intent::AppIntent;
 
-/// List the submodules and send them back as `SubmodulesLoaded`.
+/// List the submodules and send them back as `SubmodulesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,

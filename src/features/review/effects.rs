@@ -20,7 +20,7 @@ use crate::git::commit_files::CommitId;
 use crate::git::remotes::RemoteName;
 use crate::intent::AppIntent;
 
-/// Read the review queues; always answered by one `ReviewQueuesLoaded`.
+/// Read the review queues; always answered by one `ReviewIntent::QueuesLoaded`.
 pub(crate) fn load_queues(
     forge: Option<ForgeContext>,
     runner: Arc<dyn GitRunner>,
@@ -53,7 +53,7 @@ pub(crate) fn load_queues(
     );
 }
 
-/// Read pull request `number`; always answered by one `PrDetailLoaded`.
+/// Read pull request `number`; always answered by one `ReviewIntent::PrDetailLoaded`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn load_detail(
     forge: Option<ForgeContext>,
@@ -94,7 +94,7 @@ pub(crate) fn load_detail(
 }
 
 /// See whether `head` and `base` are here, and where to fetch the missing
-/// ones from. Local only; always answered by one `ReviewObjectsChecked`.
+/// ones from. Local only; always answered by one `ReviewIntent::ObjectsChecked`.
 pub(crate) fn check_commits(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -123,7 +123,7 @@ pub(crate) fn check_commits(
 }
 
 /// Fetch `oids` from `remote`, with git's questions asked through the
-/// core credential `slot`; always answered by one `ReviewHeadFetched`.
+/// core credential `slot`; always answered by one `ReviewIntent::HeadFetched`.
 pub(crate) fn fetch_commits(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -146,7 +146,7 @@ pub(crate) fn fetch_commits(
 }
 
 /// List the files the pull request changes; always answered by one
-/// `ReviewFilesLoaded`.
+/// `ReviewIntent::FilesLoaded`.
 pub(crate) fn load_files(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -163,7 +163,7 @@ pub(crate) fn load_files(
 }
 
 /// Merge pull request `number` through `gh`; always answered by one
-/// `PullRequestMerged`.
+/// `ReviewIntent::Merged`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge(
     forge: Option<ForgeContext>,

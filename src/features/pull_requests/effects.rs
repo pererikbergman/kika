@@ -20,7 +20,7 @@ use crate::intent::AppIntent;
 
 /// Send the cached badges of the remote's forge repository, then, with
 /// `refresh`, ask the forge for `branches`. With no `forge` client or no
-/// `hosts` it only answers `ForgeRepoNone`.
+/// `hosts` it only answers `PullRequestsIntent::RepoNone`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn load(
     forge: Option<ForgeContext>,
@@ -92,7 +92,7 @@ pub(crate) fn load_intent(tag: Tag, event: LoadEvent) -> AppIntent {
 }
 
 /// Open a pull request on `repo` through `gh`; always answered by one
-/// `PullRequestCreated`.
+/// `PullRequestsIntent::Created`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create(
     forge: Option<ForgeContext>,
@@ -125,7 +125,7 @@ pub(crate) fn create(
 /// Start `argv` (the browser and the URL last) with no shell and nothing
 /// to read or write, logged in the Command log. It is waited for on a
 /// thread of its own, so a browser that stays open holds nothing up;
-/// only a failure to start is reported, as `OpenUrlFailed`.
+/// only a failure to start is reported, as `PullRequestsIntent::OpenUrlFailed`.
 pub(crate) fn open_url(argv: Vec<OsString>, sink: CommandSink, tx: UnboundedSender<AppIntent>) {
     let finished = log_program(&argv, sink);
     let Some((program, args)) = argv.split_first() else {

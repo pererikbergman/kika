@@ -26,7 +26,8 @@
 //!   `effects::{find, render}`.
 //!
 //! Kept cross-feature reads:
-//! - `shown_request` reads `files`/`selected`, `commits.open`,
+//! - `shown_request` reads the Files panel's selected row
+//!   (`files.selected_row()`), `commits.open`,
 //!   `stash.open` and `diff_options`;
 //! - `blame`'s `close_blame` calls `render_if_stale`, and `custom_patch`
 //!   calls `remap` and `display_only`. So these three stay in core
