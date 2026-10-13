@@ -4,7 +4,7 @@
 
 use crate::git::blame::parse_blame;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::{EmojiZwj, terminal_safe};
+use crate::git::diff::EmojiZwj;
 use crate::git::path::RepoPath;
 use crate::git::runner::{GitCommand, GitRunner};
 
@@ -39,6 +39,7 @@ pub struct StagedFile {
 /// covers only changed lines. Every option exists in git 2.15. The
 /// prefixes are set so `diff.noprefix` and `diff.mnemonicPrefix` cannot
 /// change the names, and textconv is off so line numbers are the file's.
+/// A read that names no paths, so literal pathspecs change nothing.
 pub fn staged_diff_command() -> GitCommand {
     GitCommand::new("diff")
         .arg("--cached")
@@ -50,8 +51,7 @@ pub fn staged_diff_command() -> GitCommand {
         .arg("--ignore-submodules")
         .arg("--src-prefix=a/")
         .arg("--dst-prefix=b/")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// `git blame` of `path` as `HEAD` has it. The name goes in as raw bytes
@@ -62,9 +62,7 @@ pub fn head_blame_command(path: &RepoPath) -> GitCommand {
         .arg("HEAD")
         .arg("--")
         .arg(path.as_os_str())
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
-        .env("GIT_LITERAL_PATHSPECS", "1")
+        .standard_env()
 }
 
 /// The files of [`staged_diff_command`]'s output that `HEAD` has, each
@@ -256,32 +254,22 @@ pub fn candidates_notice(shorts: &[String]) -> String {
 /// per file `HEAD` has. Errors are made safe to draw, since git's message
 /// can quote repo-controlled names.
 pub fn find_fixup_base(runner: &dyn GitRunner) -> Result<FixupBase, String> {
-    let diff = run(runner, &staged_diff_command(), "git diff failed")?;
+    let diff = run(runner, &staged_diff_command())?;
     let mut files = Vec::new();
     for staged in parse_staged(&diff)? {
-        let blame = run(
-            runner,
-            &head_blame_command(&staged.path),
-            "git blame failed",
-        )?;
+        let blame = run(runner, &head_blame_command(&staged.path))?;
         files.push((staged.hunks, parse_line_commits(&blame)?));
     }
     Ok(suggest(&files))
 }
 
-fn run(runner: &dyn GitRunner, cmd: &GitCommand, failed: &str) -> Result<Vec<u8>, String> {
-    let output = runner
-        .run(cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if output.success {
-        return Ok(output.stdout);
-    }
-    let message = terminal_safe(&output.stderr);
-    Err(if message.is_empty() {
-        failed.to_string()
-    } else {
-        message
-    })
+/// `cmd`'s stdout. A silent failure reads `git diff failed` or `git blame
+/// failed`, after the subcommand.
+fn run(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String> {
+    runner
+        .run_checked(cmd)
+        .map(|output| output.stdout)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -454,19 +442,50 @@ Binary files a/bin and b/bin differ\n";
         let blame = head_blame_command(&path);
         assert_eq!(blame.args()[..4], ["blame", "--porcelain", "HEAD", "--"]);
         assert_eq!(blame.args()[4].as_encoded_bytes(), b"-n\xff:(top)*");
-        assert!(
-            blame
-                .envs()
-                .contains(&("GIT_LITERAL_PATHSPECS".into(), "1".into()))
-        );
         for cmd in [&diff, &blame] {
             assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
-            assert!(cmd.envs().contains(&("LC_ALL".into(), "C".into())));
-            assert!(
-                cmd.envs()
-                    .contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into()))
+            assert_eq!(cmd.env_profile(), crate::git::runner::EnvProfile::Standard);
+            assert_eq!(
+                cmd.process_env(),
+                [
+                    ("LC_ALL".into(), "C".into()),
+                    ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+                    ("GIT_LITERAL_PATHSPECS".into(), "1".into())
+                ]
             );
         }
+    }
+
+    #[test]
+    fn a_failed_read_names_its_subcommand_or_shows_git_s_words_made_safe() {
+        use crate::git::fake::{FakeRunner, fail, ok};
+        let diff: Vec<String> = staged_diff_command()
+            .args()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let diff: Vec<&str> = diff.iter().map(String::as_str).collect();
+        let runner = FakeRunner::new().expect(&diff, fail(""));
+        assert_eq!(find_fixup_base(&runner), Err("git diff failed".into()));
+
+        let staged = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n";
+        let blame = ["blame", "--porcelain", "HEAD", "--", "a"];
+        let runner = FakeRunner::new()
+            .expect(&diff, ok(staged))
+            .expect(&blame, fail(""));
+        assert_eq!(find_fixup_base(&runner), Err("git blame failed".into()));
+        let runner = FakeRunner::new()
+            .expect(&diff, ok(staged))
+            .expect(&blame, fail("fatal: \x1b[2Jno\n"));
+        assert_eq!(find_fixup_base(&runner), Err("fatal: \u{FFFD}[2Jno".into()));
+        let path = RepoPath::from_bytes(b"a");
+        assert_eq!(
+            runner.process_envs(),
+            [
+                staged_diff_command().process_env(),
+                head_blame_command(&path).process_env()
+            ]
+        );
     }
 
     #[test]

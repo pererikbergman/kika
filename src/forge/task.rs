@@ -1,7 +1,8 @@
-//! One `LoadPullRequests` effect, run off the UI loop: find the forge
-//! repository, show the cache, then ask the forge when told to.
+//! One pull-request load, run off the UI loop: find the forge repository,
+//! report the cache, then ask the forge when told to. Each step is
+//! reported as a [`LoadEvent`]; the caller decides what it becomes.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,16 +10,15 @@ use super::cache::{self, CacheKey, Cached};
 use super::github::{Answer, GhRunner, MAX_BRANCHES, Refusal};
 use super::head::{Head, heads};
 use super::remote::{allowed, parse_remote};
-use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrState};
-use crate::effect::Tag;
+use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
 use crate::git::forge_remote::{read_remote_url, read_upstreams};
 use crate::git::recording::CommandSink;
-use crate::intent::AppIntent;
 
 /// What the runtime needs to reach a forge. Only `main` builds one with
-/// the real `gh`; without one every load answers `ForgeRepoNone`.
+/// the real `gh`; without one every load answers that no repository was
+/// found.
 #[derive(Clone)]
 pub struct ForgeContext {
     pub gh: Arc<dyn GhRunner>,
@@ -27,9 +27,27 @@ pub struct ForgeContext {
     pub cache_dir: Option<PathBuf>,
 }
 
-/// One load's inputs, as the effect gave them.
+/// What one load found, in the order it is found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadEvent {
+    /// The remote is on no configured host, or its host's allow-list
+    /// leaves it out: nothing is shown.
+    RepoNone,
+    /// The repository, and its cached badges when the cache has them.
+    Cached {
+        repo: ForgeRepo,
+        badges: Option<HashMap<BranchName, PrBadge>>,
+    },
+    /// The forge's answer to a refresh; with a rate limit, the second it
+    /// resets.
+    Fetched {
+        result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
+        limited_until: Option<i64>,
+    },
+}
+
+/// One load's inputs, as the caller gave them.
 pub struct Load<'a> {
-    pub tag: Tag,
     pub hosts: &'a [ForgeHost],
     pub branches: &'a [BranchName],
     pub refresh: bool,
@@ -44,20 +62,19 @@ pub struct Load<'a> {
     pub now: i64,
 }
 
-/// Run `load`, sending each result as it is known: `ForgeRepoNone`, or
-/// `PullRequestsCached` and then, on a refresh, `PullRequestsFetched`.
+/// Run `load`, sending each event as it is known: `RepoNone`, or
+/// `Cached` and then, on a refresh, `Fetched`.
 ///
 /// A refresh first probes, for free, whether the pull requests changed;
 /// when they did not and the cache is still good, no GraphQL query runs.
 /// A fork skips the probe: its own list says nothing of its parent's pull
 /// requests. A rate-limited host gets no call at all until its limit
 /// resets. Each branch is asked about by its head, read from local git.
-/// A repository its host's allow-list leaves out answers `ForgeRepoNone`.
-pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(AppIntent)) {
-    let tag = load.tag;
+/// A repository its host's allow-list leaves out answers `RepoNone`.
+pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn Fn(LoadEvent)) {
     // Defence in depth: with no hosts nothing is read, run or written.
     if load.hosts.is_empty() {
-        send(AppIntent::ForgeRepoNone { tag });
+        send(LoadEvent::RepoNone);
         return;
     }
     let found = match load.known {
@@ -68,7 +85,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     // cache is not read either, so nothing about it is shown.
     .and_then(|repo| Some((allowed(&repo, load.hosts)?, repo)));
     let Some((host, repo)) = found else {
-        send(AppIntent::ForgeRepoNone { tag });
+        send(LoadEvent::RepoNone);
         return;
     };
     let key = load
@@ -77,8 +94,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         .and_then(|top| CacheKey::new(&repo, top));
     let place = ctx.cache_dir.as_deref().zip(key.as_ref());
     let cached = place.and_then(|(dir, key)| cache::read(dir, key));
-    send(AppIntent::PullRequestsCached {
-        tag,
+    send(LoadEvent::Cached {
         repo: repo.clone(),
         badges: cached.as_ref().map(|c| c.badges.clone()),
     });
@@ -86,8 +102,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         return;
     }
     let fetched = |result, limited_until| {
-        send(AppIntent::PullRequestsFetched {
-            tag,
+        send(LoadEvent::Fetched {
             result,
             limited_until,
         })
@@ -104,7 +119,7 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     // The client applies the same allow gate as above, so this is the
     // allow-list miss's answer should the two ever disagree.
     let Some(gh) = ctx.gh(host, &repo, load.now) else {
-        return send(AppIntent::ForgeRepoNone { tag });
+        return send(LoadEvent::RepoNone);
     };
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
     let heads = heads(branches, &read_upstreams(git), &repo);
@@ -178,8 +193,8 @@ mod tests {
         FORK_PARENT, GRAPHQL_RATE_LIMITED, HTTP_401_STDERR, LIMIT_PRIMARY, PROBE_200, PROBE_304,
         RENAMED_HEAD, SERVER_ERROR, STATES,
     };
-    use crate::forge::github::{FakeGh, GhCall, GhCommand, GhOutput, answer, failure};
-    use crate::forge::{ForgeRepo, ForgeStatus, ForgeView, PrBadge, PrState};
+    use crate::forge::github::{FakeGh, GhCall, GhCommand, answer, failure};
+    use crate::forge::{ForgeRepo, ForgeState, ForgeStatus, ForgeView, LoadSeq, PrBadge, PrState};
     use crate::git::fake::{FakeRunner, TempDir, ok};
 
     /// A fixed clock: 2023-11-14 22:13:20 UTC.
@@ -187,14 +202,6 @@ mod tests {
     /// The reset `limit_primary.http` and `graphql_rate_limited.http` name.
     const PRIMARY_RESET: i64 = 1_700_001_800;
     const GRAPHQL_RESET: i64 = 1_700_003_600;
-
-    fn tag() -> Tag {
-        Tag {
-            generation: 0,
-            seq: 3,
-            user: false,
-        }
-    }
 
     fn hosts() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
@@ -240,7 +247,6 @@ mod tests {
     /// A refresh of the known repository at [`NOW`], no host limited.
     fn refresh<'a>(hosts: &'a [ForgeHost], branches: &'a [BranchName], top: &Path) -> Load<'a> {
         Load {
-            tag: tag(),
             hosts,
             branches,
             refresh: true,
@@ -251,15 +257,29 @@ mod tests {
         }
     }
 
-    fn sent(git: &FakeRunner, ctx: &ForgeContext, load: &Load) -> Vec<AppIntent> {
+    fn sent(git: &FakeRunner, ctx: &ForgeContext, load: &Load) -> Vec<LoadEvent> {
         let sent = Mutex::new(Vec::new());
-        run_load(git, ctx, load, &|intent| sent.lock().unwrap().push(intent));
+        run_load(git, ctx, load, &|event| sent.lock().unwrap().push(event));
         sent.into_inner().unwrap()
+    }
+
+    /// Show `events` of load `seq` in `forge`, as the model does.
+    fn apply(forge: &mut ForgeState, seq: LoadSeq, events: Vec<LoadEvent>) {
+        for event in events {
+            match event {
+                LoadEvent::RepoNone => forge.repo_none(seq),
+                LoadEvent::Cached { repo, badges } => forge.cached(seq, repo, badges),
+                LoadEvent::Fetched {
+                    result,
+                    limited_until,
+                } => forge.fetched(seq, result, limited_until),
+            }
+        }
     }
 
     /// Run `load` for the known repository, no branch with an upstream;
     /// what it sent.
-    fn run_known(ctx: &ForgeContext, load: Load) -> Vec<AppIntent> {
+    fn run_known(ctx: &ForgeContext, load: Load) -> Vec<LoadEvent> {
         let git = match load.refresh {
             true => FakeRunner::new().expect(&UPSTREAMS, ok(b"")),
             false => FakeRunner::new(),
@@ -277,18 +297,17 @@ mod tests {
         sent
     }
 
-    /// The `PullRequestsFetched` that ends `sent`.
+    /// The `Fetched` that ends `sent`.
     fn fetched(
-        sent: &[AppIntent],
+        sent: &[LoadEvent],
     ) -> (
         Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
         Option<i64>,
     ) {
         match sent.last() {
-            Some(AppIntent::PullRequestsFetched {
+            Some(LoadEvent::Fetched {
                 result,
                 limited_until,
-                ..
             }) => (result.clone(), *limited_until),
             other => panic!("{other:?}"),
         }
@@ -343,7 +362,7 @@ mod tests {
         let ctx = context(Arc::clone(&gh), Some(cache_dir.clone()));
         let branches = ["main".into()];
         let sent = sent(&git, &ctx, &refresh(&[], &branches, tmp.path()));
-        assert_eq!(sent, [AppIntent::ForgeRepoNone { tag: tag() }]);
+        assert_eq!(sent, [LoadEvent::RepoNone]);
         git.assert_done();
         assert_eq!(gh.calls(), []);
         assert!(!cache_dir.exists());
@@ -359,10 +378,7 @@ mod tests {
             top: None,
             ..refresh(&hosts, &branches, Path::new("/r"))
         };
-        assert_eq!(
-            sent(&git, &ctx, &load),
-            [AppIntent::ForgeRepoNone { tag: tag() }]
-        );
+        assert_eq!(sent(&git, &ctx, &load), [LoadEvent::RepoNone]);
         assert_eq!(gh.calls(), []);
     }
 
@@ -405,7 +421,7 @@ mod tests {
         let git = origin(b"https://github.com/other/repo");
         let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
         git.assert_done();
-        assert_eq!(sent, [AppIntent::ForgeRepoNone { tag: tag() }]);
+        assert_eq!(sent, [LoadEvent::RepoNone]);
 
         // Known from an earlier load: still nothing.
         let git = FakeRunner::new();
@@ -416,7 +432,7 @@ mod tests {
                 ..refresh(&hosts, &branches, tmp.path())
             };
             let sent = self::sent(&git, &ctx, &load);
-            assert_eq!(sent, [AppIntent::ForgeRepoNone { tag: tag() }]);
+            assert_eq!(sent, [LoadEvent::RepoNone]);
         }
         git.assert_done();
         assert_eq!(gh.calls(), []);
@@ -433,7 +449,7 @@ mod tests {
         let sent = sent(&git, &ctx, &refresh(&hosts, &branches, tmp.path()));
         git.assert_done();
         assert!(
-            matches!(&sent[0], AppIntent::PullRequestsCached { repo: r, .. } if *r == repo()),
+            matches!(&sent[0], LoadEvent::Cached { repo: r, .. } if *r == repo()),
             "{sent:?}"
         );
         assert!(matches!(fetched(&sent), (Ok(_), None)), "{sent:?}");
@@ -457,16 +473,14 @@ mod tests {
         let [cached, fetched] = sent.try_into().unwrap();
         assert_eq!(
             cached,
-            AppIntent::PullRequestsCached {
-                tag: tag(),
+            LoadEvent::Cached {
                 repo: shown.clone(),
                 badges: None,
             }
         );
-        let AppIntent::PullRequestsFetched {
+        let LoadEvent::Fetched {
             result: Ok(badges),
             limited_until: None,
-            ..
         } = fetched
         else {
             panic!("{fetched:?}");
@@ -488,8 +502,7 @@ mod tests {
         git.assert_done();
         assert_eq!(
             sent,
-            [AppIntent::PullRequestsCached {
-                tag: tag(),
+            [LoadEvent::Cached {
                 repo: shown,
                 badges: Some(badges),
             }]
@@ -557,26 +570,16 @@ mod tests {
         let dir = seed(&tmp, &green);
         let gh = Arc::new(FakeGh::new().reply(answer(PROBE_304)));
         let ctx = context(Arc::clone(&gh), Some(dir.clone()));
-        let mut state = crate::test_support::forge_state(&branches);
-        let effects = state.load_pull_requests();
-        let Some(crate::effect::Effect::LoadPullRequests { tag: load_tag, .. }) = effects.first()
-        else {
-            panic!("{effects:?}");
-        };
-        let sent = run_known(
-            &ctx,
-            Load {
-                tag: *load_tag,
-                ..refresh(&hosts, &branches, tmp.path())
-            },
-        );
+        let mut forge = ForgeState::new(hosts.clone());
+        forge.set_branches(&branches);
+        let seq = LoadSeq(3);
+        assert!(forge.load(seq).is_some_and(|request| request.refresh));
+        let sent = run_known(&ctx, refresh(&hosts, &branches, tmp.path()));
         assert_eq!(gh.calls().len(), 1);
         assert_eq!(fetched(&sent), (Ok(green.badges.clone()), None));
-        for intent in sent {
-            state.update(intent);
-        }
-        assert_eq!(state.forge.status, ForgeView::Fresh);
-        assert_eq!(state.forge.badges, green.badges);
+        apply(&mut forge, seq, sent);
+        assert_eq!(forge.status, ForgeView::Fresh);
+        assert_eq!(forge.badges, green.badges);
         // The cache is left alone: `fetched_at` stays the last GraphQL
         // answer's time, so 304s cannot keep it young.
         let file = dir.join(key(tmp.path()).file_name());
@@ -771,13 +774,11 @@ mod tests {
         assert_eq!(
             sent,
             [
-                AppIntent::PullRequestsCached {
-                    tag: tag(),
+                LoadEvent::Cached {
                     repo: repo(),
                     badges: Some(green(&branches).badges),
                 },
-                AppIntent::PullRequestsFetched {
-                    tag: tag(),
+                LoadEvent::Fetched {
                     result: Err(ForgeStatus::RateLimited),
                     limited_until: Some(NOW + 10),
                 },
@@ -803,34 +804,17 @@ mod tests {
     }
 
     /// `gh` holds a token and prints it; none of it may reach the log, the
-    /// state, the cache or the screen. The probe's ETag reaches only the
-    /// cache, as the validated ETag.
+    /// forge state or the cache. The probe's ETag reaches only the cache,
+    /// as the validated ETag. The app state and the screen are checked by
+    /// the pull_requests effects tests.
     #[test]
     fn a_token_never_leaves_gh() {
-        const SENTINEL: &str = "ghp_SENTINEL";
-        const ETAG: &str = "W/\"etag_VALUE_9\"";
+        use crate::forge::github::fixtures::{
+            SECRET_ETAG as ETAG, SECRET_TOKEN as SENTINEL, leaky_gh,
+        };
         let tmp = TempDir::new("forge-secret");
         let cache_dir = tmp.path().join("forge");
-        let noisy = |output: GhOutput| GhOutput {
-            stderr: format!(
-                "GH_TOKEN={SENTINEL}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into_bytes(),
-            ..output
-        };
-        let probe = PROBE_200.replace("W/\"5f1e0c2b9a7d\"", ETAG).replace(
-            "Cache-Control:",
-            &format!("Authorization: token {SENTINEL}\r\nCache-Control:"),
-        );
-        let gh = Arc::new(
-            FakeGh::new()
-                .with_inherited_env("GH_TOKEN", SENTINEL)
-                .reply(noisy(answer(&probe)))
-                .reply(noisy(answer(STATES)))
-                .reply(noisy(failure(1, HTTP_401_STDERR)))
-                .reply(noisy(failure(1, HTTP_401_STDERR))),
-        );
+        let gh = Arc::new(leaky_gh());
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = CommandSink::new();
         let keep = Arc::clone(&events);
@@ -841,39 +825,27 @@ mod tests {
             cache_dir: Some(cache_dir.clone()),
         };
         let branches: Vec<BranchName> = vec!["main".into()];
-        let mut state = crate::test_support::forge_state(&branches);
         let hosts = hosts();
-        for _ in 0..2 {
-            state.forge.want_refresh();
-            let effects = state.load_pull_requests();
-            assert_eq!(effects.len(), 1);
-            let load_tag = match &effects[0] {
-                crate::effect::Effect::LoadPullRequests { tag, .. } => *tag,
-                other => panic!("{other:?}"),
-            };
+        let mut forge = ForgeState::new(hosts.clone());
+        forge.set_branches(&branches);
+        for seq in [LoadSeq(1), LoadSeq(2)] {
+            forge.want_refresh();
+            assert!(forge.load(seq).is_some_and(|request| request.refresh));
             let git = origin_refresh(b"https://x:pw_USERINFO@github.com/acme/widgets");
-            let load = Load {
-                tag: load_tag,
-                ..refresh(&hosts, &branches, tmp.path())
-            };
-            for intent in sent(&git, &ctx, &load) {
-                state.update(intent);
-            }
+            let load = refresh(&hosts, &branches, tmp.path());
+            apply(&mut forge, seq, sent(&git, &ctx, &load));
         }
         // The token was there to leak, and the second probe sent the ETag.
         assert!(gh.saw_env("GH_TOKEN", SENTINEL));
         assert_eq!(probe_etag(&gh.calls()[2]).as_deref(), Some(ETAG));
-        assert_eq!(
-            state.forge.status,
-            ForgeView::Problem(ForgeStatus::NotLoggedIn)
-        );
-        assert!(!state.forge.badges.is_empty());
+        assert_eq!(forge.status, ForgeView::Problem(ForgeStatus::NotLoggedIn));
+        assert!(!forge.badges.is_empty());
         let secrets = [SENTINEL, "pw_USERINFO", "etag_VALUE"];
         for event in events.lock().unwrap().iter() {
             let text = format!("{event:?}");
             assert!(secrets.iter().all(|s| !text.contains(s)), "{text}");
         }
-        let text = format!("{state:?}");
+        let text = format!("{forge:?}");
         assert!(secrets.iter().all(|s| !text.contains(s)), "state leaks");
         for entry in std::fs::read_dir(&cache_dir).unwrap() {
             let bytes = std::fs::read(entry.unwrap().path()).unwrap();
@@ -885,15 +857,6 @@ mod tests {
             assert_eq!(text.matches("etag_VALUE").count(), 1, "{text}");
             assert!(text.contains(r#""etag":"W/\"etag_VALUE_9\"""#), "{text}");
         }
-        let rows = crate::test_support::draw_branches(&state, 80, 12);
-        assert!(
-            rows.iter().all(|r| secrets.iter().all(|s| !r.contains(s))),
-            "{rows:?}"
-        );
-        assert!(
-            rows.iter().any(|r| r.contains("GitHub: not logged in")),
-            "{rows:?}"
-        );
     }
 
     #[test]

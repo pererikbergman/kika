@@ -6,9 +6,28 @@ use std::collections::HashMap;
 
 use super::create::refresh_disabled;
 use crate::effect::{Effect, Tag};
-use crate::forge::{ForgeHost, ForgeState, ForgeStatus, PrBadge};
+use crate::forge::{ForgeHost, ForgeState, ForgeStatus, LoadRequest, PrBadge};
 use crate::git::branches::BranchName;
 use crate::model::{AppState, Context};
+
+/// The effect that runs `request` and answers under `tag`.
+fn load_effect(tag: Tag, request: LoadRequest) -> Effect {
+    let LoadRequest {
+        hosts,
+        branches,
+        refresh,
+        known,
+        limited,
+    } = request;
+    Effect::LoadPullRequests {
+        tag,
+        hosts,
+        branches,
+        refresh,
+        known,
+        limited,
+    }
+}
 
 /// The forge's part of `update`.
 impl AppState {
@@ -32,7 +51,11 @@ impl AppState {
             seq,
             user: false,
         };
-        self.forge.load(tag).into_iter().collect()
+        self.forge
+            .load(tag)
+            .map(|request| load_effect(tag, request))
+            .into_iter()
+            .collect()
     }
 
     /// Ask the forge again because the user pressed for it: the same
