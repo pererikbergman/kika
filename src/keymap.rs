@@ -11,15 +11,14 @@ use crate::features::commits::CommitFilesList;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
 use crate::features::diff::{self, renderers};
 use crate::features::{
-    blame, command_log, commit, commits, conflicts, custom_commands, operation, pull_requests,
-    repos, review, stash, submodules, sync, worktrees,
+    blame, command_log, commit, commits, conflicts, custom_commands, files, operation,
+    pull_requests, repos, review, stash, submodules, sync, worktrees,
 };
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
 use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
-use crate::menu::MenuId;
 use crate::model::{AppState, Focus};
 
 /// Why a key or menu item cannot run, shown to the user. Most reasons are
@@ -1779,36 +1778,6 @@ static CORE_FOCUS: &[Binding] = &[
     },
 ];
 
-// Chunk 10: files
-static FILES_NAV: &[Binding] = &[
-    Binding {
-        id: "files.next",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('j'), NONE),
-            KeyPattern::any(KeyCode::Down),
-        ],
-        scope: KeyScope::Files,
-        intent: AppIntent::SelectNext,
-        description: "Select the next file",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-    Binding {
-        id: "files.prev",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('k'), NONE),
-            KeyPattern::any(KeyCode::Up),
-        ],
-        scope: KeyScope::Files,
-        intent: AppIntent::SelectPrev,
-        description: "Select the previous file",
-        label: "",
-        bar: false,
-        disabled: never,
-    },
-];
-
 // Chunk 20: files
 static FILES_STAGE: &[Binding] = &[
     Binding {
@@ -1871,21 +1840,6 @@ static FILES_IGNORE: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: files_ignore_disabled,
-    },
-];
-
-// Chunk 38: files
-#[rustfmt::skip]
-static FILES_MENU: &[Binding] = &[
-    Binding {
-        id: "files.menu",
-        keys: &[KeyPattern::exact(KeyCode::Char('m'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenMenu(MenuId::Actions),
-        description: "Open the actions menu",
-        label: "menu",
-        bar: true,
-        disabled: never,
     },
 ];
 
@@ -2612,7 +2566,7 @@ static CHUNKS: &[&[Binding]] = &[
     commits::custom_patch::keys::CUSTOM_PATCH_WORKSPACE,
     custom_commands::keys::CUSTOM_COMMANDS_WORKSPACE,
     commits::reflog::keys::REFLOG_WORKSPACE,
-    FILES_NAV,
+    files::keys::FILES_NAV,
     commits::keys::COMMITS_KEYS,
     commits::rewrite::keys::REWRITE_COMMITS,
     commits::rewrite::keys::REWRITE_TODO_COMMITS,
@@ -2641,7 +2595,7 @@ static CHUNKS: &[&[Binding]] = &[
     blame::keys::BLAME_KEYS,
     conflicts::keys::CONFLICTS_KEYS,
     blame::keys::BLAME_COMMIT,
-    FILES_MENU,
+    files::keys::FILES_MENU,
     stash::keys::STASH_FROM_FILES,
     commit::keys::COMMIT_KEYS,
     CORE_POPUPS,
@@ -2713,6 +2667,7 @@ mod tests {
     use crate::git::rebase_plan::{Direction, Edit};
     use crate::git::status::Head;
     use crate::git::version;
+    use crate::menu::MenuId;
     use crate::model::Context;
     use crate::test_support::{binding, build, from, key, layer, plain};
 
