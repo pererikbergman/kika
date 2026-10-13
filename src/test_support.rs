@@ -465,6 +465,17 @@ pub(crate) fn commits_loaded(tag: Tag, skip: usize, page: LogPage) -> AppIntent 
     }
 }
 
+/// The markers load in `effects`: its tag.
+pub(crate) fn markers_tag(effects: &[Effect]) -> Tag {
+    match effects
+        .iter()
+        .find(|e| matches!(e, Effect::LoadMarkers { .. }))
+    {
+        Some(Effect::LoadMarkers { tag }) => *tag,
+        _ => panic!("expected LoadMarkers in {effects:?}"),
+    }
+}
+
 /// Started in a repository with the first page of `first` commits in.
 pub(crate) fn with_commits(first: usize, done: bool) -> AppState {
     let mut state = AppState::new(Context::Workspace).with_location(Some(TOP.into()), TOP.into());
@@ -1240,6 +1251,15 @@ pub(crate) fn reversed_at(buffer: &ratatui::buffer::Buffer, needle: &str) -> boo
         .style()
         .add_modifier
         .contains(ratatui::style::Modifier::REVERSED)
+}
+
+/// A background load's tag in the first repository, numbered `seq`.
+pub(crate) fn background(seq: u64) -> Tag {
+    Tag {
+        generation: 1,
+        seq,
+        user: false,
+    }
 }
 
 /// The tag the forge effect tests send and expect back.

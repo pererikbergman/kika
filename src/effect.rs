@@ -6,13 +6,12 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::clipboard::{self, ClipboardSink, TerminalSink};
-use crate::commits;
 use crate::config::{self, ConfigPaths};
 use crate::diff_mark::DiffEnd;
 use crate::features::branches::{self, remotes, tags};
 use crate::features::commits::reflog;
 use crate::features::commits::rewrite;
-use crate::features::commits::{compare, copy};
+use crate::features::commits::{self, compare, copy};
 use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::diff::{self, DiffStreamer};
@@ -26,11 +25,10 @@ use crate::forge::task::ForgeContext;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::GitRunner;
 use crate::git::askpass::Secret;
-use crate::git::branch_tips::read_tips;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::{CommitId, CommitRange, commit_files};
 use crate::git::diff::{DiffRequest, EmojiZwj, sanitize, terminal_safe};
-use crate::git::log::{LogQuery, log_page, markers};
+use crate::git::log::LogQuery;
 use crate::git::path::RepoPath;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
 use crate::git::refs::read_refs;
@@ -977,21 +975,7 @@ impl Runtime {
                 tip,
                 skip,
                 query,
-            } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the panel would wait forever.
-                    let result = tokio::task::spawn_blocking(move || {
-                        let page =
-                            log_page(runner.as_ref(), tip.as_deref(), skip, commits::PAGE, &query)?;
-                        Ok((page, unix_now()))
-                    })
-                    .await
-                    .unwrap_or_else(|e| {
-                        Err(terminal_safe(format!("git log crashed: {e}").as_bytes()))
-                    });
-                    let _ = tx.send(AppIntent::CommitsLoaded { tag, skip, result });
-                });
-            }
+            } => commits::effects::load(runner, tx, tag, tip, skip, query),
             Effect::ResolveDiff { tag, base, target } => {
                 compare::effects::resolve(runner, tx, tag, base, target)
             }
@@ -1013,32 +997,8 @@ impl Runtime {
             Effect::LoadStashFiles { tag, entry } => {
                 stash::effects::load_files(runner, tx, tag, entry)
             }
-            Effect::LoadMarkers { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the panel would wait forever.
-                    let result = tokio::task::spawn_blocking(move || markers(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
-                                format!("git rev-list crashed: {e}").as_bytes(),
-                            ))
-                        });
-                    let _ = tx.send(AppIntent::MarkersLoaded { tag, result });
-                });
-            }
-            Effect::LoadBranchTips { tag } => {
-                tokio::spawn(async move {
-                    // A panic still reports back, or the panel would wait forever.
-                    let result = tokio::task::spawn_blocking(move || read_tips(runner.as_ref()))
-                        .await
-                        .unwrap_or_else(|e| {
-                            Err(terminal_safe(
-                                format!("git for-each-ref crashed: {e}").as_bytes(),
-                            ))
-                        });
-                    let _ = tx.send(AppIntent::BranchTipsLoaded { tag, result });
-                });
-            }
+            Effect::LoadMarkers { tag } => commits::effects::load_markers(runner, tx, tag),
+            Effect::LoadBranchTips { tag } => commits::effects::load_tips(runner, tx, tag),
             Effect::LoadRebaseTodo { tag, string_too } => {
                 rewrite::effects::load_todo(runner, tx, tag, string_too)
             }
@@ -1332,7 +1292,7 @@ mod tests {
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
     use crate::git::remote::RemoteFailure;
-    use crate::test_support::{HostilePanic, commit_op, forge_tag};
+    use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
 
     #[tokio::test]
     async fn each_gh_call_is_logged_with_its_own_id_beside_git_commands() {
@@ -2112,14 +2072,6 @@ mod tests {
         assert!(start.elapsed() >= DIFF_LOADING_DELAY);
     }
 
-    fn background(seq: u64) -> Tag {
-        Tag {
-            generation: 1,
-            seq,
-            user: false,
-        }
-    }
-
     #[tokio::test]
     async fn snapshot_refs_reports_back_with_the_same_tag() {
         let runner = Arc::new(
@@ -2164,49 +2116,6 @@ mod tests {
             }
             other => panic!("expected a failed RefsLoaded, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn load_commits_reports_the_page_with_the_same_tag_skip_and_a_time() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &[
-                "log",
-                "--no-show-signature",
-                "--no-color",
-                "-z",
-                "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s",
-                "--skip=200",
-                "-n",
-                "200",
-                "abc",
-                "--",
-            ],
-            ok(b"abc1\x1fabc\x1f\x1f7\x1fAnn\x1fsubj\0"),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-
-        runtime.spawn(Effect::LoadCommits {
-            tag: background(5),
-            tip: Some("abc".into()),
-            skip: 200,
-            query: LogQuery::default(),
-        });
-
-        match rx.recv().await {
-            Some(AppIntent::CommitsLoaded {
-                tag,
-                skip,
-                result: Ok((page, now)),
-            }) => {
-                assert_eq!((tag, skip), (background(5), 200));
-                assert_eq!(page.rows[0].subject, "subj");
-                assert!(page.done);
-                assert!(now > 1_600_000_000, "{now}");
-            }
-            other => panic!("expected a loaded page, got {other:?}"),
-        }
-        runner.assert_done();
     }
 
     #[tokio::test]
@@ -2264,81 +2173,6 @@ mod tests {
             other => panic!("expected a failed DiffResolved, got {other:?}"),
         }
         runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn load_commits_passes_its_query_to_git() {
-        let runner = Arc::new(FakeRunner::new().expect(
-            &[
-                "log",
-                "--no-show-signature",
-                "--no-color",
-                "-z",
-                "--format=%H%x1f%h%x1f%P%x1f%at%x1f%an%x1f%s",
-                "--skip=0",
-                "-n",
-                "200",
-                "--author=Ann",
-                "--fixed-strings",
-                "HEAD",
-                "--",
-            ],
-            ok(b""),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(runner.clone(), tx);
-
-        runtime.spawn(Effect::LoadCommits {
-            tag: background(5),
-            tip: None,
-            skip: 0,
-            query: LogQuery {
-                path: None,
-                author: Some("Ann".into()),
-            },
-        });
-
-        assert!(matches!(
-            rx.recv().await,
-            Some(AppIntent::CommitsLoaded { result: Ok(_), .. })
-        ));
-        runner.assert_done();
-    }
-
-    #[tokio::test]
-    async fn panicking_commit_and_marker_loads_still_report_back() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let runtime = Runtime::new(Arc::new(HostilePanic), tx);
-
-        runtime.spawn(Effect::LoadCommits {
-            tag: background(6),
-            tip: None,
-            skip: 0,
-            query: LogQuery::default(),
-        });
-        match rx.recv().await {
-            Some(AppIntent::CommitsLoaded {
-                tag,
-                result: Err(message),
-                ..
-            }) => {
-                assert_eq!(tag, background(6));
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed CommitsLoaded, got {other:?}"),
-        }
-
-        runtime.spawn(Effect::LoadMarkers { tag: background(7) });
-        match rx.recv().await {
-            Some(AppIntent::MarkersLoaded {
-                tag,
-                result: Err(message),
-            }) => {
-                assert_eq!(tag, background(7));
-                assert!(!message.contains(char::is_control), "{message:?}");
-            }
-            other => panic!("expected a failed MarkersLoaded, got {other:?}"),
-        }
     }
 
     #[tokio::test]

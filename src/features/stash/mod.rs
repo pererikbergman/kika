@@ -24,7 +24,7 @@
 //! - `files_open` reads `commits.open`. It answers whether the Diff pane
 //!   belongs to a commit's or a stash's files, and core dispatch calls
 //!   it. It stays here rather than in `model.rs` so that hubs only
-//!   shrink; `commits.open` is core state (`src/commits.rs`).
+//!   shrink; `commits.open` is the commits feature's state.
 //!
 //! What stays in core, and why:
 //! - `Focus::Stash`/`SidePanel::Stash`, `KeyScope::Stash`/`StashFiles`/

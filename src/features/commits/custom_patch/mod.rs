@@ -27,8 +27,9 @@
 //! - the patch menu (`menu.rs`), `ConfirmKind`/`PromptKind`, the
 //!   `AppIntent` variants, `GitOp::CustomPatch` with its
 //!   `op_command`/`refusal` arms, and the `handoff.rs` run arm, all
-//!   shared dispatch;
-//! - the pick marks in `commits_view.rs`.
+//!   shared dispatch.
+//!
+//! The pick marks are drawn by the parent's `view.rs`.
 
 pub(crate) mod git;
 pub(crate) mod keys;
