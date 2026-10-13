@@ -847,7 +847,7 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
             (leading, vec!["commit_files.filter", search])
         }
         KeyScope::Stash => {
-            let list = &state.stash;
+            let list = &state.stash.list;
             let leading = if list.range_anchor.is_some() || !list.filter.is_empty() {
                 vec!["stash.escape"]
             } else {
@@ -4100,9 +4100,14 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.files_loaded = true;
         state.focus = Focus::Stash;
-        state.stash.begin(1);
-        state.stash.loaded(
-            1,
+        state.stash.list.begin(1);
+        state.stash.list.loaded(
+            crate::effect::Tag {
+                generation: state.generation,
+                seq: 1,
+                user: false,
+            },
+            state.generation,
             Ok(vec![crate::features::stash::StashEntry {
                 index: 0,
                 oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
@@ -4115,11 +4120,11 @@ mod tests {
         assert!(rows[9].contains("/ filter"), "{:?}", rows[9]);
         assert!(rows[9].contains("V range"), "{:?}", rows[9]);
         assert!(!rows[9].contains("esc clear"), "{:?}", rows[9]);
-        state.stash.set_filter("first".into());
+        state.stash.list.set_filter("first".into());
         let rows = draw(&state, 160, 10);
         assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
-        state.stash.set_filter(String::new());
-        state.stash.toggle_range();
+        state.stash.list.set_filter(String::new());
+        state.stash.list.toggle_range();
         let rows = draw(&state, 160, 10);
         assert!(rows[9].starts_with(" esc clear"), "{:?}", rows[9]);
     }

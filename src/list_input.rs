@@ -5,6 +5,7 @@
 //! It also holds the pane search: opening a pane's search, `n`/`N`, and
 //! Esc that clears a pane's search before it closes the pane.
 
+use crate::diff_pane::DiffStart;
 use crate::diff_search::DiffSearch;
 use crate::effect::Effect;
 use crate::features::blame::BlameView;
@@ -106,7 +107,7 @@ impl AppState {
                 Some(open) => (InputTarget::CommitFilesFilter, &open.filter),
                 None => return,
             },
-            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.filter),
+            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.list.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
             }
@@ -163,12 +164,12 @@ impl AppState {
                     .as_mut()
                     .is_some_and(|open| open.set_filter(text));
                 if moved {
-                    return self.commit_file_diff();
+                    return self.commit_file_diff(DiffStart::Keep);
                 }
             }
             // A stash row drives nothing, so a moved cursor loads nothing.
             InputTarget::StashFilter => {
-                if self.stash.set_filter(text) {
+                if self.stash.list.set_filter(text) {
                     self.notice = Some(SELECTION_CLEARED.into());
                 }
             }
@@ -289,7 +290,7 @@ impl AppState {
             KeyScope::Branches => self.branches.toggle_range(),
             KeyScope::Remotes => self.branches.remotes.toggle_range(),
             KeyScope::Tags => self.branches.tags.toggle_range(),
-            KeyScope::Stash => self.stash.toggle_range(),
+            KeyScope::Stash => self.stash.list.toggle_range(),
             _ => {}
         }
     }
@@ -338,8 +339,8 @@ impl AppState {
             ),
             KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
             KeyScope::Stash => (
-                self.stash.range_anchor.take().is_some(),
-                &mut self.stash.filter,
+                self.stash.list.range_anchor.take().is_some(),
+                &mut self.stash.list.filter,
             ),
             _ => return self.update(AppIntent::Quit),
         };

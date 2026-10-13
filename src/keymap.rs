@@ -1420,8 +1420,8 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
         ),
         KeyScope::Files => (state.files_selected_hidden(), state.files_anchor.is_some()),
         KeyScope::Stash => (
-            state.stash.selected_hidden(),
-            state.stash.range_anchor.is_some(),
+            state.stash.list.selected_hidden(),
+            state.stash.list.range_anchor.is_some(),
         ),
         // The filter hides log rows only; a todo row above the log shows.
         KeyScope::Commits => (

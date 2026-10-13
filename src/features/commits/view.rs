@@ -715,6 +715,7 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::diff_pane::DiffStart;
     use crate::git::log::{CommitRow, LogPage, Markers};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{Context, Focus};
@@ -1665,7 +1666,9 @@ mod tests {
         let mut state = opened(Some(Ok(five_files())));
         state.screen_mode = ScreenMode::Normal;
         let seq = 9;
-        state.diff.begin(seq, &"added.rs".into(), 20);
+        state
+            .diff
+            .open(seq, &"added.rs".into(), 20, DiffStart::Keep);
         state.diff.apply(
             seq,
             Ok(crate::git::diff::DiffChunk {
