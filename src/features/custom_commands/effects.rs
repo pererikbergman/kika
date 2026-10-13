@@ -9,6 +9,7 @@ use tokio::task::AbortHandle;
 
 use super::captured::run_captured;
 use super::command::{CommandFailure, OutputMode};
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
@@ -39,11 +40,11 @@ pub(crate) fn run(
             OutputMode::Popup => result,
             OutputMode::Terminal | OutputMode::None => result.map(|_| String::new()),
         };
-        let _ = tx.send(AppIntent::CommandFinished {
+        let _ = tx.send(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
             title,
             output,
             result,
-        });
+        }));
     });
     abort
 }

@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::Tag;
+use crate::features::commit::CommitIntent;
 use crate::git::GitRunner;
 use crate::git::head::read_head_message;
 use crate::intent::AppIntent;
@@ -25,7 +26,7 @@ pub(crate) fn load_head_message(
         move || read_head_message(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git log"),
-        move |result| AppIntent::HeadMessageLoaded { tag, result },
+        move |result| AppIntent::Commit(CommitIntent::HeadMessageLoaded { tag, result }),
     );
 }
 
@@ -42,7 +43,7 @@ pub(crate) fn probe(
         move || read_prompt_facts(runner.as_ref()).ok(),
         // Errors and panics both report `None`, which hands over.
         |_| None,
-        move |facts| AppIntent::CommitProbed { tag, op, facts },
+        move |facts| AppIntent::Commit(CommitIntent::Probed { tag, op, facts }),
     );
 }
 
@@ -53,6 +54,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::effect::{Effect, Runtime, Tag};
+    use crate::features::commit::CommitIntent;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::intent::AppIntent;
     use crate::test_support::{HostilePanic, commit_op};
@@ -82,14 +84,14 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommitProbed {
+            Some(AppIntent::Commit(CommitIntent::Probed {
                 tag,
                 op: commit_op(),
                 facts: Some(crate::prompts::PromptFacts {
                     signs: true,
                     hooks: vec![],
                 }),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -115,11 +117,11 @@ mod tests {
             });
             assert_eq!(
                 rx.recv().await,
-                Some(AppIntent::CommitProbed {
+                Some(AppIntent::Commit(CommitIntent::Probed {
                     tag,
                     op: commit_op(),
                     facts: None,
-                })
+                }))
             );
         }
     }
@@ -142,10 +144,10 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::HeadMessageLoaded {
+            Some(AppIntent::Commit(CommitIntent::HeadMessageLoaded {
                 tag,
                 result: Ok("subj\n\nbody".into()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -163,10 +165,10 @@ mod tests {
         runtime.spawn(Effect::LoadHeadMessage { tag });
 
         match rx.recv().await {
-            Some(AppIntent::HeadMessageLoaded {
+            Some(AppIntent::Commit(CommitIntent::HeadMessageLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git log crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");

@@ -3,6 +3,7 @@
 //! position there is behaviour. The user's own command keys are resolved by
 //! the command engine in `keymap.rs`.
 
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, Reason};
 use crate::model::AppState;
@@ -21,7 +22,7 @@ pub(crate) static CUSTOM_COMMANDS_WORKSPACE: &[Binding] = &[
         // Not `esc` or `ctrl-c`, which quit; the bar shows it only while a
         // command runs.
         scope: KeyScope::Workspace,
-        intent: AppIntent::CancelCommand,
+        intent: AppIntent::CustomCommands(CustomCommandsIntent::Cancel),
         description: "Stop the running command",
         label: "cancel command",
         bar: false,
@@ -50,7 +51,7 @@ mod tests {
             );
             state.command_running = true;
             assert!(
-                matches!(at(&state), Resolution::Run(b) if b.intent == AppIntent::CancelCommand),
+                matches!(at(&state), Resolution::Run(b) if b.intent == AppIntent::CustomCommands(CustomCommandsIntent::Cancel)),
                 "{scope:?}"
             );
         }

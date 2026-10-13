@@ -2483,6 +2483,7 @@ mod tests {
     use crate::features::branches::BranchesIntent;
     use crate::features::branches::remotes::RemotesIntent;
     use crate::features::branches::tags::TagsIntent;
+    use crate::features::commit::CommitIntent;
     use crate::features::commits::CommitsIntent;
     use crate::features::commits::bisect::BisectIntent;
     use crate::features::commits::copy::CopyIntent;
@@ -2494,7 +2495,10 @@ mod tests {
         commits_drop_disabled, commits_fixup_disabled, commits_reword_disabled,
         commits_squash_disabled,
     };
+    use crate::features::conflicts::ConflictsIntent;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
+    use crate::features::repos::ReposIntent;
+    use crate::features::sync::SyncIntent;
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::{CommitId, CommitRange};
     use crate::git::rebase_plan::{Direction, Edit};
@@ -2762,7 +2766,7 @@ mod tests {
         );
         assert_eq!(files(plain(' ')), Some(ToggleStage));
         assert_eq!(files(plain('a')), Some(ToggleStageAll));
-        assert_eq!(files(plain('c')), Some(OpenCommit));
+        assert_eq!(files(plain('c')), Some(Commit(CommitIntent::Open)));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
     }
@@ -2819,7 +2823,7 @@ mod tests {
         assert_eq!(c(&state), Err("An operation is running".into()));
         state.free_op();
         state.files.pop();
-        assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
+        assert_eq!(c(&state), Ok(AppIntent::Commit(CommitIntent::Open)));
     }
 
     #[test]
@@ -2853,9 +2857,9 @@ mod tests {
         // A clean tree with commits: nothing staged is a message-only amend.
         state.branch = Some(branch(Head::Branch("main".into())));
         assert!(state.files.is_empty());
-        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+        assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
         state.branch = Some(branch(Head::Detached("abc".into())));
-        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+        assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
 
         state.hold_op(1);
         assert_eq!(a(&state), Err(OP_RUNNING.into()));
@@ -2877,7 +2881,7 @@ mod tests {
         let loading = |k| from(KeyScope::CommitLoading, k);
         assert_eq!(
             loading(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(CancelCommit)
+            Some(Commit(CommitIntent::Cancel))
         );
         assert_eq!(
             loading(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -2897,27 +2901,33 @@ mod tests {
         let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
 
         let confirm = |k| from(KeyScope::CommitConfirm, k);
-        assert_eq!(confirm(plain('y')), Some(ConfirmStageAll));
-        assert_eq!(confirm(enter), Some(ConfirmStageAll));
-        assert_eq!(confirm(plain('n')), Some(CancelCommit));
-        assert_eq!(confirm(esc), Some(CancelCommit));
+        assert_eq!(
+            confirm(plain('y')),
+            Some(Commit(CommitIntent::ConfirmStageAll))
+        );
+        assert_eq!(confirm(enter), Some(Commit(CommitIntent::ConfirmStageAll)));
+        assert_eq!(confirm(plain('n')), Some(Commit(CommitIntent::Cancel)));
+        assert_eq!(confirm(esc), Some(Commit(CommitIntent::Cancel)));
 
         let editor = |k| from(KeyScope::CommitEditor, k);
-        assert_eq!(editor(ctrl('s')), Some(SubmitCommit));
-        assert_eq!(editor(esc), Some(CancelCommit));
-        assert_eq!(editor(key(KeyCode::Tab, none)), Some(ToggleCommitField));
+        assert_eq!(editor(ctrl('s')), Some(Commit(CommitIntent::Submit)));
+        assert_eq!(editor(esc), Some(Commit(CommitIntent::Cancel)));
+        assert_eq!(
+            editor(key(KeyCode::Tab, none)),
+            Some(Commit(CommitIntent::ToggleField))
+        );
         assert_eq!(editor(enter), None, "Enter is typed into the message");
 
         let error = |k| from(KeyScope::CommitError, k);
-        assert_eq!(error(esc), Some(DismissCommitError));
-        assert_eq!(error(enter), Some(DismissCommitError));
+        assert_eq!(error(esc), Some(Commit(CommitIntent::DismissError)));
+        assert_eq!(error(enter), Some(Commit(CommitIntent::DismissError)));
 
-        assert_eq!(editor(ctrl('c')), Some(InterruptCommit));
+        assert_eq!(editor(ctrl('c')), Some(Commit(CommitIntent::Interrupt)));
 
         let discard = |k| from(KeyScope::CommitDiscard, k);
-        assert_eq!(discard(plain('y')), Some(DiscardCommit));
-        assert_eq!(discard(plain('n')), Some(ResumeCommit));
-        assert_eq!(discard(esc), Some(ResumeCommit));
+        assert_eq!(discard(plain('y')), Some(Commit(CommitIntent::Discard)));
+        assert_eq!(discard(plain('n')), Some(Commit(CommitIntent::Resume)));
+        assert_eq!(discard(esc), Some(Commit(CommitIntent::Resume)));
         assert_eq!(discard(enter), None, "Enter never throws a message away");
 
         for scope in [
@@ -3206,7 +3216,7 @@ mod tests {
             AppIntent::Branches(BranchesIntent::SwitchTab)
         );
         assert_eq!(run(&state, plain('r')), AppIntent::RefreshStatus);
-        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        assert_eq!(run(&state, plain('f')), AppIntent::Sync(SyncIntent::Fetch));
         // A header row is a remote, not a branch to check out.
         assert!(matches!(
             resolve_in(&state, plain(' ')),
@@ -3313,7 +3323,7 @@ mod tests {
             run(&state, plain('[')),
             AppIntent::Branches(BranchesIntent::PrevTab)
         );
-        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        assert_eq!(run(&state, plain('f')), AppIntent::Sync(SyncIntent::Fetch));
         assert_eq!(KeyScope::Tags.parent(), Some(KeyScope::Workspace));
 
         // `P` is the tag's push here, never the branch's.
@@ -4963,37 +4973,52 @@ mod tests {
     #[test]
     fn every_binding_that_quits_starts_a_program_destroys_work_or_answers_is_locked() {
         use AppIntent::*;
-        let mut branches_risky = Vec::new();
+        // The feature that owns a nested intent, by its top-level variant.
+        fn nested_feature(intent: &AppIntent) -> Option<&'static str> {
+            match intent {
+                Branches(_) => Some("branches"),
+                Commits(_) => Some("commits"),
+                Commit(_) => Some("commit"),
+                Blame(_) => Some("blame"),
+                Conflicts(_) => Some("conflicts"),
+                CustomCommands(_) => Some("custom_commands"),
+                Sync(_) => Some("sync"),
+                Operation(_) => Some("operation"),
+                Repos(_) => Some("repos"),
+                _ => None,
+            }
+        }
+        let mut nested_risky = Vec::new();
         for b in registry() {
             let risky = matches!(
                 b.intent,
-                Quit | InterruptCommit
+                Quit | Commit(CommitIntent::Interrupt)
                     | OpenInEditor
                     | EditHunk
                     | CycleRenderer
-                    | EditCommitExternally
+                    | Commit(CommitIntent::EditExternally)
                     | InitSubmodule
                     | UpdateSubmodule
                     | Discard
-                    | DiscardCommit
+                    | Commit(CommitIntent::Discard)
                     | ConfirmYes
                     | ConfirmNo
-                    | InitRepo
-                    | RecentSelect
+                    | Repos(ReposIntent::Init)
+                    | Repos(ReposIntent::Select)
                     | Branches(BranchesIntent::Delete)
                     | Branches(BranchesIntent::ConfirmDelete { .. })
-                    | Fetch
-                    | Pull
-                    | Push
-                    | ForcePush
+                    | Sync(SyncIntent::Fetch)
+                    | Sync(SyncIntent::Pull)
+                    | Sync(SyncIntent::Push)
+                    | Sync(SyncIntent::ForcePush)
                     | SubmitCredential
                     | CredentialAnswered(_)
                     | OpenMenu(MenuId::Merge)
                     | ContinueOperation
                     | SkipOperation
                     | AbortOperation
-                    | PickConflict(_)
-                    | OpenMergeTool
+                    | Conflicts(ConflictsIntent::Pick(_))
+                    | Conflicts(ConflictsIntent::OpenMergeTool)
                     | Commits(CommitsIntent::Revert)
                     | Commits(CommitsIntent::Copy(CopyIntent::Paste))
                     | OpenMenu(MenuId::Reset)
@@ -5049,14 +5074,22 @@ mod tests {
                     | PaneEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
-            if risky && matches!(b.intent, Branches(_)) {
-                branches_risky.push(b.id);
+            if risky && let Some(feature) = nested_feature(&b.intent) {
+                nested_risky.push((feature, b.id));
             }
         }
         // `use AppIntent::*` lets a stale bare name in the pattern above
-        // bind anything, so pin the branches bindings it must match.
+        // bind anything, so pin the nested bindings it must match, per
+        // feature and in registry order.
+        let risky_in = |feature| {
+            nested_risky
+                .iter()
+                .filter(|(f, _)| *f == feature)
+                .map(|(_, id)| *id)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            branches_risky,
+            risky_in("branches"),
             [
                 "branches.delete",
                 "remotes.remove",
@@ -5068,6 +5101,58 @@ mod tests {
                 "remove_remote.yes",
             ]
         );
+        assert_eq!(
+            risky_in("commits"),
+            [
+                "workspace.patch_menu",
+                "workspace.undo",
+                "workspace.redo",
+                "commits.revert",
+                "commits.squash",
+                "commits.fixup",
+                "commits.create_fixup",
+                "commits.autosquash",
+                "commits.drop",
+                "commits.reword",
+                "commits.move_up",
+                "commits.move_down",
+                "commits.edit",
+                "commits.break",
+                "commits.pick",
+                "commits.paste",
+                "status.bisect_good",
+                "status.bisect_bad",
+                "reset_hard.yes",
+                "leave_commits.yes",
+                "travel.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("commit"),
+            [
+                "commit_editor.edit_externally",
+                "commit_editor.quit",
+                "commit_discard.discard",
+            ]
+        );
+        assert_eq!(risky_in("repos"), ["recent.open", "recent.init"]);
+        assert_eq!(
+            risky_in("sync"),
+            ["workspace.fetch", "workspace.pull", "workspace.push"]
+        );
+        assert_eq!(
+            risky_in("conflicts"),
+            [
+                "files.mergetool",
+                "conflict.ours",
+                "conflict.theirs",
+                "conflict.both",
+                "conflict.mergetool",
+            ]
+        );
+        for feature in ["blame", "custom_commands", "operation"] {
+            assert!(risky_in(feature).is_empty(), "{feature}");
+        }
     }
 
     #[test]
@@ -5352,7 +5437,7 @@ mod tests {
             head: Head::Detached("abc".into()),
             upstream: None,
             ahead_behind: None,
-            in_progress: vec![Operation::Bisect],
+            in_progress: vec![crate::git::repo_state::Operation::Bisect],
             bisect: Some(crate::git::bisect::BisectState::default()),
         });
         let status = |c| match resolve(

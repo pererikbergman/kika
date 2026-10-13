@@ -2,6 +2,7 @@
 //! the selection, asking its prompts, running it, cancelling it and
 //! showing how it finished.
 
+use super::CustomCommandsIntent;
 use super::command::{CommandFailure, OutputMode, Target};
 use super::pending::PendingCommand;
 use crate::effect::Effect;
@@ -10,6 +11,21 @@ use crate::handoff::HandOff;
 use crate::model::{AppState, Focus};
 use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 use crate::refresh::Selection;
+
+/// The Custom commands feature's half of `update`: core's one
+/// `AppIntent::CustomCommands` arm lands here. A free function, so its name
+/// cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CustomCommandsIntent) -> Vec<Effect> {
+    match intent {
+        CustomCommandsIntent::PromptAnswered(text) => state.command_answered(text),
+        CustomCommandsIntent::Finished {
+            title,
+            output,
+            result,
+        } => state.command_finished(&title, output, result),
+        CustomCommandsIntent::Cancel => state.cancel_command(),
+    }
+}
 
 /// Custom commands: prompts, run and cancel.
 impl AppState {
@@ -354,11 +370,15 @@ mod tests {
         ctrl_t(&mut state);
         state.popups.pop();
         assert_eq!(
-            state.update(AppIntent::CommandPromptAnswered("1".into())),
+            state.update(AppIntent::CustomCommands(
+                CustomCommandsIntent::PromptAnswered("1".into())
+            )),
             []
         );
         state.popups.pop();
-        let effects = state.update(AppIntent::CommandPromptAnswered("2".into()));
+        let effects = state.update(AppIntent::CustomCommands(
+            CustomCommandsIntent::PromptAnswered("2".into()),
+        ));
         match effects.as_slice() {
             [Effect::RunCommand { argv, .. }] => assert_eq!(argv, &os(&["echo", "2", "1"])),
             other => panic!("expected RunCommand, got {other:?}"),
@@ -386,7 +406,9 @@ mod tests {
         assert!(!state.command_running);
         // A late answer has nothing to run.
         assert_eq!(
-            state.update(AppIntent::CommandPromptAnswered("x".into())),
+            state.update(AppIntent::CustomCommands(
+                CustomCommandsIntent::PromptAnswered("x".into())
+            )),
             []
         );
         // Esc does the same.
@@ -418,7 +440,7 @@ mod tests {
             OutputMode::Terminal,
         );
         with_commands(&mut state, &[table]);
-        state.update(AppIntent::BlameNext);
+        next_blame_line(&mut state);
         state.update(AppIntent::Key(KeyPress::new(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
@@ -434,7 +456,7 @@ mod tests {
         );
 
         // The last line is not committed: refused before any prompt.
-        state.update(AppIntent::BlameNext);
+        next_blame_line(&mut state);
         assert_eq!(ctrl_t(&mut state), []);
         assert_eq!(state.notice, Some("Not committed yet".into()));
         assert!(state.popups.is_empty());
@@ -458,11 +480,11 @@ mod tests {
     }
 
     fn command_finished(output: OutputMode, result: Result<&str, CommandFailure>) -> AppIntent {
-        AppIntent::CommandFinished {
+        AppIntent::CustomCommands(CustomCommandsIntent::Finished {
             title: "Show it".into(),
             output,
             result: result.map(String::from),
-        }
+        })
     }
 
     fn exited(text: &str) -> CommandFailure {
@@ -554,7 +576,10 @@ mod tests {
     #[test]
     fn the_cancel_key_stops_only_a_running_command() {
         let mut state = hostile_file();
-        assert_eq!(state.update(AppIntent::CancelCommand), []);
+        assert_eq!(
+            state.update(AppIntent::CustomCommands(CustomCommandsIntent::Cancel)),
+            []
+        );
 
         with_commands(
             &mut state,
@@ -562,7 +587,7 @@ mod tests {
         );
         ctrl_t(&mut state);
         assert_eq!(
-            state.update(AppIntent::CancelCommand),
+            state.update(AppIntent::CustomCommands(CustomCommandsIntent::Cancel)),
             [Effect::CancelCommand]
         );
         // Still running until the command answers.

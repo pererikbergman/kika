@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::recent;
 use crate::background;
 use crate::effect::Tag;
+use crate::features::repos::ReposIntent;
 use crate::git::GitRunner;
 use crate::git::repo_root::init_repo;
 use crate::intent::AppIntent;
@@ -46,7 +47,7 @@ fn report(store: Option<PathBuf>, tx: UnboundedSender<AppIntent>, seq: u64, repo
             }
         },
         |_| Vec::new(),
-        move |list| AppIntent::RecentLoaded { seq, list },
+        move |list| AppIntent::Repos(ReposIntent::Loaded { seq, list }),
     );
 }
 
@@ -57,6 +58,6 @@ pub(crate) fn init(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
         move || init_repo(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git init"),
-        move |result| AppIntent::RepoInitialised { tag, result },
+        move |result| AppIntent::Repos(ReposIntent::Initialised { tag, result }),
     );
 }

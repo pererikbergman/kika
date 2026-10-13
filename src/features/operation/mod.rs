@@ -4,7 +4,11 @@
 //! progress, with the abort question. The feature has no state and no
 //! `Effect` of its own: its git ops run through the core op slot.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`OperationIntent`] in
+//! `AppIntent::Operation`, and its one `update` arm calls [`update`] here.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`OperationIntent`] and the free function [`update`];
 //! - the handlers in `update.rs`: `branch_op`, `resume` and `ask_abort`,
 //!   which asks `abort_question`;
 //! - `keys::{OPERATION_BRANCHES, OPERATION_STATUS, OPERATION_ABORT_CONFIRM,
@@ -26,8 +30,10 @@
 //!   (`keymap.rs`), which bisect and other features call too, and
 //!   `OP_RUNNING`, `never` and `REPO_LOCKED`;
 //! - the bisect-aware status guards in `src/bisect.rs`;
-//! - the `update()` dispatch arms, including the `bisect::bisect_only`
-//!   guards and the `ConfirmAbort` arm;
+//! - the shared intents `ContinueOperation`, `SkipOperation` and
+//!   `AbortOperation` and their `update()` arms, including the
+//!   `bisect::bisect_only` guards: bisect shares them, and only core may
+//!   send them on to it;
 //! - the core op slot: `run_op_where_it_belongs`, `start_op`,
 //!   `op_finished`, `failure_title`/`failure_next` and `confirm_refused`;
 //! - in `view.rs`: `bisect_lines`, `FOUND_MARK`, `short_hash`,
@@ -36,9 +42,13 @@
 //! - the merge menu (`MenuId::Merge` in `menu.rs`) and the
 //!   `op_command`/`run_op` arms in `op.rs`.
 
+mod intent;
 pub(crate) mod keys;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::OperationIntent;
+pub(crate) use update::update;
 
 #[cfg(test)]
 pub(crate) use update::abort_question;

@@ -6,8 +6,12 @@
 //! bindings and guards (`keys.rs`), its render function (`view.rs`) and the
 //! I/O behind `LoadConflict` and `WriteResolved` (`effects.rs`).
 //!
+//! Its intents are nested (ADR-0002): core wraps [`ConflictsIntent`] in
+//! `AppIntent::Conflicts`, and its one `update` arm calls [`update`] here.
+//!
 //! Its `pub(crate)` API:
 //! - the types [`Choice`] and [`ConflictView`];
+//! - the intent enum [`ConflictsIntent`] and the free function [`update`];
 //! - the handlers in `update.rs`: `open_conflict`, `conflict_loaded`,
 //!   `with_conflict`, `pick_conflict`, `resolved_written` (which asks
 //!   `stage_resolved_question`), `stage_resolved` and `open_merge_tool`;
@@ -31,10 +35,14 @@
 
 pub(crate) mod effects;
 mod git;
+mod intent;
 pub(crate) mod keys;
 mod state;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::ConflictsIntent;
+pub(crate) use update::update;
 
 pub(crate) use state::{Choice, ConflictView};
 

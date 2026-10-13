@@ -5,6 +5,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::features::commit::CommitIntent;
 use crate::git::status::{EntryKind, Head};
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, never};
@@ -56,7 +57,7 @@ pub(crate) static COMMIT_FROM_FILES: &[Binding] = &[
         id: "files.commit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), NONE)],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenCommit,
+        intent: AppIntent::Commit(CommitIntent::Open),
         description: "Commit the staged changes with a message",
         label: "commit",
         bar: true,
@@ -66,7 +67,7 @@ pub(crate) static COMMIT_FROM_FILES: &[Binding] = &[
         id: "files.amend",
         keys: &[KeyPattern::any(KeyCode::Char('A'))],
         scope: KeyScope::Files,
-        intent: AppIntent::OpenAmend,
+        intent: AppIntent::Commit(CommitIntent::OpenAmend),
         description: "Amend the last commit with the staged changes, or reword it",
         label: "amend",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
@@ -84,7 +85,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Enter),
         ],
         scope: KeyScope::CommitConfirm,
-        intent: AppIntent::ConfirmStageAll,
+        intent: AppIntent::Commit(CommitIntent::ConfirmStageAll),
         description: "Stage all changes, then write the message",
         label: "stage all",
         bar: true,
@@ -97,7 +98,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Esc),
         ],
         scope: KeyScope::CommitConfirm,
-        intent: AppIntent::CancelCommit,
+        intent: AppIntent::Commit(CommitIntent::Cancel),
         description: "Do not commit",
         label: "cancel",
         bar: true,
@@ -107,7 +108,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.commit",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::SubmitCommit,
+        intent: AppIntent::Commit(CommitIntent::Submit),
         description: "Commit with this message",
         label: "commit",
         bar: true,
@@ -117,7 +118,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.switch_field",
         keys: &[KeyPattern::any(KeyCode::Tab)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::ToggleCommitField,
+        intent: AppIntent::Commit(CommitIntent::ToggleField),
         description: "Switch between subject and body",
         label: "subject/body",
         bar: true,
@@ -128,7 +129,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.skip_hooks",
         keys: &[KeyPattern::exact(KeyCode::Char('n'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::ToggleNoVerify,
+        intent: AppIntent::Commit(CommitIntent::ToggleNoVerify),
         description: "Skip the pre-commit and commit-msg hooks for this commit",
         label: "skip hooks",
         bar: false,
@@ -138,7 +139,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.edit_externally",
         keys: &[KeyPattern::exact(KeyCode::Char('e'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::EditCommitExternally,
+        intent: AppIntent::Commit(CommitIntent::EditExternally),
         description: "Write the message in your editor, then commit when it closes",
         label: "editor",
         bar: false,
@@ -148,7 +149,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::CancelCommit,
+        intent: AppIntent::Commit(CommitIntent::Cancel),
         description: "Close without committing",
         label: "cancel",
         bar: true,
@@ -158,7 +159,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_editor.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::CommitEditor,
-        intent: AppIntent::InterruptCommit,
+        intent: AppIntent::Commit(CommitIntent::Interrupt),
         description: "Close, asking before a typed message is lost; quit Kika while a commit runs",
         label: "stop",
         bar: true,
@@ -168,7 +169,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_discard.discard",
         keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
         scope: KeyScope::CommitDiscard,
-        intent: AppIntent::DiscardCommit,
+        intent: AppIntent::Commit(CommitIntent::Discard),
         description: "Throw the typed message away",
         label: "discard",
         bar: true,
@@ -181,7 +182,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Esc),
         ],
         scope: KeyScope::CommitDiscard,
-        intent: AppIntent::ResumeCommit,
+        intent: AppIntent::Commit(CommitIntent::Resume),
         description: "Back to the message",
         label: "keep",
         bar: true,
@@ -194,7 +195,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Enter),
         ],
         scope: KeyScope::CommitError,
-        intent: AppIntent::DismissCommitError,
+        intent: AppIntent::Commit(CommitIntent::DismissError),
         description: "Back to the message",
         label: "back",
         bar: true,
@@ -204,7 +205,7 @@ pub(crate) static COMMIT_KEYS: &[Binding] = &[
         id: "commit_loading.cancel",
         keys: &[KeyPattern::any(KeyCode::Esc)],
         scope: KeyScope::CommitLoading,
-        intent: AppIntent::CancelCommit,
+        intent: AppIntent::Commit(CommitIntent::Cancel),
         description: "Do not amend",
         label: "cancel",
         bar: true,
@@ -234,8 +235,14 @@ mod tests {
         use AppIntent::*;
         let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
         let editor = |k| from(KeyScope::CommitEditor, k);
-        assert_eq!(editor(ctrl('n')), Some(ToggleNoVerify));
-        assert_eq!(editor(ctrl('e')), Some(EditCommitExternally));
+        assert_eq!(
+            editor(ctrl('n')),
+            Some(Commit(CommitIntent::ToggleNoVerify))
+        );
+        assert_eq!(
+            editor(ctrl('e')),
+            Some(Commit(CommitIntent::EditExternally))
+        );
         assert_eq!(editor(plain('n')), None, "n is typed");
         assert_eq!(editor(plain('e')), None, "e is typed");
 
@@ -288,7 +295,7 @@ mod tests {
                 ctrl_c
             ),
             Resolution::Run(Binding {
-                intent: AppIntent::InterruptCommit,
+                intent: AppIntent::Commit(CommitIntent::Interrupt),
                 ..
             })
         ));

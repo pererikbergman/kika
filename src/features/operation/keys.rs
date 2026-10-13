@@ -119,7 +119,6 @@ pub(crate) static OPERATION_ABORT_CONFIRM: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::repo_state::Operation;
     use crate::git::status::Head;
     use crate::keymap::{Keymap, Resolution, registry, resolve};
     use crate::model::Context;
@@ -175,7 +174,7 @@ mod tests {
             head: Head::Branch("main".into()),
             upstream: None,
             ahead_behind: None,
-            in_progress: vec![Operation::Rebase],
+            in_progress: vec![crate::git::repo_state::Operation::Rebase],
             bisect: None,
         });
         let status = |c| match resolve(

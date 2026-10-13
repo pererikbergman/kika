@@ -4,6 +4,7 @@
 //! the popup when git is done.
 
 use super::CommitEditor;
+use super::CommitIntent;
 use crate::effect::{Effect, Tag};
 use crate::handoff::HandOff;
 use crate::intent::AppIntent;
@@ -11,6 +12,50 @@ use crate::model::{AppState, CommitFlow, Context};
 use crate::op::GitOp;
 use crate::popup::ErrorPopup;
 use crate::prompts::{PromptFacts, needs_terminal};
+
+/// The commit popup's half of `update`: core's one `AppIntent::Commit` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CommitIntent) -> Vec<Effect> {
+    match intent {
+        CommitIntent::Open => state.open_commit(),
+        CommitIntent::ConfirmStageAll => {
+            if state.commit == CommitFlow::ConfirmStageAll {
+                state.commit = CommitFlow::Editing(CommitEditor::new(true));
+            }
+        }
+        CommitIntent::Cancel => state.cancel_commit(),
+        CommitIntent::Discard => state.discard_commit(),
+        CommitIntent::Resume => state.resume_commit(),
+        CommitIntent::Submit => return state.submit_commit(),
+        CommitIntent::Interrupt => return state.interrupt_commit(),
+        CommitIntent::ToggleField => {
+            if let CommitFlow::Editing(editor) = &mut state.commit {
+                editor.toggle_field();
+            }
+        }
+        CommitIntent::OpenAmend => return state.open_amend(),
+        CommitIntent::HeadMessageLoaded { tag, result } => state.head_message_loaded(tag, result),
+        CommitIntent::ToggleNoVerify => {
+            if let CommitFlow::Editing(editor) = &mut state.commit {
+                editor.no_verify = !editor.no_verify;
+            }
+        }
+        CommitIntent::EditExternally => {
+            if let CommitFlow::Editing(editor) = &state.commit {
+                let initial = editor.message();
+                return vec![Effect::HandOff(HandOff::EditCommitMessage { initial })];
+            }
+        }
+        CommitIntent::MessageEdited { result } => {
+            return state.commit_message_edited(result);
+        }
+        CommitIntent::DismissError => state.dismiss_commit_error(),
+        CommitIntent::Probed { tag, op, facts } => {
+            return state.commit_probed(tag, op, facts);
+        }
+    }
+    Vec::new()
+}
 
 impl AppState {
     /// Open the commit popup: straight to the editor when something is
@@ -198,7 +243,7 @@ impl AppState {
     pub(crate) fn interrupt_commit(&mut self) -> Vec<Effect> {
         let intent = match self.commit {
             CommitFlow::Running(_) => AppIntent::Quit,
-            _ => AppIntent::CancelCommit,
+            _ => AppIntent::Commit(CommitIntent::Cancel),
         };
         self.update(intent)
     }
@@ -412,13 +457,16 @@ mod tests {
     fn interrupt_commit_cancels_while_editing_and_quits_while_running() {
         let mut state = editing();
         type_text(&mut state, "abc");
-        assert_eq!(state.update(AppIntent::InterruptCommit), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commit(CommitIntent::Interrupt)),
+            vec![]
+        );
         assert!(matches!(state.commit, CommitFlow::ConfirmDiscard(_)));
         assert!(!state.should_quit);
 
         let (mut state, _, _) = submitted();
         assert_eq!(
-            state.update(AppIntent::InterruptCommit),
+            state.update(AppIntent::Commit(CommitIntent::Interrupt)),
             vec![Effect::InterruptGit]
         );
         assert!(state.should_quit);
@@ -437,7 +485,7 @@ mod tests {
         type_text(&mut state, "s");
         press(&mut state, KeyCode::Tab);
         assert_eq!(editor(&state).field, Field::Body);
-        state.update(AppIntent::ToggleCommitField);
+        state.update(AppIntent::Commit(CommitIntent::ToggleField));
         assert_eq!(editor(&state).field, Field::Subject);
     }
 
@@ -544,11 +592,11 @@ mod tests {
     }
 
     fn probed(tag: Tag, op: &GitOp, facts: Option<PromptFacts>) -> AppIntent {
-        AppIntent::CommitProbed {
+        AppIntent::Commit(CommitIntent::Probed {
             tag,
             op: op.clone(),
             facts,
-        }
+        })
     }
 
     fn signing() -> Option<PromptFacts> {
@@ -572,9 +620,9 @@ mod tests {
         let skipped = (skip, tag, op);
 
         let mut edited = editing();
-        let effects = edited.update(AppIntent::CommitMessageEdited {
+        let effects = edited.update(AppIntent::Commit(CommitIntent::MessageEdited {
             result: Ok(Some("x\n".into())),
-        });
+        }));
         let (tag, op) = probe_of(&effects);
         let from_editor = (edited, tag, op);
 
@@ -716,10 +764,10 @@ mod tests {
     }
 
     fn head_loaded(tag: Tag, result: Result<&str, &str>) -> AppIntent {
-        AppIntent::HeadMessageLoaded {
+        AppIntent::Commit(CommitIntent::HeadMessageLoaded {
             tag,
             result: result.map(Into::into).map_err(Into::into),
-        }
+        })
     }
 
     /// Amending HEAD's "subj\n\nbody", the popup open on it.
@@ -855,7 +903,10 @@ mod tests {
     #[test]
     fn open_amend_does_nothing_with_a_popup_already_open() {
         let mut state = editing();
-        assert_eq!(state.update(AppIntent::OpenAmend), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commit(CommitIntent::OpenAmend)),
+            vec![]
+        );
         assert!(editor(&state).amend.is_none());
     }
 
@@ -913,9 +964,9 @@ mod tests {
         let mut state = amending();
         ctrl(&mut state, 'n');
         let busy = state.busy_count();
-        let effects = state.update(AppIntent::CommitMessageEdited {
+        let effects = state.update(AppIntent::Commit(CommitIntent::MessageEdited {
             result: Ok(Some("x\n\ny\n".into())),
-        });
+        }));
         let (tag, op) = probe_of(&effects);
         assert_eq!(
             op,
@@ -944,7 +995,9 @@ mod tests {
         let mut state = editing();
         type_text(&mut state, "keep me");
         let before = state.commit.clone();
-        let effects = state.update(AppIntent::CommitMessageEdited { result: Ok(None) });
+        let effects = state.update(AppIntent::Commit(CommitIntent::MessageEdited {
+            result: Ok(None),
+        }));
         assert_eq!(effects, vec![]);
         assert_eq!(state.commit, before);
         assert_eq!(state.notice, Some("Empty message; commit aborted".into()));
@@ -955,9 +1008,9 @@ mod tests {
     fn an_editor_failure_shows_an_error_over_the_kept_text() {
         let mut state = editing();
         type_text(&mut state, "keep me");
-        let effects = state.update(AppIntent::CommitMessageEdited {
+        let effects = state.update(AppIntent::Commit(CommitIntent::MessageEdited {
             result: Err("The editor exited with 3".into()),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
         press(&mut state, KeyCode::Esc);
@@ -967,9 +1020,9 @@ mod tests {
     #[test]
     fn an_edited_message_with_no_popup_open_is_dropped() {
         let (mut state, _) = with_files(three_files(), 24);
-        let effects = state.update(AppIntent::CommitMessageEdited {
+        let effects = state.update(AppIntent::Commit(CommitIntent::MessageEdited {
             result: Ok(Some("x\n".into())),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert_eq!(state.commit, CommitFlow::Closed);
         assert_eq!(state.held_seq(), None);

@@ -102,7 +102,9 @@ mod tests {
     use crate::intent::AppIntent;
     use crate::layout::SidePanel;
     use crate::model::{CommitFlow, Context, Focus};
-    use crate::test_support::{branches_loaded, forge_state};
+    use crate::test_support::{
+        branches_loaded, forge_state, open_commit, remote_finished, remote_intent,
+    };
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
@@ -184,11 +186,7 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no Remote in {effects:?}"));
-        let finished = state.update(AppIntent::RemoteFinished {
-            tag,
-            op,
-            result: Ok(()),
-        });
+        let finished = state.update(remote_finished(tag, op, Ok(())));
         let tag = branches_tag(&finished);
         effects.extend(finished);
         effects.extend(state.update(branches_loaded(tag, vec![branch("main")])));
@@ -218,11 +216,15 @@ mod tests {
             errors: loaded.errors,
         });
         effects.extend(list_branches(&mut state, &["main", "topic"]));
-        effects.extend(remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch));
+        effects.extend(remote_ok(
+            &mut state,
+            remote_intent(&RemoteOp::Fetch),
+            RemoteOp::Fetch,
+        ));
         let push = RemoteOp::Push {
             force_with_lease: false,
         };
-        effects.extend(remote_ok(&mut state, AppIntent::Push, push));
+        effects.extend(remote_ok(&mut state, remote_intent(&push), push));
         effects.extend(list_branches(&mut state, &["main"]));
         assert_eq!(loads(&effects), []);
         assert_eq!(state.forge.status, ForgeView::Off);
@@ -272,7 +274,7 @@ mod tests {
         let push = RemoteOp::Push {
             force_with_lease: false,
         };
-        let effects = remote_ok(&mut state, AppIntent::Push, push);
+        let effects = remote_ok(&mut state, remote_intent(&push), push);
         assert_eq!(loads(&effects), []);
         let effects = state.update(AppIntent::PullRequestsFetched {
             tag: first,
@@ -289,8 +291,8 @@ mod tests {
         });
 
         for (intent, op) in [
-            (AppIntent::Fetch, RemoteOp::Fetch),
-            (AppIntent::Pull, RemoteOp::Pull),
+            (remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch),
+            (remote_intent(&RemoteOp::Pull), RemoteOp::Pull),
         ] {
             let effects = remote_ok(&mut state, intent, op);
             let [(tag, true)] = loads(&effects)[..] else {
@@ -353,7 +355,7 @@ mod tests {
         let effects = list_branches(&mut state, &["main"]);
         assert_eq!(known(&effects), Some((Some(repo()), false)));
         // A refresh reads the remote again.
-        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
         let (tag, _) = loads(&effects)[0];
         assert_eq!(known(&effects), Some((None, true)));
 
@@ -361,7 +363,7 @@ mod tests {
         // user fetch asks again.
         state.update(AppIntent::ForgeRepoNone { tag });
         assert_eq!(loads(&list_branches(&mut state, &["main"])), []);
-        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
         assert_eq!(known(&effects), Some((None, true)));
     }
 
@@ -412,7 +414,7 @@ mod tests {
         assert!(state.popups.is_empty());
 
         // A user fetch hands the limit to the task, which decides by the clock.
-        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
         assert_eq!(limited_of(&effects), [(github()[0].clone(), T)]);
 
         // Another repository: the limit is the account's, so it stays.
@@ -442,7 +444,7 @@ mod tests {
         });
         assert!(state.forge.limited.is_empty());
         assert_eq!(state.forge.limited_until, None);
-        let effects = remote_ok(&mut state, AppIntent::Fetch, RemoteOp::Fetch);
+        let effects = remote_ok(&mut state, remote_intent(&RemoteOp::Fetch), RemoteOp::Fetch);
         assert_eq!(limited_of(&effects), []);
     }
 
@@ -528,7 +530,7 @@ mod tests {
             "{staged:?}"
         );
         state.free_op();
-        state.update(AppIntent::OpenCommit);
+        open_commit(&mut state);
         assert_ne!(state.commit, CommitFlow::Closed);
     }
 

@@ -5,37 +5,37 @@ use crossterm::event::{Event, KeyEventKind};
 
 use crate::config::ConfigError;
 use crate::effect::Tag;
+use crate::features::blame::BlameIntent;
 use crate::features::branches::BranchesIntent;
 use crate::features::command_log::CommandLogIntent;
+use crate::features::commit::CommitIntent;
 use crate::features::commits::CommitsIntent;
-use crate::features::conflicts::Choice;
-use crate::features::custom_commands::{CommandFailure, OutputMode};
+use crate::features::conflicts::ConflictsIntent;
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::diff::renderers::ExternalRenderer;
 use crate::features::diff::renderers::StyledRow;
 use crate::features::files::IgnoreAdded;
+use crate::features::operation::OperationIntent;
+use crate::features::repos::ReposIntent;
 use crate::features::review::{CommitsHere, PrFileRow};
 use crate::features::stash::{StashEntry, StashFile};
+use crate::features::sync::SyncIntent;
 use crate::features::worktrees::Worktree;
 use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
-use crate::git::blame::BlameLine;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitRange;
-use crate::git::diff::{DiffChunk, DiffLine};
+use crate::git::diff::DiffChunk;
 use crate::git::patch::FilePatch;
-use crate::git::path::RepoPath;
 use crate::git::refs::RefsSnapshot;
-use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
 use crate::menu::MenuId;
-use crate::op::{GitOp, MergeStrategy};
+use crate::op::GitOp;
 use crate::popup::PromptKind;
-use crate::prompts::PromptFacts;
 use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
@@ -174,6 +174,16 @@ pub enum AppIntent {
     /// The text could not be sent to the clipboard, and why.
     CopyFailed(String),
 
+    // --- core: shared by features ---
+    /// Go on with the merge, rebase, cherry-pick or revert in progress.
+    ContinueOperation,
+    /// Drop the commit the rebase, cherry-pick or revert stopped on and go on.
+    SkipOperation,
+    /// Ask before aborting the operation in progress.
+    AbortOperation,
+    /// Switch the whole workspace to the repository at this top level.
+    OpenRepo(PathBuf),
+
     // --- files ---
     /// Move the file selection down or up.
     SelectNext,
@@ -268,49 +278,8 @@ pub enum AppIntent {
     },
 
     // --- commit ---
-    /// Open the commit popup from the Files panel.
-    OpenCommit,
-    /// Nothing was staged: yes, stage everything and commit.
-    ConfirmStageAll,
-    /// Close the commit popup; the index is left as it is. A typed
-    /// message is only thrown away after `DiscardCommit`.
-    CancelCommit,
-    /// Yes, throw the typed message away.
-    DiscardCommit,
-    /// Back to the message instead of discarding it.
-    ResumeCommit,
-    /// Commit with the typed message.
-    SubmitCommit,
-    /// Ctrl+C in the commit popup: cancel while typing (asking before a
-    /// typed message is lost), quit while git runs.
-    InterruptCommit,
-    /// Move the cursor between the subject and the body.
-    ToggleCommitField,
-    /// Close the commit error and go back to the kept message.
-    DismissCommitError,
-    /// Open the commit popup to amend the last commit, its message filled in.
-    OpenAmend,
-    /// `HEAD`'s message was read for amending; `tag` says which load.
-    HeadMessageLoaded {
-        tag: Tag,
-        result: Result<String, String>,
-    },
-    /// Turn skipping the commit hooks on or off for this commit.
-    ToggleNoVerify,
-    /// Write the message in the user's editor, then commit with it.
-    EditCommitExternally,
-    /// The editor opened by `EditCommitExternally` has closed: the message
-    /// to commit, `None` if the user emptied it.
-    CommitMessageEdited {
-        result: Result<Option<String>, String>,
-    },
-    /// The config and hooks a commit depends on were read; `facts` is
-    /// `None` when they could not be. Decides where the commit runs.
-    CommitProbed {
-        tag: Tag,
-        op: GitOp,
-        facts: Option<PromptFacts>,
-    },
+    /// Everything the commit popup does; its own `update` handles it.
+    Commit(CommitIntent),
 
     // --- stash ---
     /// The stash list was read; `tag` says which load.
@@ -408,139 +377,36 @@ pub enum AppIntent {
     },
 
     // --- repos ---
-    /// Show the recent repositories, to switch to one.
-    OpenRecent,
-    /// The recent list as now recorded on disk, answering request `seq`.
-    RecentLoaded {
-        seq: u64,
-        list: Vec<PathBuf>,
-    },
-    /// Move the recent list's cursor down or up.
-    RecentNext,
-    RecentPrev,
-    /// Open the row under the recent list's cursor.
-    RecentSelect,
-    /// Switch the whole workspace to the repository at this top level.
-    OpenRepo(PathBuf),
-    /// Make the launch directory a repository.
-    InitRepo,
-    /// `git init` finished: the new top level, or why it failed.
-    RepoInitialised {
-        tag: Tag,
-        result: Result<PathBuf, String>,
-    },
+    /// Everything the recent list and `git init` do; its own `update`
+    /// handles it. Opening a repository is the shared `OpenRepo`.
+    Repos(ReposIntent),
 
     // --- command_log ---
     /// Everything the Command log does; its own `update` handles it.
     CommandLog(CommandLogIntent),
 
     // --- custom_commands ---
-    /// The answer to a custom command's current prompt.
-    CommandPromptAnswered(String),
-    /// A custom command finished. `Ok` holds the captured output, empty
-    /// unless `output` is `Popup`; `Err` says how it failed. Text is
-    /// terminal-safe.
-    CommandFinished {
-        title: String,
-        output: OutputMode,
-        result: Result<String, CommandFailure>,
-    },
-    /// Stop the captured command that is running, if one is.
-    CancelCommand,
+    /// Everything a custom command does once started; its own `update`
+    /// handles it.
+    CustomCommands(CustomCommandsIntent),
 
     // --- blame ---
-    /// Blame the selected file: who last changed each line, and when.
-    OpenBlame,
-    /// A blame load finished; `tag` says which one.
-    BlameLoaded {
-        tag: Tag,
-        result: Result<Vec<BlameLine>, String>,
-    },
-    /// Move the blame cursor a line or a page down or up.
-    BlameNext,
-    BlamePrev,
-    BlamePageDown,
-    BlamePageUp,
-    /// Show the commit that last changed the line under the blame cursor.
-    OpenBlameCommit,
-    /// A commit load finished; `tag` says which one.
-    CommitLoaded {
-        tag: Tag,
-        result: Result<Vec<DiffLine>, String>,
-    },
-    /// Back from the commit to the blame, at the same line.
-    CloseBlameCommit,
-    ScrollCommit(Scroll),
-    /// Back from the blame to the Files panel.
-    CloseBlame,
+    /// Everything the blame does; its own `update` handles it.
+    Blame(BlameIntent),
 
     // --- conflicts ---
-    /// The conflicted file the view opened on was read: its bytes and its
-    /// marker size, or why not. `tag` says which load.
-    ConflictLoaded {
-        tag: Tag,
-        path: RepoPath,
-        result: Result<(Vec<u8>, usize), String>,
-    },
-    /// Move the conflict view's cursor to the next or previous block.
-    ConflictNext,
-    ConflictPrev,
-    /// Keep this side of the selected block, and write the file.
-    PickConflict(Choice),
-    /// A resolved file was written: what is now on disk, or why not.
-    ResolvedWritten {
-        tag: Tag,
-        path: RepoPath,
-        result: Result<Vec<u8>, String>,
-    },
-    /// Stage the file the conflict view resolved, as the question asked.
-    StageResolved,
-    /// Resolve the selected conflicted file in the user's merge tool.
-    OpenMergeTool,
+    /// Everything the conflict view does; its own `update` handles it.
+    Conflicts(ConflictsIntent),
 
     // --- sync ---
-    /// A background fetch finished.
-    FetchFinished {
-        tag: Tag,
-        result: Result<(), String>,
-    },
-    /// Fetch every remote, pull into the current branch, or push it. Each
-    /// reaches the network, so only a key the user pressed sends one.
-    Fetch,
-    Pull,
-    Push,
-    /// Push again with `--force-with-lease`, after a plain push was rejected.
-    ForcePush,
-    /// Ssh, for the remote operation `tag`, says something that needs no
-    /// answer, such as asking to touch a security key. Terminal-safe.
-    // Only the unix bridge passes these on.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    RemoteNotice {
-        tag: Tag,
-        text: String,
-    },
-    /// A fetch, pull or push finished.
-    RemoteFinished {
-        tag: Tag,
-        op: RemoteOp,
-        result: Result<(), RemoteFailure>,
-    },
-    /// Time to draw the next frame of the remote operation's spinner.
-    SpinnerTick,
+    /// Everything fetch, pull and push do; its own `update` handles it.
+    Sync(SyncIntent),
 
     // --- operation ---
-    /// Merge the selected branch into the current one this way.
-    Merge(MergeStrategy),
-    /// Rebase the current branch onto the selected one.
-    RebaseOnto,
-    /// Go on with the merge, rebase, cherry-pick or revert in progress.
-    ContinueOperation,
-    /// Drop the commit the rebase, cherry-pick or revert stopped on and go on.
-    SkipOperation,
-    /// Ask before aborting the operation in progress.
-    AbortOperation,
-    /// Abort this operation, as the question asked.
-    ConfirmAbort(Operation),
+    /// Merging or rebasing onto the selected branch, and aborting as
+    /// asked; its own `update` handles it. Continue, skip and abort are
+    /// the shared core intents.
+    Operation(OperationIntent),
 
     // --- pull_requests ---
     /// The remote is on none of the forge hosts: no badges.
@@ -691,6 +557,48 @@ impl From<BranchesIntent> for AppIntent {
 impl From<CommitsIntent> for AppIntent {
     fn from(intent: CommitsIntent) -> Self {
         Self::Commits(intent)
+    }
+}
+
+impl From<CommitIntent> for AppIntent {
+    fn from(intent: CommitIntent) -> Self {
+        Self::Commit(intent)
+    }
+}
+
+impl From<BlameIntent> for AppIntent {
+    fn from(intent: BlameIntent) -> Self {
+        Self::Blame(intent)
+    }
+}
+
+impl From<ConflictsIntent> for AppIntent {
+    fn from(intent: ConflictsIntent) -> Self {
+        Self::Conflicts(intent)
+    }
+}
+
+impl From<CustomCommandsIntent> for AppIntent {
+    fn from(intent: CustomCommandsIntent) -> Self {
+        Self::CustomCommands(intent)
+    }
+}
+
+impl From<SyncIntent> for AppIntent {
+    fn from(intent: SyncIntent) -> Self {
+        Self::Sync(intent)
+    }
+}
+
+impl From<OperationIntent> for AppIntent {
+    fn from(intent: OperationIntent) -> Self {
+        Self::Operation(intent)
+    }
+}
+
+impl From<ReposIntent> for AppIntent {
+    fn from(intent: ReposIntent) -> Self {
+        Self::Repos(intent)
     }
 }
 

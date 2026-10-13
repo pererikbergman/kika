@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use crate::layout::SidePanel;
     use crate::model::{AppState, Context, Focus};
-    use crate::test_support::{load_list, reversed_at};
+    use crate::test_support::{load_list, reversed_at, spinner_tick};
     use crate::view::{buffer_rows, render};
 
     fn draw(state: &AppState, width: u16, height: u16) -> Vec<String> {
@@ -922,7 +922,6 @@ mod tests {
     #[test]
     fn a_running_push_spins_on_its_branch_row_and_names_itself_in_the_bar() {
         use crate::git::remote::RemoteOp;
-        use crate::intent::AppIntent;
         use crate::remote_run::RemoteRun;
 
         let mut state = focused(vec![
@@ -943,7 +942,7 @@ mod tests {
         assert!(bar.starts_with(" pushing… "), "{bar:?}");
         assert!(!contains(&rows, "loading…"), "{rows:#?}");
 
-        state.update(AppIntent::SpinnerTick);
+        spinner_tick(&mut state);
         assert!(contains(&draw(&state, 80, 24), "/ main"));
 
         // Collapsed, the panel spins on the same row.
