@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::{Tag, log_program};
-use crate::forge::task::{ForgeContext, Load, run_load};
+use crate::forge::task::{ForgeContext, Load, LoadEvent, run_load};
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
 use crate::git::GitRunner;
 use crate::git::branches::BranchName;
@@ -43,7 +43,6 @@ pub(crate) fn load(
                 tx,
                 move || {
                     let load = Load {
-                        tag,
                         hosts: &hosts,
                         branches: &branches,
                         refresh,
@@ -52,8 +51,8 @@ pub(crate) fn load(
                         top: std::fs::canonicalize(runner.workdir()).ok(),
                         now: forge.now(),
                     };
-                    run_load(runner.as_ref(), &forge, &load, &|intent| {
-                        let _ = send.send(intent);
+                    run_load(runner.as_ref(), &forge, &load, &|event| {
+                        let _ = send.send(load_intent(tag, event));
                     });
                 },
                 // A panic still ends the call, or no refresh would run again.
@@ -66,6 +65,22 @@ pub(crate) fn load(
                 },
             );
         }
+    }
+}
+
+/// The intent that reports `event` of the load tagged `tag`.
+pub(crate) fn load_intent(tag: Tag, event: LoadEvent) -> AppIntent {
+    match event {
+        LoadEvent::RepoNone => AppIntent::ForgeRepoNone { tag },
+        LoadEvent::Cached { repo, badges } => AppIntent::PullRequestsCached { tag, repo, badges },
+        LoadEvent::Fetched {
+            result,
+            limited_until,
+        } => AppIntent::PullRequestsFetched {
+            tag,
+            result,
+            limited_until,
+        },
     }
 }
 
@@ -195,6 +210,150 @@ mod tests {
         git.assert_done();
         assert_eq!(gh.calls(), []);
         assert!(!cache_dir.exists());
+    }
+
+    #[test]
+    fn load_intent_carries_the_tag_and_each_event_as_is() {
+        use super::load_intent;
+        use crate::forge::task::LoadEvent;
+        use std::collections::HashMap;
+
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        let badges = HashMap::from([(
+            "main".into(),
+            crate::forge::PrBadge {
+                number: 7,
+                state: crate::forge::PrState::Open,
+                ci: None,
+            },
+        )]);
+        assert_eq!(
+            load_intent(forge_tag(), LoadEvent::RepoNone),
+            AppIntent::ForgeRepoNone { tag: forge_tag() }
+        );
+        assert_eq!(
+            load_intent(
+                forge_tag(),
+                LoadEvent::Cached {
+                    repo: repo.clone(),
+                    badges: Some(badges.clone()),
+                }
+            ),
+            AppIntent::PullRequestsCached {
+                tag: forge_tag(),
+                repo,
+                badges: Some(badges.clone()),
+            }
+        );
+        for (result, limited_until) in [
+            (Ok(badges), None),
+            (Err(ForgeStatus::RateLimited), Some(1_700_000_000)),
+        ] {
+            assert_eq!(
+                load_intent(
+                    forge_tag(),
+                    LoadEvent::Fetched {
+                        result: result.clone(),
+                        limited_until,
+                    }
+                ),
+                AppIntent::PullRequestsFetched {
+                    tag: forge_tag(),
+                    result,
+                    limited_until,
+                }
+            );
+        }
+    }
+
+    /// `gh` holds a token and prints it; none of it may reach the app
+    /// state or the screen. The log, the cache and the forge state are
+    /// checked by `forge::task`'s own test.
+    #[test]
+    fn a_token_never_reaches_the_app_state_or_the_screen() {
+        use super::load_intent;
+        use crate::forge::github::fixtures::{SECRET_TOKEN as SENTINEL, leaky_gh};
+        use crate::forge::task::{Load, run_load};
+        use crate::forge::{ForgeStatus, ForgeView};
+        use crate::git::branches::BranchName;
+        use crate::git::fake::{TempDir, ok};
+        use crate::git::forge_remote::UPSTREAMS_ARGV;
+        use crate::test_support::{draw_branches, forge_state};
+
+        let tmp = TempDir::new("forge-secret-app");
+        let gh = Arc::new(leaky_gh());
+        let ctx = ForgeContext {
+            gh: gh.clone(),
+            sink: CommandSink::new(),
+            cache_dir: Some(tmp.path().join("forge")),
+        };
+        let branches: Vec<BranchName> = vec!["main".into()];
+        let mut state = forge_state(&branches);
+        for _ in 0..2 {
+            state.forge.want_refresh();
+            let effects = state.load_pull_requests();
+            let [
+                Effect::LoadPullRequests {
+                    tag,
+                    hosts,
+                    branches,
+                    refresh,
+                    known,
+                    limited,
+                },
+            ] = effects.as_slice()
+            else {
+                panic!("{effects:?}");
+            };
+            let git = FakeRunner::new()
+                .expect(&["remote"], ok(b"origin\n"))
+                .expect(
+                    &["config", "-z", "--get", "remote.origin.url"],
+                    ok(b"https://x:pw_USERINFO@github.com/acme/widgets\0"),
+                )
+                .expect(&UPSTREAMS_ARGV, ok(b""));
+            let load = Load {
+                hosts,
+                branches,
+                refresh: *refresh,
+                known: known.as_ref(),
+                limited,
+                top: Some(tmp.path().to_path_buf()),
+                now: 1_700_000_000,
+            };
+            let sent = Mutex::new(Vec::new());
+            run_load(&git, &ctx, &load, &|event| {
+                sent.lock().unwrap().push(load_intent(*tag, event));
+            });
+            git.assert_done();
+            for intent in sent.into_inner().unwrap() {
+                state.update(intent);
+            }
+        }
+        // The token was there to leak, and the second load got as far as
+        // GitHub's refusal.
+        assert!(gh.saw_env("GH_TOKEN", SENTINEL));
+        assert_eq!(gh.calls().len(), 4);
+        assert_eq!(
+            state.forge.status,
+            ForgeView::Problem(ForgeStatus::NotLoggedIn)
+        );
+        let secrets = [SENTINEL, "pw_USERINFO", "etag_VALUE"];
+        let text = format!("{state:?}");
+        assert!(secrets.iter().all(|s| !text.contains(s)), "state leaks");
+        let rows = draw_branches(&state, 80, 12);
+        assert!(
+            rows.iter().all(|r| secrets.iter().all(|s| !r.contains(s))),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("GitHub: not logged in")),
+            "{rows:?}"
+        );
     }
 
     #[tokio::test]

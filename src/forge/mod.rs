@@ -19,7 +19,6 @@ pub mod url;
 
 use std::collections::HashMap;
 
-use crate::effect::{Effect, Tag};
 use crate::git::branches::BranchName;
 use allow::AllowRule;
 
@@ -205,6 +204,25 @@ pub enum ForgeView {
     Problem(ForgeStatus),
 }
 
+/// The number of a pull-request load. Answers to any load but the
+/// latest are dropped; the caller decides what a number belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadSeq(pub u64);
+
+/// What one load needs to run, as [`ForgeState::load`] decided it. The
+/// caller turns it into its own effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadRequest {
+    pub hosts: Vec<ForgeHost>,
+    pub branches: Vec<BranchName>,
+    /// Ask the forge, not only the cache.
+    pub refresh: bool,
+    /// The repository an earlier load found; the remote is then not read.
+    pub known: Option<ForgeRepo>,
+    /// Hosts rate limited until the given second; not asked before it.
+    pub limited: Vec<(ForgeHost, i64)>,
+}
+
 /// Pull requests by local branch, for the repository open now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgeState {
@@ -283,9 +301,9 @@ impl ForgeState {
             .collect();
     }
 
-    /// The load to start under `tag`, or none: when off, or while a call
+    /// The load to start as `seq`, or none: when off, or while a call
     /// runs (a wanted refresh then waits for it to end).
-    pub fn load(&mut self, tag: Tag) -> Option<Effect> {
+    pub fn load(&mut self, seq: impl Into<LoadSeq>) -> Option<LoadRequest> {
         // A repository on no configured host has nothing cached either;
         // only a refresh looks at its remote again.
         if !self.enabled() || self.in_flight || (self.unmatched && !self.refresh_wanted) {
@@ -296,9 +314,8 @@ impl ForgeState {
             self.in_flight = true;
             self.status = ForgeView::Updating;
         }
-        self.seq = Some(tag.seq);
-        Some(Effect::LoadPullRequests {
-            tag,
+        self.seq = Some(seq.into().0);
+        Some(LoadRequest {
             hosts: self.hosts.clone(),
             branches: self.branches.clone(),
             refresh,
@@ -312,13 +329,13 @@ impl ForgeState {
         })
     }
 
-    fn current(&self, tag: Tag) -> bool {
-        self.seq == Some(tag.seq)
+    fn current(&self, seq: LoadSeq) -> bool {
+        self.seq == Some(seq.0)
     }
 
     /// The remote matched none of the hosts: show nothing, as when off.
-    pub fn repo_none(&mut self, tag: Tag) {
-        if !self.current(tag) {
+    pub fn repo_none(&mut self, seq: impl Into<LoadSeq>) {
+        if !self.current(seq.into()) {
             return;
         }
         self.repo = None;
@@ -331,11 +348,11 @@ impl ForgeState {
     /// The cache's badges, shown at once. A miss keeps what is shown.
     pub fn cached(
         &mut self,
-        tag: Tag,
+        seq: impl Into<LoadSeq>,
         repo: ForgeRepo,
         badges: Option<HashMap<BranchName, PrBadge>>,
     ) {
-        if !self.current(tag) {
+        if !self.current(seq.into()) {
             return;
         }
         self.repo = Some(repo);
@@ -355,11 +372,12 @@ impl ForgeState {
     /// clears it.
     pub fn fetched(
         &mut self,
-        tag: Tag,
+        seq: impl Into<LoadSeq>,
         result: Result<HashMap<BranchName, PrBadge>, ForgeStatus>,
         limited_until: Option<i64>,
     ) {
-        if !self.current(tag) {
+        let seq = seq.into();
+        if !self.current(seq) {
             return;
         }
         self.in_flight = false;
@@ -370,7 +388,7 @@ impl ForgeState {
                 self.badges = badges;
                 // A load started after the create answers for it.
                 self.created
-                    .retain(|_, (_, known_from)| tag.seq < *known_from);
+                    .retain(|_, (_, known_from)| seq.0 < *known_from);
                 self.show_created();
                 self.status = ForgeView::Fresh;
                 if let Some(host) = host {
@@ -427,6 +445,68 @@ pub(crate) mod tests {
 
     fn github() -> Vec<ForgeHost> {
         vec![ForgeHost::parse("github.com").unwrap()]
+    }
+
+    fn widgets() -> ForgeRepo {
+        ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        }
+    }
+
+    #[test]
+    fn a_load_asks_for_what_the_state_knows_and_drops_stale_answers() {
+        let mut forge = ForgeState::new(github());
+        forge.set_branches([&BranchName::from("main")]);
+        forge.limited.insert("github.com".into(), 99);
+
+        // The first load refreshes: the remote is read again, a call runs.
+        let request = forge.load(LoadSeq(1)).unwrap();
+        assert_eq!(
+            request,
+            LoadRequest {
+                hosts: github(),
+                branches: vec!["main".into()],
+                refresh: true,
+                known: None,
+                limited: vec![(github()[0].clone(), 99)],
+            }
+        );
+        assert!(forge.in_flight);
+        assert_eq!(forge.status, ForgeView::Updating);
+        assert_eq!(forge.seq, Some(1));
+        // While it runs, no other load starts.
+        assert_eq!(forge.load(LoadSeq(2)), None);
+        assert_eq!(forge.seq, Some(1));
+
+        forge.cached(LoadSeq(1), widgets(), None);
+        forge.fetched(LoadSeq(1), Ok(HashMap::new()), None);
+        assert!(!forge.in_flight);
+        assert_eq!(forge.status, ForgeView::Fresh);
+
+        // A later load that is no refresh names the repository found and
+        // leaves the status as it is.
+        let request = forge.load(LoadSeq(2)).unwrap();
+        assert!(!request.refresh);
+        assert_eq!(request.known, Some(widgets()));
+        assert!(!forge.in_flight);
+        assert_eq!(forge.status, ForgeView::Fresh);
+        assert_eq!(forge.seq, Some(2));
+
+        // Answers to the older load change nothing.
+        let before = forge.clone();
+        forge.repo_none(LoadSeq(1));
+        forge.cached(
+            LoadSeq(1),
+            ForgeRepo {
+                name: "other".into(),
+                ..widgets()
+            },
+            None,
+        );
+        forge.fetched(LoadSeq(1), Err(ForgeStatus::Failed), Some(5));
+        assert_eq!(forge, before);
     }
 
     #[test]
