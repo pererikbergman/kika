@@ -150,7 +150,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commits::CommitsTab;
+    use crate::features::commits::CommitsTab;
     use crate::git::repo_state::Operation;
     use crate::git::status::{BranchStatus, Head};
     use crate::intent::AppIntent;

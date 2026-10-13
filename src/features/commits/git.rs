@@ -1,11 +1,11 @@
 //! Where every local branch points, so a history rewrite can tell which
 //! branches sit on the commits it would replace.
 
-use super::commit_files::CommitId;
-use super::diff::terminal_safe;
-use super::log::CommitRow;
-use super::rebase_plan::branch_name;
-use super::runner::{GitCommand, GitRunner};
+use crate::git::commit_files::CommitId;
+use crate::git::diff::terminal_safe;
+use crate::git::log::CommitRow;
+use crate::git::rebase_plan::branch_name;
+use crate::git::runner::{GitCommand, GitRunner};
 
 /// One branch tip: the commit and the full ref name, raw bytes, as
 /// `refs/heads/<name>`.

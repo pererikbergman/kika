@@ -29,8 +29,7 @@
 //! - `no_commit_selected` and `no_branch_selected`: `menu.rs`, `model.rs`
 //!   and the pull-request feature use them too;
 //! - the view tests that draw the mark and a comparison's title, which
-//!   test core render code in `commits_view.rs` and the Branches
-//!   feature's `view.rs`;
+//!   test the parent's `view.rs` and the Branches feature's `view.rs`;
 //! - the open-commit path that calls `open_comparison` when a mark is
 //!   set, and the Esc chain that clears the mark, both in `model.rs`;
 //! - the `ResolveDiff` runtime test in `effect.rs`, and the keymap tests
