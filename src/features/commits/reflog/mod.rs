@@ -27,10 +27,10 @@
 //! What stays elsewhere, and why:
 //! - `CommitsTab`, `COMMITS_SWITCH_TAB` and `switch_commits_tab` are in
 //!   the parent `commits`: the tabs belong to the Commits panel;
-//! - in core: `KeyScope::Reflog`/`KeyScope::Travel`, `Popup::Travel`,
-//!   `TravelConfirm` and its rendering in `popup_view.rs`, and the
-//!   reflog branches of `key_focus`, `open_filter`, the filter apply and
-//!   `list_escape`: shared core dispatch;
+//! - in core: `KeyScope::Reflog`/`KeyScope::Travel`, the confirm question
+//!   module (`confirm_question.rs`) the undo/redo question is built on,
+//!   and the reflog branches of `key_focus`, `open_filter`, the filter
+//!   apply and `list_escape`: shared core dispatch;
 //! - the `GitOp::Travel` variant, the `HEAD_MOVED` check in `run_op`,
 //!   `failure_title`/`failure_next` and the refresh plan (`refresh.rs`);
 //! - the fixtures in `src/git/fixtures/reflog/`, which core `view.rs` and
@@ -47,3 +47,6 @@ pub(crate) mod view;
 pub(crate) use git::Reflog;
 pub(crate) use list::ReflogList;
 pub(crate) use undo::{Direction, Expected, Step};
+// Core's popup tests build the question as the feature asks it.
+#[cfg(test)]
+pub(crate) use update::travel_question;

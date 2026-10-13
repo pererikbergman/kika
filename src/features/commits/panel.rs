@@ -59,9 +59,6 @@ pub struct CommitsPanel {
     /// A commit opened to its files, shown in place of the log. `selected`
     /// stays where it was, so closing it returns to the same commit.
     pub open: Option<CommitFilesList>,
-    /// The commit an open question is about, kept from when it was asked,
-    /// since the question itself carries no data.
-    pub pending: Option<CommitId>,
     /// Where every local branch points, to tell which sit on commits a
     /// rewrite would replace. Loaded with page 0; `None` until it is, or
     /// when it failed.

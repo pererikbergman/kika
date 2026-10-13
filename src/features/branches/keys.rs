@@ -4,13 +4,14 @@
 //! switching tabs. `CHUNKS` in `keymap.rs` places every chunk, so their
 //! position there is behaviour.
 
+use crate::confirm_question::{Answer, ConfirmQuestion};
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, Reason, branch_action_disabled, branch_selected_disabled,
     list_guard, never, op_running,
 };
 use crate::model::AppState;
-use crate::popup::{DeleteBranchConfirm, Popup};
+use crate::popup::Popup;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// Why no branch can be created from the selected one now: creating it
@@ -57,9 +58,9 @@ pub(crate) fn unset_upstream_disabled(state: &AppState) -> Option<Reason> {
 }
 
 /// The delete question on top, if one is.
-fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
+fn delete_question(state: &AppState) -> Option<&ConfirmQuestion> {
     match state.popups.last() {
-        Some(Popup::DeleteBranch(confirm)) => Some(confirm),
+        Some(Popup::Question(q)) if q.scope == KeyScope::DeleteBranch => Some(q),
         _ => None,
     }
 }
@@ -67,14 +68,14 @@ fn delete_question(state: &AppState) -> Option<&DeleteBranchConfirm> {
 /// `y` deletes only a merged branch; an unmerged one needs `D`.
 fn plain_delete_disabled(state: &AppState) -> Option<Reason> {
     delete_question(state)
-        .is_some_and(DeleteBranchConfirm::force)
+        .is_some_and(|q| q.answer == Answer::Force)
         .then_some("Not fully merged: press D to force delete".into())
 }
 
 /// `D` answers only the stronger question, about an unmerged branch.
 fn force_delete_disabled(state: &AppState) -> Option<Reason> {
     delete_question(state)
-        .is_some_and(|c| !c.force())
+        .is_some_and(|q| q.answer != Answer::Force)
         .then_some("Fully merged: press y to delete".into())
 }
 
@@ -206,7 +207,7 @@ pub(crate) static BRANCHES_DELETE_CONFIRM: &[Binding] = &[
     // As with discarding, Enter is left unbound: a delete cannot be undone.
     Binding {
         id: "delete_branch.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DeleteBranch,
         intent: AppIntent::ConfirmDeleteBranch { force: false },
         description: "Yes, delete the merged branch",
@@ -216,7 +217,7 @@ pub(crate) static BRANCHES_DELETE_CONFIRM: &[Binding] = &[
     },
     Binding {
         id: "delete_branch.force",
-        keys: &[KeyPattern::any(KeyCode::Char('D'))],
+        keys: Answer::Force.keys(),
         scope: KeyScope::DeleteBranch,
         intent: AppIntent::ConfirmDeleteBranch { force: true },
         description: "Yes, delete the branch and its unmerged commits",
@@ -258,16 +259,16 @@ mod tests {
 
     #[test]
     fn the_delete_question_lets_only_the_matching_key_answer() {
-        use crate::popup::DeleteBranchConfirm;
+        use crate::features::branches::update::delete_branch_question;
         let mut state = AppState::new(Context::Workspace);
         let ask = |force| {
-            Popup::DeleteBranch(DeleteBranchConfirm {
-                name: "t".into(),
-                op: crate::op::GitOp::DeleteBranch {
+            Popup::Question(delete_branch_question(
+                "t".into(),
+                crate::op::GitOp::DeleteBranch {
                     name: "t".into(),
                     force,
                 },
-            })
+            ))
         };
         let resolve_in = |state: &AppState, key| {
             resolve(

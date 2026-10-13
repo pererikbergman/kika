@@ -4,6 +4,7 @@
 //! is behaviour. The push guard and its helpers stay in core, because sync
 //! starts the push through them too.
 
+use crate::confirm_question::Answer;
 use crate::git::commit_files::CommitId;
 use crate::intent::AppIntent;
 use crate::keymap::{
@@ -137,7 +138,7 @@ pub(crate) static TAGS_DELETE_CONFIRM: &[Binding] = &[
     // cannot be listed again to undo it.
     Binding {
         id: "delete_tag.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DeleteTag,
         intent: AppIntent::ConfirmDeleteTag,
         description: "Yes, delete the tag here",
@@ -224,13 +225,13 @@ mod tests {
     #[test]
     fn the_delete_tag_question_answers_only_to_y_n_and_esc() {
         let mut state = AppState::new(Context::Workspace);
-        state.popups = vec![Popup::DeleteTag(crate::popup::DeleteTagConfirm {
-            name: "v1".into(),
-            op: crate::op::GitOp::DeleteTag {
+        state.popups = vec![Popup::Question(super::super::update::delete_tag_question(
+            "v1".into(),
+            crate::op::GitOp::DeleteTag {
                 name: "v1".into(),
                 oid: "1".repeat(40),
             },
-        })];
+        ))];
         let resolve_in = |key| {
             resolve(
                 registry(),

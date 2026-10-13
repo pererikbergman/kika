@@ -5,6 +5,7 @@
 //! there is behaviour.
 
 use super::push::{self, leading_dirs};
+use crate::confirm_question::Answer;
 use crate::git::FileEntry;
 use crate::git::path::RepoPath;
 use crate::git::status::EntryKind;
@@ -327,7 +328,7 @@ pub(crate) static STASH_DROP_CONFIRM: &[Binding] = &[
     // from the list.
     Binding {
         id: "drop_stash.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DropStash,
         intent: AppIntent::ConfirmDropStash,
         description: "Yes, drop the stash",

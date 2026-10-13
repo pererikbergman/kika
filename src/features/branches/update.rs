@@ -5,12 +5,13 @@
 
 use super::BranchesTab;
 use super::keys;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::keymap;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{DeleteBranchConfirm, LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind};
 use crate::refresh::{RefreshPlan, Scope};
 
 /// The Branches panel: loading the list and the selected branch's log,
@@ -226,27 +227,21 @@ impl AppState {
         let Some(branch) = self.branches.selected_branch() else {
             return;
         };
-        let confirm = DeleteBranchConfirm {
-            name: branch.name.display(),
-            op: GitOp::DeleteBranch {
+        let question = delete_branch_question(
+            branch.name.display(),
+            GitOp::DeleteBranch {
                 name: branch.name.clone(),
                 force: !branch.merged,
             },
-        };
-        self.popups.push(Popup::DeleteBranch(confirm));
+        );
+        self.popups.push(Popup::Question(question));
     }
 
     /// Delete as the open question asked: `force` must match it, so `y`
-    /// never deletes unmerged commits.
+    /// never deletes unmerged commits; a mismatched key leaves it open.
     pub(crate) fn confirm_delete_branch(&mut self, force: bool) -> Vec<Effect> {
-        match self.popups.last() {
-            Some(Popup::DeleteBranch(confirm)) if confirm.force() == force => {}
-            _ => return vec![],
-        }
-        let Some(Popup::DeleteBranch(confirm)) = self.popups.pop() else {
-            return vec![];
-        };
-        self.start_op(Ok(Some(confirm.op)))
+        let answer = if force { Answer::Force } else { Answer::YOnly };
+        self.answer_question(KeyScope::DeleteBranch, answer)
     }
 
     /// Ask which remote branch the selected branch should track, starting
@@ -303,8 +298,41 @@ impl AppState {
     }
 }
 
+/// "Delete this branch?", carrying the op chosen when it was asked.
+/// `name` is the branch's display name, already terminal-safe. A branch
+/// whose commits are not merged is asked about in stronger words, and
+/// only a force delete (`D`) answers it.
+pub(crate) fn delete_branch_question(name: String, op: GitOp) -> ConfirmQuestion {
+    let (title, text, answer) = if matches!(op, GitOp::DeleteBranch { force: true, .. }) {
+        (
+            "Force delete branch",
+            format!(
+                "{name} is not fully merged; its commits may be lost.\n\
+                 Press D to force delete, n or Esc to cancel"
+            ),
+            Answer::Force,
+        )
+    } else {
+        (
+            "Delete branch",
+            format!("Delete branch {name}? (y/n)"),
+            Answer::YOnly,
+        )
+    };
+    ConfirmQuestion {
+        scope: KeyScope::DeleteBranch,
+        title: title.into(),
+        text,
+        answer,
+        then: Then::Op(op),
+        range: false,
+        head: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::confirm_question::Answer;
     use crate::effect::Effect;
     use crate::features::branches::BranchesTab;
     use crate::git::branches::LogRow;
@@ -541,7 +569,7 @@ mod tests {
         state.update(AppIntent::BranchNext);
         press_char(&mut state, 'd');
         match state.popups.as_slice() {
-            [Popup::DeleteBranch(confirm)] => assert!(confirm.force()),
+            [Popup::Question(q)] => assert_eq!(q.answer, Answer::Force),
             other => panic!("expected the delete question, got {other:?}"),
         }
 

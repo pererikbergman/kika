@@ -11,6 +11,7 @@ use super::{
     Rewrite, autosquash_disabled, create_fixup_disabled, find_base_disabled,
     range_rewrite_disabled, rewrite_disabled,
 };
+use crate::confirm_question::Answer;
 use crate::git::rebase_plan::{Direction, Edit};
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
@@ -230,7 +231,7 @@ pub(crate) static REWRITE_LEAVE_COMMITS_CONFIRM: &[Binding] = &[
     // are only in the reflog.
     Binding {
         id: "leave_commits.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::LeaveCommits,
         intent: AppIntent::ConfirmLeaveCommits,
         description: "Yes, move HEAD and leave the commits behind",

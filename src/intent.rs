@@ -813,8 +813,6 @@ pub enum AppIntent {
     LogOfFile,
     /// Ask before checking out the selected commit as a detached `HEAD`.
     CheckoutCommit,
-    /// Check out the commit the question was about.
-    ConfirmCheckoutCommit,
     /// Make a commit that undoes the selected one.
     RevertCommit,
     /// Reset the current branch to the selected commit. A hard reset asks

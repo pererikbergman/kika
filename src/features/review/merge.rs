@@ -4,6 +4,7 @@
 //! only on a host the global config lists.
 
 use super::state::{NO_FORGE, ReviewScreen};
+use crate::confirm_question::{Answer, Then};
 use crate::effect::{Effect, Tag};
 use crate::forge::merge::{MergeMethod, merge_options};
 use crate::forge::remote::allowed;
@@ -11,7 +12,7 @@ use crate::forge::review::MergeState;
 use crate::forge::{
     CreateError, ForgeHost, ForgeRepo, PrBadge, PrState, REFRESH_LIMITED, same_repo,
 };
-use crate::keymap::Reason;
+use crate::keymap::{KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, MergePrConfirm, Popup};
@@ -113,7 +114,7 @@ impl AppState {
             unstable: detail.merge_state == MergeState::Unstable,
         };
         if methods.len() == 1 {
-            self.popups.push(Popup::MergePullRequest(confirm));
+            self.popups.push(Popup::Question(confirm.into_question()));
             return;
         }
         let rows = methods.iter().map(|m| m.label().to_string()).collect();
@@ -132,17 +133,17 @@ impl AppState {
         };
         if let Some(&method) = methods.get(row) {
             confirm.method = method;
-            self.popups.push(Popup::MergePullRequest(confirm));
+            self.popups.push(Popup::Question(confirm.into_question()));
         }
     }
 
     /// `y`: ask GitHub to merge what the question described, unless its
     /// host has since left the config or become rate limited.
     pub(crate) fn confirm_merge_pr(&mut self) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::MergePullRequest(_))) {
-            return vec![];
-        }
-        let Some(Popup::MergePullRequest(confirm)) = self.popups.pop() else {
+        let Some(Then::MergePr(confirm)) = self
+            .take_question(KeyScope::MergePullRequest, Answer::YOnly)
+            .map(|q| q.then)
+        else {
             return vec![];
         };
         if self.pr_merge.is_some() {
@@ -266,6 +267,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
+    use crate::confirm_question::ConfirmQuestion;
     use crate::features::review::state::tests::{fixture_detail, in_queues, press, repo};
     use crate::forge::review::{MergeState, Mergeability, PrDetail, QueueKind};
     use crate::forge::{CiState, ForgeView};
@@ -310,10 +312,17 @@ mod tests {
         )))
     }
 
-    fn top_confirm(state: &AppState) -> &MergePrConfirm {
+    fn top_question(state: &AppState) -> &ConfirmQuestion {
         match state.popups.last() {
-            Some(Popup::MergePullRequest(confirm)) => confirm,
+            Some(Popup::Question(q)) if q.scope == KeyScope::MergePullRequest => q,
             other => panic!("expected the merge question, got {other:?}"),
+        }
+    }
+
+    fn top_confirm(state: &AppState) -> &MergePrConfirm {
+        match &top_question(state).then {
+            Then::MergePr(confirm) => confirm,
+            other => panic!("expected a merge, got {other:?}"),
         }
     }
 
@@ -359,10 +368,7 @@ mod tests {
         // Enter and the review keys do nothing here.
         for code in [KeyCode::Enter, KeyCode::Char('r'), KeyCode::Char('M')] {
             assert!(merges(&press(&mut state, code)).is_empty(), "{code:?}");
-            assert!(matches!(
-                state.popups.last(),
-                Some(Popup::MergePullRequest(_))
-            ));
+            top_question(&state);
         }
         let busy = state.busy_count();
         let (tag, number, method, head) = confirmed(&mut state);
@@ -496,10 +502,7 @@ mod tests {
         // Left out between the question and `y`: no merge.
         let mut state = on_detail(squash_only);
         shift_m(&mut state);
-        assert!(matches!(
-            state.popups.last(),
-            Some(Popup::MergePullRequest(_))
-        ));
+        top_question(&state);
         state.forge.hosts = vec![ForgeHost::parse("github.com").unwrap().with_allow(other())];
         assert!(press(&mut state, KeyCode::Char('y')).is_empty());
         assert!(state.pr_merge.is_none());
@@ -534,7 +537,7 @@ mod tests {
             pr.merge_state = MergeState::Unstable;
         });
         shift_m(&mut state);
-        let question = top_confirm(&state).question();
+        let question = &top_question(&state).text;
         assert!(question.starts_with("Press y to merge"), "{question}");
         assert!(
             question.contains("Merge #12 Add widget caching into main by squash?"),
@@ -546,7 +549,7 @@ mod tests {
         );
         let mut state = on_detail(squash_only);
         shift_m(&mut state);
-        assert!(!top_confirm(&state).question().contains("checks"));
+        assert!(!top_question(&state).text.contains("checks"));
     }
 
     /// The fixture's workspace with local `topic` showing #12's badge.

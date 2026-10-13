@@ -6,6 +6,7 @@ use std::sync::LazyLock;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::confirm_question::Answer;
 use crate::features::branches::{self, remotes, tags};
 use crate::features::commits::CommitFilesList;
 use crate::features::custom_commands::{CommandTable, CustomCommand};
@@ -1828,10 +1829,7 @@ static CORE_POPUPS: &[Binding] = &[
     },
     Binding {
         id: "confirm.yes",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('y'), NONE),
-            KeyPattern::any(KeyCode::Enter),
-        ],
+        keys: Answer::YOrEnter.keys(),
         scope: KeyScope::Confirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes",
@@ -1916,7 +1914,7 @@ static BRANCHES_DELETE_RANGE_CONFIRM: &[Binding] = &[
     // Only `y` deletes a range: Enter is left unbound, as for one branch.
     Binding {
         id: "delete_range.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DeleteRange,
         intent: AppIntent::ConfirmDeleteRange,
         description: "Yes, delete what the question names",
