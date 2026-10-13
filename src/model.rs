@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
 use crate::diff_mark::DiffMark;
-use crate::diff_pane::{DiffPane, DiffStart};
+use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
 use crate::effect::{Effect, Tag};
 use crate::features::blame::BlameView;
 use crate::features::branches::remotes::RemotePending;
@@ -124,8 +124,9 @@ pub enum Focus {
     Branches,
     Commits,
     Stash,
-    /// The Diff pane, working on the selected file's hunks.
-    Diff(HunkView),
+    /// The Diff pane, working on the selected file's hunks. The hunk
+    /// cursor is the pane's own (`DiffPane::hunks`).
+    Diff,
     /// A blame of the selected file, in the Diff pane's place.
     Blame(BlameView),
     /// The selected conflicted file's blocks, in the Diff pane's place.
@@ -153,7 +154,7 @@ impl Focus {
             Focus::Branches => Panel::Side(SidePanel::Branches),
             Focus::Commits => Panel::Side(SidePanel::Commits),
             Focus::Stash => Panel::Side(SidePanel::Stash),
-            Focus::Diff(_) | Focus::Blame(_) | Focus::Conflict(_) => Panel::Diff,
+            Focus::Diff | Focus::Blame(_) | Focus::Conflict(_) => Panel::Diff,
         }
     }
 
@@ -491,7 +492,7 @@ impl AppState {
                     && let Some(rendered) = &mut self.rendered
                 {
                     rendered.scroll(by, rows);
-                } else if let Focus::Diff(view) = &mut self.focus {
+                } else if let Some(view) = self.hunk_view_mut() {
                     view.scroll(by, rows);
                 } else if let Focus::Conflict(view) = &mut self.focus {
                     view.scroll(by, rows);
@@ -1079,8 +1080,8 @@ impl AppState {
             AppIntent::ToggleRange => self.toggle_range(),
             AppIntent::ListEscape => return self.list_escape(),
             AppIntent::DiffEscape if self.review_files_shown() => self.review_diff_escape(),
-            AppIntent::DiffEscape => match &mut self.focus {
-                Focus::Diff(view) if view.search.is_some() => view.search = None,
+            AppIntent::DiffEscape => match self.hunk_view_mut() {
+                Some(view) if view.search.is_some() => view.search = None,
                 _ => return self.update(AppIntent::FocusLeft),
             },
             AppIntent::PaneEscape => return self.pane_escape(),
@@ -1168,8 +1169,12 @@ impl AppState {
             (Context::Workspace, Focus::Status) => KeyScope::Status,
             (Context::Workspace, Focus::Stash) if self.stash.open.is_some() => KeyScope::StashFiles,
             (Context::Workspace, Focus::Stash) => KeyScope::Stash,
-            (Context::Workspace, Focus::Diff(view)) if view.lines.is_some() => KeyScope::Lines,
-            (Context::Workspace, Focus::Diff(_)) => KeyScope::Diff,
+            (Context::Workspace, Focus::Diff)
+                if self.hunk_view().is_some_and(|view| view.lines.is_some()) =>
+            {
+                KeyScope::Lines
+            }
+            (Context::Workspace, Focus::Diff) => KeyScope::Diff,
             (Context::Workspace, Focus::Blame(view)) if view.commit.is_some() => {
                 KeyScope::BlameCommit
             }
@@ -1308,8 +1313,8 @@ impl AppState {
             rendered.map.clear();
             return;
         }
-        rendered.map = match &self.focus {
-            Focus::Diff(view) if view.path == rendered.path && view.side == rendered.side => view
+        rendered.map = match focused_hunks(&self.focus, &self.diff.hunks) {
+            Some(view) if view.path == rendered.path && view.side == rendered.side => view
                 .patch
                 .as_ref()
                 .map(|patch| map_rows(patch, &rendered.rows))
@@ -1414,7 +1419,7 @@ impl AppState {
         if self.context != Context::Workspace || self.op_is_running() {
             return;
         }
-        if matches!(&self.focus, Focus::Diff(view) if view.commit.is_some()) {
+        if self.hunk_view().is_some_and(|view| view.commit.is_some()) {
             self.notice = Some(keymap::NOT_IN_COMMIT.into());
             return;
         }
@@ -1443,12 +1448,12 @@ impl AppState {
             path: path.display().to_string(),
             op,
         };
-        let view = match &self.focus {
-            Focus::Files => {
+        let view = match (&self.focus, self.hunk_view()) {
+            (Focus::Files, _) => {
                 let op = GitOp::discard_for(entry)?;
                 return Ok(op.map(|op| confirm(DiscardWhat::File, &entry.path, op)));
             }
-            Focus::Diff(view) => view,
+            (_, Some(view)) => view,
             // Bound only in Files and the diff; nothing to discard elsewhere.
             _ => return Ok(None),
         };
@@ -1607,7 +1612,7 @@ impl AppState {
         }
         let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
         let mut effects = self.open_diff(request.clone(), start);
-        if let Focus::Diff(view) = &mut self.focus {
+        if let Some(view) = self.hunk_view_mut() {
             // A file that stopped (or started) being untracked has other
             // sides now, so the remembered one no longer applies.
             let untracked = request.side == DiffSide::Untracked;
@@ -1710,7 +1715,7 @@ impl AppState {
             return self.open_conflict();
         }
         let request = DiffRequest::for_entry(entry, self.diff_options);
-        self.focus = Focus::Diff(HunkView::new(request.path, request.side));
+        self.focus_hunk_view(HunkView::new(request.path, request.side));
         let mut effects = self.load_patch();
         self.remap();
         effects.extend(self.render_shown());
@@ -1721,7 +1726,7 @@ impl AppState {
     /// indicator shows and a refused key can say "Loading…".
     pub(crate) fn load_patch(&mut self) -> Vec<Effect> {
         let seq = self.take_seq();
-        let Focus::Diff(view) = &mut self.focus else {
+        let Some(view) = focused_hunks_mut(&self.focus, &mut self.diff.hunks) else {
             return vec![];
         };
         view.seq = Some(seq);
@@ -1738,32 +1743,30 @@ impl AppState {
     }
 
     fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
-        if let Focus::Diff(view) = &self.focus
+        if let Some(view) = self.hunk_view()
             && view.commit.is_some()
         {
             let lines = view.hunk_lines();
             self.patch_toggle_lines(lines);
             return vec![];
         }
-        match &self.focus {
-            Focus::Diff(view) => self.toggle_selection_stage(PatchSelection::Hunk(view.hunk)),
-            _ => vec![],
+        match self.hunk_view() {
+            Some(view) => self.toggle_selection_stage(PatchSelection::Hunk(view.hunk)),
+            None => vec![],
         }
     }
 
     fn toggle_lines_stage(&mut self) -> Vec<Effect> {
-        if let Focus::Diff(view) = &self.focus
+        if let Some(view) = self.hunk_view()
             && view.commit.is_some()
         {
             let lines = view.selected_lines();
             self.patch_toggle_lines(lines);
             return vec![];
         }
-        match &self.focus {
-            Focus::Diff(view) => {
-                self.toggle_selection_stage(PatchSelection::Lines(view.selected_lines()))
-            }
-            _ => vec![],
+        match self.hunk_view() {
+            Some(view) => self.toggle_selection_stage(PatchSelection::Lines(view.selected_lines())),
+            None => vec![],
         }
     }
 
@@ -3595,7 +3598,7 @@ mod tests {
                 let (mut state, _) = with_files(three_files(), 24);
                 press(&mut state, KeyCode::Char('1'));
                 patch_load(&press(&mut state, right));
-                assert!(matches!(state.focus, Focus::Diff(_)), "{right:?}");
+                assert!(matches!(state.focus, Focus::Diff), "{right:?}");
                 // The side panel stays expanded behind the diff.
                 assert_eq!(state.expanded, SidePanel::Status);
                 assert_eq!(press(&mut state, left), vec![], "{left:?}");

@@ -174,8 +174,9 @@ impl AppState {
                 }
             }
             InputTarget::DiffSearch => {
-                if let Focus::Diff(view) = &mut self.focus {
-                    view.set_search(&text, self.emoji_zwj);
+                let emoji = self.emoji_zwj;
+                if let Some(view) = self.hunk_view_mut() {
+                    view.set_search(&text, emoji);
                 }
             }
             InputTarget::PreviewSearch => self.diff.set_search(&text),
@@ -227,15 +228,15 @@ impl AppState {
         }
         let rows = self.diff_rows();
         let mut effects = vec![];
-        let found = match (input.target, &mut self.focus) {
-            (InputTarget::DiffSearch, Focus::Diff(view)) => {
+        let found = match (input.target, &mut self.focus, &mut self.diff.hunks) {
+            (InputTarget::DiffSearch, Focus::Diff, Some(view)) => {
                 let found = !no_matches(&view.search);
                 if found {
                     view.jump_to_match(rows);
                 }
                 found
             }
-            (InputTarget::BlameSearch, Focus::Blame(view)) => {
+            (InputTarget::BlameSearch, Focus::Blame(view), _) => {
                 let found = !no_matches(&view.search);
                 if found {
                     view.jump_to_match(rows);
@@ -248,6 +249,7 @@ impl AppState {
                     commit: Some(commit),
                     ..
                 }),
+                _,
             ) => {
                 let found = !no_matches(&commit.search);
                 if found {
@@ -255,7 +257,7 @@ impl AppState {
                 }
                 found
             }
-            (InputTarget::PreviewSearch, _) => {
+            (InputTarget::PreviewSearch, ..) => {
                 let found = !no_matches(&self.diff.search);
                 if found {
                     effects = self.diff.jump_to_match(rows);
@@ -372,9 +374,9 @@ impl AppState {
 impl AppState {
     /// Type a search for the focused pane, starting from its query.
     pub(crate) fn open_search(&mut self) {
-        let (target, search) = match &self.focus {
-            Focus::Diff(view) => (InputTarget::DiffSearch, &view.search),
-            Focus::Blame(view) => match &view.commit {
+        let (target, search) = match (&self.focus, self.hunk_view()) {
+            (Focus::Diff, Some(view)) => (InputTarget::DiffSearch, &view.search),
+            (Focus::Blame(view), _) => match &view.commit {
                 Some(commit) => (InputTarget::BlameCommitSearch, &commit.search),
                 None => (InputTarget::BlameSearch, &view.search),
             },
@@ -389,24 +391,25 @@ impl AppState {
         let rows = self.diff_rows();
         let mut effects = vec![];
         // `None` when the search found nothing to step to.
-        let wrapped = match (self.panel_focus(), &mut self.focus) {
-            (KeyScope::Diff, Focus::Diff(view)) if no_matches(&view.search) => None,
-            (KeyScope::Diff, Focus::Diff(view)) => Some(view.step_search(back, rows)),
-            (KeyScope::Blame, Focus::Blame(view)) if no_matches(&view.search) => None,
-            (KeyScope::Blame, Focus::Blame(view)) => Some(view.step_search(back, rows)),
+        let wrapped = match (self.panel_focus(), &mut self.focus, &mut self.diff.hunks) {
+            (KeyScope::Diff, Focus::Diff, Some(view)) if no_matches(&view.search) => None,
+            (KeyScope::Diff, Focus::Diff, Some(view)) => Some(view.step_search(back, rows)),
+            (KeyScope::Blame, Focus::Blame(view), _) if no_matches(&view.search) => None,
+            (KeyScope::Blame, Focus::Blame(view), _) => Some(view.step_search(back, rows)),
             (
                 KeyScope::BlameCommit,
                 Focus::Blame(BlameView {
                     commit: Some(commit),
                     ..
                 }),
+                _,
             ) => (!no_matches(&commit.search)).then(|| commit.step_search(back, rows)),
             (
                 KeyScope::Files
                 | KeyScope::CommitFiles
                 | KeyScope::StashFiles
                 | KeyScope::ReviewDiff,
-                _,
+                ..,
             ) => (!no_matches(&self.diff.search)).then(|| {
                 let (wrapped, demand) = self.diff.step_search(back, rows);
                 effects = demand;
@@ -601,7 +604,7 @@ mod tests {
 
         press(&mut state, KeyCode::Esc);
         assert!(
-            matches!(state.focus, Focus::Diff(_)),
+            matches!(state.focus, Focus::Diff),
             "Esc only cleared the search"
         );
         assert_eq!(view(&state).search, None);
@@ -721,7 +724,7 @@ mod tests {
     fn the_diff_pane_and_back_to_files_keeps_the_preview_search() {
         let mut state = files_searching_foo();
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
-        assert!(matches!(state.focus, Focus::Diff(_)), "{:?}", state.focus);
+        assert!(matches!(state.focus, Focus::Diff), "{:?}", state.focus);
         state.update(AppIntent::FocusLeft);
         assert_eq!(state.focus, Focus::Files);
         assert!(state.diff.search.is_some());
@@ -1018,7 +1021,7 @@ mod tests {
         let tag = load_diff_tag(&opened(&mut state, two_commit_files()));
         preview_loaded(&mut state, tag);
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Diff));
-        let Focus::Diff(view) = &state.focus else {
+        let Some(view) = state.hunk_view() else {
             panic!("expected the commit file's hunks, got {:?}", state.focus);
         };
         assert!(view.commit.is_some());

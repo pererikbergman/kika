@@ -12,6 +12,7 @@ use super::files::{FilesFocus, FilesStage, PrFile, PrFiles};
 use super::git::FileCounts;
 use super::markdown;
 use super::state::{NO_FORGE, ReviewProblem, ReviewScreen, ReviewState};
+use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::forge::merge::{MergeBlock, merge_options};
 use crate::forge::review::{
     CheckStatus, Mergeability, PrDetail, PrSummary, QueueKind, ReviewVerdict, ViewedState,
@@ -266,8 +267,8 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let stream = &state.diff;
     let tail = format!(
         "{}{}",
-        view::diff_position(stream),
-        view::found_note(stream.search.as_ref(), !stream.done)
+        diff_position(stream),
+        found_note(stream.search.as_ref(), !stream.done)
     );
     let path = files
         .selected()
@@ -278,7 +279,7 @@ fn files_screen(state: &AppState, files: &PrFiles, frame: &mut Frame, inner: Rec
     let block = view::panel_block(title, files.focus == FilesFocus::Diff);
     let diff_inner = block.inner(diff);
     let body = match &files.stage {
-        FilesStage::Ready => view::diff_pane_body(&state.diff, diff_inner),
+        FilesStage::Ready => diff_pane_body(&state.diff, diff_inner),
         FilesStage::Failed(_) => Paragraph::new(Line::styled("No diff to show", dim())),
         _ => Paragraph::new(Line::styled(
             "The diff shows once the files are listed",
@@ -1009,8 +1010,8 @@ mod tests {
         };
         let current = style_of("-old cache");
         let other = style_of("+new cache");
-        assert_eq!(current.bg, crate::view::CURRENT_MATCH.bg);
-        assert_eq!(other.bg, crate::view::MATCH.bg);
+        assert_eq!(current.bg, crate::diff_pane_view::CURRENT_MATCH.bg);
+        assert_eq!(other.bg, crate::diff_pane_view::MATCH.bg);
     }
 
     #[test]

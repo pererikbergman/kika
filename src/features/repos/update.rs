@@ -180,7 +180,7 @@ impl AppState {
         if let Some(index) = parked.selected.filter(|&i| i < self.files.len()) {
             if parked.diff_focused {
                 let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
-                self.focus = Focus::Diff(HunkView::new(request.path, request.side));
+                self.focus_hunk_view(HunkView::new(request.path, request.side));
             }
             effects.extend(self.select(index));
         }
@@ -200,7 +200,7 @@ impl AppState {
             files_loaded: self.files_loaded,
             branch: self.branch.take(),
             selected: self.selected.take(),
-            diff_focused: matches!(self.focus, Focus::Diff(_)),
+            diff_focused: self.focus == Focus::Diff,
         }
     }
 }
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(state.popups, []);
 
         press(&mut state, KeyCode::Enter);
-        assert!(matches!(state.focus, Focus::Diff(_)));
+        assert!(matches!(state.focus, Focus::Diff));
         assert!(matches!(state.update(o)[..], [Effect::LoadRecent { .. }]));
         assert_eq!(state.key_focus(), KeyScope::Recent);
     }
@@ -525,7 +525,7 @@ mod tests {
         let files = state.files.clone();
         let branch = state.branch.clone();
         press(&mut state, KeyCode::Enter);
-        assert!(matches!(state.focus, Focus::Diff(_)));
+        assert!(matches!(state.focus, Focus::Diff));
 
         state.update(AppIntent::OpenRepo("/r/b".into()));
         let tag = refresh_tag(&mut state);
@@ -537,9 +537,9 @@ mod tests {
         assert!(state.files_loaded);
         assert_eq!(state.branch, branch);
         assert_eq!(state.selected, Some(1));
-        match &state.focus {
-            Focus::Diff(view) => assert_eq!(view.path, "b.rs".into()),
-            other => panic!("expected the Diff pane, got {other:?}"),
+        match state.hunk_view() {
+            Some(view) => assert_eq!(view.path, "b.rs".into()),
+            None => panic!("expected the Diff pane, got {:?}", state.focus),
         }
         assert!(matches!(effects[0], Effect::SetRepo { .. }));
         assert!(matches!(effects[1], Effect::RecordRecent { .. }));

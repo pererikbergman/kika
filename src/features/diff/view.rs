@@ -6,9 +6,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use crate::diff_pane::DiffPane;
+use crate::diff_pane_view::{diff_pane_body, diff_position, found_note};
 use crate::git::diff::{DiffOptions, DiffSide};
 use crate::hunk_view::HunkView;
-use crate::view::{PanelLook, diff_pane_body, diff_position, found_note};
+use crate::view::PanelLook;
 
 /// The diff options that differ from the defaults, for the pane title, so
 /// a changed setting is never mistaken for the file's real diff.
