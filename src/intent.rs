@@ -44,7 +44,7 @@ use crate::layout::Panel;
 use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
 use crate::op::{GitOp, MergeStrategy, ResetMode};
-use crate::popup::{ConfirmKind, PromptKind};
+use crate::popup::PromptKind;
 use crate::prompts::PromptFacts;
 use crate::watch::WatchEvent;
 
@@ -91,8 +91,10 @@ pub enum AppIntent {
     MenuPrev,
     /// Run the item under the top menu's cursor.
     MenuSelect,
-    /// Ask a yes/no question; the answer comes back as the kind's intent.
-    Ask(ConfirmKind),
+    /// Ask "Quit Kika?" (the menu's Quit item).
+    AskQuit,
+    /// Ask before resetting the bisect (the Bisect menu's reset item).
+    AskBisectReset,
     ConfirmYes,
     ConfirmNo,
     /// Ask for a line of text; the text comes back as the kind's intent.

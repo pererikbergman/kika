@@ -185,6 +185,19 @@ impl AppState {
         let tag = tag.name.clone();
         self.start_remote(RemoteOp::PushTag { remote, tag })
     }
+
+    /// Closing a tag's name or message prompt forgets the tag.
+    pub(crate) fn tags_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::TagName | PromptKind::TagMessage,
+                ..
+            }
+        ) {
+            self.branches.pending_tag = None;
+        }
+    }
 }
 
 /// "Delete this tag?", carrying the op chosen when it was asked, so a
@@ -417,6 +430,27 @@ mod tests {
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, [], "{key:?}");
             assert_eq!(state.update(AppIntent::ConfirmDeleteTag), vec![]);
+        }
+    }
+
+    #[test]
+    fn closing_a_tag_prompt_forgets_the_tag() {
+        use crate::features::branches::tags::PendingTag;
+        use crate::popup::LineInput;
+        for kind in [PromptKind::TagName, PromptKind::TagMessage] {
+            let mut state = AppState::new(Context::Workspace);
+            state.branches.pending_tag = Some(PendingTag {
+                target: cid("c1"),
+                annotated: true,
+                name: None,
+            });
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            assert_eq!(state.branches.pending_tag, None, "{kind:?}");
         }
     }
 }

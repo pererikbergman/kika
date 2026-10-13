@@ -7,6 +7,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{PatchAction, PatchChoice};
+use crate::confirm_question::Answer;
 use crate::features::commits::with_stacked_branches;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::git::patch::PatchError;
@@ -182,7 +183,7 @@ pub(crate) static CUSTOM_PATCH_CONFIRM: &[Binding] = &[
     // user may not be looking at.
     Binding {
         id: "patch_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::PatchConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, rewrite the history with the custom patch",

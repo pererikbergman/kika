@@ -296,6 +296,20 @@ impl AppState {
             .map(GitOp::UnsetUpstream);
         self.start_op(Ok(op))
     }
+
+    /// Closing a branch name or upstream prompt forgets the branch it was
+    /// asked for.
+    pub(crate) fn branches_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::NewBranch | PromptKind::RenameBranch | PromptKind::SetUpstream,
+                ..
+            }
+        ) {
+            self.branches.pending = None;
+        }
+    }
 }
 
 /// "Delete this branch?", carrying the op chosen when it was asked.
@@ -783,5 +797,25 @@ mod tests {
             "a delete changes no files: {effects:?}"
         );
         branches_tag(&effects);
+    }
+
+    #[test]
+    fn closing_a_branch_prompt_forgets_its_branch() {
+        use crate::popup::LineInput;
+        for kind in [
+            PromptKind::NewBranch,
+            PromptKind::RenameBranch,
+            PromptKind::SetUpstream,
+        ] {
+            let mut state = AppState::new(Context::Workspace);
+            state.branches.pending = Some("topic".into());
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            assert_eq!(state.branches.pending, None, "{kind:?}");
+        }
     }
 }

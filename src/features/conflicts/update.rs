@@ -4,11 +4,14 @@
 
 use super::keys;
 use super::state::{Choice, ConflictView, PendingPick};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::path::RepoPath;
+use crate::intent::AppIntent;
+use crate::keymap::KeyScope;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, ErrorPopup, Popup};
+use crate::popup::{ErrorPopup, Popup};
 use crate::refresh::Selection;
 
 /// The conflict view: loading a conflicted file, picking a side of each
@@ -139,7 +142,7 @@ impl AppState {
                 self.status_selection = Selection::KeepPath;
                 let effects = self.refresh_status();
                 if resolved {
-                    self.popups.push(Popup::Confirm(ConfirmKind::StageResolved));
+                    self.popups.push(Popup::Question(stage_resolved_question()));
                 }
                 effects
             }
@@ -200,6 +203,19 @@ impl AppState {
     }
 }
 
+/// "Stage it?", asked once every block of the conflict view's file is
+/// picked. `y` or Enter answers: staging loses nothing.
+pub(crate) fn stage_resolved_question() -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Confirm,
+        title: "Stage resolved file".into(),
+        text: "Every conflict in this file is resolved. Stage it? (y/n)".into(),
+        answer: Answer::YOrEnter,
+        then: Then::Intent(Box::new(AppIntent::StageResolved)),
+        range: false,
+        head: None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,7 +369,7 @@ mod tests {
         assert_eq!(expected, first, "the bytes the first write left");
         assert_eq!(content, b"a\nours 1\nb\ntheirs 2\n");
         state.update(written(tag, Ok(content.clone())));
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
+        assert_eq!(state.popups, [Popup::Question(stage_resolved_question())]);
         assert_eq!(conflict(&state).loaded.as_ref().unwrap().on_disk, content);
 
         // After no, a later pick asks again: Files will not stage the row.
@@ -361,7 +377,7 @@ mod tests {
         assert_eq!(state.popups, []);
         let (again, _, both) = write_of(&press_char(&mut state, 'b'));
         state.update(written(again, Ok(both)));
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::StageResolved)]);
+        assert_eq!(state.popups, [Popup::Question(stage_resolved_question())]);
 
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Stage(vec!["c.txt".into()]));

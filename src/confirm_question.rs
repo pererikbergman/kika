@@ -1,7 +1,8 @@
-//! A question asked before a git op that cannot be undone. One place per
-//! question holds its words, the keys that answer it and the re-check run
-//! when it is answered, so a new question cannot forget the re-check or
-//! bind Enter by mistake.
+//! A yes/no question, most often asked before a git op that cannot be
+//! undone. One place per question holds its words, the keys that answer
+//! it and what a yes does: an op re-checked when it is answered, or an
+//! intent whose handler checks again. So a new question cannot forget the
+//! re-check or bind Enter by mistake.
 
 use std::borrow::Cow;
 
@@ -11,6 +12,7 @@ use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::git::path::RepoPath;
 use crate::git::status::Head;
+use crate::intent::AppIntent;
 use crate::keymap::{KeyPattern, KeyScope};
 use crate::model::AppState;
 use crate::op::GitOp;
@@ -58,6 +60,8 @@ pub(crate) enum Then {
     RemoveWorktree(RepoPath),
     /// Ask GitHub to merge the pull request as described.
     MergePr(Box<MergePrConfirm>),
+    /// Send this intent: its handler does the work and its own checks.
+    Intent(Box<AppIntent>),
 }
 
 /// One open question. What yes does is fixed when it is asked, so a
@@ -109,11 +113,13 @@ impl AppState {
         Some(q)
     }
 
-    /// Run the op the question on top carries, if [`Self::take_question`]
-    /// hands it over. Only for questions whose yes is an op.
+    /// Run the op or send the intent the question on top carries, if
+    /// [`Self::take_question`] hands it over. Only for questions whose
+    /// yes is an op or an intent.
     pub(crate) fn answer_question(&mut self, scope: KeyScope, answer: Answer) -> Vec<Effect> {
         match self.take_question(scope, answer).map(|q| q.then) {
             Some(Then::Op(op)) => self.start_op(Ok(Some(op))),
+            Some(Then::Intent(intent)) => self.update(*intent),
             _ => vec![],
         }
     }
@@ -137,6 +143,19 @@ impl AppState {
         }
         self.notice = Some("HEAD moved; try again".into());
         false
+    }
+}
+
+/// "Quit Kika?", which `y` or Enter answers: nothing is lost by quitting.
+pub(crate) fn quit_question() -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Confirm,
+        title: "Quit".into(),
+        text: "Quit Kika? (y/n)".into(),
+        answer: Answer::YOrEnter,
+        then: Then::Intent(Box::new(AppIntent::Quit)),
+        range: false,
+        head: None,
     }
 }
 
@@ -170,7 +189,7 @@ mod tests {
 
     /// Each question's yes binding, with the answer its question is asked
     /// with.
-    const YES_BINDINGS: [(&str, KeyScope, Answer); 13] = [
+    const YES_BINDINGS: [(&str, KeyScope, Answer); 18] = [
         (
             "discard_confirm.yes",
             KeyScope::DiscardConfirm,
@@ -192,6 +211,23 @@ mod tests {
         ("merge_pr.yes", KeyScope::MergePullRequest, Answer::YOnly),
         ("reset_hard.yes", KeyScope::ResetHard, Answer::YOnly),
         ("confirm.yes", KeyScope::Confirm, Answer::YOrEnter),
+        ("abort_confirm.yes", KeyScope::AbortConfirm, Answer::YOnly),
+        (
+            "autosquash_confirm.yes",
+            KeyScope::AutosquashConfirm,
+            Answer::YOnly,
+        ),
+        ("patch_confirm.yes", KeyScope::PatchConfirm, Answer::YOnly),
+        (
+            "drop_range_confirm.yes",
+            KeyScope::DropRangeConfirm,
+            Answer::YOnly,
+        ),
+        (
+            "create_pull_request.yes",
+            KeyScope::CreatePullRequest,
+            Answer::YOnly,
+        ),
     ];
 
     #[test]
@@ -400,19 +436,22 @@ mod tests {
 
     #[test]
     fn take_question_hands_over_only_the_question_asked_with_that_scope_and_answer() {
-        use crate::popup::ConfirmKind;
+        let menu = || Popup::Menu {
+            id: crate::menu::MenuId::Bisect,
+            cursor: 0,
+        };
         let reset = || reset_hard_question("c1".into(), reset_op(ResetMode::Hard), None);
         let cases = [
             ("none", vec![], KeyScope::ResetHard, Answer::YOnly),
             (
                 "another popup",
-                vec![Popup::Confirm(ConfirmKind::Quit)],
+                vec![menu()],
                 KeyScope::ResetHard,
                 Answer::YOnly,
             ),
             (
                 "below another popup",
-                vec![Popup::Question(reset()), Popup::Confirm(ConfirmKind::Quit)],
+                vec![Popup::Question(reset()), menu()],
                 KeyScope::ResetHard,
                 Answer::YOnly,
             ),

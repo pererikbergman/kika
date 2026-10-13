@@ -12,7 +12,8 @@
 //! - the handlers in `update.rs`: `remotes_loaded`, `move_remote`,
 //!   `ask_track_name`, `track_named`, `ask_remote_name`, `remote_named`,
 //!   `remote_url`, `ask_remote_rename`, `rename_remote_to`,
-//!   `ask_remove_remote` and `confirm_remove_remote`;
+//!   `ask_remove_remote`, `confirm_remove_remote` and
+//!   `remotes_popup_closed`;
 //! - the chunks `keys::{REMOTES_KEYS, REMOTES_REMOVE_CONFIRM}` and the
 //!   guards `keys::{add_remote_disabled, track_disabled,
 //!   change_remote_disabled, rename_remote_disabled}`;

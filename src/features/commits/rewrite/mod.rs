@@ -31,7 +31,9 @@
 //!   (`rewrite_range`, `confirm_drop_range`), `fixup.rs`
 //!   (`create_fixup`, `ask_autosquash`, `autosquash`, `find_fixup_base`,
 //!   `fixup_base_found`) and `leave_commits.rs` (`move_head`,
-//!   `left_behind_checked`, `confirm_leave_commits`);
+//!   `left_behind_checked`, `confirm_leave_commits`), and the questions
+//!   `autosquash_question` (`fixup.rs`) and `drop_range_question`
+//!   (`range.rs`);
 //! - `effects::{load_todo, write_todo, find_base, check_left_behind}`,
 //!   `git::rebase_command` and `fixup_base::candidates_notice`.
 //!
@@ -48,9 +50,8 @@
 //!   navigates them;
 //! - in core: `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
-//! - the `AppIntent` and `Effect` variants, `ConfirmKind::{Autosquash,
-//!   DropRange}` with its question, `LeaveCommitsConfirm` (the leave
-//!   question's builder, shown as a `Popup::Question`), the popup key
+//! - the `AppIntent` and `Effect` variants, `LeaveCommitsConfirm` (the
+//!   leave question's builder, shown as a `Popup::Question`), the popup key
 //!   scopes (`KeyScope::LeaveCommits` among them) and
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
@@ -76,6 +77,11 @@ mod update;
 pub(crate) use fixup_base::FixupBase;
 pub(crate) use leave_commits::LeftBehindCheck;
 pub(crate) use todo::{RebaseTodo, Rewrite, TodoFile};
+
+#[cfg(test)]
+pub(crate) use fixup::autosquash_question;
+#[cfg(test)]
+pub(crate) use range::drop_range_question;
 
 use super::keys::commit_action_disabled;
 use super::{Crossing, with_stacked_branches};

@@ -2,11 +2,13 @@
 //! starting, watching and finishing a fetch, pull or push.
 
 use super::keys::{fetch_disabled, pull_push_disabled};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::keymap;
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
-use crate::popup::{ConfirmKind, ErrorPopup, Popup};
+use crate::popup::{ErrorPopup, Popup};
 use crate::refresh;
 use crate::remote_run::RemoteRun;
 
@@ -97,7 +99,7 @@ impl AppState {
         match result {
             Ok(()) => {}
             Err(RemoteFailure::Rejected(_)) => {
-                self.popups.push(Popup::Confirm(ConfirmKind::ForcePush));
+                self.popups.push(Popup::Question(force_push_question()));
             }
             Err(RemoteFailure::Failed(message)) => {
                 let next = if op == RemoteOp::Pull {
@@ -116,6 +118,23 @@ impl AppState {
     }
 }
 
+/// "Push with a lease?", asked when a plain push was rejected because the
+/// remote moved on. `y` or Enter answers: `--force-with-lease` refuses if
+/// someone pushed since the last fetch.
+pub(crate) fn force_push_question() -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Confirm,
+        title: "Push rejected".into(),
+        text: "The remote has commits this branch does not. Push with \
+               --force-with-lease, replacing them only if nobody pushed since \
+               your last fetch? (y/n)"
+            .into(),
+        answer: Answer::YOrEnter,
+        then: Then::Intent(Box::new(AppIntent::ForcePush)),
+        range: false,
+        head: None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,7 +405,7 @@ mod tests {
             Err(RemoteFailure::Rejected(rejected)),
         ));
         assert_eq!(effects, [], "nothing changed, so nothing reloads");
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::ForcePush)]);
+        assert_eq!(state.popups, [Popup::Question(force_push_question())]);
 
         let (_, op) = remote_of(&press_char(&mut state, 'y'));
         assert_eq!(op, FORCE_PUSH);

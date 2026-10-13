@@ -9,7 +9,7 @@
 //! - the types [`TagsList`] and [`PendingTag`];
 //! - the handlers in `update.rs`: `move_tag`, `tags_loaded`, `ask_tag_name`,
 //!   `tag_named`, `tag_messaged`, `create_tag`, `ask_delete_tag`,
-//!   `confirm_delete_tag` and `push_tag`;
+//!   `confirm_delete_tag`, `push_tag` and `tags_popup_closed`;
 //! - the chunks `keys::{TAGS_KEYS, TAGS_DELETE_CONFIRM}` and the guards
 //!   `keys::{tag_commit_disabled, delete_tag_disabled}`;
 //! - `effects::load`;
