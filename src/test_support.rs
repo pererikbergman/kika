@@ -1367,6 +1367,19 @@ pub(crate) fn cloned_repo() -> (crate::git::fake::TempDir, crate::git::fake::Tem
     (tmp, bare)
 }
 
+/// A repo on `main` with `a.txt` committed and then changed in the
+/// worktree, so a forced checkout would lose the change.
+pub(crate) fn dirty_repo() -> crate::git::fake::TempDir {
+    let tmp = crate::git::fake::TempDir::new("branch-dash");
+    let dir = tmp.path();
+    crate::git::fake::git(dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+    crate::git::fake::git(dir, &["add", "-A"]);
+    crate::git::fake::git(dir, &["commit", "-q", "-m", "init"]);
+    std::fs::write(dir.join("a.txt"), "work in progress\n").unwrap();
+    tmp
+}
+
 // --- Tags ---
 
 pub(crate) fn tag_ref(name: &str, oid: char) -> TagRef {
