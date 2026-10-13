@@ -55,6 +55,11 @@ pub(crate) fn untracked(path: &str) -> FileEntry {
     }
 }
 
+/// Repository paths from plain names, for the paths a `GitOp` takes.
+pub(crate) fn paths(paths: &[&str]) -> Vec<RepoPath> {
+    paths.iter().map(|&p| p.into()).collect()
+}
+
 /// A Files entry at `path` with these status letters and kind.
 pub(crate) fn file_entry(path: &str, index: char, worktree: char, kind: EntryKind) -> FileEntry {
     FileEntry {

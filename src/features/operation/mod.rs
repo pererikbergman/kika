@@ -12,7 +12,7 @@
 //!
 //! Kept cross-feature reads and calls:
 //! - `merge_disabled` reads `branches.selected_branch()`;
-//! - `branch_op` calls `branch_for_action` (branches);
+//! - `branch_op` calls core `branch_for_action` (`model.rs`);
 //! - `render_status_panel` reads `branch`, `status_error`, `files_loaded`
 //!   and `repo_stack`, and calls core `bisect_lines`;
 //! - chunk 52 uses the bisect-aware guards in `src/bisect.rs`

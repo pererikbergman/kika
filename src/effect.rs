@@ -49,16 +49,67 @@ pub struct Tag {
 }
 
 /// Work the reducer asks for. Executed by [`Runtime`], never by `update`.
+/// Variants are grouped by the code that runs them: core first, then the
+/// features in the order of ADR-0001's layout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    // --- core: loop ---
+    /// Stop git commands still running, because Kika is quitting. Answered
+    /// by nothing; the stopped operation reports as failed, if anyone listens.
+    InterruptGit,
+    /// Hand the terminal to another process. Run by the loop, which owns
+    /// the terminal, never by [`Runtime`].
+    HandOff(HandOff),
+    /// Point git at the repository `nested` names: each path is a
+    /// submodule of the one before, starting from the top-level `root`,
+    /// which an empty list means. Runs before the next effect starts.
+    SetRepo {
+        root: PathBuf,
+        nested: Vec<RepoPath>,
+    },
+
+    // --- core: op slot ---
+    /// Run a Git operation; always answered by one `OpFinished`.
+    RunOp {
+        tag: Tag,
+        op: GitOp,
+    },
+
+    // --- core: watch and refresh ---
+    /// Read the refs snapshot; always answered by one `RefsLoaded`.
+    SnapshotRefs {
+        tag: Tag,
+    },
+
+    // --- core: config ---
+    /// Read the global config file and that of the repository whose top
+    /// level is `repo`; answered by one `ConfigLoaded` for the same `repo`.
+    LoadConfig {
+        repo: Option<PathBuf>,
+    },
+
+    // --- core: credentials ---
+    /// Hand the answer to the question the running remote operation
+    /// asked; `None` cancels it. Does nothing when no question waits.
+    AnswerCredential(Option<Secret>),
+
+    // --- core: clipboard ---
+    /// Put `text` on the system clipboard. Run by the loop, between draws,
+    /// never by a task; a failure comes back as `CopyFailed`.
+    Clipboard(String),
+
+    // --- files ---
     LoadStatus {
         tag: Tag,
     },
-    /// Read `HEAD`'s message to amend it; always answered by one
-    /// `HeadMessageLoaded`.
-    LoadHeadMessage {
+    /// Add `line` to the worktree's top-level `.gitignore`, creating it if
+    /// need be; always answered by one `IgnoreWritten`.
+    AppendIgnore {
         tag: Tag,
+        line: Vec<u8>,
     },
+
+    // --- diff ---
     /// Stream the diff for `request`, reading `want` lines before pausing.
     /// Supersedes any diff still streaming.
     LoadDiff {
@@ -77,19 +128,33 @@ pub enum Effect {
     DiffLoadingDelay {
         tag: Tag,
     },
-    /// Stop git commands still running, because Kika is quitting. Answered
-    /// by nothing; the stopped operation reports as failed, if anyone listens.
-    InterruptGit,
     /// Load the whole diff of one file as a patch; always answered by one
     /// `PatchLoaded`.
     LoadPatch {
         tag: Tag,
         request: DiffRequest,
     },
-    /// Run a Git operation; always answered by one `OpFinished`.
-    RunOp {
+
+    // --- diff/renderers ---
+    /// Find the configured diff renderers: the global `[diff] pager`, then
+    /// git's global pagers, then the global `[diff] tool`. Answered by one
+    /// `RenderersFound`.
+    FindRenderers,
+    /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
+    /// a tool on both sides of its file. Always answered by one
+    /// `DiffRendered`.
+    RenderDiff {
         tag: Tag,
-        op: GitOp,
+        request: DiffRequest,
+        renderer: ExternalRenderer,
+        cols: u16,
+    },
+
+    // --- commit ---
+    /// Read `HEAD`'s message to amend it; always answered by one
+    /// `HeadMessageLoaded`.
+    LoadHeadMessage {
+        tag: Tag,
     },
     /// Read what decides whether the commit `op` needs the terminal;
     /// always answered by one `CommitProbed`.
@@ -97,10 +162,26 @@ pub enum Effect {
         tag: Tag,
         op: GitOp,
     },
+
+    // --- stash ---
+    /// Read the stash list; always answered by one `StashesLoaded`.
+    LoadStashes {
+        tag: Tag,
+    },
+    /// List the files `entry` holds; always answered by one
+    /// `StashFilesLoaded`.
+    LoadStashFiles {
+        tag: Tag,
+        entry: StashEntry,
+    },
+
+    // --- submodules ---
     /// List the submodules; always answered by one `SubmodulesLoaded`.
     LoadSubmodules {
         tag: Tag,
     },
+
+    // --- worktrees ---
     /// List the worktrees; always answered by one `WorktreesLoaded`.
     LoadWorktrees {
         tag: Tag,
@@ -118,33 +199,8 @@ pub enum Effect {
         tag: Tag,
         path: RepoPath,
     },
-    /// Point git at the repository `nested` names: each path is a
-    /// submodule of the one before, starting from the top-level `root`,
-    /// which an empty list means. Runs before the next effect starts.
-    SetRepo {
-        root: PathBuf,
-        nested: Vec<RepoPath>,
-    },
-    /// List the local branches; always answered by one `BranchesLoaded`.
-    LoadBranches {
-        tag: Tag,
-    },
-    /// Read the newest commits of the full ref `refname`, local or
-    /// remote-tracking; always answered by one `BranchLogLoaded` for the
-    /// same `refname`.
-    LoadBranchLog {
-        tag: Tag,
-        refname: Vec<u8>,
-    },
-    /// List the remotes and their remote-tracking branches; always
-    /// answered by one `RemotesLoaded`.
-    LoadRemotes {
-        tag: Tag,
-    },
-    /// List the tags; always answered by one `TagsLoaded`.
-    LoadTags {
-        tag: Tag,
-    },
+
+    // --- repos ---
     /// Read the recent-repositories list; answered by `RecentLoaded`
     /// with the same `seq`.
     LoadRecent {
@@ -161,16 +217,34 @@ pub enum Effect {
     InitRepo {
         tag: Tag,
     },
+
+    // --- custom_commands ---
+    /// Run the user's command in the background, in the repository's
+    /// workdir, with its output captured; always answered by one
+    /// `CommandFinished`.
+    RunCommand {
+        title: String,
+        argv: Vec<OsString>,
+        output: OutputMode,
+    },
+    /// Stop the command `RunCommand` started, which then answers with
+    /// `CommandFailure::Cancelled`. Does nothing once it has finished.
+    CancelCommand,
+
+    // --- blame ---
     /// Blame `path` in the worktree; always answered by one `BlameLoaded`.
     LoadBlame {
         tag: Tag,
         path: RepoPath,
     },
-    /// Find the commits the staged lines come from; always answered by
-    /// one `FixupBaseFound`.
-    FindFixupBase {
+    /// Read commit `oid`'s message and diff; always answered by one
+    /// `CommitLoaded`.
+    LoadCommit {
         tag: Tag,
+        oid: String,
     },
+
+    // --- conflicts ---
     /// Read conflicted `path` from the worktree and its marker size;
     /// always answered by one `ConflictLoaded` for the same `path`.
     LoadConflict {
@@ -185,125 +259,20 @@ pub enum Effect {
         expected: Vec<u8>,
         content: Vec<u8>,
     },
-    /// Read commit `oid`'s message and diff; always answered by one
-    /// `CommitLoaded`.
-    LoadCommit {
-        tag: Tag,
-        oid: String,
-    },
-    /// Find the configured diff renderers: the global `[diff] pager`, then
-    /// git's global pagers, then the global `[diff] tool`. Answered by one
-    /// `RenderersFound`.
-    FindRenderers,
-    /// Run `renderer` at `cols` columns: a pager on the diff for `request`,
-    /// a tool on both sides of its file. Always answered by one
-    /// `DiffRendered`.
-    RenderDiff {
-        tag: Tag,
-        request: DiffRequest,
-        renderer: ExternalRenderer,
-        cols: u16,
-    },
-    /// Hand the terminal to another process. Run by the loop, which owns
-    /// the terminal, never by [`Runtime`].
-    HandOff(HandOff),
-    /// Read the refs snapshot; always answered by one `RefsLoaded`.
-    SnapshotRefs {
-        tag: Tag,
-    },
-    /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to
-    /// `query`; always answered by one `CommitsLoaded`.
-    LoadCommits {
-        tag: Tag,
-        tip: Option<String>,
-        skip: usize,
-        query: LogQuery,
-    },
-    /// Read both ends of a comparison as commits; always answered by one
-    /// `DiffResolved`.
-    ResolveDiff {
-        tag: Tag,
-        base: DiffEnd,
-        target: DiffEnd,
-    },
-    /// List the files `range` changed; always answered by one
-    /// `CommitFilesLoaded`.
-    LoadCommitFiles {
-        tag: Tag,
-        range: CommitRange,
-    },
-    /// Read the stash list; always answered by one `StashesLoaded`.
-    LoadStashes {
-        tag: Tag,
-    },
-    /// List the files `entry` holds; always answered by one
-    /// `StashFilesLoaded`.
-    LoadStashFiles {
-        tag: Tag,
-        entry: StashEntry,
-    },
-    /// Read which commits are unpushed or unmerged; always answered by
-    /// one `MarkersLoaded`.
-    LoadMarkers {
-        tag: Tag,
-    },
-    /// Read where every local branch points; always answered by one
-    /// `BranchTipsLoaded`.
-    LoadBranchTips {
-        tag: Tag,
-    },
-    /// Read the stopped rebase's todo list and what it has done; always
-    /// answered by one `RebaseTodoLoaded`.
-    LoadRebaseTodo {
-        tag: Tag,
-        /// The installed git reads `core.commentString` (2.45).
-        string_too: bool,
-    },
-    /// Check `content` as an edit of `expected`, both read with the
-    /// `comment` prefix `expected` was loaded with, then write it over the
-    /// todo list at `path` only while it still holds `expected`; always
-    /// answered by one `RebaseTodoWritten`.
-    WriteRebaseTodo {
-        tag: Tag,
-        path: PathBuf,
-        expected: Vec<u8>,
-        content: Vec<u8>,
-        comment: Vec<u8>,
-    },
-    /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
-    /// `ReflogLoaded`.
-    LoadReflog {
-        tag: Tag,
-    },
+
+    // --- sync ---
     /// Fetch every remote; always answered by one `FetchFinished`.
     Fetch {
         tag: Tag,
     },
-    /// Read the global config file and that of the repository whose top
-    /// level is `repo`; answered by one `ConfigLoaded` for the same `repo`.
-    LoadConfig {
-        repo: Option<PathBuf>,
-    },
-    /// Run the user's command in the background, in the repository's
-    /// workdir, with its output captured; always answered by one
-    /// `CommandFinished`.
-    RunCommand {
-        title: String,
-        argv: Vec<OsString>,
-        output: OutputMode,
-    },
-    /// Stop the command `RunCommand` started, which then answers with
-    /// `CommandFailure::Cancelled`. Does nothing once it has finished.
-    CancelCommand,
     /// Fetch, pull or push, with git's and ssh's questions sent as
     /// `CredentialAsked`; always answered by one `RemoteFinished`.
     Remote {
         tag: Tag,
         op: RemoteOp,
     },
-    /// Hand the answer to the question the running remote operation
-    /// asked; `None` cancels it. Does nothing when no question waits.
-    AnswerCredential(Option<Secret>),
+
+    // --- pull_requests ---
     /// Find the forge repository of the remote and send its cached badges,
     /// then, with `refresh`, ask the forge for `branches`. Answered by
     /// `ForgeRepoNone`, or `PullRequestsCached` and then, with `refresh`,
@@ -317,29 +286,6 @@ pub enum Effect {
         refresh: bool,
         known: Option<ForgeRepo>,
         limited: Vec<(ForgeHost, i64)>,
-    },
-    /// Put `text` on the system clipboard. Run by the loop, between draws,
-    /// never by a task; a failure comes back as `CopyFailed`.
-    Clipboard(String),
-    /// Read commit `oid`'s full message to copy it; always answered by
-    /// one `CommitMessageLoaded`.
-    LoadCommitMessage {
-        tag: Tag,
-        oid: CommitId,
-    },
-    /// List the commits only `head` reaches before `op` moves `HEAD` to
-    /// `target`; always answered by one `LeftBehindChecked`.
-    CheckLeftBehind {
-        tag: Tag,
-        op: GitOp,
-        head: CommitId,
-        target: CommitId,
-    },
-    /// Add `line` to the worktree's top-level `.gitignore`, creating it if
-    /// need be; always answered by one `IgnoreWritten`.
-    AppendIgnore {
-        tag: Tag,
-        line: Vec<u8>,
     },
     /// Start the browser the global config names: `argv` is its argv with
     /// the URL last, run without a shell and never waited on here. Only
@@ -358,6 +304,8 @@ pub enum Effect {
         base: String,
         title: String,
     },
+
+    // --- review ---
     /// Merge pull request `number` of `repo` by `method` through `gh`, on
     /// the configured `host`, only while its head is still `head_oid`;
     /// always answered by one `PullRequestMerged`.
@@ -413,6 +361,115 @@ pub enum Effect {
         tag: Tag,
         head: CommitId,
         base: CommitId,
+    },
+
+    // --- branches ---
+    /// List the local branches; always answered by one `BranchesLoaded`.
+    LoadBranches {
+        tag: Tag,
+    },
+    /// Read the newest commits of the full ref `refname`, local or
+    /// remote-tracking; always answered by one `BranchLogLoaded` for the
+    /// same `refname`.
+    LoadBranchLog {
+        tag: Tag,
+        refname: Vec<u8>,
+    },
+
+    // --- branches/remotes ---
+    /// List the remotes and their remote-tracking branches; always
+    /// answered by one `RemotesLoaded`.
+    LoadRemotes {
+        tag: Tag,
+    },
+
+    // --- branches/tags ---
+    /// List the tags; always answered by one `TagsLoaded`.
+    LoadTags {
+        tag: Tag,
+    },
+
+    // --- commits ---
+    /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to
+    /// `query`; always answered by one `CommitsLoaded`.
+    LoadCommits {
+        tag: Tag,
+        tip: Option<String>,
+        skip: usize,
+        query: LogQuery,
+    },
+    /// List the files `range` changed; always answered by one
+    /// `CommitFilesLoaded`.
+    LoadCommitFiles {
+        tag: Tag,
+        range: CommitRange,
+    },
+    /// Read which commits are unpushed or unmerged; always answered by
+    /// one `MarkersLoaded`.
+    LoadMarkers {
+        tag: Tag,
+    },
+    /// Read where every local branch points; always answered by one
+    /// `BranchTipsLoaded`.
+    LoadBranchTips {
+        tag: Tag,
+    },
+
+    // --- commits/reflog ---
+    /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
+    /// `ReflogLoaded`.
+    LoadReflog {
+        tag: Tag,
+    },
+
+    // --- commits/rewrite ---
+    /// Find the commits the staged lines come from; always answered by
+    /// one `FixupBaseFound`.
+    FindFixupBase {
+        tag: Tag,
+    },
+    /// Read the stopped rebase's todo list and what it has done; always
+    /// answered by one `RebaseTodoLoaded`.
+    LoadRebaseTodo {
+        tag: Tag,
+        /// The installed git reads `core.commentString` (2.45).
+        string_too: bool,
+    },
+    /// Check `content` as an edit of `expected`, both read with the
+    /// `comment` prefix `expected` was loaded with, then write it over the
+    /// todo list at `path` only while it still holds `expected`; always
+    /// answered by one `RebaseTodoWritten`.
+    WriteRebaseTodo {
+        tag: Tag,
+        path: PathBuf,
+        expected: Vec<u8>,
+        content: Vec<u8>,
+        comment: Vec<u8>,
+    },
+    /// List the commits only `head` reaches before `op` moves `HEAD` to
+    /// `target`; always answered by one `LeftBehindChecked`.
+    CheckLeftBehind {
+        tag: Tag,
+        op: GitOp,
+        head: CommitId,
+        target: CommitId,
+    },
+
+    // --- commits/copy ---
+    /// Read commit `oid`'s full message to copy it; always answered by
+    /// one `CommitMessageLoaded`.
+    LoadCommitMessage {
+        tag: Tag,
+        oid: CommitId,
+    },
+
+    // --- commits/compare ---
+    /// Read both ends of a comparison as commits; always answered by one
+    /// `DiffResolved`.
+    ResolveDiff {
+        tag: Tag,
+        base: DiffEnd,
+        target: DiffEnd,
     },
 }
 

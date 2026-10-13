@@ -15,9 +15,10 @@
 //! - it reads and writes `files`, `files_loaded`, `branch` and `selected`
 //!   (files);
 //! - it reads `repo` (repos);
-//! - it calls `set_repo` and `switch_repo` (repos), `refresh_status` and
-//!   `select` (files), `reload_branches`, `reload_commits` and
-//!   `reload_stashes`.
+//! - it calls core `set_repo`, `switch_repo`, `refresh_status`, `select`,
+//!   `reload_branches` and `reload_commits` (`model.rs`);
+//! - `enter_submodule` and `leave_submodule` call stash's `reload_stashes`
+//!   (an accepted cross-feature call, listed in ADR-0001's Outcome).
 //!
 //! What stays in core: `ParentRepo` and `AppState::repo_stack`, which repos
 //! (`ParkedRepo`) and worktrees also use; the `key_focus` branch; and
