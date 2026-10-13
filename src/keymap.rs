@@ -1241,7 +1241,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = in_commit(state) {
         return Some(reason);
     }
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     if let Some(reason) = display_only(state).or_else(|| whitespace_hidden(state)) {
@@ -1255,7 +1255,7 @@ pub(crate) fn discard_disabled(state: &AppState) -> Option<Reason> {
 
 /// Why `o` cannot open the editor right now.
 pub(crate) fn open_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     no_file_selected(state)
@@ -1269,7 +1269,7 @@ pub(crate) fn branch_action_disabled(state: &AppState) -> Option<Reason> {
 
 /// [`branch_action_disabled`] without the filter and range guard.
 pub(crate) fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.branches.selected_branch().is_none() {
         Some("No branch selected".into())
@@ -1280,7 +1280,7 @@ pub(crate) fn branch_selected_disabled(state: &AppState) -> Option<Reason> {
 
 /// Why nothing can start now: git one operation at a time.
 pub(crate) fn op_running(state: &AppState) -> Option<Reason> {
-    state.op_seq.is_some().then_some(OP_RUNNING.into())
+    state.op_is_running().then_some(OP_RUNNING.into())
 }
 
 /// Why the Tags tab has nothing to act on.
@@ -1345,7 +1345,7 @@ pub(crate) fn resumable_operation(state: &AppState) -> Option<Operation> {
 /// Why continue or abort cannot run: one at a time, and only with a
 /// merge, rebase, cherry-pick or revert to act on.
 pub(crate) fn resume_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if resumable_operation(state).is_none() {
         Some("Nothing in progress".into())
@@ -1387,7 +1387,7 @@ pub(crate) fn commits_range_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn remote_disabled(state: &AppState) -> Option<Reason> {
     if state.repo.is_none() {
         Some("Not in a repository".into())
-    } else if state.op_seq.is_some() || state.remote.is_some() {
+    } else if state.op_is_running() || state.remote.is_some() {
         Some(REMOTE_BUSY.into())
     } else {
         None

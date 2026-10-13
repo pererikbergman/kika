@@ -20,7 +20,7 @@
 //! What stays in core: the credential plumbing, because review's commit
 //! fetch shares it (`Bridge`, `AnswerSlot` and `lock` in `effect.rs`, the
 //! `AnswerCredential` arm, `credential_asked`, `credential_answered`,
-//! `close_credential`, the `Quit` arm, `Popup::Credential` and its view);
+//! `close_credential` and `quit_interrupts` (`op_slot.rs`), the `Quit` arm, `Popup::Credential` and its view);
 //! `RemoteRun`, `AppState::remote`, `remote_disabled` and `REMOTE_BUSY`; the
 //! auto-fetch trigger in `watch()` and `WatchState`; `refresh::remote_plan`;
 //! and `src/git/remote.rs` and `src/git/askpass.rs`.

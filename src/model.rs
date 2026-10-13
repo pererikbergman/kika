@@ -55,16 +55,21 @@ use crate::layout::{self, Panel, ScreenMode, SidePanel};
 use crate::list_filter::{self, InputTarget, ListInput};
 use crate::list_input::{RANGE_FILES_CHANGED, search_input};
 use crate::menu;
-use crate::op::{GitOp, MergeStrategy};
+use crate::op::GitOp;
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{
-    ConfirmKind, CredentialPrompt, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup,
-    PromptKind, RangeKind,
+    ConfirmKind, DiscardConfirm, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind,
 };
 use crate::prompts::runs_attached;
-use crate::refresh::{self, RefreshPlan, Scope, Selection};
+use crate::refresh::{RefreshPlan, Scope, Selection};
 use crate::remote_run::RemoteRun;
 use crate::watch::{WatchEvent, WatchState};
+// Names the tests below reach through `super::*` since the op slot moved
+// to `op_slot.rs`.
+#[cfg(test)]
+use crate::op::MergeStrategy;
+#[cfg(test)]
+use crate::refresh;
 
 /// What Kika is looking at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,7 +175,8 @@ pub struct AppState {
     pub next_seq: u64,
     /// Sequence of the latest status load; only its result is applied.
     pub status_seq: Option<u64>,
-    /// User-initiated effects still in flight.
+    /// User-initiated effects still in flight. Core reads and writes it
+    /// through `op_slot.rs`.
     pub busy: u32,
     pub files: Vec<FileEntry>,
     /// False until the first status result arrives, to tell "loading" from "clean".
@@ -190,7 +196,8 @@ pub struct AppState {
     /// changes.
     pub screen_mode: ScreenMode,
     /// Sequence of the Git operation in flight. Operations run one at a
-    /// time so two quick presses never race for `index.lock`.
+    /// time so two quick presses never race for `index.lock`. Core takes
+    /// and frees it through `op_slot.rs`.
     pub op_seq: Option<u64>,
     /// The left-behind check in flight; one at a time, so a second press
     /// cannot stack a second question.
@@ -200,7 +207,8 @@ pub struct AppState {
     /// From the global `[commit] hooks_detached`: the user's hooks never ask
     /// anything, so a commit that only runs hooks stays detached.
     pub commit_hooks_detached: bool,
-    /// The last operation's failure, or why one was refused.
+    /// The last operation's failure, or why one was refused. Core sets it
+    /// through `op_slot.rs`.
     pub op_error: Option<String>,
     /// How the selection is kept when the pending status load lands.
     pub status_selection: Selection,
@@ -458,16 +466,7 @@ impl AppState {
             }
             AppIntent::Quit => {
                 self.should_quit = true;
-                let mut effects = Vec::new();
-                // Git is told no before it is stopped, so nothing waits on the user.
-                if self.close_credential() {
-                    effects.push(Effect::AnswerCredential(None));
-                }
-                // A hook or signing step may wait forever; quitting must not.
-                if self.op_seq.is_some() {
-                    effects.push(Effect::InterruptGit);
-                }
-                return effects;
+                return self.quit_interrupts();
             }
             AppIntent::OpenHelp => {
                 self.help_open = true;
@@ -1424,7 +1423,7 @@ impl AppState {
     /// Ask before throwing away the selected file, hunk or lines. Nothing
     /// is discarded here; a refusal says why in the bar instead of asking.
     fn ask_discard(&mut self) {
-        if self.context != Context::Workspace || self.op_seq.is_some() {
+        if self.context != Context::Workspace || self.op_is_running() {
             return;
         }
         if matches!(&self.focus, Focus::Diff(view) if view.commit.is_some()) {
@@ -1748,12 +1747,6 @@ impl AppState {
             return vec![];
         };
         view.seq = Some(seq);
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
         // Renames are off in patch diffs, so the original path is not needed.
         let request = DiffRequest {
             path: view.path.clone(),
@@ -1762,6 +1755,7 @@ impl AppState {
             options: self.diff_options,
             commit: view.commit.clone(),
         };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadPatch { tag, request }]
     }
 
@@ -1824,42 +1818,6 @@ impl AppState {
         self.select(index)
     }
 
-    /// Run the operation a stage key chose. Only one runs at a time, and
-    /// only on the local workspace.
-    pub(crate) fn start_op(&mut self, op: Result<Option<GitOp>, String>) -> Vec<Effect> {
-        self.start_op_as(op, |tag, op| Effect::RunOp { tag, op })
-    }
-
-    /// [`Self::start_op`], with `effect` saying what work starts it: a
-    /// commit is probed first, everything else runs at once.
-    pub(crate) fn start_op_as(
-        &mut self,
-        op: Result<Option<GitOp>, String>,
-        effect: fn(Tag, GitOp) -> Effect,
-    ) -> Vec<Effect> {
-        if self.context != Context::Workspace || self.op_seq.is_some() {
-            return vec![];
-        }
-        self.op_error = None;
-        let op = match op {
-            Ok(Some(op)) => op,
-            Ok(None) => return vec![],
-            Err(message) => {
-                self.op_error = Some(message);
-                return vec![];
-            }
-        };
-        let seq = self.take_seq();
-        self.op_seq = Some(seq);
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
-        vec![effect(tag, op)]
-    }
-
     /// Whether a bisect in progress refuses an answer that would move
     /// `HEAD` or make a commit, saying why in the bar.
     pub(crate) fn bisect_refuses(&mut self) -> bool {
@@ -1869,77 +1827,6 @@ impl AppState {
             self.notice = reason;
         }
         refused
-    }
-
-    fn op_finished(&mut self, tag: Tag, op: GitOp, result: Result<(), String>) -> Vec<Effect> {
-        // As with status loads: every user effect reports once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
-        if Some(tag.seq) == self.op_seq {
-            self.op_seq = None;
-        }
-        // A fixup is made from the Commits panel, not the commit popup, so
-        // its failure shows as any other op's.
-        let commit = matches!(op, GitOp::Commit { fixup: None, .. });
-        if matches!(op, GitOp::Commit { fixup: Some(_), .. }) {
-            self.commit_on_terminal = false;
-        }
-        if tag.generation != self.generation {
-            // The result is for another repository; give the message back.
-            if commit {
-                self.end_commit(None);
-            }
-            return vec![];
-        }
-        // The patch is in history now; a failure keeps it to try again.
-        let rewritten = matches!(op, GitOp::CustomPatch { .. }) && result.is_ok();
-        // The resolved file is staged: nothing is left for the view.
-        if let (Focus::Conflict(view), GitOp::Stage(paths), Ok(())) = (&self.focus, &op, &result)
-            && paths == std::slice::from_ref(&view.path)
-        {
-            self.focus = Focus::Files;
-            self.expanded = SidePanel::Files;
-        }
-        if commit {
-            // A commit's failure shows in its own popup, not the status bar.
-            self.end_commit(Some(result));
-        } else {
-            // A failed git command gets a popup; `op_error` is for refusals.
-            self.op_error = None;
-            match result {
-                // Git stops before committing a squash, so say what is left.
-                Ok(())
-                    if matches!(
-                        op,
-                        GitOp::Merge {
-                            strategy: MergeStrategy::Squash,
-                            ..
-                        }
-                    ) =>
-                {
-                    self.notice = Some("Squashed changes are staged; commit them".into());
-                }
-                Ok(()) => {}
-                Err(message) => {
-                    let error = if matches!(op, GitOp::ApplyEdited { .. }) {
-                        self.edited_hunk_error(&message)
-                    } else {
-                        ErrorPopup::new(failure_title(&op), &message, failure_next(&op))
-                    };
-                    self.push_error(error);
-                }
-            }
-        }
-        let mut effects = if rewritten {
-            self.patch_rewritten()
-        } else {
-            vec![]
-        };
-        // Refresh even after a failure: a failed `add` of several paths can
-        // still have changed the index.
-        effects.extend(self.apply_plan(refresh::plan(&op)));
-        effects
     }
 
     /// Reload what the plan says is stale. One status load serves both the
@@ -2002,16 +1889,6 @@ impl AppState {
             .flatten()
     }
 
-    /// A tag counted as busy until its answer lands.
-    pub(crate) fn user_tag(&mut self, seq: u64) -> Tag {
-        self.busy += 1;
-        Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        }
-    }
-
     /// Point git at `root` and the submodules entered from it.
     pub(crate) fn set_repo(&self, root: &Path) -> Effect {
         Effect::SetRepo {
@@ -2056,7 +1933,7 @@ impl AppState {
         self.diff = DiffPane::default();
         self.rendered = None;
         self.status_error = None;
-        self.op_error = None;
+        self.clear_op_error();
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
         self.commits = CommitsPanel::default();
@@ -2089,13 +1966,8 @@ impl AppState {
         let seq = self.next_seq;
         self.next_seq += 1;
         self.status_seq = Some(seq);
-        self.busy += 1;
         vec![Effect::LoadStatus {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user: true,
-            },
+            tag: self.user_tag(seq),
         }]
     }
 
@@ -2103,7 +1975,7 @@ impl AppState {
         // Every user effect reports back exactly once, stale or not, so
         // decrement before the staleness check or the counter would leak.
         if tag.user {
-            self.busy = self.busy.saturating_sub(1);
+            self.user_done(tag);
         } else {
             self.watch.status_pending = false;
         }
@@ -2267,8 +2139,8 @@ impl AppState {
     /// It takes `status_seq`, so a user refresh started later wins.
     pub(crate) fn background_status(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace
-            || self.busy > 0
-            || self.op_seq.is_some()
+            || self.is_busy()
+            || self.op_is_running()
             || self.watch.status_pending
         {
             return vec![];
@@ -2386,9 +2258,7 @@ impl AppState {
         oid: CommitId,
         result: Result<String, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if self.pending_copy.as_ref() != Some(&(tag, oid)) {
             return vec![];
         }
@@ -2404,37 +2274,6 @@ impl AppState {
                 vec![]
             }
         }
-    }
-}
-
-/// The questions git and ssh ask while a fetch, pull, push or review
-/// fetch runs: the credential popup that sync and review share.
-impl AppState {
-    /// Show the question, or say no at once to one nobody is waiting for.
-    fn credential_asked(&mut self, tag: Tag, prompt: String, confirm: bool) -> Vec<Effect> {
-        if self.current_remote(tag).is_none() && !self.review_fetch_running(tag) {
-            return vec![Effect::AnswerCredential(None)];
-        }
-        self.popups
-            .push(Popup::Credential(CredentialPrompt::new(prompt, confirm)));
-        vec![]
-    }
-
-    /// Close the question on top and send its answer.
-    fn credential_answered(&mut self, answer: Option<Secret>) -> Vec<Effect> {
-        if !matches!(self.popups.last(), Some(Popup::Credential(_))) {
-            return vec![];
-        }
-        self.popups.pop();
-        vec![Effect::AnswerCredential(answer)]
-    }
-
-    /// Take every credential question off the stack; whether there was one.
-    pub(crate) fn close_credential(&mut self) -> bool {
-        let before = self.popups.len();
-        self.popups
-            .retain(|popup| !matches!(popup, Popup::Credential(_)));
-        self.popups.len() != before
     }
 }
 
@@ -2458,128 +2297,12 @@ impl AppState {
     }
 }
 
-/// What the error popup says to do after a failed operation: what was
-/// reloaded, then try again.
-fn failure_next(op: &GitOp) -> &'static str {
-    match op {
-        // The run aborts itself, so there is nothing to resolve.
-        GitOp::CustomPatch { .. } => {
-            "Nothing was changed and the patch is kept. Fix the cause above, then try again."
-        }
-        // A pick that the branch already has stops as empty, not on a
-        // conflict; skip drops it.
-        GitOp::CherryPick(_) => {
-            "If git stopped on conflicts or an empty pick, resolve what it says, then continue, skip or abort from the Status panel."
-        }
-        GitOp::Merge { .. }
-        | GitOp::Rebase { .. }
-        | GitOp::InteractiveRebase(_)
-        | GitOp::Revert(_)
-        | GitOp::Continue(_)
-        | GitOp::Skip(_) => {
-            "If git stopped on conflicts, resolve them, then continue or abort from the Status panel."
-        }
-        GitOp::RenameBranch { .. }
-        | GitOp::DeleteBranch { .. }
-        | GitOp::DeleteBranches(_)
-        | GitOp::SetUpstream { .. }
-        | GitOp::UnsetUpstream(_)
-        | GitOp::AddRemote { .. }
-        | GitOp::RenameRemote { .. }
-        | GitOp::RemoveRemote(_)
-        | GitOp::RemoveRemotes(_)
-        | GitOp::CreateTag { .. }
-        | GitOp::DeleteTag { .. }
-        | GitOp::DeleteTags(_) => {
-            "The branch list was reloaded. Fix the cause above, then try again."
-        }
-        GitOp::MergeTool(_) => {
-            "The file list was reloaded. Check merge.tool, or resolve the file in your editor."
-        }
-        // A conflicted apply or pop leaves the entry in the list.
-        GitOp::StashApply(_) | GitOp::StashPop(_) => {
-            "The file list was reloaded. If git stopped on conflicts, resolve them in the Files panel; the stash is kept."
-        }
-        GitOp::StashDrop(_) | GitOp::StashDrops(_) | GitOp::StashRename { .. } => {
-            "The stash list was reloaded. Fix the cause above, then try again."
-        }
-        _ => "The file list was reloaded. Fix the cause above, then try again.",
-    }
-}
-
-/// What the error popup calls a failed operation.
-pub(crate) fn failure_title(op: &GitOp) -> &'static str {
-    match op {
-        GitOp::Stage(_) => "Could not stage",
-        GitOp::Unstage(_) => "Could not unstage",
-        GitOp::StageAll => "Could not stage everything",
-        GitOp::UnstageAll => "Could not unstage everything",
-        GitOp::Commit { fixup: Some(_), .. } => "Could not create the fixup",
-        GitOp::Commit { amend: true, .. } => "Could not amend",
-        GitOp::Commit { .. } => "Could not commit",
-        GitOp::ApplyCached { reverse: false, .. } => "Could not stage the change",
-        GitOp::ApplyCached { reverse: true, .. } => "Could not unstage the change",
-        GitOp::DiscardWorktree(_) => "Could not discard the changes",
-        GitOp::DeleteUntracked(_) => "Could not delete the file",
-        GitOp::DiscardFiles { .. } => "Could not discard the files",
-        GitOp::ApplyWorktree { .. } => "Could not discard the change",
-        GitOp::ApplyEdited { .. } => "Could not stage the edited hunk",
-        GitOp::SubmoduleInit(_) => "Could not initialize the submodule",
-        GitOp::SubmoduleUpdate(_) => "Could not update the submodule",
-        GitOp::Checkout(_) => "Could not check out the branch",
-        GitOp::CreateBranch { .. } => "Could not create the branch",
-        GitOp::RenameBranch { .. } => "Could not rename the branch",
-        GitOp::DeleteBranch { .. } => "Could not delete the branch",
-        GitOp::DeleteBranches(_) => "Could not delete every branch",
-        GitOp::Merge { .. } => "Could not merge",
-        GitOp::Rebase { .. } | GitOp::InteractiveRebase(_) => "Could not rebase",
-        GitOp::CustomPatch { .. } => "Could not apply the custom patch",
-        GitOp::CheckoutCommit(_) => "Could not check out the commit",
-        GitOp::Revert(_) => "Could not revert",
-        GitOp::CherryPick(_) => "Could not cherry-pick",
-        GitOp::Reset { .. } => "Could not reset",
-        GitOp::Continue(Operation::Merge) => "Could not continue the merge",
-        GitOp::Continue(Operation::Rebase) => "Could not continue the rebase",
-        GitOp::Continue(Operation::CherryPick) => "Could not continue the cherry-pick",
-        GitOp::Continue(Operation::Revert) => "Could not continue the revert",
-        GitOp::Continue(Operation::Bisect) => "Could not continue the bisect",
-        GitOp::Skip(_) => "Could not skip",
-        GitOp::Abort(Operation::Merge) => "Could not abort the merge",
-        GitOp::Abort(Operation::Rebase) => "Could not abort the rebase",
-        GitOp::Abort(Operation::CherryPick) => "Could not abort the cherry-pick",
-        GitOp::Abort(Operation::Revert) => "Could not abort the revert",
-        GitOp::Abort(Operation::Bisect) => "Could not abort the bisect",
-        GitOp::MergeTool(_) => "The merge tool did not resolve the file",
-        GitOp::StashPush { .. } => "Could not stash",
-        GitOp::StashApply(_) => "Could not apply the stash",
-        GitOp::StashPop(_) => "Could not pop the stash",
-        GitOp::StashDrop(_) => "Could not drop the stash",
-        GitOp::StashDrops(_) => "Could not drop the stashes",
-        GitOp::StashRename { .. } => "Could not rename the stash",
-        GitOp::CheckoutTracking { .. } => "Could not check out the remote branch",
-        GitOp::SetUpstream { .. } => "Could not set the upstream",
-        GitOp::UnsetUpstream(_) => "Could not unset the upstream",
-        GitOp::AddRemote { .. } => "Could not add the remote",
-        GitOp::RenameRemote { .. } => "Could not rename the remote",
-        GitOp::RemoveRemote(_) => "Could not remove the remote",
-        GitOp::RemoveRemotes(_) => "Could not remove every remote",
-        GitOp::CreateTag { .. } => "Could not create the tag",
-        GitOp::DeleteTag { .. } => "Could not delete the tag",
-        GitOp::DeleteTags(_) => "Could not delete every tag",
-        GitOp::BisectMark { .. } => "Could not mark the commit",
-        GitOp::BisectReset => "Could not reset the bisect",
-        GitOp::Travel {
-            direction: reflog::Direction::Undo,
-            ..
-        } => "Could not undo",
-        GitOp::Travel {
-            direction: reflog::Direction::Redo,
-            ..
-        } => "Could not redo",
-    }
-}
-
 mod confirm_guard;
+
+// The slot's failure texts, kept reachable where they used to live.
+#[cfg(test)]
+pub(crate) use crate::op_slot::failure_next;
+pub(crate) use crate::op_slot::failure_title;
 
 use crate::features::commits::custom_patch::NO_PATCH;
 
