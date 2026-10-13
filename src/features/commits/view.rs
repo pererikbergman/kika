@@ -62,16 +62,16 @@ pub(crate) fn render_commits_panel(
     // A query, a filter or a range on the log names itself in place of
     // the tabs, the query first.
     let mut name = name;
-    let selected = match panel.range_anchor {
-        Some(_) => format!(" · {} selected", panel.range().len()),
+    let selected = match panel.list.range_anchor {
+        Some(_) => format!(" · {} selected", panel.list.range().len()),
         None => String::new(),
     };
     // Only with a filter: counting the shown rows walks every loaded one.
     let counts = || {
         format!(
             "{} of {} loaded{selected}",
-            panel.visible().len(),
-            panel.rows.len()
+            panel.list.visible().len(),
+            panel.list.rows.len()
         )
     };
     let mut base = "Commits".to_string();
@@ -79,10 +79,14 @@ pub(crate) fn render_commits_panel(
         // With a filter as well, the query leaves room for it, up to half:
         // measured as `filter_title` draws it, made safe and with the
         // title's padding, one column either side, so it is not cut.
-        let reserve = if panel.filter.is_empty() {
+        let reserve = if panel.list.filter.is_empty() {
             width_of(&selected)
         } else {
-            let filter = format!(" · /{} {}", sanitize(panel.filter.as_bytes()), counts());
+            let filter = format!(
+                " · /{} {}",
+                sanitize(panel.list.filter.as_bytes()),
+                counts()
+            );
             (width_of(&filter) + 2).min(look.title_room() / 2)
         };
         let query = &panel.query;
@@ -96,8 +100,8 @@ pub(crate) fn render_commits_panel(
         name = format!("{base}{selected}");
         last.clone_from(&name);
     }
-    if expanded && !reflog && !panel.filter.is_empty() {
-        name = filter_title(look, &base, &panel.filter, &counts());
+    if expanded && !reflog && !panel.list.filter.is_empty() {
+        name = filter_title(look, &base, &panel.list.filter, &counts());
         last.clone_from(&name);
     } else if expanded && !reflog && !selected.is_empty() {
         name = format!("{base}{selected}");
@@ -148,9 +152,9 @@ pub(crate) fn render_commits_panel(
         return;
     }
     let dim = Style::new().fg(Color::DarkGray);
-    let paragraph = if panel.rows.is_empty() {
-        match &panel.error {
-            _ if !panel.loaded => Paragraph::new("Loading…"),
+    let paragraph = if panel.list.rows.is_empty() {
+        match &panel.list.error {
+            _ if !panel.list.loaded => Paragraph::new("Loading…"),
             Some(error) => {
                 let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
                 if let Some(first) = lines.first_mut() {
@@ -168,7 +172,7 @@ pub(crate) fn render_commits_panel(
         let width = usize::from(inner.width);
         let marks = Marks::of(state);
         Paragraph::new(commit_lines(panel, &marks, &[0], None, &[], width))
-    } else if panel.visible().is_empty() {
+    } else if panel.list.visible().is_empty() {
         Paragraph::new(Line::styled("No matches", dim))
     } else {
         Paragraph::new(window(panel, &Marks::of(state), inner))
@@ -277,7 +281,7 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
             Style::new().fg(Color::DarkGray),
         ))
     } else {
-        panel.error.as_deref().map(|error| {
+        panel.list.error.as_deref().map(|error| {
             let first = error.lines().next().unwrap_or_default();
             let text = format!("! {first} (press r to retry)");
             Line::styled(elide_right(&text, width), Style::new().fg(Color::Red))
@@ -289,8 +293,11 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
         height
     };
     let head = todo_lines(panel, width);
-    let shown = panel.visible();
-    let at = shown.iter().position(|&i| i == panel.selected).unwrap_or(0);
+    let shown = panel.list.visible();
+    let at = shown
+        .iter()
+        .position(|&i| i == panel.list.selected)
+        .unwrap_or(0);
     let cursor = match (panel.todo_selected, head.len()) {
         // Below the heading, the list in reverse: row 0 is the lowest.
         (Some(i), len) if len > 0 => len - 1 - i,
@@ -303,8 +310,8 @@ fn window(panel: &CommitsPanel, marks: &Marks, area: Rect) -> Vec<Line<'static>>
     let end = (start + room)
         .saturating_sub(skip)
         .clamp(log_start, shown.len());
-    let range = panel.range();
-    let selected = panel.todo_selected.is_none().then_some(panel.selected);
+    let range = panel.list.range();
+    let selected = panel.todo_selected.is_none().then_some(panel.list.selected);
     lines.extend(commit_lines(
         panel,
         marks,
@@ -412,14 +419,14 @@ impl Columns {
         let diff_mark = marks.diff.is_some();
         // The widest row loaded so far, not just on screen, so the columns
         // stay put while scrolling; never more than a third of the width.
-        let lanes = if panel.filter.is_empty() && !panel.query.is_active() {
+        let lanes = if panel.list.filter.is_empty() && !panel.query.is_active() {
             panel.lanes.max(1).min((width / 6).max(1))
         } else {
             0
         };
         let hash = indexes
             .iter()
-            .map(|&i| width_of(&panel.rows[i].short_oid))
+            .map(|&i| width_of(&panel.list.rows[i].short_oid))
             .max()
             .unwrap_or(0);
         let fixed = lanes * 2 + 2 + 2 * usize::from(mark) + 2 * usize::from(diff_mark) + hash + 1;
@@ -469,7 +476,7 @@ fn commit_line(
     columns: Columns,
     width: usize,
 ) -> Line<'static> {
-    let row = &panel.rows[index];
+    let row = &panel.list.rows[index];
     let marker = match panel.marker(&row.oid) {
         Marker::Unpushed => Span::styled(
             "↑",
@@ -717,6 +724,7 @@ mod tests {
 
     use super::*;
     use crate::diff_pane::DiffStart;
+    use crate::effect::Tag;
     use crate::git::log::{CommitRow, LogPage, Markers};
     use crate::layout::{ScreenMode, SidePanel};
     use crate::model::{Context, Focus};
@@ -745,9 +753,16 @@ mod tests {
         state.expanded = SidePanel::Commits;
         state.screen_mode = ScreenMode::Full;
         state.commits.begin_page(0, 0);
-        state
-            .commits
-            .page_loaded(0, 0, Ok((LogPage { rows, done: true }, NOW)));
+        state.commits.page_loaded(
+            Tag {
+                generation: state.generation,
+                seq: 0,
+                user: false,
+            },
+            state.generation,
+            0,
+            Ok((LogPage { rows, done: true }, NOW)),
+        );
         state
     }
 
@@ -1056,8 +1071,8 @@ mod tests {
     fn todo_rows_with_a_filtered_log_draw_at_any_size() {
         let mut state = showing(merge_rows());
         stopped_rebase(&mut state);
-        state.commits.filter = "work".into();
-        state.commits.selected = 2;
+        state.commits.list.filter = "work".into();
+        state.commits.list.selected = 2;
         for (width, height) in SIZES {
             draw(&state, width, height);
             state.commits.todo_selected = Some(1);
@@ -1070,10 +1085,10 @@ mod tests {
     fn the_log_cursor_lands_on_its_row_below_the_todo_with_a_range_and_a_filter() {
         let mut state = showing(merge_rows());
         stopped_rebase(&mut state);
-        state.commits.filter = "work".into();
+        state.commits.list.filter = "work".into();
         // `Side work` and `Main work` show; the range runs from one to the other.
-        state.commits.range_anchor = Some("s000000aaa".into());
-        state.commits.selected = 2;
+        state.commits.list.range_anchor = Some("s000000aaa".into());
+        state.commits.list.selected = 2;
         for (width, height) in SIZES {
             draw(&state, width, height);
         }
@@ -1178,7 +1193,7 @@ mod tests {
         let mut state = showing(merge_rows());
         stopped_rebase(&mut state);
         // Six rows inside the borders: the heading scrolls away.
-        state.commits.selected = 3;
+        state.commits.list.selected = 3;
         let rows = buffer_rows(&draw(&state, 100, 8));
         assert!(rows.iter().any(|r| r.contains("Root")), "{rows:#?}");
         assert!(!rows.iter().any(|r| r.contains("Rebase todo")), "{rows:#?}");
@@ -1209,7 +1224,7 @@ mod tests {
     #[test]
     fn the_selected_row_is_highlighted() {
         let mut state = showing(merge_rows());
-        state.commits.selected = 2;
+        state.commits.list.selected = 2;
         let buffer = draw(&state, 100, 30);
         let rows = buffer_rows(&buffer);
         let y = rows.iter().position(|r| r.contains("Main work")).unwrap();
@@ -1234,7 +1249,7 @@ mod tests {
             })
             .collect();
         let mut state = showing(rows);
-        state.commits.selected = 99_990;
+        state.commits.list.selected = 99_990;
 
         let lines = window(&state.commits, &Marks::of(&state), Rect::new(0, 0, 60, 20));
         assert_eq!(lines.len(), 20, "one line per visible row, no more");
@@ -1336,7 +1351,7 @@ mod tests {
         }));
         let mut state = showing(rows);
         let at_top = column_of(&buffer_rows(&draw(&state, 100, 12)), "tail 0");
-        state.commits.selected = 40;
+        state.commits.list.selected = 40;
         let scrolled = column_of(&buffer_rows(&draw(&state, 100, 12)), "tail 39");
         assert_eq!(
             at_top, scrolled,
@@ -1376,14 +1391,21 @@ mod tests {
     #[test]
     fn placeholders_say_loading_empty_or_the_error_and_how_to_retry() {
         let mut state = showing(vec![]);
-        state.commits.loaded = false;
+        state.commits.list.loaded = false;
         line_with(&buffer_rows(&draw(&state, 100, 30)), "Loading…");
-        state.commits.loaded = true;
+        state.commits.list.loaded = true;
         line_with(&buffer_rows(&draw(&state, 100, 30)), "No commits yet");
         state.commits.begin_page(1, 0);
-        state
-            .commits
-            .page_loaded(1, 0, Err("fatal: bad thing".into()));
+        state.commits.page_loaded(
+            Tag {
+                generation: state.generation,
+                seq: 1,
+                user: false,
+            },
+            state.generation,
+            0,
+            Err("fatal: bad thing".into()),
+        );
         let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "! Could not read the history: fatal: bad thing");
         line_with(&rows, "Press r to retry");
@@ -1393,7 +1415,16 @@ mod tests {
     fn a_failed_later_page_says_so_after_the_last_commit_and_names_r() {
         let mut state = showing(merge_rows());
         state.commits.begin_page(1, 4);
-        state.commits.page_loaded(1, 4, Err("fatal: gone".into()));
+        state.commits.page_loaded(
+            Tag {
+                generation: state.generation,
+                seq: 1,
+                user: false,
+            },
+            state.generation,
+            4,
+            Err("fatal: gone".into()),
+        );
         let rows = buffer_rows(&draw(&state, 100, 30));
         let root = rows.iter().position(|r| r.contains("Root")).unwrap();
         assert!(
@@ -1716,8 +1747,8 @@ mod tests {
     #[test]
     fn a_filter_shows_the_matching_rows_without_the_graph() {
         let mut state = showing(merge_rows());
-        state.commits.filter = "work".into();
-        state.commits.selected = 1;
+        state.commits.list.filter = "work".into();
+        state.commits.list.selected = 1;
         let rows = buffer_rows(&draw(&state, 100, 30));
         assert!(
             line_with(&rows, "Commits · /work 2 of 4 loaded").contains("Commits"),
@@ -1728,7 +1759,7 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains("Merge side")), "{rows:#?}");
         assert!(!rows.iter().any(|r| r.contains('●')), "no graph: {rows:#?}");
 
-        state.commits.filter = "zzz".into();
+        state.commits.list.filter = "zzz".into();
         let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "No matches");
     }
@@ -1753,7 +1784,7 @@ mod tests {
 
         // The fuzzy filter's counts come after the query.
         let mut state = queried(None, Some("ann"));
-        state.commits.filter = "work".into();
+        state.commits.list.filter = "work".into();
         let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "Commits · author: ann · /work 2 of 4 loaded");
     }
@@ -1794,7 +1825,7 @@ mod tests {
     fn a_query_and_the_fuzzy_filter_share_the_title() {
         let path = format!("{}name.rs", "dir/".repeat(30));
         let mut state = queried(Some(&path), Some("ann"));
-        state.commits.filter = "work".into();
+        state.commits.list.filter = "work".into();
         let rows = buffer_rows(&draw(&state, 80, 24));
         let title = &rows[0];
         assert!(width_of(title) <= 80, "{title}");
@@ -1807,7 +1838,7 @@ mod tests {
         let path = format!("{}name.rs", "dir/".repeat(30));
         let mut state = queried(Some(&path), None);
         // Drawn as `w`, U+FFFD and the 8-column `<U+202E>`: 10 columns, not 1.
-        state.commits.filter = "w\x07\u{202E}".into();
+        state.commits.list.filter = "w\x07\u{202E}".into();
         let rows = buffer_rows(&draw(&state, 80, 24));
         let title = &rows[0];
         assert!(
@@ -1827,7 +1858,12 @@ mod tests {
         state.commits.set_query(state.commits.query.clone());
         state.commits.begin_page(1, 0);
         state.commits.page_loaded(
-            1,
+            Tag {
+                generation: state.generation,
+                seq: 1,
+                user: false,
+            },
+            state.generation,
             0,
             Ok((
                 LogPage {
@@ -1876,8 +1912,8 @@ mod tests {
     #[test]
     fn a_range_is_counted_in_the_title() {
         let mut state = showing(merge_rows());
-        state.commits.range_anchor = Some("m000000aaa".into());
-        state.commits.selected = 2;
+        state.commits.list.range_anchor = Some("m000000aaa".into());
+        state.commits.list.selected = 2;
         let rows = buffer_rows(&draw(&state, 100, 30));
         line_with(&rows, "Commits · 3 selected");
     }

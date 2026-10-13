@@ -40,15 +40,16 @@
 //!   `git::rebase_command` and `fixup_base::candidates_notice`.
 //!
 //! Kept cross-feature reads: `commits.todo`, `todo_selected`, `todo_seq`,
-//! `todo_write_seq`, `rows`, `selected`, `query`, `filter`, `tips`,
-//! `range_anchor`, `range()`, `fixup_base_seq`, `pending` and
-//! `short_oid` (the parent `commits` panel); `files` (the Files
+//! `todo_write_seq`, `list.rows`, `list.selected`, `query`,
+//! `list.filter`, `tips`, `list.range_anchor`, `list.range()`,
+//! `fixup_base_seq`, `pending` and `short_oid` (the parent `commits`
+//! panel); `files` (the Files
 //! panel, core); the op slot, `branch` (and its `head`), `popups`,
 //! `left_behind_check`, `generation` and `notice` (core).
 //!
 //! What stays elsewhere, and why:
-//! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`, `range_anchor` and
-//!   the todo rows in the parent's `view.rs`: the commits panel shows and
+//! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`,
+//!   `list.range_anchor` and the todo rows in the parent's `view.rs`: the commits panel shows and
 //!   navigates them;
 //! - in core: `git/rebase_plan.rs`, `git/comment_prefix.rs` and
 //!   `sequence_editor.rs`: plumbing other code reads too;
@@ -116,7 +117,7 @@ pub(crate) fn rewrite_disabled(state: &AppState, rewrite: Rewrite) -> Option<Rea
         return Some(CLEAR_LOG_FILTER.into());
     }
     // The neighbour a move swaps with may be one the filter hides.
-    if matches!(rewrite, Rewrite::Move(_)) && !state.commits.filter.is_empty() {
+    if matches!(rewrite, Rewrite::Move(_)) && !state.commits.list.filter.is_empty() {
         return Some(FILTER_HIDES_NEIGHBOUR.into());
     }
     commit_action_disabled(state)
@@ -146,7 +147,7 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
         return Err(NEEDS_BREAK.into());
     }
     let commits = &state.commits;
-    let (rows, selected) = (commits.rows.as_slice(), commits.selected);
+    let (rows, selected) = (commits.list.rows.as_slice(), commits.list.selected);
     let plan = match rewrite {
         Rewrite::Edit(edit) => rebase_plan::plan(rows, selected, edit),
         Rewrite::Move(direction) => rebase_plan::plan_move(rows, selected, direction),
@@ -172,7 +173,7 @@ pub(crate) fn log_plan(state: &AppState, rewrite: Rewrite) -> Result<RebasePlan,
 /// its target, so with `--update-refs` a branch on the fixup or on one of
 /// those is refused.
 pub(crate) fn autosquash_plan(state: &AppState) -> Result<RebasePlan, Reason> {
-    let rows = state.commits.rows.as_slice();
+    let rows = state.commits.list.rows.as_slice();
     let pairs = rebase_plan::fixup_targets(rows)?;
     let plan = rebase_plan::plan_autosquash(rows)?;
     let crossings: Vec<Crossing> = pairs
@@ -199,7 +200,9 @@ pub(crate) fn autosquash_disabled(state: &AppState) -> Option<Reason> {
                 .is_active()
                 .then_some(CLEAR_LOG_FILTER.into())
         })
-        .or_else(|| (!state.commits.filter.is_empty()).then_some(FILTER_HIDES_NEIGHBOUR.into()))
+        .or_else(|| {
+            (!state.commits.list.filter.is_empty()).then_some(FILTER_HIDES_NEIGHBOUR.into())
+        })
         .or_else(|| commit_action_disabled(state))
         .or_else(|| in_progress_disabled(state))
         .or_else(|| autosquash_plan(state).err())
@@ -255,8 +258,8 @@ pub(crate) fn range_rewrite_disabled(state: &AppState, edit: Edit) -> Option<Rea
 /// The plan for `edit` over the selected log range, as it will run,
 /// checked against stacked branches like a single-row rewrite.
 pub(crate) fn range_log_plan(state: &AppState, edit: Edit) -> Result<RebasePlan, Reason> {
-    let rows = state.commits.rows.as_slice();
-    let plan = rebase_plan::plan_range(rows, &state.commits.range(), edit)?;
+    let rows = state.commits.list.rows.as_slice();
+    let plan = rebase_plan::plan_range(rows, &state.commits.list.range(), edit)?;
     with_stacked_branches(state, plan, &[])
 }
 

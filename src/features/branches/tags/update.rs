@@ -79,8 +79,9 @@ impl AppState {
         }
         let Some(target) = self
             .commits
+            .list
             .rows
-            .get(self.commits.selected)
+            .get(self.commits.list.selected)
             .and_then(|row| CommitId::parse(&row.oid))
         else {
             return;
@@ -320,7 +321,7 @@ mod tests {
         ));
         assert_eq!(state.prompt_title(PromptKind::TagName), "New tag on c1");
         // The selection moves while the user types.
-        state.commits.selected = 2;
+        state.commits.list.selected = 2;
         type_text(&mut state, " v1.0 ");
         let effects = press(&mut state, KeyCode::Enter);
         let (_, op) = op_of(&effects);

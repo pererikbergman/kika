@@ -1790,7 +1790,9 @@ impl AppState {
                     return vec![];
                 }
             },
-            CopyWhat::Subject => self.commits.rows[self.commits.selected].subject.clone(),
+            CopyWhat::Subject => self.commits.list.rows[self.commits.list.selected]
+                .subject
+                .clone(),
             CopyWhat::Message => {
                 let seq = self.take_seq();
                 let tag = self.user_tag(seq);
@@ -3465,8 +3467,8 @@ mod tests {
     fn switching_repositories_resets_the_panel_and_loads_the_new_one() {
         let mut state = with_commits(3, true);
         let effects = state.update(AppIntent::OpenRepo("/r/other".into()));
-        assert_eq!(state.commits.rows, []);
-        assert!(!state.commits.loaded);
+        assert_eq!(state.commits.list.rows, []);
+        assert!(!state.commits.list.loaded);
         let (tag, _, skip) = commits_load(&effects);
         assert_eq!((tag.generation, skip), (state.generation, 0));
     }
@@ -3483,7 +3485,7 @@ mod tests {
 
         assert!(!state.should_quit);
         assert_eq!(state.commits.open, None);
-        assert_eq!(state.commits.selected, 5);
+        assert_eq!(state.commits.list.selected, 5);
         assert_eq!(state.key_focus(), KeyScope::Commits);
         let request = diff_request(&effects);
         assert_eq!((request.commit, request.path), (None, "a.rs".into()));
@@ -4323,7 +4325,7 @@ mod tests {
     #[test]
     fn a_row_whose_id_is_not_hex_starts_nothing() {
         let mut state = on_commit();
-        state.commits.rows[1].oid = "--upload-pack=x".into();
+        state.commits.list.rows[1].oid = "--upload-pack=x".into();
         for intent in [
             AppIntent::Commits(CommitsIntent::Checkout),
             AppIntent::Commits(CommitsIntent::Revert),
@@ -4874,12 +4876,12 @@ mod tests {
             assert_ne!(guard(&state), Some(bisect::RESET_FIRST.into()));
         }
         let mut state = ready_to_bisect();
-        state.commits.selected = 1;
+        state.commits.list.selected = 1;
         state.update(AppIntent::Commits(CommitsIntent::Checkout));
         assert_eq!(state.notice, None);
         assert_ne!(state.popups, []);
         let mut state = ready_to_bisect();
-        state.commits.selected = 1;
+        state.commits.list.selected = 1;
         assert_ne!(
             state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft))),
             vec![]
@@ -4957,7 +4959,7 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
-        assert_eq!(state.commits.range(), [0, 1, 2]);
+        assert_eq!(state.commits.list.range(), [0, 1, 2]);
         press_char(&mut state, 'R');
         assert_eq!(state.notice, Some("Clear the selection first (esc)".into()));
         press_char(&mut state, 'B');
@@ -4976,7 +4978,7 @@ mod tests {
             state.notice_text.as_deref(),
             Some("Copied 2 (1 merge skipped, 2 copied)")
         );
-        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.commits.list.range_anchor, None);
 
         press_char(&mut state, 'V');
         press_char(&mut state, 'k');
@@ -5189,7 +5191,7 @@ mod tests {
     #[test]
     fn y_opens_the_copy_menu_and_each_item_copies_its_part_of_the_selected_commit() {
         let mut state = copy_ready();
-        state.commits.rows[1].short_oid = "1111111".into();
+        state.commits.list.rows[1].short_oid = "1111111".into();
         assert_eq!(press_char(&mut state, 'y'), vec![]);
         assert_eq!(open_menu(&state), MenuId::Copy);
 
@@ -5210,7 +5212,7 @@ mod tests {
             );
         }
         // The notice keeps the first 40 characters; the copy has them all.
-        state.commits.rows[1].subject = "s".repeat(41);
+        state.commits.list.rows[1].subject = "s".repeat(41);
         let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
             CopyIntent::CopyText(CopyWhat::Subject),
         )));
@@ -5224,7 +5226,7 @@ mod tests {
     #[test]
     fn a_short_hash_that_is_not_hex_is_not_copied() {
         let mut state = copy_ready();
-        state.commits.rows[1].short_oid = "-x".into();
+        state.commits.list.rows[1].short_oid = "-x".into();
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::Copy(
                 CopyIntent::CopyText(CopyWhat::ShortHash)

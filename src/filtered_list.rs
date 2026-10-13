@@ -27,9 +27,11 @@
 //! - A caller that needs to know whether a filter moved the cursor
 //!   compares `selected` before and after `set_filter`.
 //!
-//! Lists not on it yet: the Commits log (it loads in pages, with graph
-//! rows and the rebase todo beside it) and the Files panel (its selection
-//! drives the diff).
+//! The Commits log is on it too: it loads in pages, page 0 through
+//! `loaded` and each later one through `append`; its graph rows and the
+//! rebase todo stay beside it on the panel.
+//!
+//! Lists not on it yet: the Files panel (its selection drives the diff).
 //!
 //! Other lists:
 //! - A list whose rows live outside it (the command log, drawn from the
@@ -141,6 +143,37 @@ impl<R: Row> FilteredList<R> {
             .and_then(|key| self.position(&key))
             .unwrap_or(self.selected)
             .min(self.rows.len().saturating_sub(1));
+        self.reconcile();
+        true
+    }
+
+    /// Append a later page if it is the load in flight in this repository's
+    /// `generation` and starts where the rows end (`at == rows.len()`). The
+    /// cursor, filter and range stay; a hidden cursor moves to the first row
+    /// shown. A failed page keeps every row and records its error. Returns
+    /// whether it was applied.
+    pub fn append(
+        &mut self,
+        tag: Tag,
+        generation: u64,
+        at: usize,
+        result: Result<Vec<R>, String>,
+    ) -> bool {
+        if tag.generation != generation || self.seq != Some(tag.seq) {
+            return false;
+        }
+        self.seq = None;
+        // The rows moved under it since it was asked for: it fits nowhere.
+        if at != self.rows.len() {
+            return false;
+        }
+        match result {
+            Ok(rows) => {
+                self.rows.extend(rows);
+                self.error = None;
+            }
+            Err(message) => self.error = Some(message),
+        }
         self.reconcile();
         true
     }
@@ -555,6 +588,73 @@ mod tests {
         reload(&mut list, 3, ids(&[0, 1, 3]));
         assert_eq!(list.range_anchor, None);
         assert!(list.range().is_empty());
+    }
+
+    #[test]
+    fn appending_a_page_keeps_the_cursor_filter_and_range() {
+        let mut list = list(texts(&["a x", "b x", "c"]));
+        list.set_filter("x".into());
+        list.toggle_range();
+        list.move_by(1);
+        list.begin(2);
+        let page = vec![Item { id: 3, text: "d x" }, Item { id: 4, text: "e" }];
+        assert!(list.append(tag(2), GENERATION, 3, Ok(page)));
+        assert_eq!(list.seq, None);
+        assert_eq!(list.rows.len(), 5);
+        assert_eq!(list.filter, "x");
+        assert_eq!(
+            list.selected_row().map(Row::key),
+            Some(1),
+            "the cursor stays"
+        );
+        assert_eq!(list.range_anchor, Some(0), "the range stays");
+        assert_eq!(list.visible(), [0, 1, 3], "a new matching row shows");
+        assert_eq!(list.range(), [0, 1]);
+    }
+
+    #[test]
+    fn a_stale_or_other_generation_page_is_dropped() {
+        let mut list = list(ids(&[1, 2]));
+        list.begin(5);
+        assert!(!list.append(tag(4), GENERATION, 2, Ok(ids(&[3]))));
+        assert!(!list.append(tag(5), GENERATION + 1, 2, Ok(ids(&[3]))));
+        assert_eq!(list.seq, Some(5), "still in flight");
+        assert_eq!(list.rows, ids(&[1, 2]));
+    }
+
+    #[test]
+    fn a_page_not_at_the_end_is_dropped_and_ends_the_load() {
+        let mut list = list(ids(&[1, 2]));
+        list.begin(2);
+        assert!(!list.append(tag(2), GENERATION, 1, Ok(ids(&[3]))));
+        assert_eq!(list.seq, None, "the load is over");
+        assert_eq!(list.rows, ids(&[1, 2]));
+    }
+
+    #[test]
+    fn a_failed_page_keeps_the_rows_and_its_error() {
+        let mut list = list(ids(&[1, 2]));
+        list.move_by(1);
+        list.begin(2);
+        assert!(list.append(tag(2), GENERATION, 2, Err("bad".into())));
+        assert_eq!(list.rows, ids(&[1, 2]), "kept though the row type clears");
+        assert_eq!((list.seq, list.selected), (None, 1));
+        assert_eq!(list.error.as_deref(), Some("bad"));
+        list.begin(3);
+        assert!(list.append(tag(3), GENERATION, 2, Ok(ids(&[3]))));
+        assert_eq!(list.error, None, "a good page clears it");
+    }
+
+    #[test]
+    fn an_appended_page_moves_a_hidden_cursor_to_a_shown_row() {
+        let mut list = list(texts(&["a", "b"]));
+        list.set_filter("x".into());
+        assert!(list.selected_hidden());
+        list.begin(2);
+        let page = vec![Item { id: 2, text: "c" }, Item { id: 3, text: "d x" }];
+        assert!(list.append(tag(2), GENERATION, 2, Ok(page)));
+        assert_eq!(list.selected, 3);
+        assert!(!list.selected_hidden());
     }
 
     #[test]

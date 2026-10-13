@@ -16,8 +16,8 @@
 //! - `effects::load_message`.
 //!
 //! Kept cross-feature reads and calls:
-//! - the handlers read `commits.rows`, `commits.selected`,
-//!   `commits.range()` and `commits.range_anchor`, and call
+//! - the handlers read `commits.list.rows`, `commits.list.selected`,
+//!   `commits.list.range()` and `commits.list.range_anchor`, and call
 //!   `commit_for_action` (commits);
 //! - `paste_disabled` reads `branch`, `files` and the op slot.
 //!
