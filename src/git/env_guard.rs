@@ -29,42 +29,59 @@ const ALLOWED: [(&str, &str, &str); 2] = [
     ),
 ];
 
-/// Each string literal naming a standard var in `text`'s production part,
-/// as its 1-based line and the var. The production part ends at the first
-/// `#[cfg(test)]` followed by a `mod tests`, private or not.
+/// Each string literal naming a standard var in `text`'s production code,
+/// as its 1-based line and the var. Only the body of a `#[cfg(test)]`
+/// module named exactly `tests` is skipped; code after it is read too.
 fn standard_var_hits(text: &str) -> Vec<(usize, &'static str)> {
     let lines: Vec<&str> = text.lines().collect();
-    let end = lines
-        .iter()
-        .enumerate()
-        .position(|(i, line)| {
-            line.trim() == "#[cfg(test)]"
-                && lines[i + 1..]
-                    .iter()
-                    .find(|next| !next.trim().is_empty())
-                    .is_some_and(|next| is_tests_module(next))
-        })
-        .unwrap_or(lines.len());
     let mut hits = Vec::new();
-    for (i, line) in lines[..end].iter().enumerate() {
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(end) = test_module_end(&lines, i) {
+            i = end + 1;
+            continue;
+        }
         for var in STANDARD_VARS {
             let quoted = format!("\"{var}\"");
             hits.extend(std::iter::repeat_n(
                 (i + 1, var),
-                line.matches(&quoted).count(),
+                lines[i].matches(&quoted).count(),
             ));
         }
+        i += 1;
     }
     hits
 }
 
-/// `mod tests {`, private or visible to the crate.
+/// The index of the closing line of the test module whose `#[cfg(test)]`
+/// is at `at`, if one starts there. Its body ends at the first `}` line at
+/// the `mod` line's own indent, which rustfmt guarantees.
+fn test_module_end(lines: &[&str], at: usize) -> Option<usize> {
+    if lines[at].trim() != "#[cfg(test)]" {
+        return None;
+    }
+    let (offset, header) = lines[at + 1..]
+        .iter()
+        .enumerate()
+        .find(|(_, line)| !line.trim().is_empty())?;
+    if !is_tests_module(header) {
+        return None;
+    }
+    let start = at + 1 + offset;
+    let indent = &header[..header.len() - header.trim_start().len()];
+    let close = format!("{indent}}}");
+    lines[start + 1..]
+        .iter()
+        .position(|line| line.trim_end() == close)
+        .map(|end| start + 1 + end)
+}
+
+/// `mod tests {` exactly, private or visible to the crate; not
+/// `mod tests_support` or the like.
 fn is_tests_module(line: &str) -> bool {
-    let line = line.trim_start();
+    let line = line.trim();
     let line = line.strip_prefix("pub(crate) ").unwrap_or(line);
-    line.strip_prefix("pub ")
-        .unwrap_or(line)
-        .starts_with("mod tests")
+    line.strip_prefix("pub ").unwrap_or(line) == "mod tests {"
 }
 
 /// Every `.rs` file under `dir`, with paths relative to the crate root.
@@ -144,5 +161,19 @@ mod tests {
             "fn f() {}\n#[cfg(test)]\npub(crate) mod tests {\n    const A: &str = \"LC_ALL\";\n}\n";
 
         assert!(standard_var_hits(text).is_empty());
+    }
+
+    #[test]
+    fn a_test_gated_module_with_another_name_is_scanned() {
+        let text = "#[cfg(test)]\nmod tests_support {\n    const A: &str = \"LC_ALL\";\n}\n";
+
+        assert_eq!(standard_var_hits(text), [(3, "LC_ALL")]);
+    }
+
+    #[test]
+    fn production_code_after_a_test_module_is_scanned() {
+        let text = "#[cfg(test)]\nmod tests {\n    fn t() {\n        let _ = \"LC_ALL\";\n    }\n}\n\nconst LOCKS: &str = \"GIT_OPTIONAL_LOCKS\";\n";
+
+        assert_eq!(standard_var_hits(text), [(8, "GIT_OPTIONAL_LOCKS")]);
     }
 }
