@@ -6,25 +6,21 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::branches::{branch_log, list_branches};
-use crate::git::diff::terminal_safe;
 use crate::intent::AppIntent;
 
 /// List the local branches and report them as `BranchesLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || list_branches(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || list_branches(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git for-each-ref crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::BranchesLoaded { tag, result });
-    });
+        background::crashed("git for-each-ref"),
+        move |result| AppIntent::BranchesLoaded { tag, result },
+    );
 }
 
 /// Read `refname`'s log and report it as `BranchLogLoaded`, naming the
@@ -35,18 +31,18 @@ pub(crate) fn load_log(
     tag: Tag,
     refname: Vec<u8>,
 ) {
-    tokio::spawn(async move {
-        let read = crate::git::path::os_string(&refname);
+    let read = crate::git::path::os_string(&refname);
+    background::run(
+        tx,
+        move || branch_log(runner.as_ref(), &read),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || branch_log(runner.as_ref(), &read))
-            .await
-            .unwrap_or_else(|e| Err(terminal_safe(format!("git log crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::BranchLogLoaded {
+        background::crashed("git log"),
+        move |result| AppIntent::BranchLogLoaded {
             tag,
             refname,
             result,
-        });
-    });
+        },
+    );
 }
 
 #[cfg(test)]

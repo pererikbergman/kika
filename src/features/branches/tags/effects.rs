@@ -5,25 +5,21 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::tags::list_tags;
 use crate::intent::AppIntent;
 
 /// List the tags and report them as `TagsLoaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || list_tags(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || list_tags(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git for-each-ref crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::TagsLoaded { tag, result });
-    });
+        background::crashed("git for-each-ref"),
+        move |result| AppIntent::TagsLoaded { tag, result },
+    );
 }
 
 #[cfg(test)]

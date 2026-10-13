@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::background;
 use crate::effect::{Tag, gh_cwd, log_program, unix_now};
 use crate::forge::task::{ForgeContext, Load, run_load};
 use crate::forge::{CreateError, ForgeHost, ForgeRepo, ForgeStatus};
@@ -37,9 +38,10 @@ pub(crate) fn load(
             let _ = tx.send(AppIntent::ForgeRepoNone { tag });
         }
         Some(forge) => {
-            tokio::spawn(async move {
-                let send = tx.clone();
-                let done = tokio::task::spawn_blocking(move || {
+            let send = tx.clone();
+            background::run_with(
+                tx,
+                move || {
                     let load = Load {
                         tag,
                         hosts: &hosts,
@@ -53,17 +55,16 @@ pub(crate) fn load(
                     run_load(runner.as_ref(), &forge, &load, &|intent| {
                         let _ = send.send(intent);
                     });
-                })
-                .await;
+                },
                 // A panic still ends the call, or no refresh would run again.
-                if done.is_err() && refresh {
-                    let _ = tx.send(AppIntent::PullRequestsFetched {
+                move |done| {
+                    (done.is_err() && refresh).then_some(AppIntent::PullRequestsFetched {
                         tag,
                         result: Err(ForgeStatus::Failed),
                         limited_until: None,
-                    });
-                }
-            });
+                    })
+                },
+            );
         }
     }
 }
@@ -91,8 +92,9 @@ pub(crate) fn create(
         });
         return;
     };
-    tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let cwd = gh_cwd(&forge);
             let gh = crate::forge::github::Gh {
                 runner: forge.gh.as_ref(),
@@ -102,12 +104,11 @@ pub(crate) fn create(
                 now: unix_now(),
             };
             gh.create_pull(&repo, &head, &base, &title)
-        })
-        .await
+        },
         // A panic still answers, or the create would stay in flight.
-        .unwrap_or(Err(CreateError::Status(ForgeStatus::Failed)));
-        let _ = tx.send(AppIntent::PullRequestCreated { tag, result });
-    });
+        |_| Err(CreateError::Status(ForgeStatus::Failed)),
+        move |result| AppIntent::PullRequestCreated { tag, result },
+    );
 }
 
 /// Start `argv` (the browser and the URL last) with no shell and nothing

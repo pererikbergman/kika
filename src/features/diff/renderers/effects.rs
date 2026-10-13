@@ -9,9 +9,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::external_diff::{discover, read_diff, run_renderer};
 use super::{ExternalRenderer, RendererKind, ansi, diff_tool};
+use crate::background;
 use crate::effect::Tag;
 use crate::git::GitRunner;
-use crate::git::diff::{DiffRequest, terminal_safe};
+use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
 
 /// Find the renderers, `pager` and `tool` from the global config first,
@@ -22,13 +23,13 @@ pub(crate) fn find(
     pager: Option<String>,
     tool: Option<String>,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || discover(runner.as_ref(), pager, tool),
         // A panic finds nothing; the built-in view still works.
-        let found = tokio::task::spawn_blocking(move || discover(runner.as_ref(), pager, tool))
-            .await
-            .unwrap_or_default();
-        let _ = tx.send(AppIntent::RenderersFound(found));
-    });
+        |_| Default::default(),
+        AppIntent::RenderersFound,
+    );
 }
 
 /// Run `renderer` on `request` in `workdir`, `cols` wide, and report its
@@ -43,9 +44,9 @@ pub(crate) fn render(
     cols: u16,
 ) {
     let label = renderer.label.clone();
-    tokio::spawn(async move {
-        // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let out = match renderer.kind {
                 RendererKind::Pager => {
                     let diff = read_diff(runner.as_ref(), &request, &renderer.label)?;
@@ -56,11 +57,11 @@ pub(crate) fn render(
                 }
             };
             Ok(ansi::parse(&out))
-        })
-        .await
-        .unwrap_or_else(|e| Err(terminal_safe(format!("{label} crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::DiffRendered { tag, result });
-    });
+        },
+        // A panic still reports back, or the busy counter would stay raised.
+        background::crashed(label),
+        move |result| AppIntent::DiffRendered { tag, result },
+    );
 }
 
 #[cfg(test)]

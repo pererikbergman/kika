@@ -8,10 +8,10 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::PAGE;
 use super::git::read_tips;
+use crate::background;
 use crate::effect::{Tag, unix_now};
 use crate::git::GitRunner;
 use crate::git::commit_files::{CommitRange, commit_files};
-use crate::git::diff::terminal_safe;
 use crate::git::log::{LogQuery, log_page, markers};
 use crate::intent::AppIntent;
 
@@ -25,48 +25,40 @@ pub(crate) fn load(
     skip: usize,
     query: LogQuery,
 ) {
-    tokio::spawn(async move {
-        // A panic still reports back, or the panel would wait forever.
-        let result = tokio::task::spawn_blocking(move || {
+    background::run(
+        tx,
+        move || {
             let page = log_page(runner.as_ref(), tip.as_deref(), skip, PAGE, &query)?;
             Ok((page, unix_now()))
-        })
-        .await
-        .unwrap_or_else(|e| Err(terminal_safe(format!("git log crashed: {e}").as_bytes())));
-        let _ = tx.send(AppIntent::CommitsLoaded { tag, skip, result });
-    });
+        },
+        // A panic still reports back, or the panel would wait forever.
+        background::crashed("git log"),
+        move |result| AppIntent::CommitsLoaded { tag, skip, result },
+    );
 }
 
 /// Read which commits are unpushed or unmerged and report them as
 /// `MarkersLoaded`.
 pub(crate) fn load_markers(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || markers(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
-        let result = tokio::task::spawn_blocking(move || markers(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git rev-list crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::MarkersLoaded { tag, result });
-    });
+        background::crashed("git rev-list"),
+        move |result| AppIntent::MarkersLoaded { tag, result },
+    );
 }
 
 /// Read where every local branch points and report it as
 /// `BranchTipsLoaded`.
 pub(crate) fn load_tips(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || read_tips(runner.as_ref()),
         // A panic still reports back, or the panel would wait forever.
-        let result = tokio::task::spawn_blocking(move || read_tips(runner.as_ref()))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git for-each-ref crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::BranchTipsLoaded { tag, result });
-    });
+        background::crashed("git for-each-ref"),
+        move |result| AppIntent::BranchTipsLoaded { tag, result },
+    );
 }
 
 /// List the files `range` changed and report them as `CommitFilesLoaded`.
@@ -76,17 +68,13 @@ pub(crate) fn load_files(
     tag: Tag,
     range: CommitRange,
 ) {
-    tokio::spawn(async move {
+    background::run(
+        tx,
+        move || commit_files(runner.as_ref(), &range),
         // A panic still reports back, or the busy counter would stay raised.
-        let result = tokio::task::spawn_blocking(move || commit_files(runner.as_ref(), &range))
-            .await
-            .unwrap_or_else(|e| {
-                Err(terminal_safe(
-                    format!("git diff-tree crashed: {e}").as_bytes(),
-                ))
-            });
-        let _ = tx.send(AppIntent::CommitFilesLoaded { tag, result });
-    });
+        background::crashed("git diff-tree"),
+        move |result| AppIntent::CommitFilesLoaded { tag, result },
+    );
 }
 
 #[cfg(test)]

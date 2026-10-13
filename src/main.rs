@@ -1,4 +1,5 @@
 mod app;
+mod background;
 mod bisect;
 mod cli;
 mod clipboard;
