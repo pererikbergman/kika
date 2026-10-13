@@ -18,9 +18,9 @@
 //!   `branch_tips_loaded`, `open_commit_files`, `commit_files_loaded`,
 //!   `move_commit_file` and `commit_file_diff`; in `actions.rs`:
 //!   `commit_for_action`, `ask_checkout_commit`, `confirm_checkout_commit`,
-//!   `revert_commit`, `reset_to` and `confirm_reset_hard`; and in
-//!   `log_query.rs`: `open_log_filter`, `accept_log_query`,
-//!   `set_log_query` and `log_of_file`;
+//!   `revert_commit`, `reset_to` and the `reset_hard_question`
+//!   constructor; and in `log_query.rs`: `open_log_filter`,
+//!   `accept_log_query`, `set_log_query` and `log_of_file`;
 //! - the chunks `keys::{COMMITS_KEYS, COMMITS_SWITCH_TAB,
 //!   COMMITS_FILES_NAV, COMMITS_FILES_BACK, COMMITS_RESET_HARD_CONFIRM,
 //!   COMMITS_LOG_FILTER, COMMITS_FILES_LOG}`, the guards
@@ -48,9 +48,11 @@
 //! `commit_source_disabled`, `no_commit`, `in_progress_disabled` and
 //! `list_guard`, which core's own guards and other features' share;
 //! `REPO_LOCKED`; the confirm popups (`ConfirmKind::DetachedCheckout`,
-//! `Popup::ResetHard`) and their views; and `model/confirm_guard.rs`,
-//! which re-checks every move question's guard on `y`. `op.rs` keeps the
-//! `Reset` and `Revert` argv arms of `op_command`.
+//! `Popup::Question`) and their views; `confirm_question.rs`, which
+//! answers the hard-reset question and re-checks `HEAD` (`head_still`);
+//! and `model/confirm_guard.rs`, which re-checks every move question's
+//! guard on `y`. `op.rs` keeps the `Reset` and `Revert` argv arms of
+//! `op_command`.
 //!
 //! This module also owns the stacked-branch check that every history
 //! rewrite runs before it starts: [`with_stacked_branches`] with the
@@ -76,6 +78,7 @@ pub(crate) mod rewrite;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use actions::reset_hard_question;
 pub(crate) use commit_files::CommitFilesList;
 pub(crate) use panel::{CommitsPanel, CommitsTab, PAGE};
 

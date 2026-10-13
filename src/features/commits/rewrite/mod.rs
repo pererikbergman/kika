@@ -31,7 +31,7 @@
 //!   (`rewrite_range`, `confirm_drop_range`), `fixup.rs`
 //!   (`create_fixup`, `ask_autosquash`, `autosquash`, `find_fixup_base`,
 //!   `fixup_base_found`) and `leave_commits.rs` (`move_head`,
-//!   `left_behind_checked`, `confirm_leave_commits`, `head_still`);
+//!   `left_behind_checked`, `confirm_leave_commits`);
 //! - `effects::{load_todo, write_todo, find_base, check_left_behind}`,
 //!   `git::rebase_command` and `fixup_base::candidates_notice`.
 //!
@@ -54,8 +54,10 @@
 //!   `GitOp::InteractiveRebase`, which the custom patch's rewrite also
 //!   builds through `op_command`;
 //! - `confirm_refused` (`model/confirm_guard.rs`), the guard every move
-//!   question re-checks, and the reset-hard question, a Commits panel
-//!   action that also calls `head_still`;
+//!   question re-checks, and `head_still` and `detached_head`
+//!   (`confirm_question.rs`, core), which the reset-hard question also
+//!   uses; the reset-hard question itself is built by the parent's
+//!   `reset_hard_question`;
 //! - `commits_range_disabled`, `CLEAR_RANGE_FIRST` and `CLEAR_LOG_FILTER`,
 //!   which other features' guards use too.
 

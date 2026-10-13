@@ -10,6 +10,7 @@
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, CLEAR_RANGE_FIRST, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason,
@@ -234,7 +235,7 @@ pub(crate) static COMMITS_RESET_HARD_CONFIRM: &[Binding] = &[
     // cannot be undone.
     Binding {
         id: "reset_hard.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::ResetHard,
         intent: AppIntent::ConfirmResetHard,
         description: "Yes, reset and throw away every uncommitted change",
