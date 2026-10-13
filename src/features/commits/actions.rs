@@ -118,11 +118,12 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::confirm_question::quit_question;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::keymap;
     use crate::menu::MenuId;
-    use crate::popup::{ConfirmKind, Popup};
+    use crate::popup::Popup;
     use crate::test_support::{attached_of, cid, on_branch, on_commit, op_of, press, press_char};
 
     #[test]
@@ -284,13 +285,13 @@ mod tests {
         );
         assert_eq!(state.popups, []);
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        state.popups.push(Popup::Question(quit_question()));
         assert_eq!(
             state.answer_question(KeyScope::ResetHard, Answer::YOnly),
             vec![]
         );
         assert_eq!(state.update(AppIntent::ConfirmResetHard), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
 

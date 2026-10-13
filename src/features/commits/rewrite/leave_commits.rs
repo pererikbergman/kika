@@ -143,13 +143,14 @@ impl AppState {
 mod tests {
     use crossterm::event::KeyCode;
 
+    use crate::confirm_question::quit_question;
     use crate::effect::Tag;
     use crate::features::commits::{checkout_question, reset_hard_question};
     use crate::git::status::Head;
     use crate::intent::AppIntent;
     use crate::keymap::KeyScope;
     use crate::op::ResetMode;
-    use crate::popup::{ConfirmKind, ErrorPopup, LeaveCommitsConfirm, Popup};
+    use crate::popup::{ErrorPopup, LeaveCommitsConfirm, Popup};
     use crate::test_support::{
         check_of, checked, cid, detached_on_commit, ids, moves, on_branch, on_commit, op_of, press,
         press_char, reset_op,
@@ -286,9 +287,9 @@ mod tests {
     fn confirm_leave_commits_does_nothing_without_the_question() {
         let mut state = detached_on_commit();
         assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        state.popups.push(Popup::Question(quit_question()));
         assert_eq!(state.update(AppIntent::ConfirmLeaveCommits), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
 

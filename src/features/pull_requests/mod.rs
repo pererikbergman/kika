@@ -10,7 +10,7 @@
 //! - the builders `with_forge_hosts` and `with_forge_links` on `AppState`;
 //! - the guards `open_url_disabled`, `copy_url_disabled`,
 //!   `commit_url_disabled` and `create_disabled`, which the menu uses, and
-//!   `question` and `commit_page`, which core `update` uses;
+//!   `commit_page`, which core `update` uses;
 //! - the handlers in `badges.rs` and `create.rs` that `update` calls;
 //! - the chunks `keys::{PULL_REQUESTS_BRANCHES, PULL_REQUESTS_PICK_CREATE}`;
 //! - `effects::{load, create, open_url}`.
@@ -37,5 +37,8 @@ pub(crate) mod keys;
 
 pub(crate) use create::{
     PrCreating, PrDraft, commit_page, commit_url_disabled, copy_url_disabled, create_disabled,
-    open_url_disabled, question,
+    open_url_disabled,
 };
+
+#[cfg(test)]
+pub(crate) use create::create_question;

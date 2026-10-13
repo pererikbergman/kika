@@ -14,8 +14,8 @@
 //! - the handlers (`update.rs`) that core calls: `move_selection` for
 //!   `SelectNext` and `SelectPrev`, `toggle_stage` and `toggle_stage_all`,
 //!   `ask_discard_range` (from core `ask_discard`), `go_to_file`, and
-//!   `open_ignore`, `ignore_answered` and `ignore_written` for the
-//!   `.gitignore` flow;
+//!   `open_ignore`, `ignore_answered`, `ignore_written` and
+//!   `files_popup_closed` for the `.gitignore` flow;
 //! - `IgnoreDraft` (the `ignore_draft` field) and `IgnoreAdded` (the
 //!   `IgnoreWritten` intent);
 //! - `keys::{FILES_NAV, FILES_STAGE, FILES_DISCARD_OPEN, FILES_IGNORE,

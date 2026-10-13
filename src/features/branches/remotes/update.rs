@@ -202,6 +202,22 @@ impl AppState {
     pub(crate) fn confirm_remove_remote(&mut self) -> Vec<Effect> {
         self.answer_question(KeyScope::RemoveRemote, Answer::YOnly)
     }
+
+    /// Closing a remote's prompt forgets what it was asked for.
+    pub(crate) fn remotes_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::TrackBranch
+                    | PromptKind::RemoteName
+                    | PromptKind::RemoteUrl
+                    | PromptKind::RenameRemote,
+                ..
+            }
+        ) {
+            self.branches.remotes.pending = None;
+        }
+    }
 }
 
 /// "Remove this remote?", carrying the op chosen when it was asked, so a
@@ -527,6 +543,29 @@ mod tests {
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
             assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn closing_a_remote_prompt_forgets_what_it_asked_for() {
+        use crate::features::branches::remotes::RemotePending;
+        use crate::model::{AppState, Context};
+        use crate::popup::LineInput;
+        for kind in [
+            PromptKind::TrackBranch,
+            PromptKind::RemoteName,
+            PromptKind::RemoteUrl,
+            PromptKind::RenameRemote,
+        ] {
+            let mut state = AppState::new(Context::Workspace);
+            state.branches.remotes.pending = Some(RemotePending::Rename("origin".into()));
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            assert_eq!(state.branches.remotes.pending, None, "{kind:?}");
         }
     }
 }

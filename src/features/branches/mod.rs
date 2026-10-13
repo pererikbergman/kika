@@ -16,7 +16,8 @@
 //!   `branch_log_loaded`, `switch_branches_tab`, `move_branch`,
 //!   `checkout_branch`, `ask_branch_name`, `create_branch_named`,
 //!   `rename_branch_to`, `ask_delete_branch`, `confirm_delete_branch`,
-//!   `ask_upstream`, `set_upstream_to` and `unset_upstream`; and in
+//!   `ask_upstream`, `set_upstream_to`, `unset_upstream` and
+//!   `branches_popup_closed`; and in
 //!   `lists.rs`: `apply_branches_filter` and the range builders
 //!   `branches_range_confirm`, `tags_range_confirm` and
 //!   `remotes_range_confirm`;

@@ -255,6 +255,19 @@ impl AppState {
             list.pending_branch = None;
         }
     }
+
+    /// Closing the new worktree's path prompt forgets its branch.
+    pub(crate) fn worktrees_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::WorktreePath,
+                ..
+            }
+        ) {
+            self.forget_worktree_branch();
+        }
+    }
 }
 
 /// "Remove this worktree?", carrying the path taken when it was asked, so

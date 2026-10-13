@@ -131,9 +131,10 @@ mod tests {
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyPress, KeyScope};
     use crate::model::{CommitFlow, Focus};
-    use crate::popup::{ConfirmKind, Popup};
+    use crate::popup::Popup;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use rewrite::fixup::autosquash_question;
 
     fn alt(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::ALT)))
@@ -844,11 +845,12 @@ mod tests {
         let mut state = with_a_fixup();
         let ask = |state: &mut AppState| {
             assert_eq!(press_char(state, 'S'), vec![]);
-            assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
-            assert_eq!(ConfirmKind::Autosquash.title(), "Autosquash");
+            let question = autosquash_question();
+            assert_eq!(state.popups, [Popup::Question(question.clone())]);
+            assert_eq!(question.title, "Autosquash");
             assert!(
-                state
-                    .confirm_question(&ConfirmKind::Autosquash)
+                question
+                    .text
                     .starts_with("Fold every fixup! commit into the commit it fixes?")
             );
         };
@@ -857,7 +859,7 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::AutosquashConfirm);
         // Enter is too easy to press by habit: it answers nothing.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
+        assert_eq!(state.popups, [Popup::Question(autosquash_question())]);
         assert_eq!(press_char(&mut state, 'q'), vec![]);
         assert_eq!(state.held_seq(), None);
         assert_eq!(press_char(&mut state, 'n'), vec![]);

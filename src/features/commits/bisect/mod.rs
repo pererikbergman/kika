@@ -7,7 +7,8 @@
 //! Its `pub(crate)` API:
 //! - `keys::{BISECT_COMMITS, BISECT_STATUS}`;
 //! - the handlers in `update.rs`: `bisect_selected`, `bisect_head`,
-//!   `ask_bisect_reset`, `bisect_reset` and `announce_bisect`;
+//!   `ask_bisect_reset` (with its `bisect_reset_question`), `bisect_reset`
+//!   and `announce_bisect`;
 //! - `git::run_bisect_start`.
 //!
 //! Kept cross-feature reads and calls:
@@ -26,8 +27,8 @@
 //!   feature's Status panel draws;
 //! - `src/git/bisect.rs`, which `git/status` reads;
 //! - the `update()` dispatch arms and the `bisect::bisect_only` guards,
-//!   the Bisect menu (`MenuId::Bisect`), `ConfirmKind::Abort` and
-//!   `confirm_question`, and the `op_command`/`run_op` arms in `op.rs`.
+//!   the Bisect menu (`MenuId::Bisect`) and its `AskBisectReset` intent,
+//!   and the `op_command`/`run_op` arms in `op.rs`.
 
 pub(crate) mod git;
 pub(crate) mod keys;

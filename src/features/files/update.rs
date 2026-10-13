@@ -184,6 +184,19 @@ impl AppState {
         self.popups
             .push(Popup::Question(what.into_question(String::new(), op)));
     }
+
+    /// Closing the `.gitignore` prompt forgets the drafted pattern.
+    pub(crate) fn files_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::IgnorePattern,
+                ..
+            }
+        ) {
+            self.ignore_draft = None;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -676,5 +689,22 @@ mod tests {
         )));
         let (_, op) = op_of(&state.update(AppIntent::ToggleStage));
         assert_eq!(op, toggle_for(&state.files[1]).unwrap());
+    }
+
+    #[test]
+    fn closing_the_ignore_prompt_forgets_the_pattern() {
+        use crate::features::files::IgnoreDraft;
+        let mut state = AppState::new(Context::Workspace);
+        state.ignore_draft = Some(IgnoreDraft {
+            shown: "*.log".into(),
+            bytes: b"*.log".to_vec(),
+        });
+        state.popups.push(Popup::Prompt {
+            kind: PromptKind::IgnorePattern,
+            input: LineInput::default(),
+        });
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.ignore_draft, None);
     }
 }

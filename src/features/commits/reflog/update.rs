@@ -159,13 +159,13 @@ pub(crate) fn travel_question(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::confirm_question::quit_question;
     use crate::features::commits::CommitsTab;
     use crate::git::repo_state::Operation;
     use crate::git::status::{BranchStatus, Head};
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::list_filter::{self, InputTarget};
-    use crate::popup::ConfirmKind;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -252,9 +252,9 @@ mod tests {
     fn confirm_travel_does_nothing_without_the_question() {
         let mut state = undoable();
         assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
+        state.popups.push(Popup::Question(quit_question()));
         assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
 

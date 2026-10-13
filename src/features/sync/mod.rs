@@ -7,7 +7,7 @@
 //!
 //! Its `pub(crate)` API: the handlers `fetch_finished`, `start_remote`,
 //! `current_remote`, `remote_notice`, `spinner_tick` and `remote_finished` on
-//! `AppState`; the chunks `keys::{SYNC_WORKSPACE, SYNC_CREDENTIAL}`; and
+//! `AppState`, the last asking `force_push_question` after a rejected push; the chunks `keys::{SYNC_WORKSPACE, SYNC_CREDENTIAL}`; and
 //! `effects::{fetch, remote}`.
 //!
 //! Kept cross-feature reads and calls, left as they are because this slice
@@ -29,3 +29,6 @@ pub(crate) mod effects;
 mod git;
 pub(crate) mod keys;
 mod update;
+
+#[cfg(test)]
+pub(crate) use update::force_push_question;

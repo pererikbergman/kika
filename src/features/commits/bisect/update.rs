@@ -3,12 +3,14 @@
 //! what a status load found.
 
 use crate::bisect;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::git::bisect::{BisectMark, BisectState};
-use crate::git::repo_state::Operation;
+use crate::intent::AppIntent;
+use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, Popup};
+use crate::popup::Popup;
 
 /// Bisecting: marks from the Commits and Status panels, the reset, and
 /// saying what a status load found.
@@ -54,9 +56,24 @@ impl AppState {
         }
         match bisect::reset_disabled(self) {
             Some(reason) => self.notice = Some(reason),
-            None => self
-                .popups
-                .push(Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))),
+            None => {
+                let question = self.bisect_reset_question();
+                self.popups.push(Popup::Question(question));
+            }
+        }
+    }
+
+    /// "Reset the bisect?", naming where `HEAD` goes back to. Only `y`
+    /// answers: the marks are dropped and the files change.
+    pub(crate) fn bisect_reset_question(&self) -> ConfirmQuestion {
+        ConfirmQuestion {
+            scope: KeyScope::AbortConfirm,
+            title: "Reset bisect".into(),
+            text: bisect::reset_question(bisect::bisect_state(self)),
+            answer: Answer::YOnly,
+            then: Then::Intent(Box::new(AppIntent::ConfirmBisectReset)),
+            range: false,
+            head: None,
         }
     }
 
@@ -92,6 +109,7 @@ mod tests {
     use super::*;
     use crate::effect::Tag;
     use crate::git::FileEntry;
+    use crate::git::repo_state::Operation;
     use crate::git::status::{BranchStatus, EntryKind, Head, RepoStatus};
     use crate::intent::AppIntent;
     use crate::menu::MenuId;
@@ -253,7 +271,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+            [Popup::Question(state.bisect_reset_question())]
         );
     }
 
@@ -275,7 +293,7 @@ mod tests {
         assert_eq!(state.update(AppIntent::MenuSelect), vec![]);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))]
+            [Popup::Question(state.bisect_reset_question())]
         );
 
         let mut idle = ready_to_bisect();

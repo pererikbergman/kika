@@ -178,6 +178,19 @@ impl AppState {
         }
         vec![]
     }
+
+    /// Cancelling a command's prompt cancels the command.
+    pub(crate) fn custom_commands_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::Command,
+                ..
+            }
+        ) {
+            self.pending_command = None;
+        }
+    }
 }
 
 #[cfg(test)]
