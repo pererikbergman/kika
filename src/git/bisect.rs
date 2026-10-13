@@ -6,7 +6,7 @@ use std::io::Read;
 use std::path::Path;
 
 use super::commit_files::CommitId;
-use super::diff::{sanitize, terminal_safe};
+use super::safe_text::{sanitize, terminal_safe};
 
 /// The most of any one bisect file that is read. A real log is a few
 /// kilobytes; this keeps a hostile one from filling memory.

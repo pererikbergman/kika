@@ -5,10 +5,10 @@
 
 use super::push::with_literal_paths;
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
-use crate::git::diff::sanitize;
 use crate::git::error::GitError;
 use crate::git::path::RepoPath;
 use crate::git::runner::{GitCommand, GitOutput, GitRunner};
+use crate::git::safe_text::sanitize;
 use crate::git::version::{GitVersion, parse_version, version_command};
 use crate::op::{GitOp, op_command};
 
@@ -617,7 +617,7 @@ pub(crate) mod tests {
             } else {
                 (EnvProfile::Write, env_of(&WRITE))
             };
-            assert_eq!(cmd.env_profile(), profile, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(profile), "{op:?}");
             assert_eq!(literal_env(&cmd), want, "{op:?}");
         }
     }
@@ -632,7 +632,7 @@ pub(crate) mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Write), "{op:?}");
             assert_eq!(literal_env(&cmd), env_of(&WRITE), "{op:?}");
         }
     }

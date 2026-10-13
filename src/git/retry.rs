@@ -123,7 +123,9 @@ mod tests {
         );
         let (runner, slept) = retrying(Arc::clone(&fake));
 
-        let output = runner.run(&GitCommand::new("add").arg("-A")).unwrap();
+        let output = runner
+            .run(&GitCommand::new("add").write_env().arg("-A"))
+            .unwrap();
 
         assert_eq!(output, ok(b"done"));
         fake.assert_done();
@@ -136,7 +138,9 @@ mod tests {
         let fake = Arc::new(FakeRunner::new().expect(ARGV, fail("fatal: not a git repository")));
         let (runner, slept) = retrying(Arc::clone(&fake));
 
-        let output = runner.run(&GitCommand::new("add").arg("-A")).unwrap();
+        let output = runner
+            .run(&GitCommand::new("add").write_env().arg("-A"))
+            .unwrap();
 
         assert_eq!(output, fail("fatal: not a git repository"));
         assert_eq!(fake.envs().len(), 1);
@@ -152,7 +156,9 @@ mod tests {
         let fake = Arc::new(fake);
         let (runner, slept) = retrying(Arc::clone(&fake));
 
-        let output = runner.run(&GitCommand::new("add").arg("-A")).unwrap();
+        let output = runner
+            .run(&GitCommand::new("add").write_env().arg("-A"))
+            .unwrap();
 
         assert_eq!(output, fail(&format!("{INDEX_LOCK} 4")));
         fake.assert_done();
@@ -173,7 +179,7 @@ mod tests {
 
         assert!(
             runner
-                .run(&GitCommand::new("add").arg("-A"))
+                .run(&GitCommand::new("add").write_env().arg("-A"))
                 .unwrap()
                 .success
         );
@@ -202,9 +208,11 @@ mod tests {
         );
         let (runner, slept) = retrying(Arc::clone(&fake));
 
-        runner.spawn(&GitCommand::new("diff")).unwrap();
+        runner
+            .spawn(&GitCommand::new("diff").standard_env())
+            .unwrap();
         let exit = runner
-            .run_attached(&GitCommand::new("commit").arg("--no-edit"))
+            .run_attached(&GitCommand::new("commit").user_env().arg("--no-edit"))
             .unwrap();
         runner.interrupt();
 

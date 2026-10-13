@@ -14,13 +14,12 @@ use crate::features::stash::{self, StashMode, StashRef};
 use crate::git::bisect::BisectMark;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::error::GitError;
 use crate::git::path::RepoPath;
 use crate::git::rebase_plan::RebasePlan;
 use crate::git::remotes::{RemoteBranch, RemoteName};
 use crate::git::repo_state::Operation;
-use crate::git::runner::{GitCommand, GitOutput, GitRunner};
+use crate::git::runner::{GitCommand, GitRunner};
 use crate::git::status::{EntryKind, FileEntry};
 use crate::git::tags::{TagName, validate_tag_name};
 
@@ -440,7 +439,7 @@ pub fn op_command(op: &GitOp) -> GitCommand {
         GitOp::RemoveRemotes(_) | GitOp::DeleteTags(_) | GitOp::StashDrops(_) => {
             return op_steps(op)
                 .first()
-                .map_or_else(|| GitCommand::new("remote"), op_command);
+                .map_or_else(|| GitCommand::new("remote").user_env(), op_command);
         }
         GitOp::CreateTag {
             name,
@@ -684,17 +683,6 @@ fn reports_on_stdout(op: &GitOp) -> bool {
     )
 }
 
-/// Both of git's streams, made safe to draw, for commands that report
-/// their outcome on stdout.
-pub(crate) fn stderr_and_stdout(output: &GitOutput) -> String {
-    [&output.stderr, &output.stdout]
-        .map(|bytes| terminal_safe(bytes))
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Why `op` must not run at all. The reducer checks a new tag's name
 /// before it builds the op; this checks it again where git would run, so
 /// no other path can pass a name git would read as an option.
@@ -794,7 +782,7 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{op:?}");
             assert!(cmd.process_env().is_empty(), "{op:?}: {:?}", cmd.envs());
             assert_eq!(cmd.input(), None, "{op:?}");
         }
@@ -816,7 +804,7 @@ mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv), "{op:?}");
             assert!(cmd.process_env().is_empty(), "{op:?}: {:?}", cmd.envs());
         }
     }
@@ -825,7 +813,7 @@ mod tests {
     fn the_merge_tool_reads_the_path_literally_and_keeps_the_users_locale() {
         let cmd = op_command(&GitOp::MergeTool("-x".into()));
         assert_eq!(argv(&cmd), ["mergetool", "--", "-x"]);
-        assert_eq!(cmd.env_profile(), EnvProfile::UserEnv);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::UserEnv));
         assert_eq!(
             cmd.process_env(),
             env(&[("GIT_LITERAL_PATHSPECS", "1")]),
@@ -1137,7 +1125,7 @@ mod tests {
         assert_eq!(listed, (0..=48).collect(), "a variant is missing");
         for (op, profile, expected) in &cases {
             let cmd = op_command(op);
-            assert_eq!(cmd.env_profile(), *profile, "{op:?}");
+            assert_eq!(cmd.env_profile(), Some(*profile), "{op:?}");
             assert_eq!(cmd.process_env(), env(expected), "{op:?}");
         }
     }

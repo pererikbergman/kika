@@ -352,7 +352,7 @@ mod tests {
             unstage_command(&head, &paths),
             restage_command(&paths),
         ] {
-            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{cmd:?}");
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Write), "{cmd:?}");
             assert_eq!(literal_env(&cmd), env_of(&WRITE), "{cmd:?}");
         }
         let read = head_command();
@@ -360,7 +360,7 @@ mod tests {
             argv(&read),
             ["rev-parse", "--verify", "-q", "HEAD^{commit}"]
         );
-        assert_eq!(read.env_profile(), EnvProfile::Standard);
+        assert_eq!(read.env_profile(), Some(EnvProfile::Standard));
         assert_eq!(
             literal_env(&read),
             env_of(&[

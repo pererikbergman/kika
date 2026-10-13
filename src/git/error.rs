@@ -4,9 +4,8 @@
 use std::fmt;
 use std::io;
 
-use super::diff::terminal_safe;
-use super::remote::redact_userinfo;
 use super::runner::{GitCommand, GitOutput};
+use super::safe_text::git_message as safe;
 
 /// Why a checked git run did not succeed. Every message is already safe to
 /// draw and has the user part of any URL removed.
@@ -58,11 +57,6 @@ impl GitError {
 
 fn subcommand(cmd: &GitCommand) -> String {
     safe(cmd.subcommand().to_string_lossy().as_bytes())
-}
-
-/// Sanitised first, so redaction sees the text as it will be drawn.
-fn safe(bytes: &[u8]) -> String {
-    redact_userinfo(&terminal_safe(bytes))
 }
 
 impl fmt::Display for GitError {

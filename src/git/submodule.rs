@@ -1,9 +1,9 @@
 //! The repository's submodules and where each one stands, as
 //! `git submodule status` reports them.
 
-use super::diff::{sanitize, terminal_safe};
 use super::path::RepoPath;
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::sanitize;
 
 /// One submodule: its path from the top level, the commit git reports for
 /// it, and how its checkout compares to what the parent records.
@@ -60,11 +60,10 @@ impl SubmoduleState {
 }
 
 /// A read: no optional locks, and English output so the format is fixed.
+/// It takes no pathspec, so literal pathspecs change nothing (a real-git
+/// test pins that).
 pub fn status_command() -> GitCommand {
-    GitCommand::new("submodule")
-        .arg("status")
-        .env("LC_ALL", "C")
-        .env("GIT_OPTIONAL_LOCKS", "0")
+    GitCommand::new("submodule").arg("status").standard_env()
 }
 
 /// Parse `git submodule status`: per line, the state character, the hex
@@ -112,16 +111,8 @@ fn bad_line(line: &[u8]) -> String {
 /// git's message, made safe to draw.
 pub fn read_submodules(runner: &dyn GitRunner) -> Result<Vec<Submodule>, String> {
     let output = runner
-        .run(&status_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git submodule status failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&status_command())
+        .map_err(|e| e.message_or("git submodule status failed"))?;
     parse_status(&output.stdout)
 }
 
@@ -129,6 +120,8 @@ pub fn read_submodules(runner: &dyn GitRunner) -> Result<Vec<Submodule>, String>
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const OID: &str = "1234567890abcdef1234567890abcdef12345678";
 
@@ -201,13 +194,47 @@ mod tests {
     fn the_command_is_a_read_with_fixed_output() {
         let cmd = status_command();
         assert_eq!(cmd.args(), ["submodule", "status"]);
-        assert_eq!(
-            cmd.envs(),
-            [
-                ("LC_ALL".into(), "C".into()),
-                ("GIT_OPTIONAL_LOCKS".into(), "0".into())
-            ]
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
+    }
+
+    /// `submodule status` walks the index for submodules itself, so this
+    /// pins that literal pathspecs leave it listing what it lists without.
+    #[test]
+    fn the_standard_profile_still_lists_a_real_submodule() {
+        use crate::git::CliRunner;
+        use crate::git::fake::{TempDir, git};
+
+        let tmp = TempDir::new("submodule-profile");
+        let (inner, parent) = (tmp.path().join("inner"), tmp.path().join("parent"));
+        for dir in [&inner, &parent] {
+            std::fs::create_dir(dir).unwrap();
+            git(dir, &["init", "-q"]);
+            git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        }
+        let source = inner.to_str().expect("a UTF-8 temp dir");
+        git(
+            &parent,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                source,
+                "sub",
+            ],
         );
+        let runner = CliRunner::isolated(&parent).with_env("GIT_LITERAL_PATHSPECS", "0");
+
+        let listed = read_submodules(&runner).unwrap();
+        let plain = runner.run(&status_command().user_env()).unwrap();
+
+        assert_eq!(
+            listed.iter().map(|s| s.path.display()).collect::<Vec<_>>(),
+            ["sub"]
+        );
+        assert_eq!(parse_status(&plain.stdout).unwrap(), listed);
     }
 
     #[test]

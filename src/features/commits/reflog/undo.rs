@@ -9,7 +9,7 @@
 use super::git::{Action, REDO_MARKER, Reflog, ReflogEntry, UNDO_MARKER, finishes_rebase_of};
 use crate::git::branches::{Branch, BranchName};
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
+use crate::git::safe_text::terminal_safe;
 
 /// Characters any reflog-derived text may take in the preview.
 const ELIDE: usize = 60;

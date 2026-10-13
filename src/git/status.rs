@@ -1,8 +1,8 @@
 use super::bisect::{BisectState, read_bisect};
-use super::diff::{sanitize, terminal_safe};
 use super::path::RepoPath;
 use super::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::sanitize;
 
 /// What kind of change a status line describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,16 +68,17 @@ pub struct RepoStatus {
     pub files: Vec<FileEntry>,
 }
 
-/// `git status` in the machine-readable form we parse. `GIT_OPTIONAL_LOCKS=0`
+/// `git status` in the machine-readable form we parse. No optional locks
 /// stops a background refresh from taking `index.lock` and racing the user.
+/// It takes no pathspec, so literal pathspecs change nothing (a real-git
+/// test pins that).
 pub fn status_command() -> GitCommand {
     GitCommand::new("status")
         .arg("--porcelain=v2")
         .arg("--branch")
         .arg("-z")
         .arg("--untracked-files=all")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// Run `git status`, then find the git dir and read what is in progress
@@ -95,16 +96,10 @@ pub fn read_status(runner: &dyn GitRunner) -> Result<RepoStatus, String> {
 
 /// The stdout of `cmd`, or git's stderr (else `fallback`) when it fails.
 fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand, fallback: &str) -> Result<Vec<u8>, String> {
-    let output = runner.run(cmd).map_err(|e| e.to_string())?;
-    if output.success {
-        return Ok(output.stdout);
-    }
-    let stderr = terminal_safe(&output.stderr);
-    Err(if stderr.is_empty() {
-        fallback.to_string()
-    } else {
-        stderr
-    })
+    runner
+        .run_checked(cmd)
+        .map(|output| output.stdout)
+        .map_err(|e| e.message_or(fallback))
 }
 
 /// Parse `git status --porcelain=v2 --branch -z`. Paths are taken as
@@ -255,6 +250,8 @@ fn changed(
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, TempDir, fail, ok};
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const STATUS_ARGV: &[&str] = &[
         "status",
@@ -289,12 +286,50 @@ mod tests {
         let cmd = status_command();
         let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, STATUS_ARGV);
-        let envs: Vec<_> = cmd
-            .envs()
-            .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
-            .collect();
-        assert_eq!(envs, [("GIT_OPTIONAL_LOCKS", "0"), ("LC_ALL", "C")]);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
+    }
+
+    /// Literal pathspecs must change nothing for a status, which takes no
+    /// pathspec but walks the tree: the same files, with or without them,
+    /// even one literally named `*`.
+    #[cfg(unix)]
+    #[test]
+    fn the_standard_profile_changes_nothing_for_a_real_status() {
+        use crate::git::CliRunner;
+        use crate::git::fake::git;
+
+        let tmp = TempDir::new("status-profile");
+        let dir = tmp.path();
+        git(dir, &["init", "-q"]);
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/new.txt"), "new\n").unwrap();
+        std::fs::write(dir.join("staged.txt"), "staged\n").unwrap();
+        std::fs::write(dir.join("*"), "star\n").unwrap();
+        git(dir, &["add", "--", "staged.txt"]);
+        let runner = CliRunner::isolated(dir).with_env("GIT_LITERAL_PATHSPECS", "0");
+        let user_env = GitCommand::new("status")
+            .arg("--porcelain=v2")
+            .arg("--branch")
+            .arg("-z")
+            .arg("--untracked-files=all")
+            .user_env();
+
+        let standard = runner.run(&status_command()).unwrap();
+        let plain = runner.run(&user_env).unwrap();
+
+        assert!(
+            standard.success,
+            "{}",
+            String::from_utf8_lossy(&standard.stderr)
+        );
+        assert_eq!(standard.stdout, plain.stdout);
+        let files = parse_status(&standard.stdout).unwrap().files;
+        let names: Vec<_> = files.iter().map(|f| (f.index, f.path.display())).collect();
+        assert_eq!(
+            names,
+            [('A', "staged.txt"), ('?', "*"), ('?', "sub/new.txt"),]
+        );
     }
 
     const GIT_DIR_ARGV: &[&str] = &["rev-parse", "--absolute-git-dir"];
@@ -319,12 +354,7 @@ mod tests {
         );
         assert_eq!(status.branch.head, Head::Branch("main".into()));
         assert_eq!(status.branch.in_progress, [Operation::Merge]);
-        let envs = runner.envs();
-        assert_eq!(envs.len(), 2);
-        assert!(
-            envs[0].contains(&("GIT_OPTIONAL_LOCKS".into(), "0".into())),
-            "{envs:?}"
-        );
+        assert_eq!(runner.process_envs(), vec![env_list(&STANDARD_ENV); 2]);
     }
 
     #[test]

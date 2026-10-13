@@ -2,9 +2,10 @@ use std::collections::BTreeSet;
 
 use crate::diff_search::{DiffSearch, reveal};
 use crate::git::commit_files::CommitRange;
-use crate::git::diff::{DiffSide, EmojiZwj, sanitize, sanitize_body};
+use crate::git::diff::{DiffSide, EmojiZwj, sanitize_body};
 use crate::git::patch::{self, FilePatch, LineId, PatchLineKind};
 use crate::git::path::RepoPath;
+use crate::git::safe_text::sanitize;
 use crate::intent::Scroll;
 
 /// The Diff pane while it has focus: one side of the selected file's

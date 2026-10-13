@@ -9,8 +9,8 @@ use super::git::run_fetch;
 use crate::background;
 use crate::effect::{AnswerSlot, Bridge, Tag};
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::remote::{RemoteFailure, RemoteOp, run_remote};
+use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
 /// Fetch every remote quietly and send the result back as `FetchFinished`.

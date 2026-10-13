@@ -7,8 +7,8 @@
 //! outside the markers, line endings included, are kept exactly, so a file
 //! with no picks renders back to what was read.
 
-use crate::git::diff::sanitize;
 use crate::git::path::RepoPath;
+use crate::git::safe_text::sanitize;
 use crate::intent::Scroll;
 
 /// The marker size git uses unless a `conflict-marker-size` attribute

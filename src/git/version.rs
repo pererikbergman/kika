@@ -53,9 +53,10 @@ pub const COMMENT_STRING: GitVersion = GitVersion {
 };
 
 /// `git --version`, in the C locale so the words around the number are
-/// always English.
+/// always English. It reads no repository, so the rest of the standard
+/// profile changes nothing.
 pub fn version_command() -> GitCommand {
-    GitCommand::new("--version").env("LC_ALL", "C")
+    GitCommand::new("--version").standard_env()
 }
 
 /// The leading `major.minor.patch` of `git --version`'s output. Anything
@@ -102,7 +103,9 @@ pub fn check(runner: &dyn GitRunner) -> Result<Option<GitVersion>, String> {
 mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::git::runner::EnvProfile;
     use crate::git::runner::{GitChild, GitOutput};
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     fn v(major: u32, minor: u32, patch: u32) -> GitVersion {
         GitVersion {
@@ -116,7 +119,9 @@ mod tests {
     fn the_command_is_argv_only_in_the_c_locale() {
         let cmd = version_command();
         assert_eq!(cmd.args(), ["--version"]);
-        assert_eq!(cmd.envs(), [("LC_ALL".into(), "C".into())]);
+        // It reads no repository: the whole standard profile.
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
     }
 
     #[test]

@@ -17,8 +17,8 @@ use super::head::Head;
 use super::url::pull_url;
 use super::{CiState, CreateError, ForgeHost, ForgeRepo, ForgeStatus, PrBadge, PrState};
 use crate::git::branches::BranchName;
-use crate::git::diff::terminal_safe;
 use crate::git::recording::{CommandEvent, CommandOutcome, CommandSink};
+use crate::git::safe_text::terminal_safe;
 
 /// Branches asked about in one call.
 pub const BATCH: usize = 50;

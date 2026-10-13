@@ -9,7 +9,7 @@ use tokio::task::AbortHandle;
 
 use super::captured::run_captured;
 use super::command::{CommandFailure, OutputMode};
-use crate::git::diff::terminal_safe;
+use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
 /// Run a captured command in `workdir` and send `CommandFinished` back.
