@@ -115,15 +115,17 @@ impl AppState {
         let Some(root) = self.repo.clone() else {
             return vec![];
         };
+        // Read before the rows are taken, or there is no row to select.
+        let selected = self.files.selected_row().map(|_| self.files.selected);
         self.repo_stack.push(ParentRepo {
             path,
-            files: std::mem::take(&mut self.files),
-            files_loaded: self.files_loaded,
+            files: std::mem::take(&mut self.files.rows),
+            files_loaded: self.files.loaded,
             branch: self.branch.take(),
-            selected: self.selected.take(),
+            selected,
         });
         self.switch_repo();
-        self.files_loaded = false;
+        self.files.loaded = false;
         let mut effects = vec![self.set_repo(&root)];
         effects.extend(self.reload_repo());
         effects
@@ -146,11 +148,11 @@ impl AppState {
             return vec![];
         };
         self.switch_repo();
-        self.files = parent.files;
-        self.files_loaded = parent.files_loaded;
+        self.files.rows = parent.files;
+        self.files.loaded = parent.files_loaded;
         self.branch = parent.branch;
         let mut effects = vec![self.set_repo(&root)];
-        if let Some(index) = parent.selected.filter(|&i| i < self.files.len()) {
+        if let Some(index) = parent.selected.filter(|&i| i < self.files.rows.len()) {
             effects.extend(self.select(index));
         }
         effects.extend(self.reload_repo());
@@ -264,7 +266,7 @@ mod tests {
         press(&mut state, KeyCode::Down);
         assert_eq!(submodule_list(&state).list.selected, 1);
         // The file selection did not move.
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
     }
 
     #[test]
@@ -340,7 +342,7 @@ mod tests {
             submodule("sub", SubmoduleState::UpToDate),
         ]);
         let generation = state.generation;
-        let files = state.files.clone();
+        let files = state.files.rows.clone();
         let branch = state.branch.clone();
         press_char(&mut state, 'j');
 
@@ -357,10 +359,10 @@ mod tests {
             }]
         );
         assert_eq!(state.generation, generation + 1);
-        assert_eq!(state.files, []);
-        assert!(!state.files_loaded);
+        assert_eq!(state.files.rows, []);
+        assert!(!state.files.loaded);
         assert_eq!(state.branch, None);
-        assert_eq!(state.selected, None);
+        assert_eq!(state.files.selected_row(), None);
         assert_eq!(state.popups, []);
         assert_eq!(state.focus, Focus::Files);
         assert_eq!(state.diff, DiffPane::default());
@@ -428,7 +430,7 @@ mod tests {
     #[test]
     fn backspace_restores_the_parent_exactly_and_reloads_it() {
         let mut state = with_submodules(vec![submodule("sub", SubmoduleState::OutOfDate)]);
-        let files = state.files.clone();
+        let files = state.files.rows.clone();
         let branch = state.branch.clone();
         press(&mut state, KeyCode::Enter);
         let tag = refresh_tag(&mut state);
@@ -439,10 +441,10 @@ mod tests {
 
         assert_eq!(state.repo_stack, []);
         assert_eq!(state.generation, generation + 1);
-        assert_eq!(state.files, files);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.rows, files);
+        assert_eq!(state.files.selected, 1);
         assert_eq!(state.branch, branch);
-        assert!(state.files_loaded);
+        assert!(state.files.loaded);
         match effects.as_slice() {
             [
                 set,
@@ -506,7 +508,7 @@ mod tests {
         let parent = refresh_tag(&mut state);
         press(&mut state, KeyCode::Enter);
         state.update(loaded(parent, &["parent.txt"]));
-        assert_eq!(state.files, []);
-        assert!(!state.files_loaded);
+        assert_eq!(state.files.rows, []);
+        assert!(!state.files.loaded);
     }
 }

@@ -60,6 +60,7 @@ fn stash_busy_or_empty(state: &AppState) -> Option<Reason> {
 fn stash_menu_disabled(state: &AppState) -> Option<Reason> {
     state
         .files
+        .rows
         .is_empty()
         .then_some("No changes to stash".into())
 }
@@ -69,7 +70,12 @@ fn stash_menu_disabled(state: &AppState) -> Option<Reason> {
 fn stash_blocked(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
         Some(OP_RUNNING.into())
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind == EntryKind::Conflicted)
+    {
         Some("Resolve conflicts first".into())
     } else {
         None
@@ -79,8 +85,12 @@ fn stash_blocked(state: &AppState) -> Option<Reason> {
 /// Untracked files stay behind, so they alone are nothing to stash.
 pub(crate) fn stash_all_disabled(state: &AppState) -> Option<Reason> {
     stash_blocked(state).or_else(|| {
-        (!state.files.iter().any(|f| f.kind != EntryKind::Untracked))
-            .then_some("No changes to stash".into())
+        (!state
+            .files
+            .rows
+            .iter()
+            .any(|f| f.kind != EntryKind::Untracked))
+        .then_some("No changes to stash".into())
     })
 }
 
@@ -88,6 +98,7 @@ pub(crate) fn stash_untracked_disabled(state: &AppState) -> Option<Reason> {
     stash_blocked(state).or_else(|| {
         state
             .files
+            .rows
             .is_empty()
             .then_some("No changes to stash".into())
     })
@@ -95,8 +106,12 @@ pub(crate) fn stash_untracked_disabled(state: &AppState) -> Option<Reason> {
 
 pub(crate) fn stash_staged_disabled(state: &AppState) -> Option<Reason> {
     stash_blocked(state).or_else(|| {
-        (!state.files.iter().any(|f| !matches!(f.index, '.' | '?')))
-            .then_some("Nothing staged".into())
+        (!state
+            .files
+            .rows
+            .iter()
+            .any(|f| !matches!(f.index, '.' | '?')))
+        .then_some("Nothing staged".into())
     })
 }
 
@@ -134,7 +149,7 @@ pub(crate) fn stash_file_disabled(state: &AppState) -> Option<Reason> {
                 let mut at = leading_dirs(path);
                 at.push(path.clone());
                 at.iter().any(|taken| {
-                    (state.files.iter())
+                    (state.files.rows.iter())
                         .filter(|f| !own.is_some_and(|own| std::ptr::eq(*f, own)))
                         .any(|f| f.path.as_bytes().eq_ignore_ascii_case(taken.as_bytes()))
                 })

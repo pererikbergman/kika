@@ -128,10 +128,10 @@ pub(crate) static FILES_IGNORE: &[Binding] = &[
 /// Why `i` cannot add the selected file to `.gitignore`. A tracked file
 /// stays tracked whatever `.gitignore` says, and Kika never untracks one.
 pub(super) fn ignore_disabled(state: &AppState) -> Option<Reason> {
-    if state.files.is_empty() {
+    if state.files.rows.is_empty() {
         return Some("No files".into());
     }
-    match state.selected.and_then(|i| state.files.get(i)) {
+    match state.files.selected_row() {
         Some(file) if file.kind == EntryKind::Untracked => None,
         _ => Some("Only untracked files can be ignored".into()),
     }
@@ -184,7 +184,7 @@ fn stage_disabled(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
-    match state.selected.and_then(|i| state.files.get(i)) {
+    match state.files.selected_row() {
         None => Some("No file selected".into()),
         Some(file) if file.kind == EntryKind::Conflicted => {
             Some("Resolve the conflict before staging this file".into())
@@ -196,9 +196,14 @@ fn stage_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
     if state.op_is_running() {
         Some(OP_RUNNING.into())
-    } else if state.files.is_empty() {
+    } else if state.files.rows.is_empty() {
         Some("No changes to stage".into())
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+    } else if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind == EntryKind::Conflicted)
+    {
         Some(super::git::CONFLICTS_REFUSAL.into())
     } else {
         None
@@ -209,15 +214,15 @@ pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
 pub(crate) fn files_stage_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, true).or_else(|| {
         // As the action: the range counts only where it shows.
-        if state.files_anchor.is_none() || state.focus != Focus::Files {
+        if state.files.range_anchor.is_none() || state.focus != Focus::Files {
             return stage_disabled(state);
         }
-        let range = state.files_range();
+        let range = state.files.range();
         if state.op_is_running() {
             Some(OP_RUNNING.into())
         } else if range
             .iter()
-            .all(|&i| state.files[i].kind == EntryKind::Conflicted)
+            .all(|&i| state.files.rows[i].kind == EntryKind::Conflicted)
         {
             Some("Resolve the conflicts before staging these files".into())
         } else {
@@ -252,7 +257,10 @@ mod tests {
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Branches,
         )));
-        assert!(state.files_anchor.is_some(), "the range stays for later");
+        assert!(
+            state.files.range_anchor.is_some(),
+            "the range stays for later"
+        );
         assert_eq!(
             files_stage_disabled(&state),
             Some("Resolve the conflict before staging this file".into())

@@ -81,7 +81,7 @@ pub struct MenuItem {
 }
 
 fn no_files(state: &AppState) -> Option<Reason> {
-    state.files.is_empty().then_some("No files".into())
+    state.files.rows.is_empty().then_some("No files".into())
 }
 
 static ACTIONS: &[MenuItem] = &[
@@ -390,8 +390,13 @@ mod tests {
     /// Each stash item's reason; all of them are fixed text.
     fn reasons(files: Vec<FileEntry>, selected: Option<usize>) -> Vec<Option<&'static str>> {
         let mut state = AppState::new(Context::Workspace);
-        state.files = files;
-        state.selected = selected;
+        state.files.rows = files;
+        match selected {
+            Some(index) => state.files.selected = index,
+            // Nothing marked. The list has a cursor whenever it has rows,
+            // so this is a range over no listed file.
+            None => state.files.range_anchor = Some("not listed".into()),
+        }
         items(MenuId::Stash)
             .iter()
             .map(|item| match (item.disabled)(&state) {
@@ -438,7 +443,7 @@ mod tests {
         use crate::git::status::{BranchStatus, Head};
 
         let mut state = AppState::new(Context::Workspace);
-        state.files = vec![file("a", 'M', '.', EntryKind::Changed)];
+        state.files.rows = vec![file("a", 'M', '.', EntryKind::Changed)];
         state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
@@ -490,7 +495,7 @@ mod tests {
         assert_eq!(reasons(files.clone(), Some(0)), [conflicts; 4]);
 
         let mut state = AppState::new(Context::Workspace);
-        state.files = files;
+        state.files.rows = files;
         state.hold_op(1);
         for item in items(MenuId::Stash) {
             assert_eq!(

@@ -90,7 +90,7 @@ mod tests {
     /// The Branches panel focused on its Tags tab.
     fn focused(tags: Result<Vec<TagRef>, String>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Branches;
         state.expanded = SidePanel::Branches;
         load_list(&mut state.branches.list, Ok(vec![]));

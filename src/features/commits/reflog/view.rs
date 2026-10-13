@@ -96,7 +96,7 @@ mod tests {
 
     fn showing(bytes: &[u8]) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
+        state.files.loaded = true;
         state.focus = Focus::Commits;
         state.expanded = SidePanel::Commits;
         state.screen_mode = ScreenMode::Full;

@@ -563,7 +563,7 @@ mod tests {
         ];
         state.commits.tips = Some(vec![]);
         state.focus = Focus::Commits;
-        state.files = vec![crate::git::FileEntry {
+        state.files.rows = vec![crate::git::FileEntry {
             path: crate::git::path::RepoPath::from("a.txt"),
             orig_path: None,
             index: 'M',
@@ -602,13 +602,13 @@ mod tests {
         assert_eq!(create_fixup_disabled(&narrowed), None);
 
         let mut unstaged = fixup_state();
-        unstaged.files[0].index = '.';
-        unstaged.files[0].worktree = 'M';
+        unstaged.files.rows[0].index = '.';
+        unstaged.files.rows[0].worktree = 'M';
         let mut untracked = fixup_state();
-        untracked.files[0].index = '?';
-        untracked.files[0].kind = EntryKind::Untracked;
+        untracked.files.rows[0].index = '?';
+        untracked.files.rows[0].kind = EntryKind::Untracked;
         let mut clean = fixup_state();
-        clean.files.clear();
+        clean.files.rows.clear();
         for state in [&unstaged, &untracked, &clean] {
             assert_eq!(create_fixup_disabled(state).as_deref(), Some(STAGE_THE_FIX));
             assert_eq!(find_base_disabled(state).as_deref(), Some(STAGE_THE_FIX));

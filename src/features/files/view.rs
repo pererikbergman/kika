@@ -20,35 +20,35 @@ pub(crate) fn render_files_panel(
     frame: &mut Frame,
     area: Rect,
 ) {
-    let count = match state.files.len() {
+    let count = match state.files.rows.len() {
         1 => "1 file".to_string(),
         n => format!("{n} files"),
     };
-    let shown = state.files_visible();
-    let range = state.files_range();
-    let selected = match state.files_anchor {
+    let shown = state.files.visible();
+    let range = state.files.range();
+    let selected = match state.files.range_anchor {
         Some(_) => format!(" · {} selected", range.len()),
         None => String::new(),
     };
-    let title = if !state.files_filter.is_empty() {
-        let counts = format!("{} of {}{selected}", shown.len(), state.files.len());
-        look.title(&filter_title(look, "Files", &state.files_filter, &counts))
+    let title = if !state.files.filter.is_empty() {
+        let counts = format!("{} of {}{selected}", shown.len(), state.files.rows.len());
+        look.title(&filter_title(look, "Files", &state.files.filter, &counts))
     } else if !selected.is_empty() {
         look.title(&format!("Files{selected}"))
-    } else if look.title_only && state.files_loaded && state.status_error.is_none() {
+    } else if look.title_only && state.files.loaded && state.files.error.is_none() {
         look.title(&format!("Files · {count}"))
     } else {
         look.title("Files")
     };
     let block = look.block(title);
     let inner = block.inner(area);
-    let panel = if let Some(error) = &state.status_error {
+    let panel = if let Some(error) = &state.files.error {
         let mut lines: Vec<Line> = error.lines().map(Line::from).collect();
         lines.push(Line::from("Press r to retry"));
         Paragraph::new(lines).wrap(Wrap { trim: false })
-    } else if !state.files_loaded {
+    } else if !state.files.loaded {
         Paragraph::new("Loading…")
-    } else if state.files.is_empty() {
+    } else if state.files.rows.is_empty() {
         Paragraph::new("No changes")
     } else if shown.is_empty() {
         Paragraph::new(no_matches())
@@ -56,9 +56,10 @@ pub(crate) fn render_files_panel(
         Paragraph::new(count)
     } else {
         Paragraph::new(file_lines(
-            &state.files,
+            &state.files.rows,
             &shown,
-            state.selected,
+            // Rows are listed here, so the cursor is on one.
+            Some(state.files.selected),
             &range,
             inner,
         ))
@@ -159,10 +160,10 @@ mod tests {
         let rows = draw(&state, 80, 24);
         assert!(files_rows(&rows).1.starts_with("│2 files "), "{rows:#?}");
         assert!(!contains(&rows, " M a.rs"), "{rows:#?}");
-        state.files.pop();
+        state.files.rows.pop();
         let rows = draw(&state, 80, 24);
         assert!(files_rows(&rows).1.starts_with("│1 file "), "{rows:#?}");
-        state.files.clear();
+        state.files.rows.clear();
         let rows = draw(&state, 80, 24);
         assert!(files_rows(&rows).1.starts_with("│No changes "), "{rows:#?}");
     }
@@ -170,7 +171,7 @@ mod tests {
     #[test]
     fn a_conflicted_row_is_marked_and_red_bold() {
         let mut state = loaded(vec![file("a.txt")]);
-        state.files.insert(
+        state.files.rows.insert(
             0,
             FileEntry {
                 path: "both.txt".into(),
@@ -180,7 +181,7 @@ mod tests {
                 kind: EntryKind::Conflicted,
             },
         );
-        state.selected = Some(1);
+        state.files.selected = 1;
         let buffer = draw_buffer(&state, 80, 24);
         let rows = thin(buffer_rows(&buffer));
         assert!(contains(&rows, "│! UU both.txt "), "{rows:#?}");
@@ -203,7 +204,7 @@ mod tests {
     #[test]
     fn workspace_shows_status_error_wrapped_with_a_retry_hint() {
         let mut state = loaded(vec![]);
-        state.status_error =
+        state.files.error =
             Some("fatal: not a git repository (or any of the parent directories): .git".into());
         let rows = draw_files(&state, 40, 13);
         assert!(contains(&rows, "│fatal: not a git repository"), "{rows:#?}");
@@ -214,7 +215,7 @@ mod tests {
     #[test]
     fn multi_line_error_keeps_its_lines() {
         let mut state = loaded(vec![]);
-        state.status_error = Some("error: first\nhint: second".into());
+        state.files.error = Some("error: first\nhint: second".into());
         let rows = draw_files(&state, 40, 13);
         assert!(contains(&rows, "│error: first "), "{rows:#?}");
         assert!(contains(&rows, "│hint: second "), "{rows:#?}");
@@ -306,7 +307,7 @@ mod tests {
     #[test]
     fn the_selected_file_row_is_reversed_across_the_panel() {
         let mut state = loaded(vec![file("a.rs"), file("b.rs")]);
-        state.selected = Some(1);
+        state.files.selected = 1;
         let buffer = draw_buffer(&state, 100, 13);
         let (x, y) = find(&buffer, " M b.rs");
         assert!(
@@ -335,14 +336,14 @@ mod tests {
     fn a_selection_below_the_first_screen_stays_visible() {
         // Height 12: 5 rows, so 4 files plus "+N more" at a time.
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
-        state.selected = Some(5);
+        state.files.selected = 5;
         let rows = draw_files(&state, 30, 12);
         assert!(contains(&rows, "│ M f5 "), "{rows:#?}");
         assert!(!contains(&rows, "│ M f1 "), "{rows:#?}");
         assert!(contains(&rows, "│+4 more "), "{rows:#?}");
 
         // Near the end the window shows the last files and no "more" row.
-        state.selected = Some(8);
+        state.files.selected = 8;
         let rows = draw_files(&state, 30, 12);
         for name in ["f6", "f7", "f8", "f9"] {
             assert!(contains(&rows, &format!("│ M {name} ")), "{rows:#?}");
@@ -354,7 +355,7 @@ mod tests {
     fn a_one_row_list_shows_the_selection() {
         // Height 4: three rows over the bar, all Files', one inside its border.
         let mut state = loaded((0..10).map(|i| file(&format!("f{i}"))).collect());
-        state.selected = Some(4);
+        state.files.selected = 4;
         let rows = draw_files(&state, 30, 4);
         assert!(contains(&rows, "│ M f4 "), "{rows:#?}");
     }
@@ -366,14 +367,14 @@ mod tests {
             .chain((0..3).map(|i| file(&format!("b{i}.md"))))
             .collect();
         let mut state = loaded(files);
-        state.selected = Some(7);
-        state.files_filter = "md".into();
+        state.files.selected = 7;
+        state.files.filter = "md".into();
         let rows = draw(&state, 100, 30);
         assert!(contains(&rows, "Files · /md 3 of 10"), "{rows:#?}");
         assert!(contains(&rows, "b2.md"), "{rows:#?}");
         assert!(!contains(&rows, "a0.rs"), "{rows:#?}");
 
-        state.files_filter = "zzz".into();
+        state.files.filter = "zzz".into();
         let rows = draw(&state, 100, 30);
         assert!(contains(&rows, "No matches"), "{rows:#?}");
     }
@@ -381,8 +382,8 @@ mod tests {
     #[test]
     fn range_rows_are_drawn_like_the_selected_row() {
         let mut state = loaded(vec![file("a.rs"), file("b.rs"), file("c.rs")]);
-        state.selected = Some(1);
-        state.files_anchor = Some("c.rs".into());
+        state.files.selected = 1;
+        state.files.range_anchor = Some("c.rs".into());
         let buffer = draw_buffer(&state, 100, 20);
         let reversed = |needle| {
             cell_at(&buffer, needle)

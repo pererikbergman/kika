@@ -199,12 +199,12 @@ mod tests {
             ),
             (
                 "staged change",
-                |s| s.files = vec![changed("a.rs", 'M', '.')],
+                |s| s.files.rows = vec![changed("a.rs", 'M', '.')],
                 changes,
             ),
             (
                 "unstaged change",
-                |s| s.files = vec![changed("a.rs", '.', 'M')],
+                |s| s.files.rows = vec![changed("a.rs", '.', 'M')],
                 changes,
             ),
             ("op running", |s| s.hold_op(9), keymap::OP_RUNNING),
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn an_untracked_file_alone_does_not_stop_a_paste() {
         let mut state = one_copied();
-        state.files = vec![untracked("new.txt")];
+        state.files.rows = vec![untracked("new.txt")];
         let (_, op) = attached_of(&press_char(&mut state, 'v'));
         assert_eq!(op, GitOp::CherryPick(vec![cid(COPIED_OID)]));
     }

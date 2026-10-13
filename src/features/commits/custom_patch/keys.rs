@@ -81,7 +81,12 @@ fn patch_state_disabled(state: &AppState) -> Option<Reason> {
     if let Some(reason) = in_progress_disabled(state) {
         return Some(reason);
     }
-    if state.files.iter().any(|f| f.kind != EntryKind::Untracked) {
+    if state
+        .files
+        .rows
+        .iter()
+        .any(|f| f.kind != EntryKind::Untracked)
+    {
         return Some("Commit or stash your changes first".into());
     }
     if state.commits.query.is_active() || !state.commits.list.filter.is_empty() {

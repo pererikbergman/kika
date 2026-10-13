@@ -35,6 +35,7 @@ use crate::features::stash::{self, StashDraft, StashList};
 use crate::features::submodules;
 use crate::features::sync;
 use crate::features::worktrees;
+use crate::filtered_list::FilteredList;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -177,20 +178,18 @@ pub struct AppState {
     pub generation: u64,
     /// Next sequence number to hand out to an effect.
     pub next_seq: u64,
-    /// Sequence of the latest status load; only its result is applied.
-    pub status_seq: Option<u64>,
     /// The op slot: the running git op, the busy count and why the last op
     /// was refused. Only `op_slot.rs` sees inside it.
     pub(crate) op_slot: OpSlot,
-    pub files: Vec<FileEntry>,
-    /// False until the first status result arrives, to tell "loading" from "clean".
-    pub files_loaded: bool,
-    pub status_error: Option<String>,
+    /// The Files panel: the working tree's files, with the cursor (the
+    /// file whose diff is shown), the filter, the range (anchored by path,
+    /// so a refresh that moves the rows keeps it on the same files) and
+    /// the status load in flight. `loaded` tells "loading" from "clean";
+    /// a failed status keeps the files shown.
+    pub files: FilteredList<FileEntry>,
     /// Branch, upstream and operations in progress. `None` until the first
     /// status load succeeds; a failed load keeps the last one.
     pub branch: Option<BranchStatus>,
-    /// Index into `files` of the file whose diff is shown.
-    pub selected: Option<usize>,
     pub diff: DiffPane,
     pub focus: Focus,
     /// The side panel last focused. It stays expanded while the diff has
@@ -283,11 +282,6 @@ pub struct AppState {
     pub notice_text: Option<String>,
     /// The filter or search being typed on the bottom bar, if one is.
     pub input: Option<ListInput>,
-    /// Narrows the Files panel as typed; empty shows every file.
-    pub files_filter: String,
-    /// The file a range selection started on. By path, so a refresh that
-    /// moves the rows keeps the range on the same files.
-    pub files_anchor: Option<RepoPath>,
     /// Pull requests per branch; off unless the global config names hosts.
     pub forge: ForgeState,
     /// The global `[forge] gitlab` hosts: only URLs are built for them.
@@ -331,13 +325,9 @@ impl AppState {
             should_quit: false,
             generation: 0,
             next_seq: 0,
-            status_seq: None,
             op_slot: OpSlot::default(),
-            files: Vec::new(),
-            files_loaded: false,
-            status_error: None,
+            files: FilteredList::default(),
             branch: None,
-            selected: None,
             diff: DiffPane::default(),
             focus: Focus::Files,
             expanded: SidePanel::Files,
@@ -381,8 +371,6 @@ impl AppState {
             diff_mark: None,
             pending_diff: None,
             custom_patch: None,
-            files_filter: String::new(),
-            files_anchor: None,
             forge: ForgeState::default(),
             forge_gitlab_hosts: Vec::new(),
             browser: None,
@@ -940,7 +928,7 @@ impl AppState {
                 };
                 // The range was what was asked about; it is done with.
                 if q.range {
-                    self.files_anchor = None;
+                    self.files.range_anchor = None;
                 }
                 match q.then {
                     Then::Op(op) => self.start_op(Ok(Some(op))),
@@ -966,7 +954,7 @@ impl AppState {
             self.notice = Some(keymap::NOT_IN_COMMIT.into());
             return;
         }
-        if self.focus == Focus::Files && self.files_anchor.is_some() {
+        if self.focus == Focus::Files && self.files.range_anchor.is_some() {
             return self.ask_discard_range();
         }
         match self.discard_question() {
@@ -978,7 +966,7 @@ impl AppState {
 
     /// What `d` would discard from the current focus, fixed now.
     fn discard_question(&self) -> Result<Option<ConfirmQuestion>, &'static str> {
-        let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
+        let Some(entry) = self.files.selected_row() else {
             return Ok(None);
         };
         // Deleting a file is said as such, whatever was selected in it.
@@ -1115,13 +1103,13 @@ impl AppState {
 
     /// `select`, with the diff starting from `start`.
     pub(crate) fn select_from(&mut self, index: usize, start: DiffStart) -> Vec<Effect> {
-        self.selected = Some(index);
+        self.files.selected = index;
         // The pane shows another diff; leaving it streams this one.
         if self.files_open() || self.review_files_shown() {
             self.diff.rewind(start);
             return vec![];
         }
-        let request = DiffRequest::for_entry(&self.files[index], self.diff_options);
+        let request = DiffRequest::for_entry(&self.files.rows[index], self.diff_options);
         let mut effects = self.open_diff(request.clone(), start);
         if let Some(view) = self.hunk_view_mut() {
             // A file that stopped (or started) being untracked has other
@@ -1155,9 +1143,10 @@ impl AppState {
         if self.stash.open.is_some() {
             return self.stash_file_diff(DiffStart::Keep);
         }
-        match self.selected {
-            Some(index) if index < self.files.len() => self.select(index),
-            _ => vec![],
+        if self.files.selected_row().is_some() {
+            self.select(self.files.selected)
+        } else {
+            vec![]
         }
     }
 
@@ -1199,7 +1188,7 @@ impl AppState {
     /// panels. The diff is skipped with no file to show.
     fn cycle_focus(&mut self, back: bool) -> Vec<Effect> {
         let mut order: Vec<Panel> = SidePanel::ALL.into_iter().map(Panel::Side).collect();
-        if self.selected.and_then(|i| self.files.get(i)).is_some() {
+        if self.files.selected_row().is_some() {
             order.push(Panel::Diff);
         }
         let here = self.focus.panel();
@@ -1219,7 +1208,7 @@ impl AppState {
         if self.files_open() {
             return vec![];
         }
-        let Some(entry) = self.selected.and_then(|i| self.files.get(i)) else {
+        let Some(entry) = self.files.selected_row() else {
             return vec![];
         };
         if entry.kind == EntryKind::Conflicted {
@@ -1281,11 +1270,11 @@ impl AppState {
         }
     }
 
-    /// Keep the selection on the same file across a refresh when it still
-    /// exists, else near the same place.
-    fn reselect(&mut self, old_path: Option<RepoPath>) -> Vec<Effect> {
-        if self.files.is_empty() {
-            self.selected = None;
+    /// Show the diff of the file under the cursor after a refresh. The
+    /// list has already kept the cursor on the same file when it still
+    /// exists, else near the same place, and moved it off a hidden row.
+    fn reselect(&mut self) -> Vec<Effect> {
+        if self.files.rows.is_empty() {
             if self.files_open() || self.review_files_shown() {
                 return vec![];
             }
@@ -1296,17 +1285,7 @@ impl AppState {
             }
             return self.close_diff();
         }
-        let index = old_path
-            .and_then(|path| self.files.iter().position(|f| f.path == path))
-            .or_else(|| self.selected.map(|i| i.min(self.files.len() - 1)))
-            .unwrap_or(0);
-        // A row the filter hides gives way to the first one it shows.
-        let visible = self.files_visible();
-        let index = match visible.first() {
-            Some(&first) if !visible.contains(&index) => first,
-            _ => index,
-        };
-        self.select(index)
+        self.select(self.files.selected)
     }
 
     /// Whether a bisect in progress refuses an answer that would move
@@ -1385,12 +1364,12 @@ impl AppState {
         if !self.focus.is_side() {
             self.focus = Focus::side(self.expanded);
         }
-        self.files.clear();
+        self.files.rows.clear();
+        self.files.selected = 0;
         self.branch = None;
-        self.selected = None;
         self.diff.clear();
         self.rendered = None;
-        self.status_error = None;
+        self.files.error = None;
         self.clear_op_error();
         self.status_selection = Selection::KeepPath;
         self.branches = BranchesPanel::default();
@@ -1401,8 +1380,8 @@ impl AppState {
         self.copied.clear();
         // A filter and a range were made over the old repository's rows.
         self.input = None;
-        self.files_filter.clear();
-        self.files_anchor = None;
+        self.files.filter.clear();
+        self.files.range_anchor = None;
         // A mark names a commit or branch of the repository being left.
         self.diff_mark = None;
         self.pending_diff = None;
@@ -1423,7 +1402,7 @@ impl AppState {
         }
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.status_seq = Some(seq);
+        self.files.begin(seq);
         vec![Effect::LoadStatus {
             tag: self.user_tag(seq),
         }]
@@ -1437,11 +1416,9 @@ impl AppState {
         } else {
             self.watch.status_pending = false;
         }
-        if tag.generation != self.generation || Some(tag.seq) != self.status_seq {
-            return vec![];
-        }
         // Nobody asked for a background load, so it neither interrupts with
-        // an error nor reloads a diff that has not changed.
+        // an error nor reloads a diff that has not changed. Either way it
+        // changes nothing, so it may skip the staleness check below.
         if !tag.user {
             match &result {
                 Err(_) => return vec![],
@@ -1449,33 +1426,26 @@ impl AppState {
                 Ok(_) => {}
             }
         }
-        self.files_loaded = true;
+        let old_range = self.files_range_paths();
+        let had_range = !old_range.is_empty();
         match result {
             Ok(status) => {
-                let old_path = self
-                    .selected
-                    .and_then(|i| self.files.get(i))
-                    .map(|f| f.path.clone());
-                let old_range = self.files_range_paths();
-                let had_range = !old_range.is_empty();
-                self.files = status.files;
-                let rebasing = status.branch.in_progress.contains(&Operation::Rebase);
-                if let Some(anchor) = &self.files_anchor
-                    && !self.files.iter().any(|f| &f.path == anchor)
-                {
-                    self.files_anchor = None;
+                if !self.files.loaded(tag, self.generation, Ok(status.files)) {
+                    return vec![];
                 }
-                let before = self.branch.replace(status.branch);
+                let branch = status.branch;
+                let rebasing = branch.in_progress.contains(&Operation::Rebase);
+                let before = self.branch.replace(branch);
                 self.announce_bisect(before.and_then(|b| b.bisect));
-                self.status_error = None;
                 let mut effects = match self.status_selection {
-                    Selection::KeepPath => self.reselect(old_path),
+                    Selection::KeepPath => self.reselect(),
                 };
                 // A range whose files changed is not the set the user
                 // marked, so nothing may act on it.
-                // That includes a range whose first file went, cleared above.
+                // That includes a range whose first file went, cleared
+                // by the reload.
                 if had_range && self.files_range_paths() != old_range {
-                    self.files_anchor = None;
+                    self.files.range_anchor = None;
                     self.notice = Some(RANGE_FILES_CHANGED.into());
                 }
                 // The todo list shows while a rebase is stopped, and only then.
@@ -1488,12 +1458,24 @@ impl AppState {
                 effects
             }
             Err(message) => {
+                // The list keeps the files shown and records the error.
+                let before = self.files.selected;
+                if !self
+                    .files
+                    .loaded(tag, self.generation, Err(message.clone()))
+                {
+                    return vec![];
+                }
                 self.push_error(ErrorPopup::new(
                     "Could not read the repository status",
                     &message,
                     "Close this, fix the cause, then press r to retry.",
                 ));
-                self.status_error = Some(message);
+                // A cursor the filter hid (go to file can land there) moved
+                // to the first file shown; the diff follows it.
+                if self.files.selected != before {
+                    return self.select(self.files.selected);
+                }
                 vec![]
             }
         }
@@ -1521,9 +1503,10 @@ impl AppState {
         if self.commits.open.take().is_none() {
             return vec![];
         }
-        match self.selected {
-            Some(index) if index < self.files.len() => self.select_from(index, DiffStart::Top),
-            _ => self.close_diff(),
+        if self.files.selected_row().is_some() {
+            self.select_from(self.files.selected, DiffStart::Top)
+        } else {
+            self.close_diff()
         }
     }
 }
@@ -1588,7 +1571,7 @@ impl AppState {
 
     /// Reload `git status` quietly. Skipped while the user is waiting on
     /// git, whose own reload is coming, or while one is already running.
-    /// It takes `status_seq`, so a user refresh started later wins.
+    /// It takes the Files list's load, so a user refresh started later wins.
     pub(crate) fn background_status(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace
             || self.is_busy()
@@ -1598,7 +1581,7 @@ impl AppState {
             return vec![];
         }
         let tag = self.background_tag();
-        self.status_seq = Some(tag.seq);
+        self.files.begin(tag.seq);
         self.status_selection = Selection::KeepPath;
         self.watch.status_pending = true;
         vec![Effect::LoadStatus { tag }]
@@ -1615,8 +1598,8 @@ impl AppState {
     /// Whether `status` shows what is already on screen. After an error
     /// the screen is out of date, so anything is news.
     fn status_unchanged(&self, status: &RepoStatus) -> bool {
-        self.status_error.is_none()
-            && self.files == status.files
+        self.files.error.is_none()
+            && self.files.rows == status.files
             && self.branch.as_ref() == Some(&status.branch)
     }
 }
@@ -1731,26 +1714,6 @@ impl AppState {
     }
 }
 
-/// The Files panel's rows as its filter shows them. Core list input and
-/// keys read them, and so do the files and stash features.
-impl AppState {
-    /// The indexes of the files the filter shows, in order.
-    pub fn files_visible(&self) -> Vec<usize> {
-        if self.files_filter.is_empty() {
-            return (0..self.files.len()).collect();
-        }
-        let paths = self.files.iter().map(|f| f.path.display());
-        list_filter::visible(&self.files_filter, paths)
-    }
-
-    /// The filter hides the selected file, which happens only when it
-    /// hides every file.
-    pub fn files_selected_hidden(&self) -> bool {
-        let entry = self.selected.and_then(|i| self.files.get(i));
-        entry.is_some_and(|f| !list_filter::matches(&self.files_filter, f.path.display()))
-    }
-}
-
 mod confirm_guard;
 
 // The slot's failure texts, kept reachable where they used to live.
@@ -1858,8 +1821,8 @@ mod tests {
 
         state.update(loaded(tag, &["a.txt"]));
 
-        assert!(state.files_loaded);
-        assert_eq!(state.files, [untracked("a.txt")]);
+        assert!(state.files.loaded);
+        assert_eq!(state.files.rows, [untracked("a.txt")]);
     }
 
     #[test]
@@ -1869,14 +1832,14 @@ mod tests {
         let new = refresh_tag(&mut state);
 
         state.update(loaded(old, &["stale.txt"]));
-        assert!(!state.files_loaded);
-        assert_eq!(state.files, []);
+        assert!(!state.files.loaded);
+        assert_eq!(state.files.rows, []);
 
         state.update(loaded(new, &["fresh.txt"]));
-        assert_eq!(state.files, [untracked("fresh.txt")]);
+        assert_eq!(state.files.rows, [untracked("fresh.txt")]);
 
         state.update(loaded(old, &["stale.txt"]));
-        assert_eq!(state.files, [untracked("fresh.txt")]);
+        assert_eq!(state.files.rows, [untracked("fresh.txt")]);
     }
 
     #[test]
@@ -1887,8 +1850,8 @@ mod tests {
 
         state.update(loaded(tag, &["other-repo.txt"]));
 
-        assert!(!state.files_loaded);
-        assert_eq!(state.files, []);
+        assert!(!state.files.loaded);
+        assert_eq!(state.files.rows, []);
     }
 
     fn loaded_on(tag: Tag, branch: &str) -> AppIntent {
@@ -1940,7 +1903,7 @@ mod tests {
             result: Err("boom".into()),
         });
         assert_eq!(state.branch, Some(on_branch("main")));
-        assert_eq!(state.status_error.as_deref(), Some("boom"));
+        assert_eq!(state.files.error.as_deref(), Some("boom"));
     }
 
     #[test]
@@ -1966,16 +1929,16 @@ mod tests {
             tag,
             result: Err("fatal: not a git repository".into()),
         });
-        assert!(state.files_loaded);
+        assert!(state.files.loaded);
         assert_eq!(
-            state.status_error.as_deref(),
+            state.files.error.as_deref(),
             Some("fatal: not a git repository")
         );
 
         let tag = refresh_tag(&mut state);
         state.update(loaded(tag, &["a.txt"]));
-        assert_eq!(state.status_error, None);
-        assert_eq!(state.files, [untracked("a.txt")]);
+        assert_eq!(state.files.error, None);
+        assert_eq!(state.files.rows, [untracked("a.txt")]);
     }
 
     #[test]
@@ -2017,7 +1980,7 @@ mod tests {
     fn a_status_load_selects_the_first_file_and_requests_its_diff() {
         // Height 24: 21 diff rows.
         let (state, effects) = with_files(three_files(), 24);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         let tag = diff_tag(&effects);
         assert_eq!(
             effects[0],
@@ -2045,7 +2008,7 @@ mod tests {
         let tag = diff_tag(&state.update(AppIntent::Files(FilesIntent::Next)));
         state.update(chunk(tag, 50, true));
         state.update(AppIntent::ScrollDiff(Scroll::LineDown));
-        assert_eq!(state.selected, Some(2));
+        assert_eq!(state.files.selected, 2);
 
         // c.txt moved to the front; the selection follows it.
         let status = refresh_tag(&mut state);
@@ -2054,7 +2017,7 @@ mod tests {
             result: Ok(repo(vec![untracked("c.txt"), changed("a.rs", '.', 'M')])),
         });
         diff_tag(&effects);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         assert_eq!(state.diff.scroll, 1);
     }
 
@@ -2075,7 +2038,7 @@ mod tests {
             ])),
         });
         diff_tag(&effects);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         assert_eq!(state.diff.path, Some("z.rs".into()));
         assert_eq!(state.diff.scroll, 0);
     }
@@ -2089,8 +2052,24 @@ mod tests {
         let effects = state.update(loaded(status, &[]));
 
         assert_eq!(effects, vec![Effect::CancelDiff]);
-        assert_eq!(state.selected, None);
+        assert_eq!(state.files.selected_row(), None);
         assert_eq!(state.diff, DiffPane::default());
+    }
+
+    #[test]
+    fn a_failed_refresh_moves_a_hidden_cursor_to_a_shown_file_and_its_diff() {
+        let (mut state, _) = with_files(three_files(), 10);
+        state.files.filter = "rs".into();
+        // Go to file searches every file, so it may land on a hidden one.
+        state.update(AppIntent::Files(FilesIntent::GoToFile("c.txt".into())));
+        assert_eq!(state.files.selected, 2);
+        let status = refresh_tag(&mut state);
+        let effects = state.update(AppIntent::StatusLoaded {
+            tag: status,
+            result: Err("boom".into()),
+        });
+        assert_eq!(state.files.selected, 0);
+        assert_eq!(diff_request(&effects).path, "a.rs".into());
     }
 
     #[test]
@@ -2103,7 +2082,7 @@ mod tests {
             result: Err("boom".into()),
         });
         assert_eq!(effects, vec![]);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         assert_eq!(state.diff.lines.len(), 5);
     }
 
@@ -2252,7 +2231,7 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         press(&mut state, KeyCode::Char('?'));
         assert_eq!(press(&mut state, KeyCode::Char('j')), vec![]);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         press(&mut state, KeyCode::Char('q'));
         assert!(state.should_quit);
     }
@@ -2291,7 +2270,7 @@ mod tests {
             ])),
         });
         diff_tag(&effects);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
         match &effects[0] {
             Effect::LoadDiff { request, .. } => assert_eq!(
                 request,
@@ -2363,7 +2342,7 @@ mod tests {
             selection: Selection::KeepPath,
         });
         diff_tag(&effects);
-        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.files.selected, 1);
         assert_eq!(state.diff.path, Some("b.rs".into()));
     }
 
@@ -2407,7 +2386,7 @@ mod tests {
         press(&mut state, KeyCode::Up);
         assert_eq!(state.popups, [menu(MenuId::Actions, last - 1)]);
         // The file selection did not move.
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.selected, 0);
     }
 
     #[test]
@@ -2537,7 +2516,7 @@ mod tests {
             result: Err("fatal: not a git repository".into()),
         });
         assert_eq!(
-            state.status_error.as_deref(),
+            state.files.error.as_deref(),
             Some("fatal: not a git repository")
         );
         match state.popups.as_slice() {
@@ -2656,11 +2635,11 @@ mod tests {
         };
         for (what, anchor) in [(DiscardWhat::File, Some("b.rs".into())), (range, None)] {
             let (mut state, _) = with_files(three_files(), 24);
-            state.files_anchor = Some("b.rs".into());
+            state.files.range_anchor = Some("b.rs".into());
             state.popups = vec![Popup::Question(what.into_question("a.rs".into(), op()))];
             let (_, ran) = op_of(&state.update(AppIntent::ConfirmYes));
             assert_eq!(ran, op(), "{what:?}");
-            assert_eq!(state.files_anchor, anchor, "{what:?}");
+            assert_eq!(state.files.range_anchor, anchor, "{what:?}");
         }
     }
 
@@ -2696,8 +2675,8 @@ mod tests {
     #[test]
     fn discard_does_nothing_in_review_or_while_an_op_runs() {
         let mut review = AppState::new(Context::Review { number: Some(1) });
-        review.files = three_files();
-        review.selected = Some(0);
+        review.files.rows = three_files();
+        review.files.selected = 0;
         let (mut running, _) = with_files(three_files(), 24);
         running.hold_op(9);
         for state in [&mut review, &mut running] {
@@ -3381,8 +3360,8 @@ mod tests {
     fn closing_with_no_worktree_file_empties_the_diff() {
         let mut state = on_commit_five();
         opened(&mut state, two_commit_files());
-        state.files.clear();
-        state.selected = None;
+        state.files.rows.clear();
+        state.files.selected = 0;
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::CloseFiles)),
             vec![Effect::CancelDiff]
@@ -3409,7 +3388,10 @@ mod tests {
                 "{effects:?}"
             );
             assert_eq!(state.diff, diff);
-            assert_eq!(state.selected, (!files.is_empty()).then_some(0));
+            assert_eq!(
+                state.files.selected_row().map(|_| state.files.selected),
+                (!files.is_empty()).then_some(0)
+            );
         }
     }
 
@@ -3515,7 +3497,7 @@ mod tests {
         let moved = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
         let effects = state.update(refs_loaded(moved, b"b"));
         let tag = background_status_tag(&effects[..1]);
-        assert_eq!(state.status_seq, Some(tag.seq));
+        assert_eq!(state.files.seq, Some(tag.seq));
         // Branches or their upstreams may have moved too, out of the busy count.
         // The log moved too.
         match &effects[1..] {
@@ -3559,7 +3541,7 @@ mod tests {
         let mut state = idle_with_files();
         let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
         assert_eq!(state.busy_count(), 0);
-        assert_eq!(state.status_seq, Some(tag.seq));
+        assert_eq!(state.files.seq, Some(tag.seq));
         assert!(state.watch.status_pending);
 
         state.update(AppIntent::StatusLoaded {
@@ -3601,11 +3583,11 @@ mod tests {
 
         let mut state = idle_with_files();
         background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
-        let seq = state.status_seq;
+        let seq = state.files.seq;
         for _ in 0..3 {
             assert!(watch(&mut state, WatchEvent::PollFiles).is_empty());
         }
-        assert_eq!(state.status_seq, seq);
+        assert_eq!(state.files.seq, seq);
     }
 
     #[test]
@@ -3638,7 +3620,7 @@ mod tests {
             "no diff reload and no CancelDiff: {effects:?}"
         );
         assert_eq!(state.diff, before.diff);
-        assert_eq!(state.selected, before.selected);
+        assert_eq!(state.files.selected, before.files.selected);
     }
 
     #[test]
@@ -3656,8 +3638,8 @@ mod tests {
             ])),
         });
 
-        assert_eq!(state.files.len(), 3);
-        assert_eq!(state.selected, Some(0));
+        assert_eq!(state.files.rows.len(), 3);
+        assert_eq!(state.files.selected, 0);
         diff_tag(&effects);
     }
 
@@ -3670,13 +3652,42 @@ mod tests {
             result: Ok(repo(vec![])),
         });
         assert_eq!(effects, [Effect::CancelDiff]);
-        assert!(state.files.is_empty());
+        assert!(state.files.rows.is_empty());
+    }
+
+    #[test]
+    fn a_stale_unchanged_or_failed_background_status_leaves_the_user_load_in_flight() {
+        let mut state = idle_with_files();
+        let background = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
+        let user = refresh_tag(&mut state);
+        let (files, branch, diff) = (
+            state.files.clone(),
+            state.branch.clone(),
+            state.diff.clone(),
+        );
+
+        for result in [Ok(repo(three_files())), Err("boom".to_string())] {
+            let effects = state.update(AppIntent::StatusLoaded {
+                tag: background,
+                result,
+            });
+            assert!(effects.is_empty(), "{effects:?}");
+            assert_eq!(state.files.seq, Some(user.seq));
+            assert_eq!(state.files, files);
+            assert_eq!(state.branch, branch);
+            assert_eq!(state.diff, diff);
+            assert!(state.popups.is_empty());
+        }
+
+        state.update(loaded(user, &["fresh.txt"]));
+        assert_eq!(state.files.rows, [untracked("fresh.txt")]);
+        assert_eq!(state.files.seq, None);
     }
 
     #[test]
     fn a_failed_background_status_is_dropped_without_a_popup() {
         let mut state = idle_with_files();
-        let files = state.files.clone();
+        let files = state.files.rows.clone();
         let tag = background_status_tag(&watch(&mut state, WatchEvent::PollFiles));
 
         let effects = state.update(AppIntent::StatusLoaded {
@@ -3686,8 +3697,8 @@ mod tests {
 
         assert!(effects.is_empty());
         assert!(state.popups.is_empty());
-        assert_eq!(state.status_error, None);
-        assert_eq!(state.files, files);
+        assert_eq!(state.files.error, None);
+        assert_eq!(state.files.rows, files);
         assert!(!state.watch.status_pending);
     }
 
@@ -3703,7 +3714,7 @@ mod tests {
         });
 
         assert!(effects.is_empty());
-        assert_eq!(state.files, three_files());
+        assert_eq!(state.files.rows, three_files());
         assert!(!state.watch.status_pending);
         assert_eq!(state.busy_count(), 1);
         state.update(loaded(user, &["x.txt"]));
@@ -3719,7 +3730,7 @@ mod tests {
             result: Ok(repo(vec![changed("a.rs", '.', 'M'), untracked("new.txt")])),
         });
         assert_eq!(blame(&state).path, RepoPath::from("a.rs"));
-        assert_eq!(state.files.len(), 2);
+        assert_eq!(state.files.rows.len(), 2);
     }
 
     #[test]
@@ -4812,7 +4823,7 @@ mod tests {
         assert_eq!(state.notice, Some(keymap::CLEAR_RANGE_FIRST.into()));
         assert_eq!(state.focus, Focus::Files);
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         assert!(!state.should_quit, "Esc cleared the range first");
     }
 
@@ -4820,8 +4831,8 @@ mod tests {
     fn a_filter_hiding_every_row_refuses_row_keys() {
         let (mut state, _) = with_files(three_files(), 24);
         type_text(&mut state, "/zzz\n");
-        assert!(state.files_visible().is_empty());
-        assert_eq!(state.selected, Some(0), "nothing to move to");
+        assert!(state.files.visible().is_empty());
+        assert_eq!(state.files.selected, 0, "nothing to move to");
         press_char(&mut state, ' ');
         assert_eq!(state.notice, Some(keymap::FILTER_HIDES_ROW.into()));
     }
@@ -4836,7 +4847,7 @@ mod tests {
             tag,
             result: Ok(repo(rest)),
         });
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
     }
 
     #[test]
@@ -5046,11 +5057,11 @@ mod tests {
         for _ in 0..300 {
             press_char(&mut state, 'z');
         }
-        assert_eq!(state.files_filter.chars().count(), list_filter::MAX_INPUT);
+        assert_eq!(state.files.filter.chars().count(), list_filter::MAX_INPUT);
         assert_eq!(state.notice, Some(list_filter::input_full_notice().into()));
         press(&mut state, KeyCode::Backspace);
         assert_eq!(
-            state.files_filter.chars().count(),
+            state.files.filter.chars().count(),
             list_filter::MAX_INPUT - 1
         );
     }
@@ -5060,7 +5071,7 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         press_char(&mut state, 'V');
         type_text(&mut state, "/a");
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         assert_eq!(state.notice, Some("Selection cleared".into()));
     }
 
@@ -5319,12 +5330,12 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
-        assert_eq!(state.files_range(), [0, 1, 2]);
+        assert_eq!(state.files.range(), [0, 1, 2]);
         reload(
             &mut state,
             vec![changed("a.rs", '.', 'M'), changed("c.rs", '.', 'M')],
         );
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
     }
 
@@ -5335,7 +5346,7 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         reload(&mut state, vec![changed("b.rs", '.', 'M')]);
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
     }
 
@@ -5353,7 +5364,7 @@ mod tests {
                 changed("c.rs", '.', 'M'),
             ],
         );
-        assert_eq!(state.files_anchor, None);
+        assert_eq!(state.files.range_anchor, None);
         assert_eq!(state.notice, Some(RANGE_FILES_CHANGED.into()));
     }
 
@@ -5376,8 +5387,8 @@ mod tests {
                 untracked("y.rs"),
             ],
         );
-        assert_eq!(state.files_anchor, Some("a.rs".into()));
-        assert_eq!(state.files_range(), [0, 1]);
+        assert_eq!(state.files.range_anchor, Some("a.rs".into()));
+        assert_eq!(state.files.range(), [0, 1]);
         assert_eq!(state.notice, None);
     }
 

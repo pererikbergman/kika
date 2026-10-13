@@ -747,7 +747,7 @@ mod tests {
         let picks = state.custom_patch.take();
         state.hold_op(1);
         state.branch.as_mut().unwrap().in_progress = vec![Operation::Rebase];
-        state.files.push(changed("t.rs", '.', 'M'));
+        state.files.rows.push(changed("t.rs", '.', 'M'));
         state.commits.list.filter = "x".into();
         state.commits.list.rows[2].parents = vec![oid(3), oid(9)];
 
@@ -759,7 +759,7 @@ mod tests {
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         state.branch.as_mut().unwrap().in_progress.clear();
         reasons.push(why(&state, PatchChoice::MoveToSelected));
-        state.files.retain(|f| f.kind == EntryKind::Untracked);
+        state.files.rows.retain(|f| f.kind == EntryKind::Untracked);
         reasons.push(why(&state, PatchChoice::MoveToSelected));
         state.commits.list.filter.clear();
         reasons.push(why(&state, PatchChoice::MoveToSelected));

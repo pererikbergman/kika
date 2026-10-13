@@ -230,7 +230,11 @@ fn fixup_target_disabled(state: &AppState) -> Option<Reason> {
 }
 
 fn nothing_staged(state: &AppState) -> Option<Reason> {
-    let staged = state.files.iter().any(|f| !matches!(f.index, '.' | '?'));
+    let staged = state
+        .files
+        .rows
+        .iter()
+        .any(|f| !matches!(f.index, '.' | '?'));
     (!staged).then_some(STAGE_THE_FIX.into())
 }
 

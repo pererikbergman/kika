@@ -16,8 +16,8 @@
 //!
 //! Kept cross-feature reads and calls, left as they are because this slice
 //! only moves code:
-//! - it reads and writes `files`, `files_loaded`, `branch` and `selected`
-//!   (files);
+//! - it reads and writes `files` (its rows, `loaded` and cursor) and
+//!   `branch` (files);
 //! - it reads `repo` (repos);
 //! - it calls core `set_repo`, `switch_repo` and `select` (`model.rs`);
 //! - `enter_submodule` and `leave_submodule` call core `reload_repo`

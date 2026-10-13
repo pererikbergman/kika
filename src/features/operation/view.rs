@@ -29,7 +29,7 @@ pub(crate) fn render_status_panel(
     if area.is_empty() {
         return;
     }
-    let stale = state.status_error.is_some() && state.branch.is_some();
+    let stale = state.files.error.is_some() && state.branch.is_some();
     let stale_note = if stale { " (stale)" } else { "" };
     // Inside a submodule, say which one: the paths from the launch
     // repository. A long one loses its start, so the innermost name shows.
@@ -64,7 +64,7 @@ pub(crate) fn render_status_panel(
     };
     let width = usize::from(block.inner(area).width);
     let Some(branch) = &state.branch else {
-        let text = if state.files_loaded { "" } else { "Loading…" };
+        let text = if state.files.loaded { "" } else { "Loading…" };
         frame.render_widget(Paragraph::new(text).block(block), area);
         return;
     };
@@ -218,8 +218,8 @@ mod tests {
     #[test]
     fn a_failed_first_load_leaves_the_panel_blank_not_loading() {
         let mut state = AppState::new(Context::Workspace);
-        state.files_loaded = true;
-        state.status_error = Some("fatal: not a git repository".into());
+        state.files.loaded = true;
+        state.files.error = Some("fatal: not a git repository".into());
         let rows = panel_rows(&state);
         assert!(!contains(&rows, "Loading"), "{rows:#?}");
     }
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn a_failed_refresh_marks_the_panel_stale() {
         let mut state = on(branch(Head::Branch("main".into())));
-        state.status_error = Some("fatal: index file corrupt".into());
+        state.files.error = Some("fatal: index file corrupt".into());
         let buffer = draw_buffer(&state, 80, 24);
         let rows = buffer_rows(&buffer);
         assert!(rows[0].contains(" Status (stale) "), "{rows:#?}");
@@ -303,7 +303,7 @@ mod tests {
 
         // Nested, and with a name that must not drive the terminal.
         state.repo_stack = vec![parent("libs/a"), parent("in\x1bner")];
-        state.status_error = Some("boom".into());
+        state.files.error = Some("boom".into());
         let rows = draw(&state, 160, 24);
         assert!(
             rows[0].contains(" Status · libs/a/in\u{FFFD}ner (stale) "),
