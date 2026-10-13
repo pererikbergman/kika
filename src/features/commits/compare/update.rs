@@ -4,9 +4,9 @@
 
 use super::PendingDiff;
 use crate::commit_files::CommitFilesList;
-use crate::commits::CommitsTab;
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::effect::{Effect, Tag};
+use crate::features::commits::CommitsTab;
 use crate::git::commit_files::{CommitId, CommitRange};
 use crate::keymap::KeyScope;
 use crate::layout::{Panel, SidePanel};

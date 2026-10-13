@@ -1,19 +1,19 @@
 //! The log query on `AppState`: narrowing the Commits log to a path or
 //! an author.
 
-use super::{AppState, Context};
-use crate::commits::CommitsTab;
+use super::CommitsTab;
 use crate::effect::Effect;
 use crate::git::log::LogQuery;
 use crate::keymap::KeyScope;
 use crate::layout::{Panel, SidePanel};
 use crate::list_filter::{InputTarget, ListInput, LogFilterField};
+use crate::model::{AppState, Context};
 use crate::popup::LineInput;
 
 impl AppState {
     /// Type the path or author, starting from the one in force. A path
     /// that is not UTF-8 cannot be typed back, so it starts empty.
-    pub(super) fn open_log_filter(&mut self, field: LogFilterField) {
+    pub(crate) fn open_log_filter(&mut self, field: LogFilterField) {
         if self.panel_focus() != KeyScope::Commits {
             return;
         }
@@ -35,7 +35,7 @@ impl AppState {
 
     /// Enter on a path or author: set that half of the query (blank clears
     /// it) and run it. Text git cannot be given keeps the input open.
-    pub(super) fn accept_log_query(&mut self, input: ListInput) -> Vec<Effect> {
+    pub(crate) fn accept_log_query(&mut self, input: ListInput) -> Vec<Effect> {
         let mut query = self.commits.query.clone();
         let parsed = match input.target {
             InputTarget::LogPath => LogQuery::path_from(&input.line.text).map(|p| query.path = p),
@@ -54,7 +54,7 @@ impl AppState {
 
     /// Narrow the log to `query` and load its first page. A commit's files
     /// open from the old log close, since the rows they came from are gone.
-    pub(super) fn set_log_query(&mut self, query: LogQuery) -> Vec<Effect> {
+    pub(crate) fn set_log_query(&mut self, query: LogQuery) -> Vec<Effect> {
         let mut effects = self.close_commit_files();
         self.commits.set_query(query);
         effects.push(self.first_commits_page());
@@ -63,7 +63,7 @@ impl AppState {
 
     /// `L` in Files: the selected file's history, by its exact name. The
     /// author half stays.
-    pub(super) fn log_of_file(&mut self) -> Vec<Effect> {
+    pub(crate) fn log_of_file(&mut self) -> Vec<Effect> {
         if self.context != Context::Workspace {
             return vec![];
         }

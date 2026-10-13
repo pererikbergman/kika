@@ -18,16 +18,16 @@
 //!
 //! Kept cross-feature reads:
 //! - the handlers read and write `commits.reflog` and read `commits.tab`
-//!   (the commits panel, still in core);
+//!   (the parent `commits` panel);
 //! - `plan_travel` reads `branches.branches` and `files`;
 //! - `head_unborn` and `undo_disabled` read `branch`, `op_seq` and
 //!   `repo`; `travel` and `plan_travel` push onto `popups`, and the
 //!   handlers check `context`.
 //!
-//! What stays in core, and why:
-//! - `CommitsTab`, `COMMITS_SWITCH_TAB` and `switch_commits_tab`: the
-//!   tabs belong to the Commits panel;
-//! - `KeyScope::Reflog`/`KeyScope::Travel`, `Popup::Travel`,
+//! What stays elsewhere, and why:
+//! - `CommitsTab`, `COMMITS_SWITCH_TAB` and `switch_commits_tab` are in
+//!   the parent `commits`: the tabs belong to the Commits panel;
+//! - in core: `KeyScope::Reflog`/`KeyScope::Travel`, `Popup::Travel`,
 //!   `TravelConfirm` and its rendering in `popup_view.rs`, and the
 //!   reflog branches of `key_focus`, `open_filter`, the filter apply and
 //!   `list_escape`: shared core dispatch;

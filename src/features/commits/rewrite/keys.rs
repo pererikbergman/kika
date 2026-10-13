@@ -344,10 +344,11 @@ pub(crate) static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::commits::git as branch_tips;
+    use crate::features::commits::keys::TIPS_UNKNOWN;
     use crate::features::commits::rewrite::{
         FILTER_HIDES_NEIGHBOUR, STAGE_THE_FIX, autosquash_plan, range_log_plan,
     };
-    use crate::git::branch_tips;
     use crate::git::commit_files::CommitId;
     use crate::git::rebase_plan;
     use crate::git::repo_state::Operation;
@@ -355,7 +356,7 @@ mod tests {
     use crate::git::version;
     use crate::keymap::{
         CLEAR_LOG_FILTER, CLEAR_RANGE_FIRST, FILTER_HIDES_ROW, Keymap, OP_RUNNING, REPO_LOCKED,
-        Resolution, TIPS_UNKNOWN, Trust, registry, resolve,
+        Resolution, Trust, registry, resolve,
     };
     use crate::model::{Context, Focus};
     use crate::test_support::{binding, build, key, plain};
@@ -579,7 +580,7 @@ mod tests {
         });
     }
 
-    fn tip(digit: &str, name: &str) -> crate::git::branch_tips::Tip {
+    fn tip(digit: &str, name: &str) -> crate::features::commits::git::Tip {
         (
             CommitId::parse(&digit.repeat(40)).unwrap(),
             format!("refs/heads/{name}").into_bytes(),
