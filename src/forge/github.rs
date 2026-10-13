@@ -309,13 +309,35 @@ pub enum Refusal {
 }
 
 /// The `gh` calls of one load: who runs them, where they are logged, the
-/// host they go to and the time rate limits are measured from.
+/// host they go to and the time rate limits are measured from. Only
+/// [`ForgeContext::gh`](super::task::ForgeContext::gh) builds one, behind
+/// the host's allow gate, so its fields stay inside forge.
 pub struct Gh<'a> {
-    pub runner: &'a dyn GhRunner,
-    pub sink: &'a CommandSink,
-    pub host: &'a ForgeHost,
-    pub cwd: PathBuf,
-    pub now: i64,
+    pub(in crate::forge) runner: &'a dyn GhRunner,
+    pub(in crate::forge) sink: &'a CommandSink,
+    pub(in crate::forge) host: &'a ForgeHost,
+    pub(in crate::forge) cwd: PathBuf,
+    pub(in crate::forge) now: i64,
+}
+
+impl<'a> Gh<'a> {
+    /// A `gh` past the gate, for tests outside forge that need what a
+    /// scripted answer parses to. It runs in `/c`.
+    #[cfg(test)]
+    pub fn fixture(
+        runner: &'a dyn GhRunner,
+        sink: &'a CommandSink,
+        host: &'a ForgeHost,
+        now: i64,
+    ) -> Self {
+        Self {
+            runner,
+            sink,
+            host,
+            cwd: "/c".into(),
+            now,
+        }
+    }
 }
 
 impl Gh<'_> {

@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::cache::{self, CacheKey, Cached};
-use super::github::{Answer, Gh, GhRunner, MAX_BRANCHES, Refusal};
+use super::github::{Answer, GhRunner, MAX_BRANCHES, Refusal};
 use super::head::{Head, heads};
-use super::remote::{matches, parse_remote};
+use super::remote::{allowed, parse_remote};
 use super::{CiState, ForgeHost, ForgeRepo, ForgeStatus, PrState};
 use crate::effect::Tag;
 use crate::git::GitRunner;
@@ -64,10 +64,9 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
         Some(repo) => Some(repo.clone()),
         None => read_remote_url(git).and_then(|url| parse_remote(&url)),
     }
-    .and_then(|repo| Some((matches(&repo, load.hosts)?, repo)))
     // A repository `[forge.allow]` leaves out is as if on no host: its
     // cache is not read either, so nothing about it is shown.
-    .filter(|(host, repo)| host.allows(repo));
+    .and_then(|repo| Some((allowed(&repo, load.hosts)?, repo)));
     let Some((host, repo)) = found else {
         send(AppIntent::ForgeRepoNone { tag });
         return;
@@ -102,19 +101,10 @@ pub fn run_load(git: &dyn GitRunner, ctx: &ForgeContext, load: &Load, send: &dyn
     if let Some(until) = until.filter(|until| *until > load.now) {
         return limited(until);
     }
-    // `gh` runs in the cache directory, never the repository, so it reads
-    // no repository's git config.
-    let cwd = ctx
-        .cache_dir
-        .clone()
-        .filter(|dir| cache::ensure_dir(dir).is_ok())
-        .unwrap_or_else(std::env::temp_dir);
-    let gh = Gh {
-        runner: ctx.gh.as_ref(),
-        sink: &ctx.sink,
-        host,
-        cwd,
-        now: load.now,
+    // The client applies the same allow gate as above, so this is the
+    // allow-list miss's answer should the two ever disagree.
+    let Some(gh) = ctx.gh(host, &repo, load.now) else {
+        return send(AppIntent::ForgeRepoNone { tag });
     };
     let branches = &load.branches[..load.branches.len().min(MAX_BRANCHES)];
     let heads = heads(branches, &read_upstreams(git), &repo);
