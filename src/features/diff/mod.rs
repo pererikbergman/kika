@@ -58,7 +58,7 @@
 //! - discard (`ask_discard`, `discard_confirm`) and the `ApplyWorktree`
 //!   tests in `op.rs`, which exercise the discard op;
 //! - `DIFF_LOADING_DELAY` in `effect.rs`, which this feature imports;
-//! - `failure_title` in `model.rs`, which names every failed op and which
+//! - `failure_title` in `op_slot.rs`, which names every failed op and which
 //!   `edited_hunk_error` calls;
 //! - in `view.rs`: `diff_position`, because review draws it too;
 //!   `styled_diff_line`, because blame does; `render_hunk_view` and

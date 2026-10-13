@@ -640,7 +640,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             ..
         }) => Some(format!(" pushing tag to {}… ", remote.display())),
         Some(run) => Some(format!(" {} ", run.op.doing())),
-        None => (state.busy > 0).then(|| " loading… ".to_string()),
+        None => state.is_busy().then(|| " loading… ".to_string()),
     };
     if let Some(busy) = busy {
         room = room.saturating_sub(width_of(&busy));
@@ -702,7 +702,7 @@ fn status_bar(state: &AppState, width: u16) -> (Line<'_>, Option<usize>) {
             elide_right(&format!(" {notice}"), room),
             Style::new().fg(Color::Yellow),
         ));
-    } else if let Some(error) = &state.op_error {
+    } else if let Some(error) = state.op_error() {
         let text = format!(" error: {}", error.lines().next().unwrap_or_default());
         spans.push(Span::styled(
             elide_right(&text, room),

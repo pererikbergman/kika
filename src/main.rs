@@ -24,6 +24,7 @@ mod list_input;
 mod menu;
 mod model;
 mod op;
+mod op_slot;
 mod pick_list;
 mod popup;
 mod popup_view;
