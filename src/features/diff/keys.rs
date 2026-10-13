@@ -5,6 +5,7 @@
 //! open and edit. `CHUNKS` in `keymap.rs` places each chunk, so its
 //! position there is behaviour.
 
+use crate::features::diff::DiffIntent;
 use crate::git::diff::{DiffSide, MAX_CONTEXT, MIN_CONTEXT};
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::status::EntryKind;
@@ -48,7 +49,7 @@ pub(crate) static DIFF_WORKSPACE: &[Binding] = &[
             KeyPattern::exact(KeyCode::Char('='), NONE),
         ],
         scope: KeyScope::Workspace,
-        intent: AppIntent::MoreContext,
+        intent: AppIntent::Diff(DiffIntent::MoreContext),
         description: "Show more context lines in the diff",
         label: "more context",
         bar: false,
@@ -58,7 +59,7 @@ pub(crate) static DIFF_WORKSPACE: &[Binding] = &[
         id: "workspace.less_context",
         keys: &[KeyPattern::exact(KeyCode::Char('-'), NONE)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::LessContext,
+        intent: AppIntent::Diff(DiffIntent::LessContext),
         description: "Show fewer context lines in the diff",
         label: "less context",
         bar: false,
@@ -68,7 +69,7 @@ pub(crate) static DIFF_WORKSPACE: &[Binding] = &[
         id: "workspace.whitespace",
         keys: &[KeyPattern::exact(KeyCode::Char('w'), NONE)],
         scope: KeyScope::Workspace,
-        intent: AppIntent::ToggleWhitespace,
+        intent: AppIntent::Diff(DiffIntent::ToggleWhitespace),
         description: "Hide or show whitespace-only changes",
         label: "whitespace",
         bar: false,
@@ -178,7 +179,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Down),
         ],
         scope: KeyScope::Diff,
-        intent: AppIntent::NextHunk,
+        intent: AppIntent::Diff(DiffIntent::NextHunk),
         description: "Select the next hunk",
         label: "",
         bar: false,
@@ -192,7 +193,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
             KeyPattern::any(KeyCode::Up),
         ],
         scope: KeyScope::Diff,
-        intent: AppIntent::PrevHunk,
+        intent: AppIntent::Diff(DiffIntent::PrevHunk),
         description: "Select the previous hunk",
         label: "",
         bar: false,
@@ -202,7 +203,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
         id: "diff.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Diff,
-        intent: AppIntent::ToggleHunkStage,
+        intent: AppIntent::Diff(DiffIntent::ToggleHunkStage),
         description: "Stage the selected hunk, or unstage it in the staged view; in a commit's change, pick it for the custom patch or drop it",
         label: "hunk",
         bar: true,
@@ -212,7 +213,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
         id: "diff.lines",
         keys: &[KeyPattern::exact(KeyCode::Char('v'), NONE)],
         scope: KeyScope::Diff,
-        intent: AppIntent::EnterLineMode,
+        intent: AppIntent::Diff(DiffIntent::EnterLineMode),
         description: "Pick changed lines inside the selected hunk",
         label: "lines",
         bar: true,
@@ -222,7 +223,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
         id: "diff.side",
         keys: &[KeyPattern::exact(KeyCode::Char('t'), NONE)],
         scope: KeyScope::Diff,
-        intent: AppIntent::ToggleDiffSide,
+        intent: AppIntent::Diff(DiffIntent::ToggleSide),
         description: "Switch between the unstaged and the staged changes",
         label: "staged/unstaged",
         bar: true,
@@ -253,7 +254,7 @@ pub(crate) static DIFF_KEYS: &[Binding] = &[
         id: "diff.edit_hunk",
         keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
         scope: KeyScope::Diff,
-        intent: AppIntent::EditHunk,
+        intent: AppIntent::Diff(DiffIntent::EditHunk),
         description: "Edit the selected hunk in your editor, then stage it",
         label: "edit hunk",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
@@ -286,7 +287,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
             KeyPattern::exact(KeyCode::Down, NONE),
         ],
         scope: KeyScope::Lines,
-        intent: AppIntent::NextLine { extend: false },
+        intent: AppIntent::Diff(DiffIntent::NextLine { extend: false }),
         description: "Move to the next changed line",
         label: "",
         bar: false,
@@ -299,7 +300,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
             KeyPattern::exact(KeyCode::Up, NONE),
         ],
         scope: KeyScope::Lines,
-        intent: AppIntent::PrevLine { extend: false },
+        intent: AppIntent::Diff(DiffIntent::PrevLine { extend: false }),
         description: "Move to the previous changed line",
         label: "",
         bar: false,
@@ -312,7 +313,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
             KeyPattern::exact(KeyCode::Down, KeyModifiers::SHIFT),
         ],
         scope: KeyScope::Lines,
-        intent: AppIntent::NextLine { extend: true },
+        intent: AppIntent::Diff(DiffIntent::NextLine { extend: true }),
         description: "Grow the selection down a changed line",
         label: "",
         bar: false,
@@ -325,7 +326,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
             KeyPattern::exact(KeyCode::Up, KeyModifiers::SHIFT),
         ],
         scope: KeyScope::Lines,
-        intent: AppIntent::PrevLine { extend: true },
+        intent: AppIntent::Diff(DiffIntent::PrevLine { extend: true }),
         description: "Grow the selection up a changed line",
         label: "",
         bar: false,
@@ -335,7 +336,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
         id: "lines.stage",
         keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
         scope: KeyScope::Lines,
-        intent: AppIntent::ToggleLinesStage,
+        intent: AppIntent::Diff(DiffIntent::ToggleLinesStage),
         description: "Stage the selected lines, or unstage them in the staged view; in a commit's change, pick them for the custom patch or drop them",
         label: "lines",
         bar: true,
@@ -348,7 +349,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
             KeyPattern::exact(KeyCode::Char('v'), NONE),
         ],
         scope: KeyScope::Lines,
-        intent: AppIntent::ExitLineMode,
+        intent: AppIntent::Diff(DiffIntent::ExitLineMode),
         description: "Back to whole hunks",
         label: "hunks",
         bar: true,
@@ -380,6 +381,7 @@ pub(crate) static DIFF_LINES: &[Binding] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::diff::DiffIntent;
     use crate::intent::Scroll;
     use crate::keymap::{DISPLAY_ONLY, Keymap, Resolution, WHITESPACE_HIDDEN, registry, resolve};
     use crate::model::Context;
@@ -389,15 +391,31 @@ mod tests {
     fn diff_option_keys_work_from_files_diff_and_lines() {
         use AppIntent::*;
         for scope in [KeyScope::Files, KeyScope::Diff, KeyScope::Lines] {
-            assert_eq!(from(scope, plain('+')), Some(MoreContext), "{scope:?}");
             assert_eq!(
-                from(scope, key(KeyCode::Char('+'), KeyModifiers::SHIFT)),
-                Some(MoreContext),
+                from(scope, plain('+')),
+                Some(Diff(DiffIntent::MoreContext)),
                 "{scope:?}"
             );
-            assert_eq!(from(scope, plain('=')), Some(MoreContext), "{scope:?}");
-            assert_eq!(from(scope, plain('-')), Some(LessContext), "{scope:?}");
-            assert_eq!(from(scope, plain('w')), Some(ToggleWhitespace), "{scope:?}");
+            assert_eq!(
+                from(scope, key(KeyCode::Char('+'), KeyModifiers::SHIFT)),
+                Some(Diff(DiffIntent::MoreContext)),
+                "{scope:?}"
+            );
+            assert_eq!(
+                from(scope, plain('=')),
+                Some(Diff(DiffIntent::MoreContext)),
+                "{scope:?}"
+            );
+            assert_eq!(
+                from(scope, plain('-')),
+                Some(Diff(DiffIntent::LessContext)),
+                "{scope:?}"
+            );
+            assert_eq!(
+                from(scope, plain('w')),
+                Some(Diff(DiffIntent::ToggleWhitespace)),
+                "{scope:?}"
+            );
         }
         for k in [plain('+'), plain('='), plain('-'), plain('w')] {
             let binding = registry().iter().find(|b| b.matches(k)).expect("bound");
@@ -449,11 +467,17 @@ mod tests {
             Some(FocusDiff)
         );
         let diff = |k| from(KeyScope::Diff, k);
-        assert_eq!(diff(plain('j')), Some(NextHunk));
-        assert_eq!(diff(key(KeyCode::Down, none)), Some(NextHunk));
-        assert_eq!(diff(plain('k')), Some(PrevHunk));
-        assert_eq!(diff(key(KeyCode::Up, none)), Some(PrevHunk));
-        assert_eq!(diff(plain('t')), Some(ToggleDiffSide));
+        assert_eq!(diff(plain('j')), Some(Diff(DiffIntent::NextHunk)));
+        assert_eq!(
+            diff(key(KeyCode::Down, none)),
+            Some(Diff(DiffIntent::NextHunk))
+        );
+        assert_eq!(diff(plain('k')), Some(Diff(DiffIntent::PrevHunk)));
+        assert_eq!(
+            diff(key(KeyCode::Up, none)),
+            Some(Diff(DiffIntent::PrevHunk))
+        );
+        assert_eq!(diff(plain('t')), Some(Diff(DiffIntent::ToggleSide)));
         for k in [plain('h'), key(KeyCode::Left, none)] {
             assert_eq!(diff(k), Some(FocusLeft), "{k:?}");
         }
@@ -476,8 +500,8 @@ mod tests {
         assert_eq!(KeyScope::Lines.parent(), Some(KeyScope::Diff));
         assert_eq!(KeyScope::Lines.title(), "Lines");
         let lines = |k| from(KeyScope::Lines, k);
-        let next = NextLine { extend: false };
-        let prev = PrevLine { extend: false };
+        let next = Diff(DiffIntent::NextLine { extend: false });
+        let prev = Diff(DiffIntent::PrevLine { extend: false });
         assert_eq!(lines(plain('j')), Some(next.clone()));
         assert_eq!(lines(key(KeyCode::Down, none)), Some(next));
         assert_eq!(lines(plain('k')), Some(prev.clone()));
@@ -485,25 +509,28 @@ mod tests {
         for mods in [none, shift] {
             assert_eq!(
                 lines(key(KeyCode::Char('J'), mods)),
-                Some(NextLine { extend: true })
+                Some(Diff(DiffIntent::NextLine { extend: true }))
             );
             assert_eq!(
                 lines(key(KeyCode::Char('K'), mods)),
-                Some(PrevLine { extend: true })
+                Some(Diff(DiffIntent::PrevLine { extend: true }))
             );
         }
         assert_eq!(
             lines(key(KeyCode::Down, shift)),
-            Some(NextLine { extend: true })
+            Some(Diff(DiffIntent::NextLine { extend: true }))
         );
         assert_eq!(
             lines(key(KeyCode::Up, shift)),
-            Some(PrevLine { extend: true })
+            Some(Diff(DiffIntent::PrevLine { extend: true }))
         );
-        assert_eq!(lines(key(KeyCode::Esc, none)), Some(ExitLineMode));
-        assert_eq!(lines(plain('v')), Some(ExitLineMode));
+        assert_eq!(
+            lines(key(KeyCode::Esc, none)),
+            Some(Diff(DiffIntent::ExitLineMode))
+        );
+        assert_eq!(lines(plain('v')), Some(Diff(DiffIntent::ExitLineMode)));
         // Other Diff keys, and workspace and global ones, reach through.
-        assert_eq!(lines(plain('t')), Some(ToggleDiffSide));
+        assert_eq!(lines(plain('t')), Some(Diff(DiffIntent::ToggleSide)));
         assert_eq!(lines(plain('h')), Some(FocusLeft));
         assert_eq!(lines(plain('r')), Some(RefreshStatus));
         assert_eq!(lines(plain('q')), Some(Quit));
@@ -523,8 +550,14 @@ mod tests {
                 .find(|b| b.scope == scope && b.matches(k))
                 .map(|b| b.intent.clone())
         };
-        assert_eq!(bound(KeyScope::Lines, plain(' ')), Some(ToggleLinesStage));
-        assert_eq!(bound(KeyScope::Diff, plain('v')), Some(EnterLineMode));
+        assert_eq!(
+            bound(KeyScope::Lines, plain(' ')),
+            Some(Diff(DiffIntent::ToggleLinesStage))
+        );
+        assert_eq!(
+            bound(KeyScope::Diff, plain('v')),
+            Some(Diff(DiffIntent::EnterLineMode))
+        );
     }
 
     #[test]
@@ -660,10 +693,16 @@ mod tests {
             kind: RendererKind::Tool,
         }];
         let keys = [
-            (plain('j'), AppIntent::NextHunk),
-            (key(KeyCode::Down, KeyModifiers::NONE), AppIntent::NextHunk),
-            (plain('k'), AppIntent::PrevHunk),
-            (key(KeyCode::Up, KeyModifiers::NONE), AppIntent::PrevHunk),
+            (plain('j'), AppIntent::Diff(DiffIntent::NextHunk)),
+            (
+                key(KeyCode::Down, KeyModifiers::NONE),
+                AppIntent::Diff(DiffIntent::NextHunk),
+            ),
+            (plain('k'), AppIntent::Diff(DiffIntent::PrevHunk)),
+            (
+                key(KeyCode::Up, KeyModifiers::NONE),
+                AppIntent::Diff(DiffIntent::PrevHunk),
+            ),
         ];
         let resolved = |state: &AppState, key| match resolve(
             registry(),

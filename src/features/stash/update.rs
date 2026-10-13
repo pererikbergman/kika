@@ -537,7 +537,7 @@ mod tests {
         assert_eq!(state.focus, Focus::Stash);
 
         // New diff options reload the stash's file.
-        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        let request = diff_request(&toggle_whitespace(&mut state));
         assert!(request.options.ignore_whitespace);
         assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
 

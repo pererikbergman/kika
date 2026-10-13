@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::gitignore::{self, IgnoreAdded};
 use crate::background;
 use crate::effect::Tag;
+use crate::features::files::FilesIntent;
 use crate::git::GitRunner;
 use crate::git::path::RepoPath;
 use crate::git::safe_text::sanitize;
@@ -36,7 +37,7 @@ pub(crate) fn ignore(workdir: PathBuf, tx: UnboundedSender<AppIntent>, tag: Tag,
         move || append_ignore(&workdir, &line),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("Writing .gitignore"),
-        move |result| AppIntent::IgnoreWritten { tag, result },
+        move |result| AppIntent::Files(FilesIntent::IgnoreWritten { tag, result }),
     );
 }
 

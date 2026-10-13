@@ -2,11 +2,23 @@
 //! running it on the shown diff, taking its rows back and keeping them in
 //! step with the pane's width and the focused view's cursor.
 
-use super::{ExternalRenderer, RenderedDiff, StyledRow, external_diff};
+use super::{ExternalRenderer, RenderedDiff, RenderersIntent, StyledRow, external_diff};
 use crate::diff_pane::focused_hunks;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::DiffRequest;
 use crate::model::{AppState, Focus};
+
+/// The renderers' half of `update`: core's one `AppIntent::Diff` arm
+/// reaches it through the diff feature's `update`. A free function, so
+/// its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: RenderersIntent) -> Vec<Effect> {
+    match intent {
+        RenderersIntent::Cycle => return state.cycle_renderer(),
+        RenderersIntent::Found(renderers) => state.renderers_found(renderers),
+        RenderersIntent::Rendered { tag, result } => state.diff_rendered(tag, result),
+    }
+    Vec::new()
+}
 
 impl AppState {
     /// Take the renderers found. The active one is dropped, and its rows
@@ -169,6 +181,8 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::diff::DiffIntent;
+    use crate::features::diff::renderers::RenderersIntent;
     use crate::git::FileEntry;
     use crate::git::diff::DiffSide;
     use crate::intent::{AppIntent, Scroll};
@@ -187,9 +201,9 @@ mod tests {
     /// `files` loaded on an 80x24 screen, with renderers `labels` found.
     fn with_renderers(files: Vec<FileEntry>, labels: &[&str]) -> AppState {
         let (mut state, _) = with_files(files, 24);
-        state.update(AppIntent::RenderersFound(
-            labels.iter().map(|l| renderer(l)).collect(),
-        ));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(labels.iter().map(|l| renderer(l)).collect()),
+        )));
         state
     }
 
@@ -211,19 +225,21 @@ mod tests {
     }
 
     fn rendered(tag: Tag, text: &str) -> AppIntent {
-        AppIntent::DiffRendered {
+        AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Rendered {
             tag,
             result: Ok(crate::features::diff::renderers::ansi::parse(
                 text.as_bytes(),
             )),
-        }
+        }))
     }
 
     #[test]
     fn cycling_renders_the_shown_diff_at_the_pane_width() {
         let mut state = with_renderers(three_files(), &["delta"]);
         let busy = state.busy_count();
-        let (tag, request, cols) = render_of(&state.update(AppIntent::CycleRenderer));
+        let (tag, request, cols) = render_of(&state.update(AppIntent::Diff(
+            DiffIntent::Renderers(RenderersIntent::Cycle),
+        )));
         assert_eq!(state.renderer, Some(0));
         assert_eq!(cols, state.pane_cols());
         // 80 columns: the Diff pane is 53 wide, less borders and gutter.
@@ -240,7 +256,9 @@ mod tests {
     #[test]
     fn a_wider_screen_renders_again_and_a_taller_one_does_not() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         let effects = state.update(AppIntent::Resize {
             width: 120,
             height: 24,
@@ -262,7 +280,9 @@ mod tests {
     #[test]
     fn zooming_renders_again_at_the_diffs_new_width() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        let (tag, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        let (tag, _, _) = render_of(&state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        ))));
         state.update(rendered(tag, "row\n"));
         // Focus the diff, then zoom it: half, then full.
         // The diff's own view renders on focus; answer it.
@@ -315,7 +335,12 @@ mod tests {
     #[test]
     fn without_renderers_r_says_so_and_does_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
-        assert_eq!(state.update(AppIntent::CycleRenderer), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::Renderers(
+                RenderersIntent::Cycle
+            ))),
+            vec![]
+        );
         assert_eq!(state.notice, Some(external_diff::NO_RENDERER.into()));
         assert_eq!(state.renderer, None);
         state.notice = None;
@@ -327,8 +352,10 @@ mod tests {
     #[test]
     fn a_stale_render_is_dropped_but_busy_still_falls() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        let (old, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
-        let (new, _, _) = render_of(&state.update(AppIntent::SelectNext));
+        let (old, _, _) = render_of(&state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        ))));
+        let (new, _, _) = render_of(&select_next(&mut state));
         let busy = state.busy_count();
         state.update(rendered(old, "old\n"));
         assert_eq!(state.busy_count(), busy - 1);
@@ -342,7 +369,9 @@ mod tests {
     #[test]
     fn scrolling_moves_the_rendered_rows_while_they_are_shown() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        let (tag, _, _) = render_of(&state.update(AppIntent::CycleRenderer));
+        let (tag, _, _) = render_of(&state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        ))));
         state.update(rendered(tag, &"row\n".repeat(50)));
         state.update(AppIntent::ScrollDiff(Scroll::PageDown));
         assert_eq!(state.rendered.as_ref().unwrap().scroll, state.pane_rows());
@@ -352,7 +381,9 @@ mod tests {
     #[test]
     fn staging_options_and_side_changes_render_again() {
         let mut state = with_renderers(three_files(), &["delta"]);
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         render_of(&press(&mut state, KeyCode::Char('w')));
         let (_, request, _) = render_of(&press(&mut state, KeyCode::Enter));
         assert_eq!(
@@ -388,14 +419,16 @@ mod tests {
     fn focused_through(render: bool) -> AppState {
         let mut state = with_renderers(three_files(), &["delta"]);
         if render {
-            state.update(AppIntent::CycleRenderer);
+            state.update(AppIntent::Diff(DiffIntent::Renderers(
+                RenderersIntent::Cycle,
+            )));
         }
         let effects = press(&mut state, KeyCode::Enter);
         let (tag, _) = patch_load(&effects);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         if render {
             let (tag, _, _) = render_of(&effects);
             state.update(rendered(tag, DECORATED));
@@ -431,21 +464,26 @@ mod tests {
     #[test]
     fn r_cycles_through_the_pagers_then_the_tool_then_built_in() {
         let mut state = with_renderers(three_files(), &[]);
-        state.update(AppIntent::RenderersFound(vec![
-            renderer("delta"),
-            tool("difft"),
-        ]));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![renderer("delta"), tool("difft")]),
+        )));
         let mut seen = Vec::new();
         for _ in 0..3 {
-            state.update(AppIntent::CycleRenderer);
+            state.update(AppIntent::Diff(DiffIntent::Renderers(
+                RenderersIntent::Cycle,
+            )));
             seen.push(state.active_renderer().map(|r| r.label.clone()));
         }
         assert_eq!(seen, [Some("delta".into()), Some("difft".into()), None]);
 
-        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![tool("difft")]),
+        )));
         let mut seen = Vec::new();
         for _ in 0..2 {
-            state.update(AppIntent::CycleRenderer);
+            state.update(AppIntent::Diff(DiffIntent::Renderers(
+                RenderersIntent::Cycle,
+            )));
             seen.push((
                 state.active_renderer().map(|r| r.label.clone()),
                 state.display_only(),
@@ -458,14 +496,18 @@ mod tests {
     /// by tool `difft` as rows that match no patch line.
     fn focused_through_tool() -> AppState {
         let mut state = with_renderers(three_files(), &[]);
-        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![tool("difft")]),
+        )));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         let effects = press(&mut state, KeyCode::Enter);
         let (tag, _) = patch_load(&effects);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         let (tag, _, _) = render_of(&effects);
         state.update(rendered(tag, "1 old one   1 new one\n2 same      2 same\n"));
         state
@@ -494,10 +536,10 @@ mod tests {
     #[test]
     fn the_tool_view_refuses_staging_discard_and_hunk_edits() {
         for intent in [
-            AppIntent::ToggleHunkStage,
-            AppIntent::EnterLineMode,
+            AppIntent::Diff(DiffIntent::ToggleHunkStage),
+            AppIntent::Diff(DiffIntent::EnterLineMode),
             AppIntent::Discard,
-            AppIntent::EditHunk,
+            AppIntent::Diff(DiffIntent::EditHunk),
         ] {
             let mut state = focused_through_tool();
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
@@ -511,28 +553,44 @@ mod tests {
         }
         // Line mode entered before the tool, then staged by intent.
         let mut state = focused_through(false);
-        state.update(AppIntent::EnterLineMode);
-        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::EnterLineMode));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![tool("difft")]),
+        )));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         state.notice = None;
-        assert_eq!(state.update(AppIntent::ToggleLinesStage), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::ToggleLinesStage)),
+            vec![]
+        );
         assert_eq!(state.notice, Some(keymap::DISPLAY_ONLY.into()));
     }
 
     #[test]
     fn back_on_the_built_in_view_a_hunk_stages_again() {
         let mut state = focused_through_tool();
-        assert_eq!(state.update(AppIntent::ToggleHunkStage), vec![]);
-        state.update(AppIntent::CycleRenderer);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::ToggleHunkStage)),
+            vec![]
+        );
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         assert!(!state.display_only());
-        op_of(&state.update(AppIntent::ToggleHunkStage));
+        op_of(&state.update(AppIntent::Diff(DiffIntent::ToggleHunkStage)));
     }
 
     #[test]
     fn the_tool_view_leaves_whole_file_staging_alone() {
         let mut state = with_renderers(three_files(), &[]);
-        state.update(AppIntent::RenderersFound(vec![tool("difft")]));
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![tool("difft")]),
+        )));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         assert!(state.display_only());
         assert_eq!(state.focus, Focus::Files);
         op_of(&press_char(&mut state, ' '));
@@ -541,14 +599,18 @@ mod tests {
     #[test]
     fn hunk_moves_scroll_the_rendered_rows_to_the_hunk() {
         let (mut state, _) = with_files(three_files(), 6);
-        state.update(AppIntent::RenderersFound(vec![renderer("delta")]));
-        state.update(AppIntent::CycleRenderer);
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(vec![renderer("delta")]),
+        )));
+        state.update(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Cycle,
+        )));
         let effects = press(&mut state, KeyCode::Enter);
         let (tag, _) = patch_load(&effects);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         let (tag, _, _) = render_of(&effects);
         state.update(rendered(tag, DECORATED));
         // 3 rows: hunk 0's lines are rows 6 to 9, so its first is on top.

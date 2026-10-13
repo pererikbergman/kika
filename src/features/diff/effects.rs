@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::background;
 use crate::effect::{DIFF_LOADING_DELAY, Tag};
+use crate::features::diff::DiffIntent;
 use crate::git::GitRunner;
 use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
@@ -19,7 +20,7 @@ use crate::intent::AppIntent;
 pub(crate) fn loading_delay(tx: UnboundedSender<AppIntent>, tag: Tag) {
     tokio::spawn(async move {
         tokio::time::sleep(DIFF_LOADING_DELAY).await;
-        let _ = tx.send(AppIntent::DiffSlow { tag });
+        let _ = tx.send(AppIntent::Diff(DiffIntent::Slow { tag }));
     });
 }
 
@@ -36,12 +37,13 @@ pub(crate) fn load_patch(
         move || crate::git::diff::load_patch(runner.as_ref(), &request),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git diff"),
-        move |result| AppIntent::PatchLoaded { tag, result },
+        move |result| AppIntent::Diff(DiffIntent::PatchLoaded { tag, result }),
     );
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::features::diff::DiffIntent;
     use std::sync::Arc;
 
     use tokio::sync::mpsc;
@@ -95,10 +97,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::PatchLoaded {
+            Some(AppIntent::Diff(DiffIntent::PatchLoaded {
                 tag: got,
                 result: Ok(patch),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(patch.hunks.len(), 1);
             }
@@ -123,10 +125,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::PatchLoaded {
+            Some(AppIntent::Diff(DiffIntent::PatchLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git diff crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");

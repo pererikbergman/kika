@@ -3,9 +3,11 @@
 //! from the Diff pane (hunks, lines, the side and the loaded patch), and
 //! handing a file or a hunk to the editor and taking back what it left.
 
+use super::DiffIntent;
+use super::renderers;
 use crate::diff_pane::focused_hunks_mut;
 use crate::effect::{Effect, Tag};
-use crate::git::diff::{DiffChunk, DiffSide};
+use crate::git::diff::{DiffChunk, DiffOptions, DiffSide};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
 use crate::handoff::HandOff;
 use crate::hunk_view::{HunkView, NO_CHANGES};
@@ -14,6 +16,58 @@ use crate::model::{AppState, Context, Focus, failure_title};
 use crate::op::GitOp;
 use crate::popup::ErrorPopup;
 use crate::refresh::Selection;
+
+/// The Diff pane's half of `update`: core's one `AppIntent::Diff` arm
+/// lands here, and the renderers' intents go on to their own `update`.
+/// A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: DiffIntent) -> Vec<Effect> {
+    match intent {
+        DiffIntent::Loaded { tag, result } => state.diff_loaded(tag, result),
+        DiffIntent::Slow { tag } => {
+            if tag.generation == state.generation {
+                state.diff.slow(tag.seq);
+            }
+        }
+        DiffIntent::NextHunk => state.next_hunk(),
+        DiffIntent::PrevHunk => state.prev_hunk(),
+        DiffIntent::ToggleHunkStage => return state.toggle_hunk_stage(),
+        DiffIntent::EnterLineMode => state.enter_line_mode(),
+        DiffIntent::ExitLineMode => state.with_lines(HunkView::exit_lines),
+        DiffIntent::NextLine { extend } => state.with_lines(|view| view.next_line(extend)),
+        DiffIntent::PrevLine { extend } => state.with_lines(|view| view.prev_line(extend)),
+        DiffIntent::ToggleLinesStage => return state.toggle_lines_stage(),
+        DiffIntent::ToggleSide => return state.toggle_diff_side(),
+        DiffIntent::MoreContext => {
+            let context = state.diff_options.context.saturating_add(1);
+            return state.set_diff_options(DiffOptions {
+                context,
+                ..state.diff_options
+            });
+        }
+        DiffIntent::LessContext => {
+            let context = state.diff_options.context.saturating_sub(1);
+            return state.set_diff_options(DiffOptions {
+                context,
+                ..state.diff_options
+            });
+        }
+        DiffIntent::ToggleWhitespace => {
+            return state.set_diff_options(DiffOptions {
+                ignore_whitespace: !state.diff_options.ignore_whitespace,
+                ..state.diff_options
+            });
+        }
+        DiffIntent::PatchLoaded { tag, result } => {
+            state.patch_loaded(tag, result);
+            state.remap();
+        }
+        DiffIntent::EditHunk => return state.edit_hunk(),
+        DiffIntent::EditorClosed { result } => return state.editor_closed(result),
+        DiffIntent::HunkEdited { result } => return state.hunk_edited(result),
+        DiffIntent::Renderers(i) => return renderers::update(state, i),
+    }
+    Vec::new()
+}
 
 impl AppState {
     /// Take a chunk of the shown diff. One from an older generation is
@@ -307,6 +361,7 @@ Keep the @@ line as it was and start each line with a space, + or -.";
 mod tests {
     use super::EDITED_HUNK_INVALID;
     use crate::effect::{Effect, Tag};
+    use crate::features::diff::DiffIntent;
     use crate::git::diff::{DiffRequest, DiffSide};
     use crate::git::patch::{self, Direction, PatchSelection};
     use crate::git::status::EntryKind;
@@ -318,8 +373,8 @@ mod tests {
     use crate::popup::{ErrorPopup, Popup};
     use crate::test_support::{
         BINARY, HEAD, ONE_HUNK, TWO_HUNKS, changed, chunk, diff_tag, finished, focused, loaded,
-        op_of, patch_load, patch_of, press, refresh_tag, repo, three_files, untracked, view,
-        with_files,
+        op_of, patch_load, patch_of, press, refresh_tag, repo, select_next, three_files, untracked,
+        view, with_files,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -336,11 +391,11 @@ mod tests {
     fn superseded_diff_results_never_appear() {
         let (mut state, effects) = with_files(three_files(), 24);
         let first = diff_tag(&effects);
-        let second = diff_tag(&state.update(AppIntent::SelectNext));
+        let second = diff_tag(&select_next(&mut state));
         let before = state.diff.clone();
 
         state.update(chunk(first, 3, true));
-        state.update(AppIntent::DiffSlow { tag: first });
+        state.update(AppIntent::Diff(DiffIntent::Slow { tag: first }));
         assert_eq!(state.diff, before);
 
         let current_generation = Tag {
@@ -350,7 +405,7 @@ mod tests {
         state.generation += 1;
         let after_bump = state.diff.clone();
         state.update(chunk(second, 3, true));
-        state.update(AppIntent::DiffSlow { tag: second });
+        state.update(AppIntent::Diff(DiffIntent::Slow { tag: second }));
         assert_eq!(state.diff, after_bump);
         // Sanity: the tag for the new generation would have applied.
         state.update(chunk(current_generation, 1, true));
@@ -361,10 +416,10 @@ mod tests {
     fn a_diff_error_is_stored_and_ends_the_stream() {
         let (mut state, effects) = with_files(three_files(), 10);
         let tag = diff_tag(&effects);
-        state.update(AppIntent::DiffLoaded {
+        state.update(AppIntent::Diff(DiffIntent::Loaded {
             tag,
             result: Err("fatal: oops".into()),
-        });
+        }));
         assert_eq!(state.diff.error.as_deref(), Some("fatal: oops"));
         assert!(state.diff.done);
         assert!(!state.diff.pending);
@@ -558,20 +613,20 @@ mod tests {
         let (new, _) = patch_load(&press(&mut state, KeyCode::Char('t')));
         assert_eq!(state.busy_count(), 2);
 
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag: old,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         assert_eq!(state.busy_count(), 1);
         assert_eq!(view(&state).patch, None);
         assert_eq!(view(&state).seq, Some(new.seq));
 
         // Another repository's result is dropped too.
         state.generation += 1;
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag: new,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         assert_eq!(state.busy_count(), 0);
         assert_eq!(view(&state).patch, None);
     }
@@ -580,10 +635,10 @@ mod tests {
     fn a_failed_patch_load_shows_an_error_popup() {
         let (mut state, _) = with_files(three_files(), 24);
         let (tag, _) = patch_load(&press(&mut state, KeyCode::Enter));
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Err("fatal: bad".into()),
-        });
+        }));
         match state.popups.as_slice() {
             [Popup::Error(error)] => {
                 assert_eq!(error.title, "Could not read the diff");
@@ -633,10 +688,10 @@ mod tests {
         // Same file, so the same side.
         assert_eq!(request.side, DiffSide::Worktree);
         assert_eq!(view(&state).hunk, 1);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(ONE_HUNK)),
-        });
+        }));
         assert_eq!(view(&state).hunk, 0);
         assert_eq!(state.busy_count(), 0);
     }
@@ -910,25 +965,31 @@ mod tests {
 
         let mut running = focused(three_files(), TWO_HUNKS);
         running.hold_op(5);
-        assert_eq!(running.update(AppIntent::EditHunk), vec![]);
+        assert_eq!(
+            running.update(AppIntent::Diff(DiffIntent::EditHunk)),
+            vec![]
+        );
         assert_eq!(running.update(AppIntent::OpenInEditor), vec![]);
 
         // Still loading: no patch to edit yet.
         let (mut loading, _) = with_files(three_files(), 24);
         press(&mut loading, KeyCode::Enter);
-        assert_eq!(loading.update(AppIntent::EditHunk), vec![]);
+        assert_eq!(
+            loading.update(AppIntent::Diff(DiffIntent::EditHunk)),
+            vec![]
+        );
 
         // From the Files panel there is no hunk.
         let (mut files, _) = with_files(three_files(), 24);
-        assert_eq!(files.update(AppIntent::EditHunk), vec![]);
+        assert_eq!(files.update(AppIntent::Diff(DiffIntent::EditHunk)), vec![]);
     }
 
     #[test]
     fn an_edited_hunk_is_staged_with_one_apply_edited() {
         let mut state = focused(three_files(), TWO_HUNKS);
-        let effects = state.update(AppIntent::HunkEdited {
+        let effects = state.update(AppIntent::Diff(DiffIntent::HunkEdited {
             result: Ok(Some(b"edited".to_vec())),
-        });
+        }));
         let (tag, op) = op_of(&effects);
         assert!(tag.user);
         assert_eq!(
@@ -947,9 +1008,9 @@ mod tests {
     fn rejected_edit(keymap: Keymap) -> ErrorPopup {
         let mut state = focused(three_files(), TWO_HUNKS);
         state.keymap = keymap;
-        let effects = state.update(AppIntent::HunkEdited {
+        let effects = state.update(AppIntent::Diff(DiffIntent::HunkEdited {
             result: Ok(Some(b"edited".to_vec())),
-        });
+        }));
         let (tag, op) = op_of(&effects);
         state.update(finished(tag, op, Err(GARBAGE.into())));
         match state.popups.as_slice() {
@@ -1007,7 +1068,7 @@ mod tests {
     fn a_cancelled_edit_says_so_and_runs_nothing() {
         let mut state = focused(three_files(), TWO_HUNKS);
         assert_eq!(
-            state.update(AppIntent::HunkEdited { result: Ok(None) }),
+            state.update(AppIntent::Diff(DiffIntent::HunkEdited { result: Ok(None) })),
             vec![]
         );
         assert_eq!(state.notice, Some("Edit cancelled".into()));
@@ -1019,15 +1080,15 @@ mod tests {
     fn a_failed_edit_or_editor_shows_an_error_popup() {
         for (intent, title) in [
             (
-                AppIntent::HunkEdited {
+                AppIntent::Diff(DiffIntent::HunkEdited {
                     result: Err("no editor".into()),
-                },
+                }),
                 "Could not edit the hunk",
             ),
             (
-                AppIntent::EditorClosed {
+                AppIntent::Diff(DiffIntent::EditorClosed {
                     result: Err("no editor".into()),
-                },
+                }),
                 "Could not open the editor",
             ),
         ] {
@@ -1047,7 +1108,7 @@ mod tests {
     #[test]
     fn a_closed_editor_reloads_the_status() {
         let (mut state, _) = with_files(three_files(), 24);
-        let effects = state.update(AppIntent::EditorClosed { result: Ok(()) });
+        let effects = state.update(AppIntent::Diff(DiffIntent::EditorClosed { result: Ok(()) }));
         assert!(
             matches!(effects.as_slice(), [Effect::LoadStatus { tag }] if tag.user),
             "{effects:?}"
@@ -1062,15 +1123,15 @@ mod tests {
         review.selected = Some(0);
         for intent in [
             AppIntent::OpenInEditor,
-            AppIntent::EditHunk,
-            AppIntent::EditorClosed { result: Ok(()) },
-            AppIntent::EditorClosed {
+            AppIntent::Diff(DiffIntent::EditHunk),
+            AppIntent::Diff(DiffIntent::EditorClosed { result: Ok(()) }),
+            AppIntent::Diff(DiffIntent::EditorClosed {
                 result: Err("x".into()),
-            },
-            AppIntent::HunkEdited {
+            }),
+            AppIntent::Diff(DiffIntent::HunkEdited {
                 result: Ok(Some(b"p".to_vec())),
-            },
-            AppIntent::HunkEdited { result: Ok(None) },
+            }),
+            AppIntent::Diff(DiffIntent::HunkEdited { result: Ok(None) }),
         ] {
             assert_eq!(review.update(intent.clone()), vec![], "{intent:?}");
         }

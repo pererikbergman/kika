@@ -234,7 +234,7 @@ mod tests {
     use crate::model::{AppState, Context, Focus, ParentRepo};
     use crate::popup::Popup;
     use crate::test_support::{
-        loaded, outside, press, press_char, refresh_tag, three_files, with_files,
+        loaded, outside, press, press_char, refresh_tag, select_next, three_files, with_files,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::path::{Path, PathBuf};
@@ -496,7 +496,7 @@ mod tests {
     fn in_repo_a() -> AppState {
         let (state, _) = with_files(three_files(), 24);
         let mut state = state.with_location(Some("/r/a".into()), "/r/a".into());
-        state.update(AppIntent::SelectNext);
+        select_next(&mut state);
         state
     }
 

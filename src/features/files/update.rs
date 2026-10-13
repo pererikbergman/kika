@@ -2,6 +2,7 @@
 //! the filter shows. Also what Space and `a` stage, the question `d`
 //! asks for a range, go-to-file, and adding a file to `.gitignore`.
 
+use super::FilesIntent;
 use super::git::{toggle_all, toggle_for, toggle_many};
 use super::gitignore::{self, IgnoreAdded, IgnoreDraft};
 use crate::effect::{Effect, Tag};
@@ -11,6 +12,22 @@ use crate::list_filter;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
 use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind};
+
+/// The Files panel's half of `update`: core's one `AppIntent::Files` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: FilesIntent) -> Vec<Effect> {
+    match intent {
+        FilesIntent::Next => return state.move_selection(1),
+        FilesIntent::Prev => return state.move_selection(-1),
+        FilesIntent::ToggleStage => return state.toggle_stage(),
+        FilesIntent::ToggleStageAll => return state.toggle_stage_all(),
+        FilesIntent::GoToFile(text) => return state.go_to_file(&text),
+        FilesIntent::OpenIgnore => state.open_ignore(),
+        FilesIntent::IgnorePatternAnswered(text) => return state.ignore_answered(text),
+        FilesIntent::IgnoreWritten { tag, result } => return state.ignore_written(tag, result),
+    }
+    Vec::new()
+}
 
 impl AppState {
     /// Move by `delta` rows among those the filter shows.
@@ -201,6 +218,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::features::files::FilesIntent;
     use crossterm::event::{KeyCode, KeyModifiers};
 
     use crate::effect::Effect;
@@ -225,7 +243,7 @@ mod tests {
         state.update(chunk(first, 3, true));
         assert_eq!(state.diff.lines.len(), 3);
 
-        let effects = state.update(AppIntent::SelectNext);
+        let effects = state.update(AppIntent::Files(FilesIntent::Next));
         let second = diff_tag(&effects);
         assert!(second.seq > first.seq);
         assert_eq!(state.selected, Some(1));
@@ -254,15 +272,15 @@ mod tests {
     #[test]
     fn selection_stops_at_the_ends_of_the_list() {
         let (mut state, _) = with_files(three_files(), 24);
-        assert_eq!(state.update(AppIntent::SelectPrev), vec![]);
+        assert_eq!(state.update(AppIntent::Files(FilesIntent::Prev)), vec![]);
         assert_eq!(state.selected, Some(0));
 
-        state.update(AppIntent::SelectNext);
-        state.update(AppIntent::SelectNext);
-        assert_eq!(state.update(AppIntent::SelectNext), vec![]);
+        state.update(AppIntent::Files(FilesIntent::Next));
+        state.update(AppIntent::Files(FilesIntent::Next));
+        assert_eq!(state.update(AppIntent::Files(FilesIntent::Next)), vec![]);
         assert_eq!(state.selected, Some(2));
 
-        diff_tag(&state.update(AppIntent::SelectPrev));
+        diff_tag(&state.update(AppIntent::Files(FilesIntent::Prev)));
         assert_eq!(state.selected, Some(1));
     }
 
@@ -271,8 +289,8 @@ mod tests {
         let (mut state, effects) = with_files(vec![], 24);
         assert_eq!(effects, vec![Effect::CancelDiff]);
         assert_eq!(state.selected, None);
-        assert_eq!(state.update(AppIntent::SelectNext), vec![]);
-        assert_eq!(state.update(AppIntent::SelectPrev), vec![]);
+        assert_eq!(state.update(AppIntent::Files(FilesIntent::Next)), vec![]);
+        assert_eq!(state.update(AppIntent::Files(FilesIntent::Prev)), vec![]);
     }
 
     #[test]
@@ -313,12 +331,18 @@ mod tests {
     #[test]
     fn going_to_a_missing_file_says_so_and_empty_text_does_nothing() {
         let mut state = two_txt_files();
-        assert_eq!(state.update(AppIntent::GoToFile("zzz".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::GoToFile("zzz".into()))),
+            vec![]
+        );
         assert_eq!(state.notice, Some("No file matches".into()));
         assert_eq!(state.selected, Some(0));
 
         state.notice = None;
-        assert_eq!(state.update(AppIntent::GoToFile("  ".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::GoToFile("  ".into()))),
+            vec![]
+        );
         assert_eq!(state.notice, None);
         assert_eq!(state.selected, Some(0));
     }
@@ -373,13 +397,13 @@ mod tests {
         assert!(state.popups.is_empty());
         assert_eq!(state.ignore_draft, None);
 
-        let effects = state.update(AppIntent::IgnoreWritten {
+        let effects = state.update(AppIntent::Files(FilesIntent::IgnoreWritten {
             tag: *tag,
             result: Ok(IgnoreAdded {
                 pattern: "/build\\[1].log".into(),
                 added: true,
             }),
-        });
+        }));
         assert_eq!(
             state.notice_text.as_deref(),
             Some("Added /build\\[1].log to .gitignore")
@@ -449,10 +473,10 @@ mod tests {
         let [Effect::AppendIgnore { tag, .. }] = effects.as_slice() else {
             panic!("expected an append, got {effects:?}");
         };
-        let effects = state.update(AppIntent::IgnoreWritten {
+        let effects = state.update(AppIntent::Files(FilesIntent::IgnoreWritten {
             tag: *tag,
             result: Err(crate::worktree_file::CHANGED_ON_DISK.into()),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
     }
@@ -503,7 +527,7 @@ mod tests {
         let (mut state, _) = with_files(three_files(), 24);
         let busy = state.busy_count();
 
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
 
         assert_eq!(op, GitOp::Stage(vec!["a.rs".into()]));
         assert!(tag.user);
@@ -516,18 +540,18 @@ mod tests {
     fn toggle_stage_on_a_staged_file_unstages_it() {
         let (mut state, _) = with_files(three_files(), 24);
         select_path(&mut state, "b.rs");
-        let (_, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (_, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         assert_eq!(op, GitOp::Unstage(vec!["b.rs".into()]));
     }
 
     #[test]
     fn toggle_stage_all_stages_or_unstages_everything() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (_, op) = op_of(&state.update(AppIntent::ToggleStageAll));
+        let (_, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStageAll)));
         assert_eq!(op, GitOp::StageAll);
 
         let (mut state, _) = with_files(vec![changed("b.rs", 'M', '.')], 24);
-        let (_, op) = op_of(&state.update(AppIntent::ToggleStageAll));
+        let (_, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStageAll)));
         assert_eq!(op, GitOp::UnstageAll);
     }
 
@@ -540,7 +564,10 @@ mod tests {
         let (mut state, _) = with_files(vec![changed("a.rs", '.', 'M'), conflict], 24);
         let busy = state.busy_count();
 
-        assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::ToggleStageAll)),
+            vec![]
+        );
 
         assert_eq!(
             state.op_error(),
@@ -557,18 +584,27 @@ mod tests {
             ..changed("both.rs", 'U', 'U')
         };
         let (mut state, _) = with_files(vec![conflict], 24);
-        assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::ToggleStage)),
+            vec![]
+        );
         assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn a_second_toggle_while_one_is_in_flight_does_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
-        op_of(&state.update(AppIntent::ToggleStage));
+        op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         let busy = state.busy_count();
 
-        assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
-        assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::ToggleStage)),
+            vec![]
+        );
+        assert_eq!(
+            state.update(AppIntent::Files(FilesIntent::ToggleStageAll)),
+            vec![]
+        );
         assert_eq!(state.busy_count(), busy);
     }
 
@@ -579,8 +615,14 @@ mod tests {
         review.selected = Some(0);
         let (mut clean, _) = with_files(vec![], 24);
         for state in [&mut review, &mut clean] {
-            assert_eq!(state.update(AppIntent::ToggleStage), vec![]);
-            assert_eq!(state.update(AppIntent::ToggleStageAll), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Files(FilesIntent::ToggleStage)),
+                vec![]
+            );
+            assert_eq!(
+                state.update(AppIntent::Files(FilesIntent::ToggleStageAll)),
+                vec![]
+            );
             assert_eq!(state.held_seq(), None);
             assert_eq!(state.op_error(), None);
         }
@@ -590,7 +632,7 @@ mod tests {
     fn the_next_stage_key_clears_an_old_error() {
         let (mut state, _) = with_files(three_files(), 24);
         state.set_op_error("old".into());
-        op_of(&state.update(AppIntent::ToggleStage));
+        op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         assert_eq!(state.op_error(), None);
     }
 
@@ -687,7 +729,7 @@ mod tests {
         state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
             SidePanel::Branches,
         )));
-        let (_, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (_, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         assert_eq!(op, toggle_for(&state.files[1]).unwrap());
     }
 

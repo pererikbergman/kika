@@ -395,10 +395,7 @@ mod tests {
         open_files(&mut state, 2);
         let (tag, request) = patch_load(&press(&mut state, KeyCode::Char('l')));
         assert_eq!(request.commit.as_ref().map(|r| r.oid.clone()), Some(id(2)));
-        state.update(AppIntent::PatchLoaded {
-            tag,
-            result: Ok(patch_of(TWO_HUNKS)),
-        });
+        state.update(patch_loaded(tag, patch_of(TWO_HUNKS)));
         state
     }
 
@@ -462,9 +459,9 @@ mod tests {
         );
         // Sent as intents, they do nothing either.
         for intent in [
-            AppIntent::ToggleDiffSide,
+            toggle_diff_side_intent(),
             AppIntent::Discard,
-            AppIntent::EditHunk,
+            edit_hunk_intent(),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");

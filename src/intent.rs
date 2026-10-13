@@ -12,9 +12,8 @@ use crate::features::commit::CommitIntent;
 use crate::features::commits::CommitsIntent;
 use crate::features::conflicts::ConflictsIntent;
 use crate::features::custom_commands::CustomCommandsIntent;
-use crate::features::diff::renderers::ExternalRenderer;
-use crate::features::diff::renderers::StyledRow;
-use crate::features::files::IgnoreAdded;
+use crate::features::diff::DiffIntent;
+use crate::features::files::FilesIntent;
 use crate::features::operation::OperationIntent;
 use crate::features::repos::ReposIntent;
 use crate::features::review::{CommitsHere, PrFileRow};
@@ -26,8 +25,6 @@ use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
 use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitRange;
-use crate::git::diff::DiffChunk;
-use crate::git::patch::FilePatch;
 use crate::git::refs::RefsSnapshot;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
@@ -183,99 +180,22 @@ pub enum AppIntent {
     AbortOperation,
     /// Switch the whole workspace to the repository at this top level.
     OpenRepo(PathBuf),
-
-    // --- files ---
-    /// Move the file selection down or up.
-    SelectNext,
-    SelectPrev,
-    /// Stage the selected file, or unstage it when it is fully staged.
-    ToggleStage,
-    /// Stage everything, or unstage everything when nothing is left to stage.
-    ToggleStageAll,
     /// Ask to throw away the unstaged work under the cursor: the selected
     /// file, hunk or lines, by focus. The answer is `ConfirmYes`/`ConfirmNo`.
     Discard,
-    /// Select the first file whose path contains this text, ignoring case.
-    GoToFile(String),
-    /// Ask which pattern to add to `.gitignore` for the selected
-    /// untracked file, offering the one that matches exactly it.
-    OpenIgnore,
-    /// The pattern the `.gitignore` prompt was accepted with.
-    IgnorePatternAnswered(String),
-    /// The pattern was added to `.gitignore`, or was there already, or
-    /// why not. The text is the pattern as shown.
-    IgnoreWritten {
-        tag: Tag,
-        result: Result<IgnoreAdded, String>,
-    },
-
-    // --- diff ---
     ScrollDiff(Scroll),
-    /// A chunk of the diff stream for `tag`. A stream reports more than once.
-    DiffLoaded {
-        tag: Tag,
-        result: Result<DiffChunk, String>,
-    },
-    /// The diff for `tag` has taken long enough to show "Loading…".
-    DiffSlow {
-        tag: Tag,
-    },
-    /// Move the hunk cursor down or up.
-    NextHunk,
-    PrevHunk,
-    /// Stage the selected hunk, or unstage it in the staged view.
-    ToggleHunkStage,
-    /// Start or stop picking changed lines inside the selected hunk.
-    EnterLineMode,
-    ExitLineMode,
-    /// Move the line cursor down or up; with `extend`, grow the range.
-    NextLine {
-        extend: bool,
-    },
-    PrevLine {
-        extend: bool,
-    },
-    /// Stage the selected lines, or unstage them in the staged view.
-    ToggleLinesStage,
-    /// Switch the focused Diff pane between unstaged and staged changes.
-    ToggleDiffSide,
-    /// Show one more unchanged line around each change in the diff.
-    MoreContext,
-    /// Show one fewer unchanged line around each change in the diff.
-    LessContext,
-    /// Hide or show changes that only touch whitespace.
-    ToggleWhitespace,
-    /// A whole-file patch load finished; `tag` says which one.
-    PatchLoaded {
-        tag: Tag,
-        result: Result<FilePatch, String>,
-    },
     /// Open the selected file in the user's editor, at the selected line
     /// when there is one.
     OpenInEditor,
-    /// Edit the selected hunk in the user's editor, then stage the result.
-    EditHunk,
-    /// The editor opened by `OpenInEditor` has closed.
-    EditorClosed {
-        result: Result<(), String>,
-    },
-    /// The hunk edit finished: the patch to stage, `None` if the user
-    /// cancelled.
-    HunkEdited {
-        result: Result<Option<Vec<u8>>, String>,
-    },
 
-    // --- diff/renderers ---
-    /// Show the diff through the next configured renderer, or the
-    /// built-in view after the last.
-    CycleRenderer,
-    /// The renderers configured for this session, found at boot.
-    RenderersFound(Vec<ExternalRenderer>),
-    /// A renderer's rows for the shown diff; `tag` says which render.
-    DiffRendered {
-        tag: Tag,
-        result: Result<Vec<StyledRow>, String>,
-    },
+    // --- files ---
+    /// Everything the Files panel does; its own `update` handles it.
+    Files(FilesIntent),
+
+    // --- diff ---
+    /// Everything the Diff pane does, with its child the renderers. Its
+    /// own `update` handles it.
+    Diff(DiffIntent),
 
     // --- commit ---
     /// Everything the commit popup does; its own `update` handles it.
@@ -557,6 +477,18 @@ impl From<BranchesIntent> for AppIntent {
 impl From<CommitsIntent> for AppIntent {
     fn from(intent: CommitsIntent) -> Self {
         Self::Commits(intent)
+    }
+}
+
+impl From<FilesIntent> for AppIntent {
+    fn from(intent: FilesIntent) -> Self {
+        Self::Files(intent)
+    }
+}
+
+impl From<DiffIntent> for AppIntent {
+    fn from(intent: DiffIntent) -> Self {
+        Self::Diff(intent)
     }
 }
 

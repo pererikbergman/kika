@@ -8,7 +8,12 @@
 //! its effects. The programs come only from the global config, which
 //! core `config.rs` parses and checks with `external_diff::check_argv`.
 //!
+//! Its intents are nested (ADR-0002): they live in [`RenderersIntent`],
+//! which nests in `DiffIntent::Renderers`, so core's one `AppIntent::Diff`
+//! arm reaches [`update`] here through the diff feature's `update`.
+//!
 //! Its `pub(crate)` API:
+//! - the intent enum [`RenderersIntent`] and the free function [`update`];
 //! - the types `ExternalRenderer`, `RendererKind`, `RenderedDiff` and
 //!   `StyledRow`, re-exported here; core reaches the rest by module path,
 //!   such as `external_diff::{NO_RENDERER, kill_group, check_argv,
@@ -39,10 +44,14 @@ pub(crate) mod ansi;
 pub(crate) mod diff_tool;
 pub(crate) mod effects;
 pub(crate) mod external_diff;
+mod intent;
 pub(crate) mod keys;
 pub(crate) mod rendered_view;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::RenderersIntent;
+pub(crate) use update::update;
 
 pub(crate) use ansi::StyledRow;
 pub(crate) use external_diff::{ExternalRenderer, RendererKind};
