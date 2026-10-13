@@ -15,9 +15,9 @@ use crate::features::commits::copy::git::ordered;
 use crate::features::commits::custom_patch;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
 use crate::git::GitRunner;
-use crate::git::diff::terminal_safe;
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
+use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 use crate::op::{GitOp, op_command, run_op};
 use crate::sequence_editor::editor_value;
@@ -193,17 +193,10 @@ pub fn start_error(program: &OsString, error: &io::Error) -> String {
 /// The editor git would use: `GIT_EDITOR`, `core.editor`, `VISUAL`,
 /// `EDITOR`, then git's default, as `git var` resolves them.
 fn editor(runner: &dyn GitRunner) -> Result<String, String> {
+    // The user's own env: the editor is theirs.
     let output = runner
-        .run(&GitCommand::new("var").arg("GIT_EDITOR"))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git var GIT_EDITOR failed".into()
-        } else {
-            message
-        });
-    }
+        .run_checked(&GitCommand::new("var").arg("GIT_EDITOR").user_env())
+        .map_err(|e| e.message_or("git var GIT_EDITOR failed"))?;
     let editor = output.stdout.trim_ascii();
     if editor.is_empty() {
         return Err("No editor is configured".into());
@@ -744,6 +737,8 @@ mod tests {
             }
         );
         runner.assert_done();
+        // The editor is the user's, so git resolves it in their env.
+        assert_eq!(runner.process_envs(), [vec![]]);
     }
 
     fn commit_op(message: Option<&str>, stage_all: bool, amend: bool, no_verify: bool) -> GitOp {

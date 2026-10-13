@@ -4,11 +4,11 @@
 
 use std::path::PathBuf;
 
-use crate::git::diff::terminal_safe;
 use crate::git::rebase_plan::{
     Direction, Edit, NOTHING_TO_FOLD, TodoAction, TodoEntry, Unreadable, command_lines, crossing,
     parse_todo, unreadable,
 };
+use crate::git::safe_text::terminal_safe;
 
 /// Why a todo list is shown but not edited, when no single line says it.
 pub(crate) const NOT_EDITABLE: &str = "The todo list has commands Kika does not edit";

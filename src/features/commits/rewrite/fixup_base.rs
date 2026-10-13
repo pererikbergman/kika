@@ -444,7 +444,10 @@ Binary files a/bin and b/bin differ\n";
         assert_eq!(blame.args()[4].as_encoded_bytes(), b"-n\xff:(top)*");
         for cmd in [&diff, &blame] {
             assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
-            assert_eq!(cmd.env_profile(), crate::git::runner::EnvProfile::Standard);
+            assert_eq!(
+                cmd.env_profile(),
+                Some(crate::git::runner::EnvProfile::Standard)
+            );
             assert_eq!(
                 cmd.process_env(),
                 [

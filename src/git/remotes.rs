@@ -6,9 +6,9 @@
 use std::ffi::OsString;
 
 use super::branches::run;
-use super::diff::terminal_safe;
-use super::remote::redact_userinfo;
+use super::error::GitError;
 use super::runner::{GitCommand, GitRunner};
+use super::safe_text::{redact_userinfo, terminal_safe};
 
 /// A remote's name as raw bytes, so a name that is not UTF-8 reaches argv
 /// unchanged. Equality is on the bytes.
@@ -168,17 +168,15 @@ fn configured_remotes(runner: &dyn GitRunner) -> Result<Vec<Remote>, String> {
         .arg("-z")
         .arg("--get-regexp")
         .arg(r"^remote\..*\.url$")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C");
-    let out = runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
+        .standard_env();
+    let out = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if !out.success {
         // Nothing matched: exit 1 with nothing on stderr.
         if out.stderr.is_empty() {
             return Ok(Vec::new());
         }
-        return Err(terminal_safe(&out.stderr));
+        // Blank stderr stays blank, as before the message was redacted.
+        return Err(GitError::failed(&cmd, &out).message_or(""));
     }
     let out = out.stdout;
     let mut remotes: Vec<Remote> = Vec::new();
@@ -272,6 +270,7 @@ mod tests {
     use super::*;
     use crate::git::CliRunner;
     use crate::git::fake::{FakeRunner, TempDir, fail, git, ok};
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const CONFIG: &[&str] = &["config", "-z", "--get-regexp", r"^remote\..*\.url$"];
     const REFS: &[&str] = &[
@@ -279,13 +278,6 @@ mod tests {
         "--format=%(refname)%00%(symref)",
         "refs/remotes",
     ];
-
-    fn read_env() -> Vec<(OsString, OsString)> {
-        vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ]
-    }
 
     fn names(remotes: &[Remote]) -> Vec<String> {
         remotes.iter().map(|r| r.name.display()).collect()
@@ -316,7 +308,7 @@ mod tests {
         let remotes = list_remotes(&fake).unwrap();
 
         fake.assert_done();
-        assert_eq!(fake.envs(), [read_env(), read_env()]);
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 2]);
         assert_eq!(names(&remotes), ["a", "a/b", "gone", "my.fork", "origin"]);
         let by = |name: &str| remotes.iter().find(|r| r.name.display() == name).unwrap();
         assert_eq!(branches(by("a")), ["a/d"]);

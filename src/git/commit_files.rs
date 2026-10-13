@@ -1,10 +1,10 @@
 //! The files one commit changed, against its first parent, so the Commits
 //! panel can show a commit file by file.
 
-use super::diff::terminal_safe;
 use super::log::CommitRow;
 use super::path::RepoPath;
-use super::runner::{GitCommand, GitOutput, GitRunner};
+use super::runner::{GitCommand, GitRunner};
+use super::safe_text::terminal_safe;
 
 /// An object id as hex digits only. It is the only way a commit id reaches
 /// argv, so nothing git could read as an option gets through, without the
@@ -79,8 +79,7 @@ pub fn files_command(range: &CommitRange) -> GitCommand {
         .args()
         .fold(cmd, |cmd, arg| cmd.arg(arg))
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The files `range` changed, in git's order. Errors are made safe to
@@ -90,11 +89,8 @@ pub fn commit_files(
     range: &CommitRange,
 ) -> Result<Vec<CommitFile>, String> {
     let output = runner
-        .run(&files_command(range))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        return Err(failure(&output));
-    }
+        .run_checked(&files_command(range))
+        .map_err(|e| e.message_or("git diff-tree failed"))?;
     parse(&output.stdout)
 }
 
@@ -112,8 +108,7 @@ pub fn numstat_command(range: &CommitRange) -> GitCommand {
         .args()
         .fold(cmd, |cmd, arg| cmd.arg(arg))
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// Lines added and removed per file, by its (new) name; `None` for a
@@ -126,11 +121,8 @@ pub fn numstat(
     range: &CommitRange,
 ) -> Result<Vec<(RepoPath, LineCounts)>, String> {
     let output = runner
-        .run(&numstat_command(range))
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        return Err(failure(&output));
-    }
+        .run_checked(&numstat_command(range))
+        .map_err(|e| e.message_or("git diff-tree failed"))?;
     parse_numstat(&output.stdout)
 }
 
@@ -213,18 +205,10 @@ fn parse(stdout: &[u8]) -> Result<Vec<CommitFile>, String> {
     Ok(files)
 }
 
-fn failure(output: &GitOutput) -> String {
-    let message = terminal_safe(&output.stderr);
-    if message.is_empty() {
-        "git diff-tree failed".into()
-    } else {
-        message
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
@@ -299,11 +283,11 @@ mod tests {
         assert_eq!(commit_files(&fake, &range(Some(PARENT))), Ok(vec![]));
         assert_eq!(commit_files(&fake, &range(None)), Ok(vec![]));
         fake.assert_done();
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(fake.envs(), [env.clone(), env]);
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 2]);
+        assert_eq!(
+            files_command(&range(None)).env_profile(),
+            Some(EnvProfile::Standard)
+        );
     }
 
     fn file(status: char, path: &str, orig: Option<&str>) -> CommitFile {
@@ -382,11 +366,11 @@ mod tests {
             FakeRunner::new().expect(&[&NUMSTAT[..], &[PARENT, OID, "--"]].concat(), ok(b""));
         assert_eq!(numstat(&fake, &range(Some(PARENT))), Ok(vec![]));
         fake.assert_done();
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(fake.envs(), [env]);
+        assert_eq!(fake.process_envs(), [env_list(&STANDARD_ENV)]);
+        assert_eq!(
+            numstat_command(&range(Some(PARENT))).env_profile(),
+            Some(EnvProfile::Standard)
+        );
     }
 
     #[test]

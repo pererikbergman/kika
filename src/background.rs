@@ -8,7 +8,7 @@ use std::fmt::Display;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinError;
 
-use crate::git::diff::terminal_safe;
+use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
 /// Run `work` on the blocking pool and send what `reply` makes of its

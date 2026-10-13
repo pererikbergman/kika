@@ -5,7 +5,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use super::diff::sanitize;
+use super::safe_text::sanitize;
 
 /// A repo file name: the exact bytes git gave us, plus a terminal-safe form
 /// for display. Equality is on the bytes.

@@ -1,7 +1,7 @@
 //! A cheap fingerprint of every ref and of `HEAD`, polled to notice commits,
 //! checkouts and fetches made outside Kika without running `git status`.
 
-use super::diff::terminal_safe;
+use super::error::GitError;
 use super::runner::{GitCommand, GitOutput, GitRunner};
 
 /// Opaque: only ever compared with the previous one.
@@ -20,25 +20,18 @@ impl RefsSnapshot {
 /// A detached or unborn `HEAD` makes the last two fail; that is part of the
 /// snapshot, not an error.
 pub fn read_refs(runner: &dyn GitRunner) -> Result<RefsSnapshot, String> {
-    let refs = run(
-        runner,
-        GitCommand::new("for-each-ref").arg("--format=%(objectname) %(refname)"),
-    )?;
+    let refs_cmd = GitCommand::new("for-each-ref").arg("--format=%(objectname) %(refname)");
+    let refs = run(runner, &refs_cmd)?;
     if !refs.success {
-        let message = terminal_safe(&refs.stderr);
-        return Err(if message.is_empty() {
-            "git for-each-ref failed".into()
-        } else {
-            message
-        });
+        return Err(GitError::failed(&refs_cmd, &refs).message_or("git for-each-ref failed"));
     }
     let symbolic = run(
         runner,
-        GitCommand::new("symbolic-ref").arg("-q").arg("HEAD"),
+        &GitCommand::new("symbolic-ref").arg("-q").arg("HEAD"),
     )?;
     let head = run(
         runner,
-        GitCommand::new("rev-parse")
+        &GitCommand::new("rev-parse")
             .arg("-q")
             .arg("--verify")
             .arg("HEAD"),
@@ -53,19 +46,19 @@ pub fn read_refs(runner: &dyn GitRunner) -> Result<RefsSnapshot, String> {
 }
 
 /// Run a read-only query that must not take the index lock from the user.
-fn run(runner: &dyn GitRunner, cmd: GitCommand) -> Result<GitOutput, String> {
-    let cmd = cmd.env("GIT_OPTIONAL_LOCKS", "0").env("LC_ALL", "C");
+/// Ref reads name no path, so the whole standard profile is a no-op past
+/// the lock and the locale. A failed exit is part of the snapshot.
+fn run(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
     runner
-        .run(&cmd)
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))
+        .run(&cmd.clone().standard_env())
+        .map_err(|e| GitError::io(&e).to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     const REFS: &[&str] = &["for-each-ref", "--format=%(objectname) %(refname)"];
     const SYMBOLIC: &[&str] = &["symbolic-ref", "-q", "HEAD"];
@@ -85,11 +78,7 @@ mod tests {
         assert!(read_refs(&fake).is_ok());
 
         fake.assert_done();
-        let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
-            ("LC_ALL".into(), "C".into()),
-        ];
-        assert_eq!(fake.envs(), [env.clone(), env.clone(), env]);
+        assert_eq!(fake.process_envs(), vec![env_list(&STANDARD_ENV); 3]);
     }
 
     #[test]

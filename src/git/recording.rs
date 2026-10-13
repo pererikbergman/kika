@@ -323,8 +323,13 @@ mod tests {
         }
         let runner = RecordingRunner::new(Arc::new(Peek(Arc::clone(&fake), seen)), sink);
 
-        assert!(runner.run(&GitCommand::new("status")).unwrap().success);
-        let commit = GitCommand::new("commit").arg("-m").arg("x");
+        assert!(
+            runner
+                .run(&GitCommand::new("status").standard_env())
+                .unwrap()
+                .success
+        );
+        let commit = GitCommand::new("commit").user_env().arg("-m").arg("x");
         assert!(!runner.run(&commit).unwrap().success);
 
         assert_eq!(
@@ -343,10 +348,22 @@ mod tests {
     fn a_run_that_cannot_start_finishes_as_not_started() {
         let (sink, events) = collecting();
         let runner = RecordingRunner::new(Arc::new(Broken), sink);
-        assert!(runner.run(&GitCommand::new("status")).is_err());
-        assert!(runner.spawn(&GitCommand::new("log")).is_err());
+        assert!(
+            runner
+                .run(&GitCommand::new("status").standard_env())
+                .is_err()
+        );
+        assert!(
+            runner
+                .spawn(&GitCommand::new("log").standard_env())
+                .is_err()
+        );
         // The default `run_attached` is unsupported.
-        assert!(runner.run_attached(&GitCommand::new("commit")).is_err());
+        assert!(
+            runner
+                .run_attached(&GitCommand::new("commit").user_env())
+                .is_err()
+        );
         assert_eq!(
             timeless(&events),
             [
@@ -370,11 +387,11 @@ mod tests {
         let (runner, events) = recording(Arc::clone(&fake));
         assert!(
             runner
-                .run_attached(&GitCommand::new("commit"))
+                .run_attached(&GitCommand::new("commit").user_env())
                 .unwrap()
                 .success
         );
-        let cont = GitCommand::new("rebase").arg("--continue");
+        let cont = GitCommand::new("rebase").user_env().arg("--continue");
         assert!(!runner.run_attached(&cont).unwrap().success);
         assert_eq!(
             timeless(&events),
@@ -397,7 +414,9 @@ mod tests {
         );
         let (runner, events) = recording(Arc::clone(&fake));
 
-        let child = runner.spawn(&GitCommand::new("log")).unwrap();
+        let child = runner
+            .spawn(&GitCommand::new("log").standard_env())
+            .unwrap();
         assert_eq!(timeless(&events), [started(0, "git log", false)]);
         let mut out = String::new();
         let mut stdout = child.stdout;
@@ -408,7 +427,9 @@ mod tests {
         child.handle.finish().unwrap();
         drop(child.handle);
 
-        let child = runner.spawn(&GitCommand::new("diff")).unwrap();
+        let child = runner
+            .spawn(&GitCommand::new("diff").standard_env())
+            .unwrap();
         assert!(!child.handle.finish().unwrap().success);
         drop(child);
 
@@ -430,7 +451,9 @@ mod tests {
         let fake = Arc::new(FakeRunner::new().expect_spawn(&["log"], probe.clone()));
         let (runner, events) = recording(Arc::clone(&fake));
 
-        let child = runner.spawn(&GitCommand::new("log")).unwrap();
+        let child = runner
+            .spawn(&GitCommand::new("log").standard_env())
+            .unwrap();
         let other = Arc::clone(&child.handle);
         child.handle.kill();
         assert!(probe.was_killed());
@@ -475,9 +498,9 @@ mod tests {
             Arc::new(FakeRunner::new().expect(&["log"], ok(b""))),
             sink.clone(),
         );
-        one.run(&GitCommand::new("status")).unwrap();
+        one.run(&GitCommand::new("status").standard_env()).unwrap();
         let other = sink.next_id();
-        two.run(&GitCommand::new("log")).unwrap();
+        two.run(&GitCommand::new("log").standard_env()).unwrap();
         assert_eq!(
             timeless(&events),
             [
@@ -514,7 +537,12 @@ mod tests {
         let runner =
             RecordingRunner::new(Arc::new(crate::git::CliRunner::isolated(tmp.path())), sink);
 
-        assert!(runner.run(&GitCommand::new("status")).unwrap().success);
+        assert!(
+            runner
+                .run(&GitCommand::new("status").standard_env())
+                .unwrap()
+                .success
+        );
 
         let events = events.lock().unwrap();
         assert_eq!(events[0], started(0, "git status", false));

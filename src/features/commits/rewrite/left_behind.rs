@@ -94,7 +94,7 @@ mod tests {
             ]
         );
         assert!(!cmd.args().iter().any(|a| a == "--end-of-options"));
-        assert_eq!(cmd.env_profile(), EnvProfile::Standard);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
         assert_eq!(
             cmd.process_env(),
             [

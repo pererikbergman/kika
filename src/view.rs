@@ -15,10 +15,11 @@ use crate::features::files;
 use crate::features::operation;
 use crate::features::stash;
 use crate::git::bisect::BisectState;
-use crate::git::diff::{DiffLine, DiffOptions, EmojiZwj, LineKind, sanitize};
+use crate::git::diff::{DiffLine, DiffOptions, EmojiZwj, LineKind};
 use crate::git::emoji;
 use crate::git::patch::{FileKind, PatchError};
 use crate::git::remote::RemoteOp;
+use crate::git::safe_text::sanitize;
 use crate::git::status::Head;
 use crate::hunk_view::{HunkView, NO_CHANGES, RowKind, drawn_text};
 use crate::keymap::{Binding, KeyPattern, KeyScope, available, available_commands, registry};
@@ -3826,10 +3827,10 @@ mod tests {
     #[test]
     fn a_hostile_start_and_subject_draw_without_control_characters() {
         let mut bisect = bisect_state();
-        bisect.start = crate::git::diff::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
+        bisect.start = crate::git::safe_text::terminal_safe(b"evil\x1b[2J\x07\xe2\x80\xae");
         bisect.first_bad = Some(crate::git::bisect::Found {
             commit: crate::git::commit_files::CommitId::parse("abc1234def").unwrap(),
-            subject: crate::git::diff::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
+            subject: crate::git::safe_text::terminal_safe(b"bad\x1b]0;x\x07 \xe2\x80\xaeok"),
         });
         let rows = bisect_rows(Head::Detached("abc1234def".into()), bisect);
         assert!(

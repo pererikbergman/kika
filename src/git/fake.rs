@@ -86,7 +86,13 @@ impl FakeRunner {
     }
 
     /// Record what every call, run or spawn, was given besides its argv.
+    /// A command that named no env profile is a bug in its builder.
     fn record(&self, cmd: &GitCommand) {
+        assert!(
+            cmd.env_profile().is_some(),
+            "git command with no env profile: {:?}",
+            argv_of(cmd)
+        );
         self.envs.lock().unwrap().push(cmd.envs().to_vec());
         self.process_envs.lock().unwrap().push(cmd.process_env());
         self.inputs

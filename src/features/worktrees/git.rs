@@ -583,7 +583,7 @@ mod tests {
             let cmd = list_command(z);
             let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
             assert_eq!(args, if z { LIST_Z } else { LIST });
-            assert_eq!(cmd.env_profile(), EnvProfile::Standard);
+            assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
             assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
         }
     }
@@ -730,7 +730,7 @@ mod tests {
         let raw: Vec<&[u8]> = cmd.args().iter().map(|a| a.as_bytes()).collect();
         assert_eq!(raw, [&b"worktree"[..], b"remove", b"--", b"/r/-f\xff"]);
         assert!(!raw.iter().any(|a| *a == b"--force" || *a == b"-f"));
-        assert_eq!(cmd.env_profile(), EnvProfile::Locale);
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Locale));
         assert_eq!(cmd.process_env(), env_list(&[("LC_ALL", "C")]));
     }
 

@@ -55,7 +55,7 @@ pub fn resumable(ops: &[Operation]) -> Option<Operation> {
 pub fn git_dir_command() -> GitCommand {
     GitCommand::new("rev-parse")
         .arg("--absolute-git-dir")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The path `rev-parse --absolute-git-dir` printed, from its raw bytes so a
@@ -85,6 +85,8 @@ pub fn in_progress(git_dir: &Path) -> Vec<Operation> {
 mod tests {
     use super::*;
     use crate::git::fake::TempDir;
+    use crate::git::runner::EnvProfile;
+    use crate::test_support::{STANDARD_ENV, env_list};
 
     #[test]
     fn resumable_is_the_first_of_rebase_merge_and_cherry_pick_never_bisect() {
@@ -114,12 +116,9 @@ mod tests {
         let cmd = git_dir_command();
         let args: Vec<_> = cmd.args().iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["rev-parse", "--absolute-git-dir"]);
-        let envs: Vec<_> = cmd
-            .envs()
-            .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
-            .collect();
-        assert_eq!(envs, [("LC_ALL", "C")]);
+        // A read with no path and no lock: the whole standard profile.
+        assert_eq!(cmd.env_profile(), Some(EnvProfile::Standard));
+        assert_eq!(cmd.process_env(), env_list(&STANDARD_ENV));
     }
 
     #[test]
