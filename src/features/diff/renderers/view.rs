@@ -160,9 +160,9 @@ mod tests {
             kind: crate::features::diff::renderers::RendererKind::Pager,
         }];
         state.renderer = Some(0);
-        let side = match &state.focus {
-            Focus::Diff(view) => view.side,
-            _ => DiffSide::Worktree,
+        let side = match state.hunk_view() {
+            Some(view) => view.side,
+            None => DiffSide::Worktree,
         };
         let mut rendered = RenderedDiff::new(1, "a.rs".into(), side);
         rendered.apply(
@@ -171,9 +171,9 @@ mod tests {
                 text.as_bytes(),
             )),
         );
-        if let Focus::Diff(HunkView {
+        if let Some(HunkView {
             patch: Some(patch), ..
-        }) = &state.focus
+        }) = state.hunk_view()
         {
             rendered.map = map_rows(patch, &rendered.rows);
         }
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn the_line_cursor_marks_only_the_rendered_row_of_its_line() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.enter_lines();
             view.next_line(false);
         }
@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn a_side_by_side_rendering_falls_back_to_the_built_in_view() {
         let mut state = hunks(DiffSide::Worktree, TWO_HUNKS);
-        if let Focus::Diff(view) = &mut state.focus {
+        if let Some(view) = state.hunk_view_mut() {
             view.enter_lines();
         }
         // Each row ends with the new side, so `-old one` has no row.
@@ -476,7 +476,7 @@ mod tests {
         let mut hunk = hunks(DiffSide::Worktree, TWO_HUNKS);
         through_renderer(&mut hunk, DECORATED);
         let mut lines = hunk.clone();
-        if let Focus::Diff(view) = &mut lines.focus {
+        if let Some(view) = lines.hunk_view_mut() {
             view.enter_lines();
         }
         through_renderer(&mut lines, DECORATED);

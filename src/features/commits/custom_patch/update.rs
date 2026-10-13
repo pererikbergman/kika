@@ -44,7 +44,7 @@ impl AppState {
         let Some(file) = open.selected_file() else {
             return vec![];
         };
-        self.focus = Focus::Diff(HunkView::for_commit(file.path.clone(), open.range.clone()));
+        self.focus_hunk_view(HunkView::for_commit(file.path.clone(), open.range.clone()));
         let effects = self.load_patch();
         self.remap();
         effects
@@ -77,7 +77,7 @@ impl AppState {
     /// Pick `lines` of the focused commit file, or drop them when all are
     /// picked. Nothing reaches git.
     pub(crate) fn patch_toggle_lines(&mut self, lines: BTreeSet<LineId>) {
-        let Focus::Diff(view) = &self.focus else {
+        let Some(view) = self.hunk_view() else {
             return;
         };
         let Some(range) = view.commit.clone() else {
@@ -226,7 +226,7 @@ impl AppState {
     /// files, whose commit was rewritten.
     pub(crate) fn patch_rewritten(&mut self) -> Vec<Effect> {
         self.custom_patch = None;
-        if matches!(&self.focus, Focus::Diff(view) if view.commit.is_some()) {
+        if self.hunk_view().is_some_and(|view| view.commit.is_some()) {
             self.focus = Focus::Commits;
             self.expanded = SidePanel::Commits;
         }

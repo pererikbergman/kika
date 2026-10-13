@@ -11,7 +11,8 @@
 //! - `keys::` predicates and constants (`patch_file_disabled`,
 //!   `patch_rewrite_disabled`, `patch_plan`, `PATCH_EMPTY`,
 //!   `TARGET_IS_SOURCE`, ...) and the three chunks;
-//! - `view::picked_rows`, for the Diff pane's mark;
+//! - `view::picked_rows`, which core `view.rs` passes to the Diff pane
+//!   as its mark overlay;
 //! - `git::{Rewrite, run, ...}`, which the hand-off runs;
 //! - the handlers in `update.rs` that `update()` calls.
 //!

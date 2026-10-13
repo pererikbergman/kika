@@ -3,6 +3,7 @@
 //! from the Diff pane (hunks, lines, the side and the loaded patch), and
 //! handing a file or a hunk to the editor and taking back what it left.
 
+use crate::diff_pane::focused_hunks_mut;
 use crate::effect::{Effect, Tag};
 use crate::git::diff::{DiffChunk, DiffSide};
 use crate::git::patch::{self, Direction, FileKind, FilePatch, PatchSelection};
@@ -30,7 +31,7 @@ impl AppState {
     /// Select the next hunk, keeping it on screen.
     pub(crate) fn next_hunk(&mut self) {
         let rows = self.pane_rows();
-        if let Focus::Diff(view) = &mut self.focus {
+        if let Some(view) = self.hunk_view_mut() {
             view.next(rows);
         }
         self.follow_cursor();
@@ -39,7 +40,7 @@ impl AppState {
     /// Select the previous hunk, keeping it on screen.
     pub(crate) fn prev_hunk(&mut self) {
         let rows = self.pane_rows();
-        if let Focus::Diff(view) = &mut self.focus {
+        if let Some(view) = self.hunk_view_mut() {
             view.prev(rows);
         }
         self.follow_cursor();
@@ -47,7 +48,7 @@ impl AppState {
 
     /// Pick lines inside the selected hunk; a tool's rows have none.
     pub(crate) fn enter_line_mode(&mut self) {
-        if self.display_only() && matches!(self.focus, Focus::Diff(_)) {
+        if self.display_only() && matches!(self.focus, Focus::Diff) {
             self.notice = Some(keymap::DISPLAY_ONLY.into());
         } else {
             self.with_lines(HunkView::enter_lines);
@@ -58,7 +59,7 @@ impl AppState {
         // Every user effect reports back once, stale or not.
         self.user_done(tag);
         let rows = self.pane_rows();
-        let Focus::Diff(view) = &mut self.focus else {
+        let Some(view) = focused_hunks_mut(&self.focus, &mut self.diff.hunks) else {
             return;
         };
         if tag.generation != self.generation || view.seq != Some(tag.seq) {
@@ -81,7 +82,7 @@ impl AppState {
     /// Change the focused view's line cursor, keeping it on screen.
     pub(crate) fn with_lines(&mut self, change: impl FnOnce(&mut HunkView)) {
         let rows = self.pane_rows();
-        if let Focus::Diff(view) = &mut self.focus {
+        if let Some(view) = self.hunk_view_mut() {
             change(view);
             view.scroll_to_cursor(rows);
         }
@@ -92,7 +93,7 @@ impl AppState {
     /// view. When that is the file's whole change, the file is staged
     /// instead: the same change, without a patch that could fail to apply.
     pub(crate) fn toggle_selection_stage(&mut self, selection: PatchSelection) -> Vec<Effect> {
-        let Focus::Diff(view) = &self.focus else {
+        let Some(view) = self.hunk_view() else {
             return vec![];
         };
         if self.display_only() {
@@ -137,7 +138,7 @@ impl AppState {
 
     /// Flip the focused view between unstaged and staged changes.
     pub(crate) fn toggle_diff_side(&mut self) -> Vec<Effect> {
-        let Focus::Diff(view) = &mut self.focus else {
+        let Some(view) = self.hunk_view_mut() else {
             return vec![];
         };
         if view.commit.is_some() {
@@ -173,9 +174,9 @@ impl AppState {
             self.notice = Some("The file is deleted".into());
             return vec![];
         }
-        let (path, line) = match &self.focus {
-            Focus::Files => (entry.path.clone(), None),
-            Focus::Diff(view) => (view.path.clone(), view.editor_line()),
+        let (path, line) = match (&self.focus, self.hunk_view()) {
+            (Focus::Files, _) => (entry.path.clone(), None),
+            (Focus::Diff, Some(view)) => (view.path.clone(), view.editor_line()),
             // Bound only in Files and the diff; nothing to open elsewhere.
             _ => return vec![],
         };
@@ -189,7 +190,7 @@ impl AppState {
         if self.context != Context::Workspace || self.op_is_running() {
             return vec![];
         }
-        let Focus::Diff(view) = &self.focus else {
+        let Some(view) = self.hunk_view() else {
             return vec![];
         };
         if view.commit.is_some() {
