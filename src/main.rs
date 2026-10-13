@@ -15,7 +15,6 @@ mod effect;
 mod features;
 mod forge;
 mod git;
-mod gitignore;
 mod handoff;
 mod hunk_view;
 mod intent;

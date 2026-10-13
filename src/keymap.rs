@@ -1188,18 +1188,6 @@ pub(crate) fn no_commit_selected(state: &AppState) -> Option<Reason> {
     row.is_none().then_some("No commit selected".into())
 }
 
-/// Why `i` cannot add the selected file to `.gitignore`. A tracked file
-/// stays tracked whatever `.gitignore` says, and Kika never untracks one.
-pub(crate) fn ignore_disabled(state: &AppState) -> Option<Reason> {
-    if state.files.is_empty() {
-        return Some("No files".into());
-    }
-    match state.selected.and_then(|i| state.files.get(i)) {
-        Some(file) if file.kind == EntryKind::Untracked => None,
-        _ => Some("Only untracked files can be ignored".into()),
-    }
-}
-
 pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
     if state.op_seq.is_some() {
         return Some(OP_RUNNING.into());
@@ -1560,10 +1548,6 @@ fn commits_revert_disabled(state: &AppState) -> Option<Reason> {
 
 fn commits_reset_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| reset_disabled(state))
-}
-
-fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| ignore_disabled(state))
 }
 
 /// Why a rewrite cannot run on a log narrowed to a path or an author.
@@ -1992,22 +1976,6 @@ static FILES_DISCARD_OPEN: &[Binding] = &[
         // Out of the bar, which is full at 80 columns; the help menu lists it.
         bar: false,
         disabled: files_open_disabled,
-    },
-];
-
-// Chunk 31: files
-#[rustfmt::skip]
-static FILES_IGNORE: &[Binding] = &[
-    Binding {
-        id: "files.ignore",
-        keys: &[KeyPattern::exact(KeyCode::Char('i'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenIgnore,
-        description: "Add to .gitignore",
-        label: "ignore",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: files_ignore_disabled,
     },
 ];
 
@@ -2795,7 +2763,7 @@ static CHUNKS: &[&[Binding]] = &[
     blame::keys::BLAME_FILES,
     diff::keys::DIFF_FILES,
     conflicts::keys::CONFLICTS_FILES,
-    FILES_IGNORE,
+    files::keys::FILES_IGNORE,
     diff::keys::DIFF_KEYS,
     renderers::keys::RENDERERS_DIFF,
     diff::keys::DIFF_LINES,
