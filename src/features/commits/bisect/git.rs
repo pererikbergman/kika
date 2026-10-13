@@ -4,11 +4,11 @@ use crate::git::runner::{GitCommand, GitRunner};
 use crate::op::stderr_and_stdout;
 
 /// `git bisect start` with no arguments: it records where `HEAD` is and
-/// moves nothing, so the first mark that follows starts the bisect.
+/// moves nothing, so the first mark that follows starts the bisect. Hooks
+/// a later checkout runs see the user's env, so this does too. git reports
+/// on stdout, which a checked run drops, so this reads both itself.
 pub(crate) fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
-    let output = runner
-        .run(&GitCommand::new("bisect").arg("start"))
-        .map_err(|e| e.to_string())?;
+    let output = runner.run(&start_command()).map_err(|e| e.to_string())?;
     if output.success {
         return Ok(());
     }
@@ -20,12 +20,16 @@ pub(crate) fn run_bisect_start(runner: &dyn GitRunner) -> Result<(), String> {
     })
 }
 
+fn start_command() -> GitCommand {
+    GitCommand::new("bisect").arg("start").user_env()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::CommitId;
     use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::GitOutput;
+    use crate::git::runner::{EnvProfile, GitOutput};
     use crate::op::{GitOp, op_command, run_op};
     use crate::test_support::{argv, cid as oid, rev_parse};
 
@@ -60,6 +64,8 @@ mod tests {
             .expect(&["bisect", "bad", "abc123"], ok(b""));
         run_op(&runner, &mark(BisectMark::Bad, true)).unwrap();
         runner.assert_done();
+        assert_eq!(runner.process_envs()[0], []);
+        assert_eq!(super::start_command().env_profile(), EnvProfile::UserEnv);
 
         let runner = FakeRunner::new().expect(&["bisect", "good", "abc123"], ok(b""));
         run_op(&runner, &mark(BisectMark::Good, false)).unwrap();

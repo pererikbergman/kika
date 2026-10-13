@@ -16,7 +16,6 @@ use crate::effect::Tag;
 use crate::git::GitRunner;
 use crate::git::comment_prefix::read_comment_prefix;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::rebase_plan::{parse_todo, validate_edit};
 use crate::git::repo_state::{git_dir_command, git_dir_from};
 use crate::intent::AppIntent;
@@ -102,11 +101,8 @@ pub(crate) fn write_todo(
 /// list, to be shown read-only with why.
 fn read_rebase_todo(runner: &dyn GitRunner, string_too: bool) -> Result<Option<TodoFile>, String> {
     let output = runner
-        .run(&git_dir_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        return Err(terminal_safe(&output.stderr));
-    }
+        .run_checked(&git_dir_command())
+        .map_err(|e| e.to_string())?;
     let dir = git_dir_from(&output.stdout).join("rebase-merge");
     let path = dir.join("git-rebase-todo");
     if std::fs::symlink_metadata(&path).is_err() {
@@ -272,6 +268,23 @@ mod tests {
         assert_eq!(read_rebase_todo(&runner, true), file(b"//"));
         // An older git ignores `core.commentString`.
         assert_eq!(read_rebase_todo(&runner, false), file(b"#"));
+        runner.assert_done();
+    }
+
+    #[test]
+    fn a_failed_git_dir_read_shows_git_s_words_or_names_the_subcommand() {
+        let argv = ["rev-parse", "--absolute-git-dir"];
+        let runner = FakeRunner::new()
+            .expect(&argv, fail("fatal: not a \x1b[2Jrepo\n"))
+            .expect(&argv, fail(""));
+        assert_eq!(
+            read_rebase_todo(&runner, true),
+            Err("fatal: not a \u{FFFD}[2Jrepo".into())
+        );
+        assert_eq!(
+            read_rebase_todo(&runner, true),
+            Err("git rev-parse failed".into())
+        );
         runner.assert_done();
     }
 

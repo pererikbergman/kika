@@ -9,7 +9,8 @@ use std::collections::BTreeSet;
 
 use super::state::{CustomPatch, FilePick, PatchAction};
 use crate::git::commit_files::CommitId;
-use crate::git::diff::{DiffOptions, commit_patch_command, run_diff, terminal_safe};
+use crate::git::diff::{DiffOptions, commit_patch_command, run_diff};
+use crate::git::error::GitError;
 use crate::git::patch::{self, Direction, PatchSelection};
 use crate::git::rebase_plan::{RebasePlan, TodoAction};
 use crate::git::repo_state::{Operation, git_dir_command, git_dir_from, in_progress};
@@ -67,54 +68,64 @@ pub fn diff_command(patch: &CustomPatch, path: &crate::git::path::RepoPath) -> G
 
 /// `git apply --index` of the patch on stdin; reversed takes it out,
 /// `check` only says whether it would apply. `--whitespace=nowarn` so the
-/// user's `apply.whitespace` can never reject or rewrite it.
+/// user's `apply.whitespace` can never reject or rewrite it. It takes the
+/// index lock and no pathspec, so literal pathspecs change nothing.
 pub fn apply_command(reverse: bool, check: bool) -> GitCommand {
     let cmd = GitCommand::new("apply").arg("--index");
     let cmd = if reverse { cmd.arg("--reverse") } else { cmd };
     let cmd = if check { cmd.arg("--check") } else { cmd };
-    cmd.arg("--whitespace=nowarn").arg("-").env("LC_ALL", "C")
+    cmd.arg("--whitespace=nowarn").arg("-").write_env()
 }
 
 /// Fold the index into the commit the rebase stopped at, keeping its
 /// message. Empty is allowed: the patch may have been all it changed.
-/// Hooks are skipped, as for the rebase's own picks.
+/// Hooks are skipped, as for the rebase's own picks; a signing program
+/// still sees the user's env.
 pub fn amend_command() -> GitCommand {
     GitCommand::new("commit")
+        .user_env()
         .arg("--amend")
         .arg("--no-edit")
         .arg("--no-verify")
         .arg("--allow-empty")
 }
 
-/// Commit the index with `message`, on stdin.
+/// Commit the index with `message`, on stdin, in the user's env.
 pub fn new_commit_command(message: &str) -> GitCommand {
     GitCommand::new("commit")
+        .user_env()
         .arg("--no-verify")
         .arg("-F")
         .arg("-")
         .stdin(message.as_bytes().to_vec())
 }
 
+/// `git rebase --continue` or `--abort`, whose hooks and editor see the
+/// user's env.
 fn rebase_command(word: &str) -> GitCommand {
-    GitCommand::new("rebase").arg(word)
+    GitCommand::new("rebase").arg(word).user_env()
 }
 
 /// Put the branch, the index and the worktree back at `orig`. `--keep`
 /// refuses rather than lose a local change; the id is hex digits only.
+/// It has always run with no env of Kika's, so git's own words show.
 pub fn reset_command(orig: &CommitId) -> GitCommand {
     GitCommand::new("reset")
+        .user_env()
         .arg("-q")
         .arg("--keep")
         .arg(orig.as_str())
         .arg("--")
 }
 
+/// `HEAD`'s id. A plumbing read with no paths, so taking no optional lock
+/// and reading pathspecs literally change nothing.
 fn head_command() -> GitCommand {
     GitCommand::new("rev-parse")
         .arg("-q")
         .arg("--verify")
         .arg("HEAD")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The patch for every pick, one file after another, built to apply on
@@ -176,7 +187,7 @@ pub fn run(
     rebase: GitCommand,
     attached: &dyn Fn(GitCommand) -> Result<(), String>,
 ) -> Result<(), String> {
-    let head = run_checked(runner, &head_command())?;
+    let head = stdout_of(runner, &head_command())?;
     if String::from_utf8_lossy(&head).trim() != rewrite.orig_head.as_str() {
         return Err(HEAD_MOVED.into());
     }
@@ -219,7 +230,8 @@ pub fn run(
 fn worktree_clean(runner: &dyn GitRunner) -> Result<bool, String> {
     // Its exit says some entries needed refreshing, which is no error.
     let _ = runner.run(&refresh_command());
-    let output = runner.run(&dirty_command()).map_err(|e| e.to_string())?;
+    let cmd = dirty_command();
+    let output = runner.run(&cmd).map_err(|e| GitError::io(&e).to_string())?;
     if output.success {
         return Ok(true);
     }
@@ -228,27 +240,29 @@ fn worktree_clean(runner: &dyn GitRunner) -> Result<bool, String> {
     if output.stderr.is_empty() {
         Ok(false)
     } else {
-        Err(terminal_safe(&output.stderr))
+        Err(GitError::failed(&cmd, &output).to_string())
     }
 }
 
 /// `git update-index -q --refresh`: the index's stat data brought up to
-/// date, so the next compare reads content.
+/// date, so the next compare reads content. It takes the index lock and
+/// no paths, so literal pathspecs change nothing.
 pub fn refresh_command() -> GitCommand {
     GitCommand::new("update-index")
         .arg("-q")
         .arg("--refresh")
-        .env("LC_ALL", "C")
+        .write_env()
 }
 
 /// `git diff-index --quiet HEAD --`: exit 1 when a tracked file differs
-/// from `HEAD` in the index or the worktree.
+/// from `HEAD` in the index or the worktree. A plumbing read with no
+/// paths after `--`: it takes no optional lock and reads no pathspec.
 pub fn dirty_command() -> GitCommand {
     GitCommand::new("diff-index")
         .arg("--quiet")
         .arg("HEAD")
         .arg("--")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// Why nothing ran: a tracked file changed since the question was asked.
@@ -286,12 +300,12 @@ fn do_work(
 }
 
 fn apply(runner: &dyn GitRunner, patch: &[u8], reverse: bool, check: bool) -> Result<(), String> {
-    run_checked(runner, &apply_command(reverse, check).stdin(patch.to_vec())).map(|_| ())
+    stdout_of(runner, &apply_command(reverse, check).stdin(patch.to_vec())).map(|_| ())
 }
 
 /// Whether a rebase is stopped in the repository now.
 fn rebasing(runner: &dyn GitRunner) -> Result<bool, String> {
-    let dir = git_dir_from(&run_checked(runner, &git_dir_command())?);
+    let dir = git_dir_from(&stdout_of(runner, &git_dir_command())?);
     Ok(in_progress(&dir).contains(&Operation::Rebase))
 }
 
@@ -300,14 +314,14 @@ fn rebasing(runner: &dyn GitRunner) -> Result<bool, String> {
 fn fail_closed(runner: &dyn GitRunner, orig: &CommitId, error: String) -> String {
     let mut reset = false;
     let undo = match rebasing(runner) {
-        Ok(true) => run_checked(runner, &rebase_command("--abort")).map(|_| ()),
+        Ok(true) => stdout_of(runner, &rebase_command("--abort")).map(|_| ()),
         Ok(false) => {
-            let head = run_checked(runner, &head_command());
+            let head = stdout_of(runner, &head_command());
             match head {
                 Ok(head) if String::from_utf8_lossy(&head).trim() == orig.as_str() => Ok(()),
                 _ => {
                     reset = true;
-                    run_checked(runner, &reset_command(orig)).map(|_| ())
+                    stdout_of(runner, &reset_command(orig)).map(|_| ())
                 }
             }
         }
@@ -329,8 +343,11 @@ fn fail_closed(runner: &dyn GitRunner, orig: &CommitId, error: String) -> String
 }
 
 /// Run `cmd` detached; its stdout, or git's message made safe to draw.
-fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String> {
-    crate::git::runner::run_checked(runner, cmd).map(|output| output.stdout)
+fn stdout_of(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<Vec<u8>, String> {
+    runner
+        .run_checked(cmd)
+        .map(|output| output.stdout)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -433,6 +450,129 @@ mod tests {
             argv(&reset_command(&id('a'))),
             ["reset", "-q", "--keep", id('a').as_str(), "--"]
         );
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        pairs.iter().map(|(k, v)| (k.into(), v.into())).collect()
+    }
+
+    #[test]
+    fn index_writes_reads_and_user_commands_each_get_their_profile() {
+        use crate::git::runner::EnvProfile;
+        let write = env(&[("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")]);
+        let read = env(&[
+            ("LC_ALL", "C"),
+            ("GIT_OPTIONAL_LOCKS", "0"),
+            ("GIT_LITERAL_PATHSPECS", "1"),
+        ]);
+        let cases = [
+            (apply_command(false, false), EnvProfile::Write, &write),
+            (apply_command(true, true), EnvProfile::Write, &write),
+            (refresh_command(), EnvProfile::Write, &write),
+            (head_command(), EnvProfile::Standard, &read),
+            (dirty_command(), EnvProfile::Standard, &read),
+        ];
+        for (cmd, profile, want) in cases {
+            assert_eq!(cmd.env_profile(), profile, "{cmd:?}");
+            assert_eq!(&cmd.process_env(), want, "{cmd:?}");
+        }
+        // Hooks, a signing program and the editor see the user's own env.
+        for cmd in [
+            amend_command(),
+            new_commit_command("m\n"),
+            rebase_command("--continue"),
+            rebase_command("--abort"),
+            reset_command(&id('a')),
+        ] {
+            assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{cmd:?}");
+            assert_eq!(cmd.process_env(), [], "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn a_split_off_runs_each_command_with_its_profile_env() {
+        let tmp = TempDir::new("custom-patch-env");
+        let git_dir = format!("{}\n", tmp.path().display());
+        let plan = plan(TodoAction::Edit, TodoAction::Pick);
+        let head = format!("{}\n", id('c').as_str());
+        let diff_cmd = diff_command(&picks(), &RepoPath::from("a.txt"));
+        let diff = argv(&diff_cmd);
+        let rebase = op_command(&GitOp::InteractiveRebase(plan.clone()));
+        let apply = |reverse: bool| {
+            let mut argv = vec!["apply", "--index"];
+            if reverse {
+                argv.push("--reverse");
+            }
+            argv.extend(["--whitespace=nowarn", "-"]);
+            argv
+        };
+        let amend = [
+            "commit",
+            "--amend",
+            "--no-edit",
+            "--no-verify",
+            "--allow-empty",
+        ];
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "-q", "--verify", "HEAD"],
+                ok(head.as_bytes()),
+            )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(&["diff-index", "--quiet", "HEAD", "--"], ok(b""))
+            .expect(&strs(&diff), ok(DIFF))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
+            .expect(&apply(true), ok(b""))
+            .expect(&apply(false), ok(b""))
+            .expect(&["rev-parse", "--absolute-git-dir"], ok(git_dir.as_bytes()))
+            .expect_attached(&strs(&argv(&rebase)), true)
+            .expect_attached(&amend, true)
+            .expect_attached(&["commit", "--no-verify", "-F", "-"], true)
+            .expect_attached(&["rebase", "--continue"], true);
+        let runner = faking_a_rebase(runner, tmp.path());
+
+        let split = PatchAction::NewCommit("split\n".into());
+        assert_eq!(run_with(&runner, &plan, &split), Ok(()));
+
+        runner.assert_done();
+        let git_dir_env = git_dir_command().process_env();
+        assert_eq!(
+            runner.process_envs(),
+            [
+                head_command().process_env(),
+                refresh_command().process_env(),
+                dirty_command().process_env(),
+                diff_cmd.process_env(),
+                rebase.process_env(),
+                git_dir_env.clone(),
+                apply_command(true, false).process_env(),
+                vec![],
+                apply_command(false, false).process_env(),
+                vec![],
+                vec![],
+                git_dir_env,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_worktree_check_shows_git_s_words_made_safe() {
+        let plan = plan(TodoAction::Edit, TodoAction::Pick);
+        let runner = FakeRunner::new()
+            .expect(
+                &["rev-parse", "-q", "--verify", "HEAD"],
+                ok(format!("{}\n", id('c').as_str()).as_bytes()),
+            )
+            .expect(&["update-index", "-q", "--refresh"], ok(b""))
+            .expect(
+                &["diff-index", "--quiet", "HEAD", "--"],
+                fail("fatal: bad \x1b[2Jobject\n"),
+            );
+        assert_eq!(
+            run_with(&runner, &plan, &PatchAction::Remove),
+            Err("fatal: bad \u{FFFD}[2Jobject".into())
+        );
+        runner.assert_done();
     }
 
     #[test]
