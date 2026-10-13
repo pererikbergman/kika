@@ -1,12 +1,17 @@
-//! The Files panel's navigation and menu key bindings. `CHUNKS` in
-//! `keymap.rs` places every chunk, so their position there is behaviour.
+//! The Files panel's navigation, stage, discard, open, ignore and menu
+//! key bindings, the discard question's keys, and the guards they use.
+//! `CHUNKS` in `keymap.rs` places every chunk, so their position there is
+//! behaviour.
 
 use crate::git::status::EntryKind;
 use crate::intent::AppIntent;
-use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
+use crate::keymap::{
+    Binding, KeyPattern, KeyScope, NONE, OP_RUNNING, Reason, discard_disabled, list_guard, never,
+    open_disabled,
+};
 use crate::menu::MenuId;
-use crate::model::AppState;
-use crossterm::event::KeyCode;
+use crate::model::{AppState, Focus};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 // Chunk 10: files
 pub(crate) static FILES_NAV: &[Binding] = &[
@@ -35,6 +40,55 @@ pub(crate) static FILES_NAV: &[Binding] = &[
         label: "",
         bar: false,
         disabled: never,
+    },
+];
+
+// Chunk 20: files
+pub(crate) static FILES_STAGE: &[Binding] = &[
+    Binding {
+        id: "files.stage",
+        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::ToggleStage,
+        description: "Stage the selected file, or unstage it if fully staged",
+        label: "stage",
+        bar: true,
+        disabled: files_stage_disabled,
+    },
+    Binding {
+        id: "files.stage_all",
+        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::ToggleStageAll,
+        description: "Stage everything, or unstage everything if all is staged",
+        label: "all",
+        bar: true,
+        disabled: stage_all_disabled,
+    },
+];
+
+// Chunk 22: files
+pub(crate) static FILES_DISCARD_OPEN: &[Binding] = &[
+    Binding {
+        id: "files.discard",
+        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::Discard,
+        description: "Discard the selected file's unstaged changes, or delete it if untracked",
+        label: "discard",
+        bar: true,
+        disabled: files_discard_disabled,
+    },
+    Binding {
+        id: "files.open",
+        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
+        scope: KeyScope::Files,
+        intent: AppIntent::OpenInEditor,
+        description: "Open the selected file in your editor",
+        label: "open in editor",
+        // Out of the bar, which is full at 80 columns; the help menu lists it.
+        bar: false,
+        disabled: files_open_disabled,
     },
 ];
 
@@ -83,4 +137,123 @@ pub(super) fn ignore_disabled(state: &AppState) -> Option<Reason> {
 
 fn files_ignore_disabled(state: &AppState) -> Option<Reason> {
     list_guard(state, false).or_else(|| ignore_disabled(state))
+}
+
+// Chunk 44: files
+pub(crate) static FILES_DISCARD_CONFIRM: &[Binding] = &[
+    // Only `y` throws work away. Enter is left unbound on purpose: it
+    // answers yes elsewhere, and a discard cannot be undone.
+    Binding {
+        id: "discard_confirm.yes",
+        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        scope: KeyScope::DiscardConfirm,
+        intent: AppIntent::ConfirmYes,
+        description: "Yes, throw it away",
+        label: "discard",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "discard_confirm.no",
+        keys: &[
+            KeyPattern::exact(KeyCode::Char('n'), NONE),
+            KeyPattern::any(KeyCode::Esc),
+        ],
+        scope: KeyScope::DiscardConfirm,
+        intent: AppIntent::ConfirmNo,
+        description: "No, keep it",
+        label: "keep",
+        bar: true,
+        disabled: never,
+    },
+    Binding {
+        id: "discard_confirm.quit",
+        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
+        scope: KeyScope::DiscardConfirm,
+        intent: AppIntent::Quit,
+        description: "Quit Kika",
+        label: "quit",
+        bar: true,
+        disabled: never,
+    },
+];
+
+fn stage_disabled(state: &AppState) -> Option<Reason> {
+    if state.op_seq.is_some() {
+        return Some(OP_RUNNING.into());
+    }
+    match state.selected.and_then(|i| state.files.get(i)) {
+        None => Some("No file selected".into()),
+        Some(file) if file.kind == EntryKind::Conflicted => {
+            Some("Resolve the conflict before staging this file".into())
+        }
+        Some(_) => None,
+    }
+}
+
+pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
+    if state.op_seq.is_some() {
+        Some(OP_RUNNING.into())
+    } else if state.files.is_empty() {
+        Some("No changes to stage".into())
+    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
+        Some(super::git::CONFLICTS_REFUSAL.into())
+    } else {
+        None
+    }
+}
+
+/// Space stages a range too, so long as one of its files can be staged.
+pub(crate) fn files_stage_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, true).or_else(|| {
+        // As the action: the range counts only where it shows.
+        if state.files_anchor.is_none() || state.focus != Focus::Files {
+            return stage_disabled(state);
+        }
+        let range = state.files_range();
+        if state.op_seq.is_some() {
+            Some(OP_RUNNING.into())
+        } else if range
+            .iter()
+            .all(|&i| state.files[i].kind == EntryKind::Conflicted)
+        {
+            Some("Resolve the conflicts before staging these files".into())
+        } else {
+            None
+        }
+    })
+}
+
+fn files_discard_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, true).or_else(|| discard_disabled(state))
+}
+
+fn files_open_disabled(state: &AppState) -> Option<Reason> {
+    list_guard(state, false).or_else(|| open_disabled(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::files_stage_disabled;
+    use crate::intent::AppIntent;
+    use crate::layout::SidePanel;
+    use crate::test_support::*;
+
+    #[test]
+    fn stage_is_judged_on_the_one_file_outside_the_files_panel() {
+        let (mut state, _) = with_files(vec![conflicted("c.rs"), changed("a.rs", '.', 'M')], 24);
+        press_char(&mut state, 'V');
+        assert_eq!(
+            files_stage_disabled(&state),
+            Some("Resolve the conflicts before staging these files".into())
+        );
+        state.update(AppIntent::FocusPanel(crate::layout::Panel::Side(
+            SidePanel::Branches,
+        )));
+        assert!(state.files_anchor.is_some(), "the range stays for later");
+        assert_eq!(
+            files_stage_disabled(&state),
+            Some("Resolve the conflict before staging this file".into())
+        );
+    }
 }
