@@ -14,7 +14,7 @@ use crate::git::diff::EmojiZwj;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 
-/// Blame `path` and report it as `BlameLoaded`.
+/// Blame `path` and report it as `BlameIntent::Loaded`.
 pub(crate) fn load(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -31,7 +31,7 @@ pub(crate) fn load(
     );
 }
 
-/// Read commit `oid` and report it as `CommitLoaded`.
+/// Read commit `oid` and report it as `BlameIntent::CommitLoaded`.
 pub(crate) fn load_commit(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

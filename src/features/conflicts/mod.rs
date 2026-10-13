@@ -21,7 +21,7 @@
 //!
 //! Kept cross-feature reads, of files through core for now:
 //! - `open_conflict`, `open_merge_tool` and `mergetool_disabled` read
-//!   `selected` and `files`;
+//!   the Files panel's selected row (`files.selected_row()`);
 //! - `resolved_written` calls `refresh_status` and sets `status_selection`;
 //! - writes and staging go through the core op slot (`take_op`,
 //!   `release_op`, `start_op`, `run_op_where_it_belongs`).

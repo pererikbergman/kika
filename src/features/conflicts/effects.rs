@@ -19,7 +19,7 @@ use crate::intent::AppIntent;
 use crate::worktree_file;
 
 /// Read the conflicted file at `path` under `workdir`, which `Runtime`
-/// reads before the spawn, and report it as `ConflictLoaded`.
+/// reads before the spawn, and report it as `ConflictsIntent::Loaded`.
 pub(crate) fn load(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -42,7 +42,7 @@ pub(crate) fn load(
 }
 
 /// Replace the file at `path` under `workdir` with `content`, only while
-/// it still holds `expected`, and report it as `ResolvedWritten`.
+/// it still holds `expected`, and report it as `ConflictsIntent::ResolvedWritten`.
 pub(crate) fn write(
     tx: UnboundedSender<AppIntent>,
     workdir: PathBuf,

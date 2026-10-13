@@ -14,7 +14,7 @@ use crate::git::branches::BranchName;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
 
-/// List the worktrees and report them as `WorktreesLoaded`.
+/// List the worktrees and report them as `WorktreesIntent::Loaded`.
 pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
@@ -25,7 +25,7 @@ pub(crate) fn load(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, t
     );
 }
 
-/// Add a worktree for `branch` at `path` and report it as `WorktreeAdded`.
+/// Add a worktree for `branch` at `path` and report it as `WorktreesIntent::Added`.
 pub(crate) fn add(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -43,7 +43,7 @@ pub(crate) fn add(
 }
 
 /// Remove the worktree at `path`, never forced, and report it as
-/// `WorktreeRemoved`.
+/// `WorktreesIntent::Removed`.
 pub(crate) fn remove(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

@@ -14,7 +14,7 @@ use crate::git::remote::{RemoteFailure, RemoteOp, run_remote};
 use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 
-/// Fetch every remote quietly and send the result back as `FetchFinished`.
+/// Fetch every remote quietly and send the result back as `SyncIntent::FetchFinished`.
 pub(crate) fn fetch(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
@@ -26,7 +26,7 @@ pub(crate) fn fetch(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, 
 }
 
 /// Run `op` with the askpass bridge open on `slot`, and send the result
-/// back as `RemoteFinished`.
+/// back as `SyncIntent::RemoteFinished`.
 pub(crate) fn remote(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

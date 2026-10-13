@@ -32,7 +32,7 @@ Core files:
 |---|---|---|
 | `src/main.rs`, `src/app.rs` | Loop | draw → wait for intent on the `mpsc` channel → update. |
 | `src/cli.rs` | CLI | `clap` commands map to a starting `Context`. |
-| `src/intent.rs` | Intent | `AppIntent`: core variants plus one variant per feature wrapping that feature's intent enum; flat feature variants are left over until #393 (see ADR-0002). Raw terminal or task events map to intents here. |
+| `src/intent.rs` | Intent | `AppIntent`: core variants, a short list of intents shared by features, and one variant per top-level feature wrapping its intent enum (ADR-0002). Raw terminal or task events map to intents here. |
 | `src/model.rs` | Model | `AppState` (composes feature state) + `update(intent)`, one `match` whose arms call feature handlers. Pure: no I/O, no rendering. |
 | `src/effect.rs` | Effects | `Effect`, one flat enum, and the `Runtime::run` dispatch that calls each feature's `effects.rs`. |
 | `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |

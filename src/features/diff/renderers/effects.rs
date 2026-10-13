@@ -18,7 +18,7 @@ use crate::git::diff::DiffRequest;
 use crate::intent::AppIntent;
 
 /// Find the renderers, `pager` and `tool` from the global config first,
-/// and report them as `RenderersFound`.
+/// and report them as `RenderersIntent::Found`.
 pub(crate) fn find(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -35,7 +35,7 @@ pub(crate) fn find(
 }
 
 /// Run `renderer` on `request` in `workdir`, `cols` wide, and report its
-/// rows as `DiffRendered`.
+/// rows as `RenderersIntent::Rendered`.
 pub(crate) fn render(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,

@@ -23,7 +23,7 @@ pub(crate) enum WorktreesIntent {
     Open,
     /// Ask where to add a worktree for the Branches panel's local branch.
     Add,
-    /// The typed path for the worktree `AddWorktree` asked about.
+    /// The typed path for the worktree `Add` asked about.
     AddAt(String),
     /// A worktree add finished: where it was made, or why not.
     Added {
