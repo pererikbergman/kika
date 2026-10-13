@@ -107,7 +107,7 @@ impl AppState {
                 Some(open) => (InputTarget::CommitFilesFilter, &open.filter),
                 None => return,
             },
-            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.filter),
+            KeyScope::Stash => (InputTarget::StashFilter, &self.stash.list.filter),
             KeyScope::Review if review::queue_keys_disabled(self).is_none() => {
                 (InputTarget::ReviewFilter, &self.review.filter)
             }
@@ -169,7 +169,7 @@ impl AppState {
             }
             // A stash row drives nothing, so a moved cursor loads nothing.
             InputTarget::StashFilter => {
-                if self.stash.set_filter(text) {
+                if self.stash.list.set_filter(text) {
                     self.notice = Some(SELECTION_CLEARED.into());
                 }
             }
@@ -290,7 +290,7 @@ impl AppState {
             KeyScope::Branches => self.branches.toggle_range(),
             KeyScope::Remotes => self.branches.remotes.toggle_range(),
             KeyScope::Tags => self.branches.tags.toggle_range(),
-            KeyScope::Stash => self.stash.toggle_range(),
+            KeyScope::Stash => self.stash.list.toggle_range(),
             _ => {}
         }
     }
@@ -339,8 +339,8 @@ impl AppState {
             ),
             KeyScope::Reflog => (false, &mut self.commits.reflog.filter),
             KeyScope::Stash => (
-                self.stash.range_anchor.take().is_some(),
-                &mut self.stash.filter,
+                self.stash.list.range_anchor.take().is_some(),
+                &mut self.stash.list.filter,
             ),
             _ => return self.update(AppIntent::Quit),
         };

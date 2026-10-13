@@ -13,6 +13,7 @@ mod diff_search;
 mod e2e;
 mod effect;
 mod features;
+mod filtered_list;
 mod forge;
 mod git;
 mod handoff;

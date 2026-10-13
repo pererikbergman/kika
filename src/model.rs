@@ -713,12 +713,14 @@ impl AppState {
                 return self.commit_files_loaded(tag, result);
             }
             AppIntent::StashesLoaded { tag, result } => {
-                if tag.generation == self.generation {
-                    self.stash.loaded(tag.seq, result);
-                }
+                self.stash.list.loaded(tag, self.generation, result);
             }
-            AppIntent::StashNext => self.stash.move_by(1),
-            AppIntent::StashPrev => self.stash.move_by(-1),
+            AppIntent::StashNext => {
+                self.stash.list.move_by(1);
+            }
+            AppIntent::StashPrev => {
+                self.stash.list.move_by(-1);
+            }
             AppIntent::OpenStashFiles => return self.open_stash_files(),
             AppIntent::CloseStashFiles => return self.close_stash_files(),
             AppIntent::StashFileNext => return self.move_stash_file(1),
@@ -728,7 +730,7 @@ impl AppState {
             }
             AppIntent::ApplyStash => return self.stash_op(GitOp::StashApply),
             AppIntent::PopStash => return self.stash_op(GitOp::StashPop),
-            AppIntent::DropStash if self.stash.range_anchor.is_some() => {
+            AppIntent::DropStash if self.stash.list.range_anchor.is_some() => {
                 self.ask_delete_range(RangeKind::Stashes)
             }
             AppIntent::DropStash => self.ask_drop_stash(),

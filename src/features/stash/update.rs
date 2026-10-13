@@ -31,7 +31,7 @@ impl AppState {
             return vec![];
         }
         let tag = self.background_tag();
-        self.stash.begin(tag.seq);
+        self.stash.list.begin(tag.seq);
         vec![Effect::LoadStashes { tag }]
     }
 
@@ -48,7 +48,7 @@ impl AppState {
             self.notice = Some(reason);
             return vec![];
         }
-        let Some(entry) = self.stash.selected_entry().cloned() else {
+        let Some(entry) = self.stash.list.selected_row().cloned() else {
             return vec![];
         };
         let seq = self.take_seq();
@@ -133,7 +133,7 @@ impl AppState {
             self.notice = Some(reason);
             return None;
         }
-        self.stash.selected_entry().cloned()
+        self.stash.list.selected_row().cloned()
     }
 
     /// Apply or pop the selected entry, as `make` says.
@@ -163,9 +163,10 @@ impl AppState {
     pub(crate) fn stashes_range_confirm(&self) -> DeleteRangeConfirm {
         let stashes: Vec<StashRef> = self
             .stash
+            .list
             .range()
             .into_iter()
-            .map(|i| self.stash.entries[i].stash_ref())
+            .map(|i| self.stash.list.rows[i].stash_ref())
             .collect();
         DeleteRangeConfirm {
             kind: RangeKind::Stashes,
@@ -372,7 +373,7 @@ mod tests {
             tag: first,
             result: Ok(three_stashes()),
         });
-        assert!(state.stash.entries.is_empty(), "a stale seq is ignored");
+        assert!(state.stash.list.rows.is_empty(), "a stale seq is ignored");
         state.update(AppIntent::StashesLoaded {
             tag: Tag {
                 generation: second.generation + 1,
@@ -380,27 +381,27 @@ mod tests {
             },
             result: Ok(three_stashes()),
         });
-        assert!(state.stash.entries.is_empty(), "another repository's");
+        assert!(state.stash.list.rows.is_empty(), "another repository's");
         state.update(AppIntent::StashesLoaded {
             tag: second,
             result: Ok(three_stashes()),
         });
-        assert_eq!(state.stash.entries, three_stashes());
-        assert!(state.stash.loaded);
+        assert_eq!(state.stash.list.rows, three_stashes());
+        assert!(state.stash.list.loaded);
         assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
     fn the_cursor_moves_through_the_stashes_and_stops_at_the_ends() {
         let mut state = on_stash_one();
-        assert_eq!(state.stash.selected, 1);
+        assert_eq!(state.stash.list.selected, 1);
         press_char(&mut state, 'j');
         press(&mut state, KeyCode::Down);
-        assert_eq!(state.stash.selected, 2);
+        assert_eq!(state.stash.list.selected, 2);
         press_char(&mut state, 'k');
         press(&mut state, KeyCode::Up);
         press(&mut state, KeyCode::Up);
-        assert_eq!(state.stash.selected, 0);
+        assert_eq!(state.stash.list.selected, 0);
     }
 
     #[test]
@@ -454,7 +455,7 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Down), vec![]);
         let request = diff_request(&press(&mut state, KeyCode::Up));
         assert_eq!(request.path, "src/lib.rs".into());
-        assert_eq!(state.stash.selected, 1);
+        assert_eq!(state.stash.list.selected, 1);
     }
 
     #[test]
@@ -494,7 +495,7 @@ mod tests {
 
             assert!(!state.should_quit, "{code:?}");
             assert_eq!(state.stash.open, None, "{code:?}");
-            assert_eq!(state.stash.selected, 1, "{code:?}");
+            assert_eq!(state.stash.list.selected, 1, "{code:?}");
             assert_eq!(state.key_focus(), KeyScope::Stash, "{code:?}");
             let request = diff_request(&effects);
             assert_eq!((request.commit, request.path), (None, "a.rs".into()));
@@ -591,20 +592,20 @@ mod tests {
         for c in "zero".chars() {
             effects.extend(press_char(&mut state, c));
         }
-        assert_eq!(state.stash.visible(), [0], "by subject");
-        assert_eq!(state.stash.selected, 0, "the hidden cursor follows");
+        assert_eq!(state.stash.list.visible(), [0], "by subject");
+        assert_eq!(state.stash.list.selected, 0, "the hidden cursor follows");
         for _ in 0..4 {
             effects.extend(press(&mut state, KeyCode::Backspace));
         }
         for c in "{2}".chars() {
             effects.extend(press_char(&mut state, c));
         }
-        assert_eq!(state.stash.visible(), [2], "by its place");
-        assert_eq!(state.stash.selected, 2);
+        assert_eq!(state.stash.list.visible(), [2], "by its place");
+        assert_eq!(state.stash.list.selected, 2);
         effects.extend(press(&mut state, KeyCode::Enter));
         assert_eq!(effects, vec![], "the filter asks git nothing");
         assert_eq!(state.input, None);
-        assert_eq!(state.stash.filter, "{2}");
+        assert_eq!(state.stash.list.filter, "{2}");
         assert_eq!(state.key_focus(), KeyScope::Stash);
         // `/` again starts from the kept text.
         press_char(&mut state, '/');
@@ -616,10 +617,10 @@ mod tests {
         let mut state = on_stash_one();
         press(&mut state, KeyCode::Char('V'));
         press_char(&mut state, 'j');
-        assert_eq!(state.stash.range(), [1, 2]);
+        assert_eq!(state.stash.list.range(), [1, 2]);
         press_char(&mut state, '/');
         press_char(&mut state, 'o');
-        assert_eq!(state.stash.range_anchor, None);
+        assert_eq!(state.stash.list.range_anchor, None);
         assert_eq!(state.notice.as_deref(), Some(SELECTION_CLEARED));
     }
 
@@ -629,12 +630,12 @@ mod tests {
         press_char(&mut state, '/');
         type_text(&mut state, "main\n");
         press(&mut state, KeyCode::Char('V'));
-        assert!(state.stash.range_anchor.is_some());
+        assert!(state.stash.list.range_anchor.is_some());
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(state.stash.range_anchor, None);
-        assert_eq!(state.stash.filter, "main");
+        assert_eq!(state.stash.list.range_anchor, None);
+        assert_eq!(state.stash.list.filter, "main");
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
-        assert_eq!(state.stash.filter, "");
+        assert_eq!(state.stash.list.filter, "");
         assert!(!state.should_quit);
         press(&mut state, KeyCode::Esc);
         assert!(state.should_quit);
@@ -648,7 +649,7 @@ mod tests {
         press(&mut state, KeyCode::Char('V'));
         press_char(&mut state, 'j');
         press_char(&mut state, 'j');
-        assert_eq!(state.stash.range(), [0, 1, 2]);
+        assert_eq!(state.stash.list.range(), [0, 1, 2]);
         state
     }
 
@@ -681,7 +682,10 @@ mod tests {
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::StashDrops(refs));
         assert_eq!(state.popups, []);
-        assert_eq!(state.stash.range_anchor, None, "the range is done with");
+        assert_eq!(
+            state.stash.list.range_anchor, None,
+            "the range is done with"
+        );
     }
 
     #[test]
@@ -725,8 +729,8 @@ mod tests {
         assert_eq!(state.stash.open, None);
 
         // The anchor hidden by a filter set under the range: nothing to ask.
-        state.stash.filter = "{2}".into();
-        assert!(state.stash.range().is_empty());
+        state.stash.list.filter = "{2}".into();
+        assert!(state.stash.list.range().is_empty());
         state.update(AppIntent::DropStash);
         assert_eq!(state.popups, []);
         assert_eq!(state.notice.as_deref(), Some("No stash in the selection"));
@@ -749,8 +753,8 @@ mod tests {
         }
         effects.extend(press(&mut state, KeyCode::Enter));
         assert_eq!(effects, vec![], "typing a filter returns no effects");
-        assert_eq!(state.stash.filter, hostile);
-        assert_eq!(state.stash.visible(), [0, 1, 2]);
+        assert_eq!(state.stash.list.filter, hostile);
+        assert_eq!(state.stash.list.visible(), [0, 1, 2]);
 
         press_char(&mut state, 'k');
         press(&mut state, KeyCode::Char('V'));

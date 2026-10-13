@@ -7,7 +7,8 @@
 //! the core op slot.
 //!
 //! Its `pub(crate)` API:
-//! - the state types `StashList` and `StashDraft` (`list.rs`);
+//! - the state types `StashList` and `StashDraft` (`list.rs`). The list
+//!   itself is a core `FilteredList<StashEntry>` in `StashList::list`;
 //! - `keys::{STASH_KEYS, STASH_FROM_FILES, STASH_DROP_CONFIRM}` and the
 //!   guards `stash_action_disabled`, `drop_stash_disabled`,
 //!   `stash_files_disabled`, the Stash menu's `stash_*_disabled`, and
