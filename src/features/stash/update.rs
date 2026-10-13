@@ -318,6 +318,22 @@ impl AppState {
             unstage,
         })))
     }
+
+    /// Closing a stash's message or rename prompt forgets what it was
+    /// asked for.
+    pub(crate) fn stash_popup_closed(&mut self, closed: &Popup) {
+        match closed {
+            Popup::Prompt {
+                kind: PromptKind::StashMessage,
+                ..
+            } => self.stash_draft = None,
+            Popup::Prompt {
+                kind: PromptKind::RenameStash,
+                ..
+            } => self.stash.pending = None,
+            _ => {}
+        }
+    }
 }
 
 /// "Drop this stash?", carrying the op chosen when it was asked, so a
@@ -518,7 +534,7 @@ mod tests {
         assert_eq!(state.focus, Focus::Stash);
 
         // New diff options reload the stash's file.
-        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        let request = diff_request(&toggle_whitespace(&mut state));
         assert!(request.options.ignore_whitespace);
         assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
 
@@ -1314,5 +1330,32 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some(STASH_SET_CHANGED.into()));
         assert!(state.files_anchor.is_some(), "the range stays to try again");
+    }
+
+    #[test]
+    fn closing_a_stash_prompt_forgets_only_its_own_draft() {
+        for kind in [PromptKind::StashMessage, PromptKind::RenameStash] {
+            let mut state = AppState::new(Context::Workspace);
+            state.stash_draft = Some(StashDraft {
+                mode: StashMode::All,
+                paths: vec![],
+                restore: vec![],
+                unstage: vec![],
+                from_range: false,
+            });
+            state.stash.pending = Some(StashRef {
+                index: 0,
+                oid: cid("c1"),
+            });
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            let message = kind == PromptKind::StashMessage;
+            assert_eq!(state.stash_draft.is_some(), !message, "{kind:?}");
+            assert_eq!(state.stash.pending.is_some(), message, "{kind:?}");
+        }
     }
 }

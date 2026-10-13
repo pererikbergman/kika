@@ -3,12 +3,44 @@
 //! written back, and the todo list's loads.
 
 use super::todo::{self, RebaseTodo, Rewrite, TODO_CHANGED, TodoFile};
-use super::{log_plan, rewrite_disabled, todo_edit};
+use super::{RewriteIntent, log_plan, rewrite_disabled, todo_edit};
 use crate::effect::{Effect, Tag};
 use crate::git::rebase_plan;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::worktree_file::CHANGED_ON_DISK;
+
+/// The history rewrites' half of `update`, which `commits::update` passes
+/// `CommitsIntent::Rewrite` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: RewriteIntent) -> Vec<Effect> {
+    match intent {
+        RewriteIntent::LeftBehindChecked {
+            tag,
+            op,
+            head,
+            result,
+        } => return state.left_behind_checked(tag, op, head, result),
+        RewriteIntent::ConfirmLeaveCommits => return state.confirm_leave_commits(),
+        RewriteIntent::Edit(
+            edit @ (rebase_plan::Edit::Squash | rebase_plan::Edit::Fixup | rebase_plan::Edit::Drop),
+        ) if state.commits.range_anchor.is_some() => return state.rewrite_range(edit),
+        RewriteIntent::Edit(edit) => return state.rewrite(Rewrite::Edit(edit)),
+        RewriteIntent::ConfirmDropRange(ids) => return state.confirm_drop_range(ids),
+        RewriteIntent::Move(direction) => return state.rewrite(Rewrite::Move(direction)),
+        RewriteIntent::CreateFixup => return state.create_fixup(),
+        RewriteIntent::Autosquash => state.ask_autosquash(),
+        RewriteIntent::ConfirmAutosquash => return state.autosquash(),
+        RewriteIntent::FindFixupBase => return state.find_fixup_base(),
+        RewriteIntent::FixupBaseFound { tag, result } => state.fixup_base_found(tag, result),
+        RewriteIntent::InsertBreak => return state.rewrite(Rewrite::Break),
+        RewriteIntent::TodoLoaded { tag, result } => state.rebase_todo_loaded(tag, result),
+        RewriteIntent::TodoWritten { tag, result } => {
+            return state.rebase_todo_written(tag, result);
+        }
+    }
+    Vec::new()
+}
 
 impl AppState {
     /// Rewrite the selected commit on the terminal: squash and reword open
@@ -125,15 +157,17 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    use crate::features::commits::CommitsIntent;
     use crate::features::commits::keys::TIPS_UNKNOWN;
     use crate::features::commits::rewrite;
     use crate::git::repo_state::Operation;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyPress, KeyScope};
     use crate::model::{CommitFlow, Focus};
-    use crate::popup::{ConfirmKind, Popup};
+    use crate::popup::Popup;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+    use rewrite::fixup::autosquash_question;
 
     fn alt(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
         state.update(AppIntent::Key(KeyPress::new(code, KeyModifiers::ALT)))
@@ -398,10 +432,12 @@ mod tests {
         assert_eq!(alt(&mut state, KeyCode::Char('j')), vec![]);
         assert_eq!(state.notice, Some(rewrite::TODO_SAVING.into()));
         // Until the written list is read back, too.
-        state.update(AppIntent::RebaseTodoWritten {
-            tag,
-            result: Ok(()),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::TodoWritten {
+                tag,
+                result: Ok(()),
+            },
+        )));
         assert_eq!(press_char(&mut state, 'd'), vec![]);
         assert_eq!(state.notice, Some(rewrite::TODO_SAVING.into()));
     }
@@ -485,15 +521,17 @@ mod tests {
             [.., Effect::LoadRebaseTodo { tag, .. }] => *tag,
             other => panic!("expected LoadRebaseTodo, got {other:?}"),
         };
-        state.update(AppIntent::RebaseTodoLoaded {
-            tag: load,
-            result: Ok(Some(TodoFile {
-                path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
-                todo: TODO.to_vec(),
-                done: None,
-                comment: Ok(b"#".to_vec()),
-            })),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::TodoLoaded {
+                tag: load,
+                result: Ok(Some(TodoFile {
+                    path: PathBuf::from("/r/.git/rebase-merge/git-rebase-todo"),
+                    todo: TODO.to_vec(),
+                    done: None,
+                    comment: Ok(b"#".to_vec()),
+                })),
+            },
+        )));
         assert_eq!(
             state.commits.todo.as_ref().map(|t| t.entries.len()),
             Some(4)
@@ -595,7 +633,9 @@ mod tests {
                 other => panic!("{other:?}"),
             };
             assert_eq!(state.busy_count(), busy + 1);
-            let effects = state.update(AppIntent::RebaseTodoWritten { tag, result });
+            let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::TodoWritten { tag, result },
+            )));
             assert!(
                 matches!(effects.as_slice(), [Effect::LoadRebaseTodo { .. }]),
                 "{effects:?}"
@@ -783,7 +823,9 @@ mod tests {
         let mut state = on_linear_log();
         state.context = Context::Review { number: Some(1) };
         assert_eq!(
-            state.update(AppIntent::RewriteCommit(rebase_plan::Edit::Drop)),
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(rebase_plan::Edit::Drop)
+            ))),
             vec![]
         );
         assert_eq!(state.held_seq(), None);
@@ -833,7 +875,12 @@ mod tests {
     fn a_fixup_needs_something_staged() {
         let mut state = with_a_fixup();
         state.files.clear();
-        assert_eq!(state.update(AppIntent::CreateFixup), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::CreateFixup
+            ))),
+            vec![]
+        );
         assert_eq!(state.notice, Some(rewrite::STAGE_THE_FIX.into()));
         assert_eq!(state.held_seq(), None);
     }
@@ -844,11 +891,12 @@ mod tests {
         let mut state = with_a_fixup();
         let ask = |state: &mut AppState| {
             assert_eq!(press_char(state, 'S'), vec![]);
-            assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
-            assert_eq!(ConfirmKind::Autosquash.title(), "Autosquash");
+            let question = autosquash_question();
+            assert_eq!(state.popups, [Popup::Question(question.clone())]);
+            assert_eq!(question.title, "Autosquash");
             assert!(
-                state
-                    .confirm_question(&ConfirmKind::Autosquash)
+                question
+                    .text
                     .starts_with("Fold every fixup! commit into the commit it fixes?")
             );
         };
@@ -857,7 +905,7 @@ mod tests {
         assert_eq!(state.key_focus(), KeyScope::AutosquashConfirm);
         // Enter is too easy to press by habit: it answers nothing.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
+        assert_eq!(state.popups, [Popup::Question(autosquash_question())]);
         assert_eq!(press_char(&mut state, 'q'), vec![]);
         assert_eq!(state.held_seq(), None);
         assert_eq!(press_char(&mut state, 'n'), vec![]);
@@ -897,7 +945,12 @@ mod tests {
     fn autosquash_says_why_not_and_asks_nothing() {
         let mut state = with_a_fixup();
         state.commits.rows[0].subject = "A".into();
-        assert_eq!(state.update(AppIntent::Autosquash), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Autosquash
+            ))),
+            vec![]
+        );
         assert_eq!(state.popups, []);
         assert_eq!(state.notice, Some(rebase_plan::NO_FIXUPS.into()));
     }
@@ -915,10 +968,10 @@ mod tests {
     }
 
     fn base_found(tag: Tag, base: rewrite::FixupBase) -> AppIntent {
-        AppIntent::FixupBaseFound {
+        AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::FixupBaseFound {
             tag,
             result: Ok(base),
-        }
+        }))
     }
 
     #[test]
@@ -929,7 +982,9 @@ mod tests {
         // From the Files panel a range in the log does not stop it.
         state.focus = Focus::Files;
         let before = state.busy_count();
-        let tag = state.update(AppIntent::FindFixupBase);
+        let tag = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::FindFixupBase,
+        )));
         let tag = match tag.as_slice() {
             [Effect::FindFixupBase { tag }] => *tag,
             other => panic!("{other:?}"),
@@ -974,10 +1029,12 @@ mod tests {
         );
 
         let tag = find_base(&mut state);
-        state.update(AppIntent::FixupBaseFound {
-            tag,
-            result: Err("fatal: no".into()),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::FixupBaseFound {
+                tag,
+                result: Err("fatal: no".into()),
+            },
+        )));
         assert!(matches!(
             state.popups.as_slice(),
             [Popup::Error(error)] if error.title == "Could not find the fixup base"

@@ -2,7 +2,7 @@
 //! and Enter on another one asks for both ends as commits, then opens
 //! what changed between them in the commit-files view.
 
-use super::PendingDiff;
+use super::{CompareIntent, PendingDiff};
 use crate::diff_mark::{DiffEnd, DiffMark};
 use crate::effect::{Effect, Tag};
 use crate::features::commits::CommitFilesList;
@@ -11,6 +11,18 @@ use crate::git::commit_files::{CommitId, CommitRange};
 use crate::keymap::KeyScope;
 use crate::layout::{Panel, SidePanel};
 use crate::model::AppState;
+
+/// Comparing commits' half of `update`, which `commits::update` passes
+/// `CommitsIntent::Compare` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CompareIntent) -> Vec<Effect> {
+    match intent {
+        CompareIntent::ToggleMark => state.toggle_diff_mark(),
+        CompareIntent::Open => return state.open_branch_diff(),
+        CompareIntent::Resolved { tag, result } => return state.diff_resolved(tag, result),
+    }
+    Vec::new()
+}
 
 /// What Esc or a second `M` says once the mark is gone.
 pub(crate) const MARK_CLEARED: &str = "Diff mark cleared";
@@ -120,6 +132,7 @@ mod tests {
     use crossterm::event::KeyCode;
 
     use super::*;
+    use crate::features::commits::CommitsIntent;
     use crate::git::branches::{Branch, BranchName, Track};
     use crate::intent::AppIntent;
     use crate::model::Focus;
@@ -158,10 +171,12 @@ mod tests {
             oid: id(3),
             parent: Some(id(2)),
         };
-        let effects = state.update(AppIntent::DiffResolved {
-            tag,
-            result: Ok(range.clone()),
-        });
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Compare(
+            CompareIntent::Resolved {
+                tag,
+                result: Ok(range.clone()),
+            },
+        )));
 
         let open = state.commits.open.as_ref().expect("the comparison opens");
         assert_eq!(open.range.parent, Some(id(2)));
@@ -175,10 +190,12 @@ mod tests {
         );
         // Answered once: a repeat is stale.
         assert_eq!(
-            state.update(AppIntent::DiffResolved {
-                tag,
-                result: Ok(range),
-            }),
+            state.update(AppIntent::Commits(CommitsIntent::Compare(
+                CompareIntent::Resolved {
+                    tag,
+                    result: Ok(range),
+                }
+            ))),
             vec![]
         );
     }
@@ -239,13 +256,15 @@ mod tests {
 
         assert_eq!(base, DiffEnd::Branch(BranchName::from_bytes(b"main")));
         assert_eq!(target, DiffEnd::Branch(BranchName::from_bytes(b"topic")));
-        state.update(AppIntent::DiffResolved {
-            tag,
-            result: Ok(CommitRange {
-                oid: id(1),
-                parent: Some(id(0)),
-            }),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Compare(
+            CompareIntent::Resolved {
+                tag,
+                result: Ok(CommitRange {
+                    oid: id(1),
+                    parent: Some(id(0)),
+                }),
+            },
+        )));
         let open = state.commits.open.as_ref().unwrap();
         assert_eq!(
             (open.short_oid.as_str(), open.against.as_deref()),
@@ -268,10 +287,12 @@ mod tests {
         type_text(&mut state, "Mj");
 
         let (tag, ..) = resolve(&press(&mut state, KeyCode::Enter));
-        state.update(AppIntent::DiffResolved {
-            tag,
-            result: Ok(range),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Compare(
+            CompareIntent::Resolved {
+                tag,
+                result: Ok(range),
+            },
+        )));
 
         let open = state.commits.open.as_ref().unwrap();
         assert_eq!(open.against.as_deref(), Some("main"));
@@ -303,10 +324,12 @@ mod tests {
         let (tag, ..) = resolve(&press(&mut state, KeyCode::Enter));
         assert_eq!(state.busy_count(), busy + 1);
 
-        state.update(AppIntent::DiffResolved {
-            tag,
-            result: Err("No branch named topic".into()),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Compare(
+            CompareIntent::Resolved {
+                tag,
+                result: Err("No branch named topic".into()),
+            },
+        )));
 
         assert_eq!(state.commits.open, None);
         assert_eq!(

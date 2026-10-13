@@ -619,6 +619,13 @@ impl AppState {
         }
     }
 
+    /// Closing the "Check details" list forgets its pages.
+    pub(crate) fn review_popup_closed(&mut self, closed: &Popup) {
+        if matches!(closed, Popup::PickList(list) if list.purpose == PickPurpose::CheckDetails) {
+            self.review.check_urls.clear();
+        }
+    }
+
     fn open_check_url(&mut self, url: String) -> Vec<Effect> {
         let Some(mut argv) = self.browser.clone() else {
             self.notice = Some(NO_BROWSER.into());
@@ -1054,6 +1061,16 @@ pub(crate) mod tests {
             }]
         );
         assert!(state.popups.is_empty());
+    }
+
+    #[test]
+    fn esc_on_the_check_list_forgets_its_pages() {
+        let mut state = in_detail(vec![failing("build"), failing("lint")]);
+        type_char(&mut state, 'o');
+        assert_eq!(state.review.check_urls.len(), 2);
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert!(state.popups.is_empty());
+        assert!(state.review.check_urls.is_empty());
     }
 
     #[test]

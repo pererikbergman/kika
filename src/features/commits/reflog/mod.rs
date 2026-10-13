@@ -7,6 +7,8 @@
 //! op runs through the core op slot.
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `ReflogIntent`, nested in `CommitsIntent::Reflog`,
+//!   and the free function `update` that `commits::update` passes it to;
 //! - the state types `ReflogList` and `ReflogHead` (`list.rs`), `Reflog`
 //!   (`git.rs`) and the planner's `Direction`, `Step` and `Expected`
 //!   (`undo.rs`);
@@ -39,6 +41,7 @@
 
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 pub(crate) mod list;
 pub(crate) mod undo;
@@ -46,8 +49,10 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use git::Reflog;
+pub(crate) use intent::ReflogIntent;
 pub(crate) use list::ReflogList;
 pub(crate) use undo::{Direction, Expected, Step};
+pub(crate) use update::update;
 // Core's popup tests build the question as the feature asks it.
 #[cfg(test)]
 pub(crate) use update::travel_question;

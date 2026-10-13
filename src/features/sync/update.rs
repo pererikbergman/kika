@@ -1,14 +1,43 @@
 //! The sync feature's `update` handlers: the auto-fetch result, and
 //! starting, watching and finishing a fetch, pull or push.
 
+use super::SyncIntent;
 use super::keys::{fetch_disabled, pull_push_disabled};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::keymap;
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
-use crate::popup::{ConfirmKind, ErrorPopup, Popup};
+use crate::popup::{ErrorPopup, Popup};
 use crate::refresh;
 use crate::remote_run::RemoteRun;
+
+/// The sync feature's half of `update`: core's one `AppIntent::Sync` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: SyncIntent) -> Vec<Effect> {
+    match intent {
+        SyncIntent::FetchFinished { tag, result } => return state.fetch_finished(tag, result),
+        SyncIntent::Fetch => return state.start_remote(RemoteOp::Fetch),
+        SyncIntent::Pull => return state.start_remote(RemoteOp::Pull),
+        SyncIntent::Push => {
+            return state.start_remote(RemoteOp::Push {
+                force_with_lease: false,
+            });
+        }
+        SyncIntent::ForcePush => {
+            return state.start_remote(RemoteOp::Push {
+                force_with_lease: true,
+            });
+        }
+        SyncIntent::RemoteNotice { tag, text } => state.remote_notice(tag, text),
+        SyncIntent::RemoteFinished { tag, op, result } => {
+            return state.remote_finished(tag, op, result);
+        }
+        SyncIntent::SpinnerTick => state.spinner_tick(),
+    }
+    Vec::new()
+}
 
 /// Auto-fetch's result, and fetch, pull and push run by hand.
 impl AppState {
@@ -97,7 +126,7 @@ impl AppState {
         match result {
             Ok(()) => {}
             Err(RemoteFailure::Rejected(_)) => {
-                self.popups.push(Popup::Confirm(ConfirmKind::ForcePush));
+                self.popups.push(Popup::Question(force_push_question()));
             }
             Err(RemoteFailure::Failed(message)) => {
                 let next = if op == RemoteOp::Pull {
@@ -116,6 +145,23 @@ impl AppState {
     }
 }
 
+/// "Push with a lease?", asked when a plain push was rejected because the
+/// remote moved on. `y` or Enter answers: `--force-with-lease` refuses if
+/// someone pushed since the last fetch.
+pub(crate) fn force_push_question() -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::Confirm,
+        title: "Push rejected".into(),
+        text: "The remote has commits this branch does not. Push with \
+               --force-with-lease, replacing them only if nobody pushed since \
+               your last fetch? (y/n)"
+            .into(),
+        answer: Answer::YOrEnter,
+        then: Then::Intent(Box::new(AppIntent::Sync(SyncIntent::ForcePush))),
+        range: false,
+        head: None,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,10 +219,10 @@ mod tests {
         let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
 
-        let effects = state.update(AppIntent::FetchFinished {
+        let effects = state.update(AppIntent::Sync(SyncIntent::FetchFinished {
             tag,
             result: Ok(()),
-        });
+        }));
 
         background_status_tag(&effects);
         assert!(!state.watch.fetch_pending);
@@ -187,19 +233,19 @@ mod tests {
     fn a_failed_or_stale_fetch_is_dropped_but_frees_the_slot() {
         let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
-        let effects = state.update(AppIntent::FetchFinished {
+        let effects = state.update(AppIntent::Sync(SyncIntent::FetchFinished {
             tag,
             result: Err("fatal: unable to access remote".into()),
-        });
+        }));
         assert!(effects.is_empty());
         assert!(state.popups.is_empty());
 
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         state.generation += 1;
-        let effects = state.update(AppIntent::FetchFinished {
+        let effects = state.update(AppIntent::Sync(SyncIntent::FetchFinished {
             tag,
             result: Ok(()),
-        });
+        }));
         assert!(effects.is_empty());
         assert!(!state.watch.fetch_pending);
     }
@@ -209,10 +255,10 @@ mod tests {
         let mut state = idle_with_fetch();
         let tag = fetch_tag(&watch(&mut state, WatchEvent::Fetch));
         state.hold_op(9);
-        let effects = state.update(AppIntent::FetchFinished {
+        let effects = state.update(AppIntent::Sync(SyncIntent::FetchFinished {
             tag,
             result: Ok(()),
-        });
+        }));
         assert!(effects.is_empty());
     }
 
@@ -279,7 +325,7 @@ mod tests {
         // An intent that skips the keymap is refused the same way.
         let mut state = remote_ready();
         state.hold_op(99);
-        assert_eq!(state.update(AppIntent::ForcePush), []);
+        assert_eq!(state.update(AppIntent::Sync(SyncIntent::ForcePush)), []);
         assert_eq!(state.held_seq(), Some(99));
     }
 
@@ -326,9 +372,9 @@ mod tests {
         for op in [RemoteOp::Fetch, RemoteOp::Pull, PUSH] {
             let mut state = remote_ready();
             let (tag, _) = remote_of(&state.update(match op {
-                RemoteOp::Fetch => AppIntent::Fetch,
-                RemoteOp::Pull => AppIntent::Pull,
-                _ => AppIntent::Push,
+                RemoteOp::Fetch => AppIntent::Sync(SyncIntent::Fetch),
+                RemoteOp::Pull => AppIntent::Sync(SyncIntent::Pull),
+                _ => AppIntent::Sync(SyncIntent::Push),
             }));
             let effects = state.update(remote_finished(tag, op, Ok(())));
             assert_eq!(state.remote, None);
@@ -367,11 +413,11 @@ mod tests {
     #[test]
     fn spinner_ticks_turn_the_frame_only_while_a_remote_op_runs() {
         let mut state = remote_ready();
-        state.update(AppIntent::SpinnerTick);
+        state.update(AppIntent::Sync(SyncIntent::SpinnerTick));
         assert_eq!(state.remote, None);
         remote_of(&press_char(&mut state, 'f'));
-        state.update(AppIntent::SpinnerTick);
-        state.update(AppIntent::SpinnerTick);
+        state.update(AppIntent::Sync(SyncIntent::SpinnerTick));
+        state.update(AppIntent::Sync(SyncIntent::SpinnerTick));
         assert_eq!(state.remote.as_ref().unwrap().frame, 2);
     }
 
@@ -386,7 +432,7 @@ mod tests {
             Err(RemoteFailure::Rejected(rejected)),
         ));
         assert_eq!(effects, [], "nothing changed, so nothing reloads");
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::ForcePush)]);
+        assert_eq!(state.popups, [Popup::Question(force_push_question())]);
 
         let (_, op) = remote_of(&press_char(&mut state, 'y'));
         assert_eq!(op, FORCE_PUSH);
@@ -589,10 +635,10 @@ mod tests {
         let (tag, _) = remote_of(&press_char(&mut state, 'f'));
         let text = "Confirm user presence for key ED25519-SK".to_string();
         assert_eq!(
-            state.update(AppIntent::RemoteNotice {
+            state.update(AppIntent::Sync(SyncIntent::RemoteNotice {
                 tag,
                 text: text.clone()
-            }),
+            })),
             []
         );
         assert_eq!(state.remote.as_ref().unwrap().notice, Some(text));

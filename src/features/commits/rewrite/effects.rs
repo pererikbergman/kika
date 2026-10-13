@@ -13,6 +13,8 @@ use super::left_behind::read_left_behind;
 use super::todo::{TodoFile, nothing_done, serialize};
 use crate::background;
 use crate::effect::Tag;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::GitRunner;
 use crate::git::comment_prefix::read_comment_prefix;
 use crate::git::commit_files::CommitId;
@@ -23,7 +25,7 @@ use crate::op::GitOp;
 use crate::sequence_editor::MAX_TODO;
 use crate::worktree_file;
 
-/// Read the todo list and report it as `RebaseTodoLoaded`.
+/// Read the todo list and report it as `RewriteIntent::TodoLoaded`.
 pub(crate) fn load_todo(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -35,24 +37,34 @@ pub(crate) fn load_todo(
         move || read_rebase_todo(runner.as_ref(), string_too),
         // A panic still reports back, or the panel would wait forever.
         background::crashed("Reading the todo list"),
-        move |result| AppIntent::RebaseTodoLoaded { tag, result },
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::TodoLoaded {
+                tag,
+                result,
+            }))
+        },
     );
 }
 
 /// Look for the commits the staged lines come from and report them as
-/// `FixupBaseFound`.
+/// `RewriteIntent::FixupBaseFound`.
 pub(crate) fn find_base(runner: Arc<dyn GitRunner>, tx: UnboundedSender<AppIntent>, tag: Tag) {
     background::run(
         tx,
         move || find_fixup_base(runner.as_ref()),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("Finding the fixup base"),
-        move |result| AppIntent::FixupBaseFound { tag, result },
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::FixupBaseFound {
+                tag,
+                result,
+            }))
+        },
     );
 }
 
 /// List the commits moving the detached `head` to `target` would leave
-/// behind and report them as `LeftBehindChecked`.
+/// behind and report them as `RewriteIntent::LeftBehindChecked`.
 pub(crate) fn check_left_behind(
     runner: Arc<dyn GitRunner>,
     tx: UnboundedSender<AppIntent>,
@@ -67,16 +79,18 @@ pub(crate) fn check_left_behind(
         move || read_left_behind(runner.as_ref(), &from, &target),
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("git rev-list"),
-        move |result| AppIntent::LeftBehindChecked {
-            tag,
-            op,
-            head,
-            result,
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::LeftBehindChecked {
+                tag,
+                op,
+                head,
+                result,
+            }))
         },
     );
 }
 
-/// Write the edited todo list and report it as `RebaseTodoWritten`.
+/// Write the edited todo list and report it as `RewriteIntent::TodoWritten`.
 pub(crate) fn write_todo(
     tx: UnboundedSender<AppIntent>,
     tag: Tag,
@@ -90,7 +104,12 @@ pub(crate) fn write_todo(
         move || write_rebase_todo(&path, &expected, &content, &comment),
         // A panic still reports back, or the todo would stay locked.
         background::crashed("Writing the todo list"),
-        move |result| AppIntent::RebaseTodoWritten { tag, result },
+        move |result| {
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::TodoWritten {
+                tag,
+                result,
+            }))
+        },
     );
 }
 
@@ -367,15 +386,17 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head,
-                result: Ok(vec![
-                    CommitId::parse("aa11").unwrap(),
-                    CommitId::parse("cc33").unwrap()
-                ]),
-            })
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::LeftBehindChecked {
+                    tag,
+                    op,
+                    head,
+                    result: Ok(vec![
+                        CommitId::parse("aa11").unwrap(),
+                        CommitId::parse("cc33").unwrap()
+                    ]),
+                }
+            )))
         );
         runner.assert_done();
     }
@@ -398,11 +419,13 @@ mod tests {
             target: id,
         });
         match rx.recv().await {
-            Some(AppIntent::LeftBehindChecked {
-                tag: got,
-                result: Err(message),
-                ..
-            }) => {
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::LeftBehindChecked {
+                    tag: got,
+                    result: Err(message),
+                    ..
+                },
+            ))) => {
                 assert_eq!(got, tag);
                 assert!(message.contains("git rev-list crashed"), "{message}");
             }

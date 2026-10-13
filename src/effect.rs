@@ -17,6 +17,7 @@ use crate::features::custom_commands::OutputMode;
 use crate::features::diff::renderers::{self, ExternalRenderer};
 use crate::features::diff::{self, DiffStreamer};
 use crate::features::stash::StashEntry;
+use crate::features::sync::SyncIntent;
 use crate::features::{
     blame, commit, conflicts, custom_commands, files, pull_requests, repos, review, stash,
     submodules, sync, worktrees,
@@ -374,13 +375,14 @@ pub enum Effect {
     },
 
     // --- branches ---
-    /// List the local branches; always answered by one `BranchesLoaded`.
+    /// List the local branches; always answered by one
+    /// `BranchesIntent::Loaded`.
     LoadBranches {
         tag: Tag,
     },
     /// Read the newest commits of the full ref `refname`, local or
-    /// remote-tracking; always answered by one `BranchLogLoaded` for the
-    /// same `refname`.
+    /// remote-tracking; always answered by one `BranchesIntent::LogLoaded`
+    /// for the same `refname`.
     LoadBranchLog {
         tag: Tag,
         refname: Vec<u8>,
@@ -388,20 +390,20 @@ pub enum Effect {
 
     // --- branches/remotes ---
     /// List the remotes and their remote-tracking branches; always
-    /// answered by one `RemotesLoaded`.
+    /// answered by one `RemotesIntent::Loaded`.
     LoadRemotes {
         tag: Tag,
     },
 
     // --- branches/tags ---
-    /// List the tags; always answered by one `TagsLoaded`.
+    /// List the tags; always answered by one `TagsIntent::Loaded`.
     LoadTags {
         tag: Tag,
     },
 
     // --- commits ---
     /// Read a page of `HEAD`'s log, from `tip` when set, narrowed to
-    /// `query`; always answered by one `CommitsLoaded`.
+    /// `query`; always answered by one `CommitsIntent::PageLoaded`.
     LoadCommits {
         tag: Tag,
         tip: Option<String>,
@@ -409,37 +411,37 @@ pub enum Effect {
         query: LogQuery,
     },
     /// List the files `range` changed; always answered by one
-    /// `CommitFilesLoaded`.
+    /// `CommitsIntent::FilesLoaded`.
     LoadCommitFiles {
         tag: Tag,
         range: CommitRange,
     },
     /// Read which commits are unpushed or unmerged; always answered by
-    /// one `MarkersLoaded`.
+    /// one `CommitsIntent::MarkersLoaded`.
     LoadMarkers {
         tag: Tag,
     },
     /// Read where every local branch points; always answered by one
-    /// `BranchTipsLoaded`.
+    /// `CommitsIntent::TipsLoaded`.
     LoadBranchTips {
         tag: Tag,
     },
 
     // --- commits/reflog ---
     /// Read `HEAD`'s reflog and where `HEAD` is; always answered by one
-    /// `ReflogLoaded`.
+    /// `ReflogIntent::Loaded`.
     LoadReflog {
         tag: Tag,
     },
 
     // --- commits/rewrite ---
     /// Find the commits the staged lines come from; always answered by
-    /// one `FixupBaseFound`.
+    /// one `RewriteIntent::FixupBaseFound`.
     FindFixupBase {
         tag: Tag,
     },
     /// Read the stopped rebase's todo list and what it has done; always
-    /// answered by one `RebaseTodoLoaded`.
+    /// answered by one `RewriteIntent::TodoLoaded`.
     LoadRebaseTodo {
         tag: Tag,
         /// The installed git reads `core.commentString` (2.45).
@@ -448,7 +450,7 @@ pub enum Effect {
     /// Check `content` as an edit of `expected`, both read with the
     /// `comment` prefix `expected` was loaded with, then write it over the
     /// todo list at `path` only while it still holds `expected`; always
-    /// answered by one `RebaseTodoWritten`.
+    /// answered by one `RewriteIntent::TodoWritten`.
     WriteRebaseTodo {
         tag: Tag,
         path: PathBuf,
@@ -457,7 +459,7 @@ pub enum Effect {
         comment: Vec<u8>,
     },
     /// List the commits only `head` reaches before `op` moves `HEAD` to
-    /// `target`; always answered by one `LeftBehindChecked`.
+    /// `target`; always answered by one `RewriteIntent::LeftBehindChecked`.
     CheckLeftBehind {
         tag: Tag,
         op: GitOp,
@@ -467,7 +469,7 @@ pub enum Effect {
 
     // --- commits/copy ---
     /// Read commit `oid`'s full message to copy it; always answered by
-    /// one `CommitMessageLoaded`.
+    /// one `CopyIntent::MessageLoaded`.
     LoadCommitMessage {
         tag: Tag,
         oid: CommitId,
@@ -475,7 +477,7 @@ pub enum Effect {
 
     // --- commits/compare ---
     /// Read both ends of a comparison as commits; always answered by one
-    /// `DiffResolved`.
+    /// `CompareIntent::Resolved`.
     ResolveDiff {
         tag: Tag,
         base: DiffEnd,
@@ -1227,7 +1229,7 @@ impl Bridge {
         let server = std::env::current_exe().ok().and_then(|program| {
             let server = AskpassServer::start(move |question| match question {
                 Question::Notice(text) => {
-                    let _ = tx.send(AppIntent::RemoteNotice { tag, text });
+                    let _ = tx.send(AppIntent::Sync(SyncIntent::RemoteNotice { tag, text }));
                     None
                 }
                 Question::Ask { prompt, confirm } => {
@@ -1285,8 +1287,16 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::features::blame::BlameIntent;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::compare::CompareIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::reflog::ReflogIntent;
     #[cfg(unix)]
     use crate::features::custom_commands::CommandFailure;
+    use crate::features::custom_commands::CustomCommandsIntent;
+    use crate::features::diff::DiffIntent;
+    use crate::features::repos::ReposIntent;
     use crate::git::remote::RemoteFailure;
     use crate::test_support::{HostilePanic, background, commit_op, forge_tag};
 
@@ -1466,11 +1476,13 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommitMessageLoaded {
-                tag,
-                oid,
-                result: Ok("subj".into()),
-            })
+            Some(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::MessageLoaded {
+                    tag,
+                    oid,
+                    result: Ok("subj".into()),
+                }
+            )))
         );
         fake.assert_done();
         let events = events.lock().unwrap().clone();
@@ -1645,10 +1657,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::BlameLoaded {
+            Some(AppIntent::Blame(BlameIntent::Loaded {
                 tag: got,
                 result: Ok(lines),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0].author, "Ann");
@@ -1673,10 +1685,10 @@ mod tests {
             path: "a.rs".into(),
         });
         match rx.recv().await {
-            Some(AppIntent::BlameLoaded {
+            Some(AppIntent::Blame(BlameIntent::Loaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git blame crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -1689,10 +1701,10 @@ mod tests {
             oid: "abc".into(),
         });
         match rx.recv().await {
-            Some(AppIntent::CommitLoaded {
+            Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                 tag: got,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git show crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -1729,10 +1741,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::CommitLoaded {
+            Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                 tag: got,
                 result: Ok(lines),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(lines.len(), 1);
                 assert_eq!(lines[0].text, "commit abc");
@@ -1902,7 +1914,7 @@ mod tests {
             path: std::env::temp_dir(),
             seq: 1,
         });
-        let empty = |seq| Some(AppIntent::RecentLoaded { seq, list: vec![] });
+        let empty = |seq| Some(AppIntent::Repos(ReposIntent::Loaded { seq, list: vec![] }));
         assert_eq!(rx.recv().await, empty(1));
         runtime.spawn(Effect::LoadRecent { seq: 2 });
         assert_eq!(rx.recv().await, empty(2));
@@ -1925,19 +1937,19 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RecentLoaded {
+            Some(AppIntent::Repos(ReposIntent::Loaded {
                 seq: 1,
                 list: vec![repo.clone()]
-            })
+            }))
         );
         assert!(store.is_file());
         runtime.spawn(Effect::LoadRecent { seq: 2 });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RecentLoaded {
+            Some(AppIntent::Repos(ReposIntent::Loaded {
                 seq: 2,
                 list: vec![repo]
-            })
+            }))
         );
     }
 
@@ -1960,10 +1972,10 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RepoInitialised {
+            Some(AppIntent::Repos(ReposIntent::Initialised {
                 tag,
                 result: Ok("/r/new".into()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2008,7 +2020,10 @@ mod tests {
 
         runtime.spawn(Effect::DiffLoadingDelay { tag });
 
-        assert_eq!(rx.recv().await, Some(AppIntent::DiffSlow { tag }));
+        assert_eq!(
+            rx.recv().await,
+            Some(AppIntent::Diff(DiffIntent::Slow { tag }))
+        );
         assert!(start.elapsed() >= DIFF_LOADING_DELAY);
     }
 
@@ -2087,13 +2102,15 @@ mod tests {
         });
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::DiffResolved {
-                tag: user,
-                result: Ok(CommitRange {
-                    oid: target,
-                    parent: CommitId::parse("aaa111"),
-                }),
-            })
+            Some(AppIntent::Commits(CommitsIntent::Compare(
+                CompareIntent::Resolved {
+                    tag: user,
+                    result: Ok(CommitRange {
+                        oid: target,
+                        parent: CommitId::parse("aaa111"),
+                    }),
+                }
+            )))
         );
 
         // Output that is not hex is never taken for a commit.
@@ -2103,10 +2120,10 @@ mod tests {
             target: DiffEnd::Branch(BranchName::from_bytes(b"topic")),
         });
         match rx.recv().await {
-            Some(AppIntent::DiffResolved {
+            Some(AppIntent::Commits(CommitsIntent::Compare(CompareIntent::Resolved {
                 tag,
                 result: Err(message),
-            }) => {
+            }))) => {
                 assert_eq!(tag, user);
                 assert!(message.contains("not a commit id"), "{message:?}");
             }
@@ -2128,10 +2145,10 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::FetchFinished {
+            Some(AppIntent::Sync(SyncIntent::FetchFinished {
                 tag: background(5),
                 result: Ok(()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2144,10 +2161,10 @@ mod tests {
         runtime.spawn(Effect::Fetch { tag: background(6) });
 
         match rx.recv().await {
-            Some(AppIntent::FetchFinished {
+            Some(AppIntent::Sync(SyncIntent::FetchFinished {
                 tag,
                 result: Err(message),
-            }) => {
+            })) => {
                 assert_eq!(tag, background(6));
                 assert!(message.starts_with("git fetch crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -2183,10 +2200,10 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::DiffLoaded {
+            Some(AppIntent::Diff(DiffIntent::Loaded {
                 tag: got,
                 result: Ok(chunk),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert_eq!(chunk.lines.len(), 2);
                 assert!(chunk.done);
@@ -2211,11 +2228,11 @@ mod tests {
 
         runtime.spawn(run(&["sh", "-c", "printf hi; exit 3"], OutputMode::Popup));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title,
                 output: OutputMode::Popup,
                 result: Err(CommandFailure::Exited(e)),
-            }) => {
+            })) => {
                 assert_eq!(title, "Try");
                 assert!(e.contains('3') && e.contains("hi"), "{e}");
             }
@@ -2226,17 +2243,18 @@ mod tests {
         runtime.spawn(run(&["sh", "-c", "printf hi"], OutputMode::None));
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Try".into(),
                 output: OutputMode::None,
                 result: Ok(String::new()),
-            })
+            }))
         );
         runtime.spawn(run(&["sh", "-c", "pwd"], OutputMode::Popup));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
-                result: Ok(cwd), ..
-            }) => assert_eq!(
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
+                result: Ok(cwd),
+                ..
+            })) => assert_eq!(
                 std::fs::canonicalize(cwd).unwrap(),
                 std::fs::canonicalize(tmp.path()).unwrap()
             ),
@@ -2246,10 +2264,10 @@ mod tests {
         // A program that cannot start still answers, once.
         runtime.spawn(run(&["kika-no-such-program"], OutputMode::None));
         match rx.recv().await {
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 result: Err(CommandFailure::Launch(e)),
                 ..
-            }) => {
+            })) => {
                 assert!(e.starts_with("Could not start"), "{e}")
             }
             other => panic!("expected a start failure, got {other:?}"),
@@ -2275,11 +2293,11 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::CommandFinished {
+            Some(AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Hang".into(),
                 output: OutputMode::Popup,
                 result: Err(CommandFailure::Cancelled),
-            })
+            }))
         );
         assert!(started.elapsed() < Duration::from_secs(10));
         // A second cancel finds nothing to stop and sends nothing.
@@ -2327,9 +2345,9 @@ mod tests {
                 path: "a".into(),
             });
             match rx.recv().await {
-                Some(AppIntent::BlameLoaded {
+                Some(AppIntent::Blame(BlameIntent::Loaded {
                     result: Ok(lines), ..
-                }) => assert_eq!(lines[0].text, text, "{emoji:?}"),
+                })) => assert_eq!(lines[0].text, text, "{emoji:?}"),
                 other => panic!("expected a blame, got {other:?}"),
             }
             runtime.spawn(Effect::LoadCommit {
@@ -2337,9 +2355,9 @@ mod tests {
                 oid: oid.clone(),
             });
             match rx.recv().await {
-                Some(AppIntent::CommitLoaded {
+                Some(AppIntent::Blame(BlameIntent::CommitLoaded {
                     result: Ok(lines), ..
-                }) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
+                })) => assert_eq!(lines.last().unwrap().text, format!("+{text}"), "{emoji:?}"),
                 other => panic!("expected a commit, got {other:?}"),
             }
             runner.assert_done();
@@ -2373,11 +2391,11 @@ mod tests {
 
         assert_eq!(
             rx.recv().await,
-            Some(AppIntent::RemoteFinished {
+            Some(AppIntent::Sync(SyncIntent::RemoteFinished {
                 tag,
                 op,
                 result: Ok(()),
-            })
+            }))
         );
         runner.assert_done();
     }
@@ -2398,11 +2416,11 @@ mod tests {
         });
 
         match rx.recv().await {
-            Some(AppIntent::RemoteFinished {
+            Some(AppIntent::Sync(SyncIntent::RemoteFinished {
                 tag: got,
                 op: RemoteOp::Fetch,
                 result: Err(RemoteFailure::Failed(message)),
-            }) => {
+            })) => {
                 assert_eq!(got, tag);
                 assert!(message.starts_with("git crashed: "), "{message:?}");
                 assert!(!message.contains(char::is_control), "{message:?}");
@@ -2473,7 +2491,7 @@ mod tests {
             );
             runtime.spawn(Effect::AnswerCredential(answer));
             match rx.recv().await {
-                Some(AppIntent::RemoteFinished { result, .. }) => {
+                Some(AppIntent::Sync(SyncIntent::RemoteFinished { result, .. })) => {
                     assert_eq!(result.is_ok(), succeeded, "{result:?}")
                 }
                 other => panic!("expected RemoteFinished, got {other:?}"),
@@ -2507,10 +2525,10 @@ mod tests {
 
         runtime.spawn(Effect::LoadReflog { tag: background(8) });
         match rx.recv().await {
-            Some(AppIntent::ReflogLoaded {
+            Some(AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Loaded {
                 tag,
                 result: Ok(reflog),
-            }) => {
+            }))) => {
                 assert_eq!(tag, background(8));
                 assert_eq!(reflog.entries.len(), 1);
                 assert_eq!(
@@ -2526,10 +2544,10 @@ mod tests {
         let runtime = Runtime::new(Arc::new(HostilePanic), tx);
         runtime.spawn(Effect::LoadReflog { tag: background(9) });
         match rx.recv().await {
-            Some(AppIntent::ReflogLoaded {
+            Some(AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Loaded {
                 tag,
                 result: Err(message),
-            }) => {
+            }))) => {
                 assert_eq!(tag, background(9));
                 assert!(!message.contains(char::is_control), "{message:?}");
             }

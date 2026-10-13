@@ -12,6 +12,8 @@ use super::{
     range_rewrite_disabled, rewrite_disabled,
 };
 use crate::confirm_question::Answer;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::rebase_plan::{Direction, Edit};
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard, never};
@@ -92,7 +94,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.squash",
         keys: &[KeyPattern::exact(KeyCode::Char('s'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Squash),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Squash))),
         description: "Squash the selected commit into the one below, combining their messages",
         label: "squash",
         bar: true,
@@ -103,7 +105,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.fixup",
         keys: &[KeyPattern::any(KeyCode::Char('F'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Fixup),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Fixup))),
         description: "Fold the selected commit into the one below, keeping that one's message",
         label: "fixup",
         bar: true,
@@ -113,7 +115,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.create_fixup",
         keys: &[KeyPattern::exact(KeyCode::Char('f'), KeyModifiers::CONTROL)],
         scope: KeyScope::Commits,
-        intent: AppIntent::CreateFixup,
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup)),
         description: "Commit the staged change as a fixup! of the selected commit",
         label: "create fixup",
         // Out of the bar, which is full at 80 columns; the help menu lists it.
@@ -124,7 +126,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.autosquash",
         keys: &[KeyPattern::any(KeyCode::Char('S'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::Autosquash,
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash)),
         description: "Fold every fixup! commit into the commit it fixes, after asking",
         label: "autosquash",
         bar: false,
@@ -134,7 +136,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.find_base",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), KeyModifiers::CONTROL)],
         scope: KeyScope::Commits,
-        intent: AppIntent::FindFixupBase,
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::FindFixupBase)),
         description: "Select the commit that last touched the staged lines",
         label: "find fixup base",
         bar: false,
@@ -144,7 +146,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.drop",
         keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Drop),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Drop))),
         description: "Drop the selected commit and its change from the history",
         label: "drop",
         bar: true,
@@ -155,7 +157,7 @@ pub(crate) static REWRITE_COMMITS: &[Binding] = &[
         id: "commits.reword",
         keys: &[KeyPattern::exact(KeyCode::Char('e'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Reword),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Reword))),
         description: "Write a new message for the selected commit",
         label: "reword",
         bar: true,
@@ -173,7 +175,7 @@ pub(crate) static REWRITE_TODO_COMMITS: &[Binding] = &[
             KeyPattern::exact(KeyCode::Up, KeyModifiers::ALT),
         ],
         scope: KeyScope::Commits,
-        intent: AppIntent::MoveCommit(Direction::Up),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Up))),
         description: "Move the selected commit or todo row up, above the newer one",
         label: "move up",
         bar: true,
@@ -186,7 +188,7 @@ pub(crate) static REWRITE_TODO_COMMITS: &[Binding] = &[
             KeyPattern::exact(KeyCode::Down, KeyModifiers::ALT),
         ],
         scope: KeyScope::Commits,
-        intent: AppIntent::MoveCommit(Direction::Down),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Down))),
         description: "Move the selected commit or todo row down, below the older one",
         label: "move down",
         bar: true,
@@ -196,7 +198,7 @@ pub(crate) static REWRITE_TODO_COMMITS: &[Binding] = &[
         id: "commits.edit",
         keys: &[KeyPattern::any(KeyCode::Char('E'))],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Stop),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Stop))),
         description: "Stop the rebase at the selected commit, to amend it, then continue from Status",
         label: "edit",
         bar: true,
@@ -206,7 +208,7 @@ pub(crate) static REWRITE_TODO_COMMITS: &[Binding] = &[
         id: "commits.break",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::InsertBreak,
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::InsertBreak)),
         description: "Stop the rebase right after the selected commit, or toggle the stop after a todo row",
         label: "break",
         bar: true,
@@ -217,7 +219,7 @@ pub(crate) static REWRITE_TODO_COMMITS: &[Binding] = &[
         id: "commits.pick",
         keys: &[KeyPattern::exact(KeyCode::Char('u'), NONE)],
         scope: KeyScope::Commits,
-        intent: AppIntent::RewriteCommit(Edit::Pick),
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Pick))),
         description: "Pick the selected todo row as it is, undoing its other action",
         label: "pick",
         bar: true,
@@ -233,7 +235,7 @@ pub(crate) static REWRITE_LEAVE_COMMITS_CONFIRM: &[Binding] = &[
         id: "leave_commits.yes",
         keys: Answer::YOnly.keys(),
         scope: KeyScope::LeaveCommits,
-        intent: AppIntent::ConfirmLeaveCommits,
+        intent: AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits)),
         description: "Yes, move HEAD and leave the commits behind",
         label: "leave",
         bar: true,
@@ -270,7 +272,7 @@ pub(crate) static REWRITE_AUTOSQUASH_CONFIRM: &[Binding] = &[
     // may not be looking at.
     Binding {
         id: "autosquash_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::AutosquashConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, fold every fixup! commit into its target",
@@ -309,7 +311,7 @@ pub(crate) static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
     // changes of several commits at once, so only a deliberate y answers.
     Binding {
         id: "drop_range_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DropRangeConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, drop the selected commits and their changes",
@@ -746,12 +748,18 @@ mod tests {
             other => panic!("{key:?}: {other:?}"),
         };
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(on(key(KeyCode::Char('f'), ctrl)), AppIntent::CreateFixup);
+        assert_eq!(
+            on(key(KeyCode::Char('f'), ctrl)),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup))
+        );
         assert_eq!(
             on(key(KeyCode::Char('S'), KeyModifiers::SHIFT)),
-            AppIntent::Autosquash
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash))
         );
-        assert_eq!(on(key(KeyCode::Char('b'), ctrl)), AppIntent::FindFixupBase);
+        assert_eq!(
+            on(key(KeyCode::Char('b'), ctrl)),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::FindFixupBase))
+        );
         for id in ["commits.create_fixup", "commits.autosquash"] {
             assert!(REPO_LOCKED.contains(&id), "{id}");
             assert!(build(&[(id, &["Z"])], Trust::Repo).is_err(), "{id}");
@@ -807,7 +815,12 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmLeaveCommits));
+        assert_eq!(
+            resolve_in(plain('y')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmLeaveCommits
+            )))
+        );
         assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
             resolve_in(key(KeyCode::Esc, none)),

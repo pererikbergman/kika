@@ -7,6 +7,7 @@ use std::borrow::Cow;
 use std::ffi::OsString;
 
 use crate::clipboard::CopyWhat;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::forge::remote::{allowed, matches};
 use crate::forge::url::{ForgeKind, commit_url, forge_for, gitlab_mrs_url, pull_url, repo_of};
@@ -17,10 +18,11 @@ use crate::git::branches::BranchName;
 use crate::git::commit_files::CommitId;
 use crate::git::remotes::RemoteName;
 use crate::git::safe_text::terminal_safe;
-use crate::keymap::{Reason, no_commit_selected};
+use crate::intent::AppIntent;
+use crate::keymap::{KeyScope, Reason, no_commit_selected};
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
-use crate::popup::{ConfirmKind, ErrorPopup, LineInput, Popup, PromptKind};
+use crate::popup::{ErrorPopup, LineInput, Popup, PromptKind};
 
 const NO_BRANCH: &str = "No branch selected";
 const NO_FORGE: &str = "The remote is on no forge host in the global config";
@@ -177,7 +179,7 @@ const QUESTION_TITLE: usize = 72;
 /// The question before a create: what to press first, so a short screen
 /// cuts the details rather than the answer, then where, what into what,
 /// and the title, cut to [`QUESTION_TITLE`].
-pub(crate) fn question(state: &AppState) -> Option<String> {
+fn question(state: &AppState) -> Option<String> {
     let draft = state.pr_draft.as_ref()?;
     let (_, target) = draft.target.as_ref()?;
     let base = draft.base.as_ref()?;
@@ -194,6 +196,25 @@ pub(crate) fn question(state: &AppState) -> Option<String> {
         safe(&head_ref(draft, target)),
         safe(base),
     ))
+}
+
+/// "Create the pull request?", asked once the draft has its title. It
+/// reaches GitHub, so only `y` answers it: never Enter. Only
+/// `ConfirmCreatePullRequest` creates, from the draft as it is then.
+pub(crate) fn create_question(state: &AppState) -> ConfirmQuestion {
+    let text = question(state).unwrap_or_else(|| {
+        // The fallback when the draft cannot be named.
+        "Create the pull request on GitHub?\nPress y to create, n or Esc to cancel".into()
+    });
+    ConfirmQuestion {
+        scope: KeyScope::CreatePullRequest,
+        title: "Create pull request".into(),
+        text,
+        answer: Answer::YOnly,
+        then: Then::Intent(Box::new(AppIntent::ConfirmCreatePullRequest)),
+        range: false,
+        head: None,
+    }
 }
 
 /// The head as GitHub names it: `owner:branch` from a fork.
@@ -418,16 +439,18 @@ impl AppState {
             return;
         }
         draft.title = title.to_string();
-        self.popups
-            .push(Popup::Confirm(ConfirmKind::CreatePullRequest));
+        let question = create_question(self);
+        self.popups.push(Popup::Question(question));
     }
 
     /// Ask GitHub to create the pull request the question described.
     pub(crate) fn confirm_create_pull_request(&mut self) -> Vec<Effect> {
-        if self.popups.last() != Some(&Popup::Confirm(ConfirmKind::CreatePullRequest)) {
+        if self
+            .take_question(KeyScope::CreatePullRequest, Answer::YOnly)
+            .is_none()
+        {
             return vec![];
         }
-        self.popups.pop();
         let Some(draft) = self.pr_draft.take() else {
             return vec![];
         };
@@ -528,6 +551,20 @@ impl AppState {
                 ));
                 vec![]
             }
+        }
+    }
+
+    /// Closing a step of a pull request stops it. The check details
+    /// list belongs to review mode, not to a draft.
+    pub(crate) fn pull_requests_popup_closed(&mut self, closed: &Popup) {
+        let step = match closed {
+            Popup::PickList(list) => list.purpose != PickPurpose::CheckDetails,
+            Popup::Prompt { kind, .. } => *kind == PromptKind::PullRequestTitle,
+            Popup::Question(q) => q.scope == KeyScope::CreatePullRequest,
+            _ => false,
+        };
+        if step {
+            self.pr_draft = None;
         }
     }
 }
@@ -691,6 +728,14 @@ mod tests {
         }
     }
 
+    /// The create question on top.
+    fn asked(state: &AppState) -> &ConfirmQuestion {
+        match state.popups.last() {
+            Some(Popup::Question(q)) if q.scope == KeyScope::CreatePullRequest => q,
+            other => panic!("expected the create question, got {other:?}"),
+        }
+    }
+
     fn press(state: &mut AppState, code: crossterm::event::KeyCode) -> Vec<Effect> {
         let key = crate::keymap::KeyPress::new(code, crossterm::event::KeyModifiers::NONE);
         state.update(AppIntent::Key(key))
@@ -760,8 +805,14 @@ mod tests {
             subject: "s".into(),
             subject_altered: false,
         }];
+        // The menu's own intent, as a user picks it.
+        let copy_url = menu::items(MenuId::Copy)
+            .iter()
+            .find(|item| item.label == "Forge URL")
+            .map(|item| item.intent.clone())
+            .expect("the Copy menu has a Forge URL item");
         assert_eq!(reason(&state, "Forge URL"), None);
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl));
+        let effects = state.update(copy_url.clone());
         let url = format!("https://github.com/acme/widgets/commit/{OID}");
         assert_eq!(effects, [Effect::Clipboard(url)]);
         assert!(
@@ -775,10 +826,7 @@ mod tests {
 
         state.branches.remotes.list.rows.clear();
         assert_eq!(reason(&state, "Forge URL").as_deref(), Some(NO_FORGE));
-        assert_eq!(
-            state.update(AppIntent::CopyCommitText(CopyWhat::ForgeUrl)),
-            vec![]
-        );
+        assert_eq!(state.update(copy_url), vec![]);
         assert_eq!(state.notice.as_deref(), Some(NO_FORGE));
     }
 
@@ -868,13 +916,22 @@ mod tests {
         );
         assert_eq!(state.popups.len(), 1);
         state.update(AppIntent::SubmitPrompt);
+        assert_eq!(state.popups, [Popup::Question(create_question(&state))]);
         assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::CreatePullRequest)]
-        );
-        assert_eq!(
-            state.confirm_question(&ConfirmKind::CreatePullRequest),
+            asked(&state).text,
             "Press y to create it on GitHub, n or Esc to cancel\nacme/widgets: topic → main\ntopic"
+        );
+    }
+
+    #[test]
+    fn submitting_the_title_keeps_the_draft_for_the_question() {
+        let mut state = one_remote();
+        state.update(AppIntent::CreatePrStart);
+        assert_eq!(state.update(AppIntent::SubmitPrompt), vec![]);
+        assert_eq!(asked(&state).title, "Create pull request");
+        assert_eq!(
+            state.pr_draft.as_ref().map(|d| d.title.as_str()),
+            Some("topic")
         );
     }
 
@@ -906,7 +963,7 @@ mod tests {
         let mut state = one_remote();
         state.update(AppIntent::CreatePrStart);
         answer_title(&mut state, &"t".repeat(200));
-        let question = state.confirm_question(&ConfirmKind::CreatePullRequest);
+        let question = asked(&state).text.clone();
         let lines: Vec<&str> = question.lines().collect();
         assert_eq!(
             lines[0],
@@ -934,10 +991,7 @@ mod tests {
         assert_eq!(state.popups.len(), 1);
         answer_title(&mut state, "  Add login ");
         assert_eq!(state.pr_draft.as_ref().unwrap().title, "Add login");
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::CreatePullRequest)]
-        );
+        assert_eq!(state.popups, [Popup::Question(create_question(&state))]);
     }
 
     #[test]
@@ -992,13 +1046,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         // `ConfirmYes` cannot answer it either.
         assert_eq!(state.update(AppIntent::ConfirmYes), vec![]);
-        assert_eq!(
-            state.popups,
-            [Popup::Confirm(ConfirmKind::CreatePullRequest)]
-        );
+        assert_eq!(state.popups, [Popup::Question(create_question(&state))]);
         assert!(
-            state
-                .confirm_question(&ConfirmKind::CreatePullRequest)
+            asked(&state)
+                .text
                 .ends_with("\nacme-org/widgets: acme:topic → main\nAdd login")
         );
 

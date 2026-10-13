@@ -8,15 +8,24 @@
 //! `Effect::LoadBranches` and `Effect::LoadBranchLog` (`effects.rs`). Its
 //! children `remotes` and `tags` own the other two tabs.
 //!
+//! Its intents are nested (ADR-0002): core wraps [`BranchesIntent`] in
+//! `AppIntent::Branches`, and its one `update` arm calls [`update`] here,
+//! which handles the panel's own variants and passes each child's enum
+//! (`BranchesIntent::Remotes(RemotesIntent)` and
+//! `BranchesIntent::Tags(TagsIntent)`) to that child's `update`. A child
+//! may build its parent's intents; neither builds the other's.
+//!
 //! Its `pub(crate)` API:
 //! - the types [`BranchesPanel`] and [`BranchesTab`];
+//! - the intent enum [`BranchesIntent`] and the free function [`update`];
 //! - `load_branches` and `load_branch_log` on `AppState`, which the
 //!   children and core reloads call;
 //! - the handlers in `update.rs`: `background_branches`, `branches_loaded`,
 //!   `branch_log_loaded`, `switch_branches_tab`, `move_branch`,
 //!   `checkout_branch`, `ask_branch_name`, `create_branch_named`,
 //!   `rename_branch_to`, `ask_delete_branch`, `confirm_delete_branch`,
-//!   `ask_upstream`, `set_upstream_to` and `unset_upstream`; and in
+//!   `ask_upstream`, `set_upstream_to`, `unset_upstream` and
+//!   `branches_popup_closed`; and in
 //!   `lists.rs`: `apply_branches_filter` and the range builders
 //!   `branches_range_confirm`, `tags_range_confirm` and
 //!   `remotes_range_confirm`;
@@ -52,6 +61,7 @@
 
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod lists;
 mod panel;
@@ -60,7 +70,9 @@ pub(crate) mod tags;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use intent::BranchesIntent;
 pub(crate) use panel::{BranchesPanel, BranchesTab};
+pub(crate) use update::update;
 // Core's popup tests build the question as the feature asks it.
 #[cfg(test)]
 pub(crate) use update::delete_branch_question;

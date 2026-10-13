@@ -12,6 +12,7 @@ use super::git::conflict_marker_size;
 use super::state::MAX_CONFLICT_FILE;
 use crate::background;
 use crate::effect::Tag;
+use crate::features::conflicts::ConflictsIntent;
 use crate::git::GitRunner;
 use crate::git::path::RepoPath;
 use crate::intent::AppIntent;
@@ -36,7 +37,7 @@ pub(crate) fn load(
         },
         // A panic still reports back, or the busy counter would stay raised.
         background::crashed("Reading the file"),
-        move |result| AppIntent::ConflictLoaded { tag, path, result },
+        move |result| AppIntent::Conflicts(ConflictsIntent::Loaded { tag, path, result }),
     );
 }
 
@@ -56,6 +57,6 @@ pub(crate) fn write(
         move || worktree_file::replace(&workdir, &target, &expected, &content).map(|()| content),
         // A panic still reports back, or the op slot would block every later op.
         background::crashed("Writing the file"),
-        move |result| AppIntent::ResolvedWritten { tag, path, result },
+        move |result| AppIntent::Conflicts(ConflictsIntent::ResolvedWritten { tag, path, result }),
     );
 }

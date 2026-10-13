@@ -1,6 +1,7 @@
 //! The repos `update` handlers: the recent list, opening a repository
 //! from it, `git init` outside one, and parking the view left behind.
 
+use super::ReposIntent;
 use std::path::PathBuf;
 
 use super::{ParkedRepo, RecentList, RecentRow};
@@ -10,6 +11,23 @@ use crate::hunk_view::HunkView;
 use crate::intent::AppIntent;
 use crate::model::{AppState, Context, Focus};
 use crate::popup::{ErrorPopup, Popup};
+
+/// The repos feature's half of `update`: core's one `AppIntent::Repos` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: ReposIntent) -> Vec<Effect> {
+    match intent {
+        ReposIntent::OpenRecent => return state.open_recent(),
+        ReposIntent::Loaded { seq, list } => state.recent_loaded(seq, list),
+        ReposIntent::Next => state.move_recent_cursor(1),
+        ReposIntent::Prev => state.move_recent_cursor(-1),
+        ReposIntent::Select => return state.recent_select(),
+        ReposIntent::Init => return state.init_repo(),
+        ReposIntent::Initialised { tag, result } => {
+            return state.repo_initialised(tag, result);
+        }
+    }
+    Vec::new()
+}
 
 /// Repos: the recent list, opening, initialising and parking repositories.
 impl AppState {
@@ -208,7 +226,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use crate::effect::{Effect, Tag};
-    use crate::features::repos::RecentList;
+    use crate::features::repos::{RecentList, ReposIntent};
     use crate::git::path::RepoPath;
     use crate::intent::AppIntent;
     use crate::keymap::{KeyPress, KeyScope};
@@ -216,7 +234,7 @@ mod tests {
     use crate::model::{AppState, Context, Focus, ParentRepo};
     use crate::popup::Popup;
     use crate::test_support::{
-        loaded, outside, press, press_char, refresh_tag, three_files, with_files,
+        loaded, outside, press, press_char, refresh_tag, select_next, three_files, with_files,
     };
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::path::{Path, PathBuf};
@@ -226,7 +244,7 @@ mod tests {
     /// Answer the latest recent-list request with `list`.
     fn recent_loaded(state: &mut AppState, list: Vec<PathBuf>) {
         let seq = state.recent_seq;
-        state.update(AppIntent::RecentLoaded { seq, list });
+        state.update(AppIntent::Repos(ReposIntent::Loaded { seq, list }));
     }
 
     fn recent_list(state: &AppState) -> &RecentList {
@@ -309,7 +327,7 @@ mod tests {
         state.update(AppIntent::OpenMenu(MenuId::Actions));
         let recent = menu::items(MenuId::Actions)
             .iter()
-            .position(|item| item.intent == AppIntent::OpenRecent)
+            .position(|item| item.intent == AppIntent::Repos(ReposIntent::OpenRecent))
             .unwrap();
         for _ in 0..recent {
             state.update(AppIntent::MenuNext);
@@ -354,20 +372,22 @@ mod tests {
         else {
             panic!("expected RecordRecent first");
         };
-        let [Effect::LoadRecent { seq: loaded }] = state.update(AppIntent::OpenRecent)[..] else {
+        let [Effect::LoadRecent { seq: loaded }] =
+            state.update(AppIntent::Repos(ReposIntent::OpenRecent))[..]
+        else {
             panic!("expected LoadRecent");
         };
         assert!(recorded < loaded);
 
         let newer: Vec<PathBuf> = vec!["/r/a".into(), "/r/b".into()];
-        state.update(AppIntent::RecentLoaded {
+        state.update(AppIntent::Repos(ReposIntent::Loaded {
             seq: loaded,
             list: newer.clone(),
-        });
-        state.update(AppIntent::RecentLoaded {
+        }));
+        state.update(AppIntent::Repos(ReposIntent::Loaded {
             seq: recorded,
             list: vec!["/r/a".into()],
-        });
+        }));
 
         assert_eq!(state.recent, newer);
         assert!(!state.recent_pending());
@@ -402,10 +422,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.notice, Some("Loading…".into()));
 
-        let effects = state.update(AppIntent::RepoInitialised {
+        let effects = state.update(AppIntent::Repos(ReposIntent::Initialised {
             tag,
             result: Ok("/w".into()),
-        });
+        }));
 
         assert_eq!(
             state.busy_count(),
@@ -450,10 +470,10 @@ mod tests {
         let mut state = outside("/w");
         state.update(AppIntent::Start);
         let tag = init_tag(&press_char(&mut state, 'i'));
-        let effects = state.update(AppIntent::RepoInitialised {
+        let effects = state.update(AppIntent::Repos(ReposIntent::Initialised {
             tag,
             result: Err("fatal: cannot mkdir".into()),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert_eq!(state.busy_count(), 0);
         assert_eq!(state.repo, None);
@@ -467,7 +487,7 @@ mod tests {
     fn i_is_refused_inside_a_repository() {
         let (state, _) = with_files(three_files(), 24);
         let mut state = state.with_location(Some("/r/a".into()), "/r/a".into());
-        state.update(AppIntent::OpenRecent);
+        state.update(AppIntent::Repos(ReposIntent::OpenRecent));
         assert_eq!(press_char(&mut state, 'i'), vec![]);
         assert_eq!(state.notice, Some("Already in a repository".into()));
     }
@@ -476,7 +496,7 @@ mod tests {
     fn in_repo_a() -> AppState {
         let (state, _) = with_files(three_files(), 24);
         let mut state = state.with_location(Some("/r/a".into()), "/r/a".into());
-        state.update(AppIntent::SelectNext);
+        select_next(&mut state);
         state
     }
 
@@ -612,7 +632,7 @@ mod tests {
     #[test]
     fn opening_the_open_repository_only_closes_the_list() {
         let mut state = in_repo_a();
-        state.update(AppIntent::OpenRecent);
+        state.update(AppIntent::Repos(ReposIntent::OpenRecent));
         let before = AppState {
             popups: vec![],
             ..state.clone()
@@ -667,10 +687,10 @@ mod tests {
             generation: tag.generation + 1,
             ..tag
         };
-        let effects = state.update(AppIntent::RepoInitialised {
+        let effects = state.update(AppIntent::Repos(ReposIntent::Initialised {
             tag: stale,
             result: Ok("/w".into()),
-        });
+        }));
         assert_eq!(effects, vec![]);
         assert_eq!(state.busy_count(), 0);
         assert_eq!(state.repo, None);

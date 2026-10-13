@@ -436,6 +436,7 @@ pub(crate) fn failure_title(op: &GitOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::files::FilesIntent;
     use crate::intent::AppIntent;
     use crate::test_support::*;
 
@@ -606,7 +607,7 @@ mod tests {
     #[test]
     fn a_failed_op_shows_its_title_and_next_step_and_frees_the_slot() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
 
         state.update(finished(tag, op.clone(), Err("fatal: boom".into())));
 
@@ -623,7 +624,7 @@ mod tests {
     #[test]
     fn an_older_generations_result_frees_the_slot_and_shows_nothing() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         let busy = state.busy_count();
         state.generation += 1;
 

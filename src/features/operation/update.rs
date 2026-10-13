@@ -2,13 +2,30 @@
 //! rebasing onto it, and continuing, skipping or asking before aborting
 //! the merge, rebase, cherry-pick or revert in progress.
 
+use super::OperationIntent;
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::git::branches::BranchName;
 use crate::git::repo_state::Operation;
-use crate::keymap::{self, Reason};
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, Popup};
+use crate::popup::Popup;
+
+/// The operation's half of `update`: core's one `AppIntent::Operation` arm
+/// lands here. A free function, so its name cannot clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: OperationIntent) -> Vec<Effect> {
+    match intent {
+        OperationIntent::Merge(strategy) => {
+            state.branch_op(|branch| GitOp::Merge { branch, strategy })
+        }
+        OperationIntent::RebaseOnto => state.branch_op(|onto| GitOp::Rebase { onto }),
+        OperationIntent::ConfirmAbort(operation) => {
+            state.start_op(Ok(Some(GitOp::Abort(operation))))
+        }
+    }
+}
 
 /// Merge, rebase onto, and the operation in progress.
 impl AppState {
@@ -52,11 +69,41 @@ impl AppState {
     /// Ask before aborting: resolved conflicts are thrown away. The
     /// question names the operation, and the answer aborts that one.
     pub(crate) fn ask_abort(&mut self) {
-        if let Some(operation) = self.operation_for_action(keymap::resume_disabled) {
-            self.popups
-                .push(Popup::Confirm(ConfirmKind::Abort(operation)));
+        if let Some(question) = self
+            .operation_for_action(keymap::resume_disabled)
+            .and_then(abort_question)
+        {
+            self.popups.push(Popup::Question(question));
         }
     }
+}
+
+/// "Abort the merge?", naming the operation found when asked, so the
+/// answer aborts what the question said. Only `y` answers: resolved
+/// conflicts are lost. A bisect is not aborted here but reset, from the
+/// bisect menu, so it has no question.
+pub(crate) fn abort_question(operation: Operation) -> Option<ConfirmQuestion> {
+    let (title, name) = match operation {
+        Operation::Merge => ("Abort merge", "merge"),
+        Operation::Rebase => ("Abort rebase", "rebase"),
+        Operation::CherryPick => ("Abort cherry-pick", "cherry-pick"),
+        Operation::Revert => ("Abort revert", "revert"),
+        Operation::Bisect => return None,
+    };
+    Some(ConfirmQuestion {
+        scope: KeyScope::AbortConfirm,
+        title: title.into(),
+        text: format!(
+            "Abort the {name} and return to where it started? \
+             Resolved conflicts are lost. (y/n)"
+        ),
+        answer: Answer::YOnly,
+        then: Then::Intent(Box::new(AppIntent::Operation(
+            OperationIntent::ConfirmAbort(operation),
+        ))),
+        range: false,
+        head: None,
+    })
 }
 
 #[cfg(test)]
@@ -74,7 +121,7 @@ mod tests {
     #[test]
     fn m_on_another_branch_opens_the_merge_menu() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         assert_eq!(press_char(&mut state, 'm'), vec![]);
         assert_eq!(
             state.popups,
@@ -89,8 +136,9 @@ mod tests {
     fn fast_forward_and_squash_run_detached_on_the_selected_branch() {
         for strategy in [MergeStrategy::FastForwardOnly, MergeStrategy::Squash] {
             let mut state = in_progress(&[]);
-            state.update(AppIntent::BranchNext);
-            let (_, op) = op_of(&state.update(AppIntent::Merge(strategy)));
+            next_branch(&mut state);
+            let (_, op) =
+                op_of(&state.update(AppIntent::Operation(OperationIntent::Merge(strategy))));
             assert_eq!(
                 op,
                 GitOp::Merge {
@@ -104,8 +152,10 @@ mod tests {
     #[test]
     fn a_merge_commit_and_a_rebase_run_on_the_terminal() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
-        let (tag, op) = attached_of(&state.update(AppIntent::Merge(MergeStrategy::NoFastForward)));
+        next_branch(&mut state);
+        let (tag, op) = attached_of(&state.update(AppIntent::Operation(OperationIntent::Merge(
+            MergeStrategy::NoFastForward,
+        ))));
         assert_eq!(
             op,
             GitOp::Merge {
@@ -116,7 +166,7 @@ mod tests {
         assert_eq!(state.held_seq(), Some(tag.seq));
         state.update(finished(tag, op, Ok(())));
 
-        let (_, op) = attached_of(&state.update(AppIntent::RebaseOnto));
+        let (_, op) = attached_of(&state.update(AppIntent::Operation(OperationIntent::RebaseOnto)));
         assert_eq!(
             op,
             GitOp::Rebase {
@@ -128,7 +178,7 @@ mod tests {
     #[test]
     fn the_merge_menu_runs_the_chosen_item() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
+        next_branch(&mut state);
         press_char(&mut state, 'm');
         press_char(&mut state, 'j');
         let (_, op) = attached_of(&press(&mut state, KeyCode::Enter));
@@ -149,21 +199,29 @@ mod tests {
         assert_eq!(state.notice, Some("Already on this branch".into()));
         assert_eq!(state.popups, []);
         assert_eq!(
-            state.update(AppIntent::Merge(MergeStrategy::Squash)),
+            state.update(AppIntent::Operation(OperationIntent::Merge(
+                MergeStrategy::Squash
+            ))),
             vec![]
         );
-        assert_eq!(state.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Operation(OperationIntent::RebaseOnto)),
+            vec![]
+        );
         assert_eq!(state.notice, Some("Already on this branch".into()));
 
         let mut merging = in_progress(&[Operation::Merge]);
-        merging.update(AppIntent::BranchNext);
+        next_branch(&mut merging);
         assert_eq!(press_char(&mut merging, 'm'), vec![]);
         assert_eq!(
             merging.notice,
             Some("Finish or abort the operation in progress".into())
         );
         assert_eq!(merging.popups, []);
-        assert_eq!(merging.update(AppIntent::RebaseOnto), vec![]);
+        assert_eq!(
+            merging.update(AppIntent::Operation(OperationIntent::RebaseOnto)),
+            vec![]
+        );
         assert_eq!(merging.held_seq(), None);
     }
 
@@ -193,7 +251,7 @@ mod tests {
         assert_eq!(press_char(&mut state, 'a'), vec![]);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))]
+            [Popup::Question(abort_question(Operation::Merge).unwrap())]
         );
         assert_eq!(state.held_seq(), None);
 
@@ -215,7 +273,7 @@ mod tests {
     fn enter_does_not_answer_the_abort_question() {
         let mut state = status_focused(&[Operation::Merge]);
         press_char(&mut state, 'a');
-        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Merge))];
+        let question = [Popup::Question(abort_question(Operation::Merge).unwrap())];
         assert_eq!(state.popups, question);
         assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
 

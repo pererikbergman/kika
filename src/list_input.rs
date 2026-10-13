@@ -8,7 +8,9 @@
 use crate::diff_pane::DiffStart;
 use crate::diff_search::DiffSearch;
 use crate::effect::Effect;
+use crate::features::blame::BlameIntent;
 use crate::features::blame::BlameView;
+use crate::features::commits::CommitsIntent;
 use crate::features::commits::compare::MARK_CLEARED;
 use crate::features::review;
 use crate::git::FileEntry;
@@ -461,9 +463,9 @@ impl AppState {
             return vec![];
         }
         let close = match scope {
-            KeyScope::Blame => AppIntent::CloseBlame,
-            KeyScope::BlameCommit => AppIntent::CloseBlameCommit,
-            KeyScope::CommitFiles => AppIntent::CloseCommitFiles,
+            KeyScope::Blame => AppIntent::Blame(BlameIntent::Close),
+            KeyScope::BlameCommit => AppIntent::Blame(BlameIntent::CloseCommit),
+            KeyScope::CommitFiles => AppIntent::Commits(CommitsIntent::CloseFiles),
             KeyScope::StashFiles => AppIntent::CloseStashFiles,
             _ => return vec![],
         };
@@ -475,6 +477,7 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::effect::Tag;
+    use crate::features::diff::DiffIntent;
     use crate::git::diff::DiffChunk;
     use crate::layout::SidePanel;
     use crate::test_support::*;
@@ -640,10 +643,10 @@ mod tests {
         let lines = (0..60)
             .map(|i| line(if i == 30 || i == 50 { "+foo" } else { " x" }))
             .collect();
-        state.update(AppIntent::DiffLoaded {
+        state.update(AppIntent::Diff(DiffIntent::Loaded {
             tag,
             result: Ok(DiffChunk { lines, done: false }),
-        });
+        }));
     }
 
     fn preview_current(state: &AppState) -> Option<usize> {
@@ -775,10 +778,10 @@ mod tests {
             [Effect::LoadCommit { tag, .. }] => *tag,
             other => panic!("expected one LoadCommit, got {other:?}"),
         };
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok(vec![line("+foo")]),
-        });
+        }));
         type_text(&mut state, "/foo\n");
         assert!(blame(&state).commit.as_ref().unwrap().search.is_some());
         press_char(&mut state, '/');
@@ -890,10 +893,10 @@ mod tests {
                 ..blame_line(OID, i + 1)
             })
             .collect();
-        state.update(AppIntent::BlameLoaded {
+        state.update(AppIntent::Blame(BlameIntent::Loaded {
             tag,
             result: Ok(lines),
-        });
+        }));
         state
     }
 
@@ -923,10 +926,10 @@ mod tests {
         press_char(&mut state, '/');
         assert_eq!(state.input, None, "nothing to search while it loads");
         assert_eq!(state.notice, Some("Loading…".into()));
-        state.update(AppIntent::CommitLoaded {
+        state.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok(vec![line("commit abc"), line("+foo"), line(" ctx")]),
-        });
+        }));
         press_char(&mut state, '/');
         assert_eq!(
             state
@@ -1015,10 +1018,10 @@ mod tests {
             [Effect::LoadCommit { tag, .. }] => *tag,
             other => panic!("expected one LoadCommit, got {other:?}"),
         };
-        commit.update(AppIntent::CommitLoaded {
+        commit.update(AppIntent::Blame(BlameIntent::CommitLoaded {
             tag,
             result: Ok(vec![line("+foo")]),
-        });
+        }));
         check(commit, &slash, InputTarget::BlameCommitSearch);
     }
 

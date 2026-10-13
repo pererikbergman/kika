@@ -3,25 +3,33 @@
 
 use crate::bisect;
 use crate::clipboard::CopyWhat;
+use crate::features::command_log::CommandLogIntent;
+use crate::features::commit::CommitIntent;
 use crate::features::commit::keys::{amend_disabled, commit_disabled};
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::bisect::BisectIntent;
+use crate::features::commits::copy::CopyIntent;
+use crate::features::commits::custom_patch::CustomPatchIntent;
 use crate::features::commits::custom_patch::PatchChoice;
 use crate::features::commits::custom_patch::keys::patch_rewrite_disabled;
 use crate::features::commits::keys::reset_disabled;
+use crate::features::files::FilesIntent;
 use crate::features::files::keys::{files_stage_disabled, stage_all_disabled};
+use crate::features::operation::OperationIntent;
 use crate::features::operation::keys::merge_disabled;
 use crate::features::pull_requests::{
     commit_url_disabled, copy_url_disabled, create_disabled, open_url_disabled,
 };
+use crate::features::repos::ReposIntent;
 use crate::features::stash::keys::{
     stash_all_disabled, stash_file_disabled, stash_staged_disabled, stash_untracked_disabled,
 };
 use crate::git::bisect::BisectMark;
-use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::{Reason, never, no_commit_selected};
 use crate::model::AppState;
 use crate::op::{MergeStrategy, ResetMode};
-use crate::popup::{ConfirmKind, PromptKind};
+use crate::popup::PromptKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuId {
@@ -80,12 +88,12 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Commit…",
-        intent: AppIntent::OpenCommit,
+        intent: AppIntent::Commit(CommitIntent::Open),
         disabled: commit_disabled,
     },
     MenuItem {
         label: "Amend last commit…",
-        intent: AppIntent::OpenAmend,
+        intent: AppIntent::Commit(CommitIntent::OpenAmend),
         disabled: amend_disabled,
     },
     MenuItem {
@@ -110,17 +118,17 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Command log…",
-        intent: AppIntent::OpenCommandLog,
+        intent: AppIntent::CommandLog(CommandLogIntent::Open),
         disabled: never,
     },
     MenuItem {
         label: "Recent repositories…",
-        intent: AppIntent::OpenRecent,
+        intent: AppIntent::Repos(ReposIntent::OpenRecent),
         disabled: never,
     },
     MenuItem {
         label: "Quit…",
-        intent: AppIntent::Ask(ConfirmKind::Quit),
+        intent: AppIntent::AskQuit,
         disabled: never,
     },
 ];
@@ -153,27 +161,35 @@ fn no_patch(state: &AppState) -> Option<Reason> {
 static CUSTOM_PATCH: &[MenuItem] = &[
     MenuItem {
         label: "Remove from commit",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::Remove),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::Remove,
+        ))),
         disabled: remove_disabled,
     },
     MenuItem {
         label: "Move to selected commit",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::MoveToSelected),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::MoveToSelected,
+        ))),
         disabled: move_disabled,
     },
     MenuItem {
         label: "Move to index",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::ToIndex),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::ToIndex,
+        ))),
         disabled: to_index_disabled,
     },
     MenuItem {
         label: "New commit after source…",
-        intent: AppIntent::ChoosePatchAction(PatchChoice::NewCommit),
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Choose(
+            PatchChoice::NewCommit,
+        ))),
         disabled: new_commit_disabled,
     },
     MenuItem {
         label: "Reset patch",
-        intent: AppIntent::ResetPatch,
+        intent: AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Reset)),
         disabled: no_patch,
     },
 ];
@@ -181,12 +197,12 @@ static CUSTOM_PATCH: &[MenuItem] = &[
 static STAGE: &[MenuItem] = &[
     MenuItem {
         label: "Selected file",
-        intent: AppIntent::ToggleStage,
+        intent: AppIntent::Files(FilesIntent::ToggleStage),
         disabled: files_stage_disabled,
     },
     MenuItem {
         label: "Everything",
-        intent: AppIntent::ToggleStageAll,
+        intent: AppIntent::Files(FilesIntent::ToggleStageAll),
         disabled: stage_all_disabled,
     },
 ];
@@ -194,22 +210,22 @@ static STAGE: &[MenuItem] = &[
 static MERGE: &[MenuItem] = &[
     MenuItem {
         label: "Fast-forward only",
-        intent: AppIntent::Merge(MergeStrategy::FastForwardOnly),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::FastForwardOnly)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Merge commit",
-        intent: AppIntent::Merge(MergeStrategy::NoFastForward),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::NoFastForward)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Squash",
-        intent: AppIntent::Merge(MergeStrategy::Squash),
+        intent: AppIntent::Operation(OperationIntent::Merge(MergeStrategy::Squash)),
         disabled: merge_disabled,
     },
     MenuItem {
         label: "Rebase current branch onto it",
-        intent: AppIntent::RebaseOnto,
+        intent: AppIntent::Operation(OperationIntent::RebaseOnto),
         disabled: merge_disabled,
     },
 ];
@@ -217,17 +233,17 @@ static MERGE: &[MenuItem] = &[
 static RESET: &[MenuItem] = &[
     MenuItem {
         label: "Soft: keep index and worktree",
-        intent: AppIntent::ResetTo(ResetMode::Soft),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
         disabled: reset_disabled,
     },
     MenuItem {
         label: "Mixed: keep worktree, reset index",
-        intent: AppIntent::ResetTo(ResetMode::Mixed),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Mixed)),
         disabled: reset_disabled,
     },
     MenuItem {
         label: "Hard: discard all changes…",
-        intent: AppIntent::ResetTo(ResetMode::Hard),
+        intent: AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
         disabled: reset_disabled,
     },
 ];
@@ -258,22 +274,28 @@ static STASH: &[MenuItem] = &[
 static BISECT: &[MenuItem] = &[
     MenuItem {
         label: "Mark selected bad (starts a bisect)",
-        intent: AppIntent::BisectSelected(BisectMark::Bad),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Bad,
+        ))),
         disabled: bisect::selected_bad_disabled,
     },
     MenuItem {
         label: "Mark selected good (starts a bisect)",
-        intent: AppIntent::BisectSelected(BisectMark::Good),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Good,
+        ))),
         disabled: bisect::selected_good_disabled,
     },
     MenuItem {
         label: "Skip selected",
-        intent: AppIntent::BisectSelected(BisectMark::Skip),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(
+            BisectMark::Skip,
+        ))),
         disabled: bisect::selected_skip_disabled,
     },
     MenuItem {
         label: "Reset bisect…",
-        intent: AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::AskReset)),
         disabled: bisect::reset_disabled,
     },
 ];
@@ -281,27 +303,31 @@ static BISECT: &[MenuItem] = &[
 static COPY: &[MenuItem] = &[
     MenuItem {
         label: "Full hash",
-        intent: AppIntent::CopyCommitText(CopyWhat::Hash),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Hash))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Short hash",
-        intent: AppIntent::CopyCommitText(CopyWhat::ShortHash),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+            CopyWhat::ShortHash,
+        ))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Subject",
-        intent: AppIntent::CopyCommitText(CopyWhat::Subject),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Subject))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Full message",
-        intent: AppIntent::CopyCommitText(CopyWhat::Message),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(CopyWhat::Message))),
         disabled: no_commit_selected,
     },
     MenuItem {
         label: "Forge URL",
-        intent: AppIntent::CopyCommitText(CopyWhat::ForgeUrl),
+        intent: AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+            CopyWhat::ForgeUrl,
+        ))),
         disabled: commit_url_disabled,
     },
 ];

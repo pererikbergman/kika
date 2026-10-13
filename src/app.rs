@@ -16,6 +16,8 @@ use tokio::time::MissedTickBehavior;
 
 use crate::config::Loaded;
 use crate::effect::{Effect, Runtime};
+use crate::features::command_log::CommandLogIntent;
+use crate::features::sync::SyncIntent;
 use crate::forge;
 use crate::forge::github::CliGh;
 use crate::forge::task::ForgeContext;
@@ -43,7 +45,7 @@ pub async fn run(
     // Before anything runs git, so every command reaches the log.
     let log_tx = tx.clone();
     sink.connect(move |event| {
-        let _ = log_tx.send(AppIntent::CommandLogged(event));
+        let _ = log_tx.send(CommandLogIntent::Logged(event).into());
     });
     // Only when the user named hosts; otherwise `gh` is never run.
     let forge = (!config.forge_hosts.is_empty()).then(|| ForgeContext {
@@ -401,7 +403,7 @@ impl Spinner {
                     ticks.tick().await;
                     loop {
                         ticks.tick().await;
-                        if tx.send(AppIntent::SpinnerTick).is_err() {
+                        if tx.send(AppIntent::Sync(SyncIntent::SpinnerTick)).is_err() {
                             break;
                         }
                     }
@@ -529,11 +531,13 @@ mod tests {
     }
 
     fn started(id: u64) -> AppIntent {
-        AppIntent::CommandLogged(crate::git::recording::CommandEvent::Started {
-            id,
-            line: format!("git command-{id}"),
-            attached: false,
-        })
+        AppIntent::CommandLog(CommandLogIntent::Logged(
+            crate::git::recording::CommandEvent::Started {
+                id,
+                line: format!("git command-{id}"),
+                attached: false,
+            },
+        ))
     }
 
     fn logged_lines(state: &AppState) -> Vec<String> {
@@ -822,7 +826,7 @@ mod tests {
         tokio::time::sleep(SPINNER_TICK * 3 + SPINNER_TICK / 2).await;
         let mut ticks = 0;
         while let Ok(intent) = rx.try_recv() {
-            assert_eq!(intent, AppIntent::SpinnerTick);
+            assert_eq!(intent, AppIntent::Sync(SyncIntent::SpinnerTick));
             ticks += 1;
         }
         assert_eq!(ticks, 3);

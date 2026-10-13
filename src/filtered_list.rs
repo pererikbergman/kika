@@ -27,12 +27,19 @@
 //! - A caller that needs to know whether a filter moved the cursor
 //!   compares `selected` before and after `set_filter`.
 //!
-//! Lists not on it: the Commits log (it loads in pages, with graph rows
-//! and the rebase todo beside it), the Files panel (its selection drives
-//! the diff), and the review queue with a pull request's files (two
-//! queues share one cursor and filter; the files load in stages). The
-//! command log is out of reach: its rows live outside the list, in the
-//! log it is handed.
+//! Lists not on it yet: the Commits log (it loads in pages, with graph
+//! rows and the rebase todo beside it) and the Files panel (its selection
+//! drives the diff).
+//!
+//! Other lists:
+//! - A list whose rows live outside it (the command log, drawn from the
+//!   log it is handed) is out of reach of this module.
+//! - A list whose one cursor and filter serve several row sets (the
+//!   review queue, showing whichever of its loaded queues is picked) is
+//!   out of reach of this module.
+//! - A list whose one seq follows a staged load (a pull request's files,
+//!   `PrFiles`: check, fetch, then list) rather than one read of its rows
+//!   is out of reach of this module.
 
 use crate::effect::Tag;
 use crate::list_filter;

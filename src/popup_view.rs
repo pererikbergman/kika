@@ -37,12 +37,6 @@ pub fn render_popups(state: &AppState, frame: &mut Frame, area: Rect) {
                 let cursor = top.then_some(*cursor);
                 render_menu(state, *id, cursor, frame, area)
             }
-            Popup::Confirm(kind) => render_question(
-                &format!(" {} ", kind.title()),
-                &state.confirm_question(kind),
-                frame,
-                area,
-            ),
             Popup::Prompt { kind, input } => {
                 render_prompt(&state.prompt_title(*kind), input, top, frame, area)
             }
@@ -448,14 +442,18 @@ mod tests {
     use ratatui::buffer::Buffer;
 
     use super::*;
+    use crate::confirm_question::quit_question;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::pull_requests::create_question;
     use crate::filtered_list::FilteredList;
     use crate::git::FileEntry;
     use crate::git::status::EntryKind;
     use crate::git::submodule::{Submodule, SubmoduleState};
     use crate::model::Context;
     use crate::op::GitOp;
+    use crate::popup::DiscardWhat;
     use crate::popup::PromptKind;
-    use crate::popup::{ConfirmKind, DiscardWhat};
     use crate::test_support::load_list;
     use crate::view::{buffer_rows, render};
 
@@ -732,7 +730,7 @@ mod tests {
     #[test]
     fn the_confirm_asks_and_the_bar_offers_yes_and_no() {
         let mut state = workspace(&["a.rs"]);
-        state.popups = vec![Popup::Confirm(ConfirmKind::Quit)];
+        state.popups = vec![Popup::Question(quit_question())];
         let (_, rows) = draw(&state, 80, 12);
         assert!(contains(&rows, " Quit "), "{rows:#?}");
         assert!(contains(&rows, "Quit Kika? (y/n)"), "{rows:#?}");
@@ -744,8 +742,8 @@ mod tests {
         use crate::git::repo_state::Operation;
 
         let mut state = workspace(&["a.rs"]);
-        let kind = ConfirmKind::Abort(Operation::Rebase);
-        state.popups = vec![Popup::Confirm(kind.clone())];
+        let ask = crate::features::operation::abort_question(Operation::Rebase).unwrap();
+        state.popups = vec![Popup::Question(ask.clone())];
         let (_, rows) = draw(&state, 40, 12);
         for needle in [" Abort rebase ", "Abort the rebase", "(y/n)"] {
             assert!(contains(&rows, needle), "{needle}: {rows:#?}");
@@ -774,7 +772,7 @@ mod tests {
         }
         let text = text.join(" ");
         assert!(text.contains("Resolved conflicts are lost."), "{rows:#?}");
-        assert_eq!(text, kind.question(), "{rows:#?}");
+        assert_eq!(text, ask.text, "{rows:#?}");
     }
 
     /// The text inside the popup box titled `title`, row by row, every
@@ -803,15 +801,11 @@ mod tests {
     #[test]
     fn the_autosquash_question_shows_whole_and_only_y_folds() {
         let mut state = workspace(&["a.rs"]);
-        let kind = ConfirmKind::Autosquash;
-        state.popups = vec![Popup::Confirm(kind.clone())];
+        let ask = crate::features::commits::rewrite::autosquash_question();
+        state.popups = vec![Popup::Question(ask.clone())];
         for (width, height) in [(80, 24), (40, 12)] {
             let (_, rows) = draw(&state, width, height);
-            assert_eq!(
-                box_text(&rows, " Autosquash "),
-                kind.question(),
-                "{rows:#?}"
-            );
+            assert_eq!(box_text(&rows, " Autosquash "), ask.text, "{rows:#?}");
             let bar = &rows[usize::from(height) - 1];
             assert!(bar.starts_with(" y fold  n keep"), "{rows:#?}");
             assert!(!bar.contains("enter"), "{rows:#?}");
@@ -826,7 +820,8 @@ mod tests {
         use crate::git::commit_files::CommitId;
         let mut state = workspace(&["a.rs"]);
         let ids = ['a', 'b', 'c'].map(|d| CommitId::parse(&d.to_string().repeat(40)).unwrap());
-        state.popups = vec![Popup::Confirm(ConfirmKind::DropRange(ids.to_vec()))];
+        let ask = crate::features::commits::rewrite::drop_range_question(ids.to_vec());
+        state.popups = vec![Popup::Question(ask)];
         let (_, rows) = draw(&state, 80, 24);
         assert_eq!(
             box_text(&rows, " Drop commits "),
@@ -868,7 +863,7 @@ mod tests {
         ];
         for action in actions {
             let mut state = with_patch();
-            state.popups = vec![Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))];
+            state.popups = vec![Popup::Question(state.patch_action_question(action.clone()))];
             for (width, height) in [(80, 24), (40, 12)] {
                 let (_, rows) = draw(&state, width, height);
                 let text = box_text(&rows, " Custom patch ");
@@ -891,9 +886,9 @@ mod tests {
         }
         // A long message is cut, not shown whole.
         let mut state = with_patch();
-        state.popups = vec![Popup::Confirm(ConfirmKind::CustomPatch(
-            PatchAction::NewCommit(long.into()),
-        ))];
+        state.popups = vec![Popup::Question(
+            state.patch_action_question(PatchAction::NewCommit(long.into())),
+        )];
         let (_, rows) = draw(&state, 80, 24);
         let text = box_text(&rows, " Custom patch ");
         assert!(text.contains("…\"?"), "{rows:#?}");
@@ -1070,7 +1065,6 @@ mod tests {
     fn the_create_question_names_where_what_and_the_title_and_offers_no_enter() {
         use crate::features::pull_requests::PrDraft;
         use crate::forge::ForgeRepo;
-        use crate::popup::ConfirmKind;
         let repo = |owner: &str| ForgeRepo {
             host: "github.com".into(),
             owner: owner.into(),
@@ -1088,7 +1082,7 @@ mod tests {
             base: Some("main".into()),
             title: "Add login".into(),
         });
-        state.popups = vec![Popup::Confirm(ConfirmKind::CreatePullRequest)];
+        state.popups = vec![Popup::Question(create_question(&state))];
         let (_, rows) = draw(&state, 100, 14);
         assert!(contains(&rows, " Create pull request "), "{rows:#?}");
         assert!(
@@ -1173,7 +1167,7 @@ mod tests {
                     input: LineInput::with_text(&long_draft().title),
                 },
             ),
-            ("confirm", Popup::Confirm(ConfirmKind::CreatePullRequest)),
+            ("confirm", Popup::Question(create_question(&state))),
             (
                 "merge",
                 Popup::Question(
@@ -1782,7 +1776,7 @@ mod tests {
                 id: MenuId::Stage,
                 cursor: 1,
             },
-            Popup::Confirm(ConfirmKind::Quit),
+            Popup::Question(quit_question()),
             Popup::Prompt {
                 kind: PromptKind::GoToFile,
                 input: LineInput {
@@ -2015,7 +2009,7 @@ mod tests {
                 ..BisectState::default()
             }),
         });
-        state.popups = vec![Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        state.popups = vec![Popup::Question(state.bisect_reset_question())];
         let (_, rows) = draw(&state, 100, 12);
         assert!(contains(&rows, " Reset bisect "), "{rows:#?}");
         assert!(contains(&rows, "HEAD goes back to feature;"), "{rows:#?}");
@@ -2046,9 +2040,9 @@ mod tests {
         }
 
         state.popups.clear();
-        state.update(crate::intent::AppIntent::CopyCommitText(
-            crate::clipboard::CopyWhat::Hash,
-        ));
+        state.update(crate::intent::AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(crate::clipboard::CopyWhat::Hash),
+        )));
         let (_, rows) = draw(&state, 80, 24);
         let bar = rows.last().unwrap();
         assert!(bar.contains("Copied hash: abc1234def"), "{bar:?}");

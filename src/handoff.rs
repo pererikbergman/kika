@@ -10,10 +10,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::effect::Tag;
+use crate::features::commit::CommitIntent;
 use crate::features::commit::git::{MessageSource, commit_command};
 use crate::features::commits::copy::git::ordered;
 use crate::features::commits::custom_patch;
+use crate::features::custom_commands::CustomCommandsIntent;
 use crate::features::custom_commands::{CommandFailure, OutputMode};
+use crate::features::diff::DiffIntent;
 use crate::git::GitRunner;
 use crate::git::path::RepoPath;
 use crate::git::runner::GitCommand;
@@ -135,19 +138,21 @@ pub fn execute_as(
         HandOff::OpenFile { path, line } => {
             let file = workdir.join(path.as_os_str());
             let result = editor(runner).and_then(|editor| launch(&editor, &file, line, workdir));
-            AppIntent::EditorClosed { result }
+            AppIntent::Diff(DiffIntent::EditorClosed { result })
         }
-        HandOff::EditHunk { header, hunk } => AppIntent::HunkEdited {
+        HandOff::EditHunk { header, hunk } => AppIntent::Diff(DiffIntent::HunkEdited {
             result: edit_hunk(&header, &hunk, runner, workdir),
-        },
-        HandOff::EditCommitMessage { initial } => AppIntent::CommitMessageEdited {
+        }),
+        HandOff::EditCommitMessage { initial } => AppIntent::Commit(CommitIntent::MessageEdited {
             result: edit_commit_message(&initial, runner, workdir),
-        },
-        HandOff::RunCommand { title, argv } => AppIntent::CommandFinished {
-            title,
-            output: OutputMode::Terminal,
-            result: run_command(&argv, workdir).map(|()| String::new()),
-        },
+        }),
+        HandOff::RunCommand { title, argv } => {
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished {
+                title,
+                output: OutputMode::Terminal,
+                result: run_command(&argv, workdir).map(|()| String::new()),
+            })
+        }
     }
 }
 
@@ -577,6 +582,7 @@ impl Drop for TempFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::diff::DiffIntent;
     use crate::git::fake::{ANY_ARG, FakeRunner, fail, ok};
 
     fn argv(editor: &str, line: Option<u32>) -> Vec<String> {
@@ -732,9 +738,9 @@ mod tests {
         };
         assert_eq!(
             execute(job, &runner, Path::new("/nowhere")),
-            AppIntent::EditorClosed {
+            AppIntent::Diff(DiffIntent::EditorClosed {
                 result: Err("fatal: \u{FFFD}[2Jno".into())
-            }
+            })
         );
         runner.assert_done();
         // The editor is the user's, so git resolves it in their env.
@@ -1104,9 +1110,9 @@ mod tests {
         expected.extend_from_slice(b"@@ -1 +1,3 @@\n a\n+keep\n");
         assert_eq!(
             intent,
-            AppIntent::HunkEdited {
+            AppIntent::Diff(DiffIntent::HunkEdited {
                 result: Ok(Some(expected))
-            }
+            })
         );
         let seen = fs::read_to_string(dir.join("seen")).unwrap();
         let temp = Path::new(seen.trim_end());
@@ -1136,9 +1142,9 @@ mod tests {
 
         assert_eq!(
             intent,
-            AppIntent::CommitMessageEdited {
+            AppIntent::Commit(CommitIntent::MessageEdited {
                 result: Ok(Some("new subj\n\nnew body".into()))
-            }
+            })
         );
         let before = fs::read_to_string(dir.join("before")).unwrap();
         assert!(
@@ -1173,7 +1179,7 @@ mod tests {
         };
 
         match execute(job, &runner, dir) {
-            AppIntent::CommitMessageEdited { result: Err(e) } => {
+            AppIntent::Commit(CommitIntent::MessageEdited { result: Err(e) }) => {
                 assert!(e.starts_with("The editor exited with"), "{e}")
             }
             other => panic!("expected a failed edit, got {other:?}"),
@@ -1217,7 +1223,7 @@ mod tests {
         let job = HandOff::edit_hunk(b"diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n");
 
         match execute(job, &runner, dir) {
-            AppIntent::HunkEdited { result: Err(e) } => {
+            AppIntent::Diff(DiffIntent::HunkEdited { result: Err(e) }) => {
                 assert!(e.starts_with("The editor exited with"), "{e}")
             }
             other => panic!("expected a failed edit, got {other:?}"),
@@ -1250,7 +1256,10 @@ mod tests {
     #[test]
     fn a_cancelled_edit_is_none_and_removes_the_directory() {
         let (intent, parent) = edit_hunk_with("handoff-cancel", ": > \"$1\"");
-        assert_eq!(intent, AppIntent::HunkEdited { result: Ok(None) });
+        assert_eq!(
+            intent,
+            AppIntent::Diff(DiffIntent::HunkEdited { result: Ok(None) })
+        );
         assert!(!parent.exists(), "{parent:?} was left behind");
     }
 
@@ -1360,7 +1369,10 @@ mod tests {
 
         let intent = execute(job, &runner, dir);
 
-        assert_eq!(intent, AppIntent::EditorClosed { result: Ok(()) });
+        assert_eq!(
+            intent,
+            AppIntent::Diff(DiffIntent::EditorClosed { result: Ok(()) })
+        );
         let args = fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(
             args,
@@ -1390,11 +1402,11 @@ mod tests {
 
         assert_eq!(
             intent,
-            AppIntent::CommandFinished {
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished {
                 title: "Show".into(),
                 output: OutputMode::Terminal,
                 result: Ok(String::new()),
-            }
+            })
         );
         let args = fs::read_to_string(dir.join("args")).unwrap();
         assert_eq!(args, "a b;$(touch x)\n*\n");
@@ -1415,7 +1427,7 @@ mod tests {
             &FakeRunner::new(),
             tmp.path(),
         ) {
-            AppIntent::CommandFinished { result, .. } => result,
+            AppIntent::CustomCommands(CustomCommandsIntent::Finished { result, .. }) => result,
             other => panic!("expected CommandFinished, got {other:?}"),
         };
         let Err(CommandFailure::Exited(failed)) = result(&["sh", "-c", "exit 3"]) else {

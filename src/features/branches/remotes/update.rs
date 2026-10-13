@@ -2,9 +2,9 @@
 //! Remotes tab, checking out a remote branch as a tracking branch, and
 //! adding, renaming and removing a remote.
 
-use super::RemotePending;
 use super::keys;
 use super::lines;
+use super::{RemotePending, RemotesIntent};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
@@ -12,7 +12,31 @@ use crate::git::remotes::{Remote, validate_remote_name, validate_remote_url};
 use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
+
+/// The Remotes tab's half of `update`, which `branches::update` passes
+/// `BranchesIntent::Remotes` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: RemotesIntent) -> Vec<Effect> {
+    match intent {
+        RemotesIntent::Loaded { tag, result } => return state.remotes_loaded(tag, result),
+        RemotesIntent::Next => return state.move_remote(1),
+        RemotesIntent::Prev => return state.move_remote(-1),
+        RemotesIntent::Track => state.ask_track_name(),
+        RemotesIntent::TrackNamed(text) => return state.track_named(&text),
+        RemotesIntent::Add => state.ask_remote_name(),
+        RemotesIntent::AddNamed(text) => state.remote_named(&text),
+        RemotesIntent::AddUrl(text) => return state.remote_url(&text),
+        RemotesIntent::Rename => state.ask_remote_rename(),
+        RemotesIntent::RenameTo(text) => return state.rename_remote_to(&text),
+        RemotesIntent::Remove if state.branches.remotes.list.range_anchor.is_some() => {
+            state.ask_delete_range(RangeKind::Remotes)
+        }
+        RemotesIntent::Remove => state.ask_remove_remote(),
+        RemotesIntent::ConfirmRemove => return state.confirm_remove_remote(),
+    }
+    Vec::new()
+}
 
 /// Loading the Remotes tab and moving its selection.
 impl AppState {
@@ -202,6 +226,22 @@ impl AppState {
     pub(crate) fn confirm_remove_remote(&mut self) -> Vec<Effect> {
         self.answer_question(KeyScope::RemoveRemote, Answer::YOnly)
     }
+
+    /// Closing a remote's prompt forgets what it was asked for.
+    pub(crate) fn remotes_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::TrackBranch
+                    | PromptKind::RemoteName
+                    | PromptKind::RemoteUrl
+                    | PromptKind::RenameRemote,
+                ..
+            }
+        ) {
+            self.branches.remotes.pending = None;
+        }
+    }
 }
 
 /// "Remove this remote?", carrying the op chosen when it was asked, so a
@@ -226,8 +266,10 @@ pub(crate) fn remove_remote_question(name: String, op: GitOp) -> ConfirmQuestion
 mod tests {
     use crate::confirm_question::Then;
     use crate::effect::Effect;
+    use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
     use crate::features::branches::remotes::RemoteLine;
+    use crate::features::branches::remotes::RemotesIntent;
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::op::GitOp;
@@ -244,16 +286,20 @@ mod tests {
         let mut state = with_branches();
         let old = remotes_tag(&state.update(AppIntent::RefreshStatus));
         let newer = remotes_tag(&state.update(AppIntent::RefreshStatus));
-        state.update(AppIntent::RemotesLoaded {
-            tag: old,
-            result: Ok(three_remotes()),
-        });
+        state.update(AppIntent::Branches(BranchesIntent::Remotes(
+            RemotesIntent::Loaded {
+                tag: old,
+                result: Ok(three_remotes()),
+            },
+        )));
         assert!(!state.branches.remotes.list.loaded);
         state.generation += 1;
-        state.update(AppIntent::RemotesLoaded {
-            tag: newer,
-            result: Ok(three_remotes()),
-        });
+        state.update(AppIntent::Branches(BranchesIntent::Remotes(
+            RemotesIntent::Loaded {
+                tag: newer,
+                result: Ok(three_remotes()),
+            },
+        )));
         assert!(!state.branches.remotes.list.loaded);
         assert_eq!(state.branches.remotes.remotes().count(), 0);
     }
@@ -419,7 +465,12 @@ mod tests {
         assert!(state.branches.remotes.pending.is_some());
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.branches.remotes.pending, None);
-        assert_eq!(state.update(AppIntent::AddRemoteUrl("/x".into())), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Remotes(
+                RemotesIntent::AddUrl("/x".into())
+            ))),
+            vec![]
+        );
     }
 
     #[test]
@@ -473,7 +524,10 @@ mod tests {
         reload_remotes(&mut state, vec![git_remote("-f", true, &["x"])]);
         press_char(&mut state, ']');
         state.branches.remotes.list.move_by(1);
-        for intent in [AppIntent::RemoveRemote, AppIntent::RenameRemote] {
+        for intent in [
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Remove)),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Rename)),
+        ] {
             state.notice = None;
             assert_eq!(state.update(intent), vec![]);
             assert!(state.notice.unwrap().contains("like an option"));
@@ -509,7 +563,12 @@ mod tests {
             press_char(&mut state, 'd');
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, [], "{key:?}");
-            assert_eq!(state.update(AppIntent::ConfirmRemoveRemote), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Branches(BranchesIntent::Remotes(
+                    RemotesIntent::ConfirmRemove
+                ))),
+                vec![]
+            );
         }
     }
 
@@ -518,15 +577,38 @@ mod tests {
         let mut state = on_remote_row(2);
         state.hold_op(99);
         for intent in [
-            AppIntent::TrackRemoteBranch,
-            AppIntent::AddRemote,
-            AppIntent::RenameRemote,
-            AppIntent::RemoveRemote,
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track)),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Add)),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Rename)),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Remove)),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
             assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{intent:?}");
             assert_eq!(state.popups, [], "{intent:?}");
+        }
+    }
+
+    #[test]
+    fn closing_a_remote_prompt_forgets_what_it_asked_for() {
+        use crate::features::branches::remotes::RemotePending;
+        use crate::model::{AppState, Context};
+        use crate::popup::LineInput;
+        for kind in [
+            PromptKind::TrackBranch,
+            PromptKind::RemoteName,
+            PromptKind::RemoteUrl,
+            PromptKind::RenameRemote,
+        ] {
+            let mut state = AppState::new(Context::Workspace);
+            state.branches.remotes.pending = Some(RemotePending::Rename("origin".into()));
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            assert_eq!(state.branches.remotes.pending, None, "{kind:?}");
         }
     }
 }

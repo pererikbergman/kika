@@ -19,7 +19,9 @@ use crate::app;
 use crate::clipboard::RecordingSink;
 use crate::e2e::repo::TestRepo;
 use crate::effect::Runtime;
+use crate::features::diff::DiffIntent;
 use crate::features::diff::renderers::ExternalRenderer;
+use crate::features::diff::renderers::RenderersIntent;
 use crate::forge::ForgeHost;
 use crate::forge::github::FakeGh;
 use crate::forge::task::ForgeContext;
@@ -157,7 +159,9 @@ impl Harness {
     // Only `#[cfg(unix)]` tests call it so far.
     #[cfg_attr(not(unix), allow(dead_code))]
     pub async fn use_renderers(&mut self, renderers: Vec<ExternalRenderer>) {
-        self.dispatch(AppIntent::RenderersFound(renderers));
+        self.dispatch(AppIntent::Diff(DiffIntent::Renderers(
+            RenderersIntent::Found(renderers),
+        )));
         self.wait_idle().await;
     }
 
@@ -170,7 +174,10 @@ impl Harness {
     /// Apply `intent` as the loop does, running any hand-off it asks for
     /// to the end before going on.
     fn dispatch(&mut self, intent: AppIntent) {
-        if matches!(intent, AppIntent::RenderersFound(_)) {
+        if matches!(
+            intent,
+            AppIntent::Diff(DiffIntent::Renderers(RenderersIntent::Found(_)))
+        ) {
             self.renderers_found = true;
         }
         let mut jobs = VecDeque::from(app::dispatch(&mut self.state, &self.runtime, intent));
@@ -363,6 +370,7 @@ fn hidden_sequence_editor() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::repos::ReposIntent;
     use crate::git::diff::{DiffLine, LineKind};
 
     /// A state with a diff stream for request 1 that has asked for 10 lines.
@@ -400,11 +408,11 @@ mod tests {
     #[test]
     fn a_recent_list_still_on_its_way_is_not_idle() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(AppIntent::OpenRecent);
+        state.update(AppIntent::Repos(ReposIntent::OpenRecent));
         assert!(!is_idle(&state));
 
         let seq = state.recent_seq;
-        state.update(AppIntent::RecentLoaded { seq, list: vec![] });
+        state.update(AppIntent::Repos(ReposIntent::Loaded { seq, list: vec![] }));
         assert!(is_idle(&state));
     }
 

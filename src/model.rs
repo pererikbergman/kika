@@ -1,36 +1,38 @@
 use crate::bisect;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
-use crate::confirm_question::{Answer, ConfirmQuestion, Then};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then, quit_question};
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
 use crate::effect::{Effect, Tag};
-use crate::features::blame::BlameView;
+use crate::features::blame::{self, BlameView};
 use crate::features::branches::remotes::RemotePending;
 use crate::features::branches::tags::PendingTag;
-use crate::features::branches::{BranchesPanel, BranchesTab};
-use crate::features::command_log::CommandLog;
-use crate::features::commit::CommitEditor;
+use crate::features::branches::{self, BranchesPanel, BranchesTab};
+use crate::features::command_log::{self, CommandLog};
+use crate::features::commit::{self, CommitEditor};
+use crate::features::commits::bisect::BisectIntent;
 use crate::features::commits::compare::PendingDiff;
 use crate::features::commits::copy::CopiedCommits;
 use crate::features::commits::custom_patch::CustomPatch;
-use crate::features::commits::reflog;
-use crate::features::commits::rewrite::{LeftBehindCheck, Rewrite};
-use crate::features::commits::{CommitsPanel, CommitsTab};
-use crate::features::conflicts::ConflictView;
-use crate::features::custom_commands::PendingCommand;
+use crate::features::commits::rewrite::LeftBehindCheck;
+use crate::features::commits::{self, CommitsIntent, CommitsPanel, CommitsTab};
+use crate::features::conflicts::{self, ConflictView};
+use crate::features::custom_commands::{self, PendingCommand};
+use crate::features::diff;
 use crate::features::diff::renderers::external_diff::map_rows;
 use crate::features::diff::renderers::{ExternalRenderer, RenderedDiff, RendererKind};
-use crate::features::files::IgnoreDraft;
+use crate::features::files::{self, IgnoreDraft};
+use crate::features::operation;
 use crate::features::pull_requests::{self, PrCreating, PrDraft};
-use crate::features::repos::ParkedRepo;
+use crate::features::repos::{self, ParkedRepo};
 use crate::features::review::{self, PrMerging};
 use crate::features::stash::{StashDraft, StashList, StashMode};
+use crate::features::sync;
 use crate::forge::{ForgeHost, ForgeState};
 use crate::git::FileEntry;
 use crate::git::askpass::Secret;
@@ -42,9 +44,7 @@ use crate::git::diff::{
 };
 use crate::git::patch::{self, Direction, PatchSelection};
 use crate::git::path::RepoPath;
-use crate::git::rebase_plan;
 use crate::git::refs::RefsSnapshot;
-use crate::git::remote::RemoteOp;
 use crate::git::repo_state::Operation;
 use crate::git::status::{BranchStatus, EntryKind, RepoStatus};
 use crate::git::version::GitVersion;
@@ -58,14 +58,15 @@ use crate::list_input::{RANGE_FILES_CHANGED, search_input};
 use crate::menu;
 use crate::op::GitOp;
 use crate::op_slot::OpSlot;
-use crate::pick_list::{PickList, PickPurpose};
-use crate::popup::{ConfirmKind, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
+use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
 use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
 use crate::watch::{WatchEvent, WatchState};
 // Names the tests below reach through `super::*` since the op slot moved
 // to `op_slot.rs`.
+#[cfg(test)]
+use crate::git::remote::RemoteOp;
 #[cfg(test)]
 use crate::op::MergeStrategy;
 #[cfg(test)]
@@ -478,8 +479,6 @@ impl AppState {
             }
             AppIntent::RefreshStatus => return self.reload_repo(),
             AppIntent::StatusLoaded { tag, result } => return self.status_loaded(tag, result),
-            AppIntent::SelectNext => return self.move_selection(1),
-            AppIntent::SelectPrev => return self.move_selection(-1),
             AppIntent::ScrollDiff(by) if self.review_files_shown() => {
                 return self.scroll_review_diff(by);
             }
@@ -497,12 +496,6 @@ impl AppState {
                     view.scroll(by, rows);
                 } else {
                     return self.diff.scroll(by, rows);
-                }
-            }
-            AppIntent::DiffLoaded { tag, result } => self.diff_loaded(tag, result),
-            AppIntent::DiffSlow { tag } => {
-                if tag.generation == self.generation {
-                    self.diff.slow(tag.seq);
                 }
             }
             AppIntent::FocusDiff => return self.focus_diff(),
@@ -527,78 +520,7 @@ impl AppState {
                 self.screen_mode = self.screen_mode.next();
                 return self.rerender_if_resized(cols, vec![]);
             }
-            AppIntent::NextHunk => self.next_hunk(),
-            AppIntent::PrevHunk => self.prev_hunk(),
-            AppIntent::ToggleHunkStage => return self.toggle_hunk_stage(),
-            AppIntent::EnterLineMode => self.enter_line_mode(),
-            AppIntent::ExitLineMode => self.with_lines(HunkView::exit_lines),
-            AppIntent::NextLine { extend } => self.with_lines(|view| view.next_line(extend)),
-            AppIntent::PrevLine { extend } => self.with_lines(|view| view.prev_line(extend)),
-            AppIntent::ToggleLinesStage => return self.toggle_lines_stage(),
-            AppIntent::ToggleDiffSide => return self.toggle_diff_side(),
-            AppIntent::MoreContext => {
-                let context = self.diff_options.context.saturating_add(1);
-                return self.set_diff_options(DiffOptions {
-                    context,
-                    ..self.diff_options
-                });
-            }
-            AppIntent::LessContext => {
-                let context = self.diff_options.context.saturating_sub(1);
-                return self.set_diff_options(DiffOptions {
-                    context,
-                    ..self.diff_options
-                });
-            }
-            AppIntent::ToggleWhitespace => {
-                return self.set_diff_options(DiffOptions {
-                    ignore_whitespace: !self.diff_options.ignore_whitespace,
-                    ..self.diff_options
-                });
-            }
-            AppIntent::PatchLoaded { tag, result } => {
-                self.patch_loaded(tag, result);
-                self.remap();
-            }
-            AppIntent::ToggleStage => return self.toggle_stage(),
-            AppIntent::ToggleStageAll => return self.toggle_stage_all(),
             AppIntent::Discard => self.ask_discard(),
-            AppIntent::OpenCommit => self.open_commit(),
-            AppIntent::ConfirmStageAll => {
-                if self.commit == CommitFlow::ConfirmStageAll {
-                    self.commit = CommitFlow::Editing(CommitEditor::new(true));
-                }
-            }
-            AppIntent::CancelCommit => self.cancel_commit(),
-            AppIntent::DiscardCommit => self.discard_commit(),
-            AppIntent::ResumeCommit => self.resume_commit(),
-            AppIntent::SubmitCommit => return self.submit_commit(),
-            AppIntent::InterruptCommit => return self.interrupt_commit(),
-            AppIntent::ToggleCommitField => {
-                if let CommitFlow::Editing(editor) = &mut self.commit {
-                    editor.toggle_field();
-                }
-            }
-            AppIntent::OpenAmend => return self.open_amend(),
-            AppIntent::HeadMessageLoaded { tag, result } => self.head_message_loaded(tag, result),
-            AppIntent::ToggleNoVerify => {
-                if let CommitFlow::Editing(editor) = &mut self.commit {
-                    editor.no_verify = !editor.no_verify;
-                }
-            }
-            AppIntent::EditCommitExternally => {
-                if let CommitFlow::Editing(editor) = &self.commit {
-                    let initial = editor.message();
-                    return vec![Effect::HandOff(HandOff::EditCommitMessage { initial })];
-                }
-            }
-            AppIntent::CommitMessageEdited { result } => {
-                return self.commit_message_edited(result);
-            }
-            AppIntent::DismissCommitError => self.dismiss_commit_error(),
-            AppIntent::CommitProbed { tag, op, facts } => {
-                return self.commit_probed(tag, op, facts);
-            }
             AppIntent::OpFinished { tag, op, result } => return self.op_finished(tag, op, result),
             AppIntent::OpenMenu(id) => {
                 if self.context == Context::Workspace {
@@ -608,7 +530,7 @@ impl AppState {
             AppIntent::MenuNext => self.move_menu_cursor(1),
             AppIntent::MenuPrev => self.move_menu_cursor(-1),
             AppIntent::MenuSelect => return self.menu_select(),
-            AppIntent::Ask(kind) => self.popups.push(Popup::Confirm(kind)),
+            AppIntent::AskQuit => self.popups.push(Popup::Question(quit_question())),
             AppIntent::ConfirmYes => return self.answer(true),
             AppIntent::ConfirmNo => return self.answer(false),
             AppIntent::OpenPrompt(kind) => {
@@ -626,92 +548,16 @@ impl AppState {
                     return self.update(submitted);
                 }
             }
-            AppIntent::GoToFile(text) => return self.go_to_file(&text),
             AppIntent::PopPopup => match self.popups.pop() {
                 // Closing the welcome shows what git says about the launch
                 // directory, as Kika did before there was a welcome.
                 Some(Popup::Recent(_)) if self.repo.is_none() => return self.refresh_status(),
-                // Cancelling a command's prompt cancels the command.
-                Some(Popup::Prompt {
-                    kind: PromptKind::Command,
-                    ..
-                }) => self.pending_command = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::NewBranch | PromptKind::RenameBranch | PromptKind::SetUpstream,
-                    ..
-                }) => self.branches.pending = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::StashMessage,
-                    ..
-                }) => self.stash_draft = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::RenameStash,
-                    ..
-                }) => self.stash.pending = None,
-                Some(Popup::Prompt {
-                    kind:
-                        PromptKind::TrackBranch
-                        | PromptKind::RemoteName
-                        | PromptKind::RemoteUrl
-                        | PromptKind::RenameRemote,
-                    ..
-                }) => self.branches.remotes.pending = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::WorktreePath,
-                    ..
-                }) => self.forget_worktree_branch(),
-                Some(Popup::Prompt {
-                    kind: PromptKind::TagName | PromptKind::TagMessage,
-                    ..
-                }) => self.branches.pending_tag = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::IgnorePattern,
-                    ..
-                }) => self.ignore_draft = None,
-                // Closing a step of a pull request stops it.
-                Some(Popup::PickList(PickList {
-                    purpose: PickPurpose::CheckDetails,
-                    ..
-                })) => self.review.check_urls.clear(),
-                Some(
-                    Popup::PickList(_)
-                    | Popup::Prompt {
-                        kind: PromptKind::PullRequestTitle,
-                        ..
-                    },
-                ) => self.pr_draft = None,
-                _ => {}
+                Some(closed) => self.popup_closed(&closed),
+                None => {}
             },
-            AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
-            AppIntent::CommandFinished {
-                title,
-                output,
-                result,
-            } => return self.command_finished(&title, output, result),
-            AppIntent::CancelCommand => return self.cancel_command(),
             AppIntent::OpenInEditor => return self.open_in_editor(),
-            AppIntent::EditHunk => return self.edit_hunk(),
-            AppIntent::EditorClosed { result } => return self.editor_closed(result),
-            AppIntent::HunkEdited { result } => return self.hunk_edited(result),
             AppIntent::Watch(event) => return self.watch(event),
             AppIntent::RefsLoaded { tag, result } => return self.refs_loaded(tag, result),
-            AppIntent::FetchFinished { tag, result } => return self.fetch_finished(tag, result),
-            AppIntent::CommitsLoaded { tag, skip, result } => {
-                return self.commits_loaded(tag, skip, result);
-            }
-            AppIntent::MarkersLoaded { tag, result } => self.markers_loaded(tag, result),
-            AppIntent::CommitNext => {
-                self.commits.step(1);
-                return self.more_commits();
-            }
-            AppIntent::CommitPrev => self.commits.step(-1),
-            AppIntent::OpenCommitFiles => return self.open_commit_files(),
-            AppIntent::CloseCommitFiles => return self.close_commit_files(),
-            AppIntent::CommitFileNext => return self.move_commit_file(1),
-            AppIntent::CommitFilePrev => return self.move_commit_file(-1),
-            AppIntent::CommitFilesLoaded { tag, result } => {
-                return self.commit_files_loaded(tag, result);
-            }
             AppIntent::StashesLoaded { tag, result } => {
                 self.stash.list.loaded(tag, self.generation, result);
             }
@@ -765,54 +611,25 @@ impl AppState {
             AppIntent::WorktreeRemoved { tag, result } => {
                 return self.worktree_removed(tag, result);
             }
-            AppIntent::CommandLogged(event) => self.command_logged(event),
-            AppIntent::OpenCommandLog => self.open_command_log(),
-            AppIntent::CommandLogNext => self.move_command_log(1),
-            AppIntent::CommandLogPrev => self.move_command_log(-1),
-            AppIntent::CommandLogPageDown => self.move_command_log(self.command_log_page()),
-            AppIntent::CommandLogPageUp => self.move_command_log(-self.command_log_page()),
-            AppIntent::OpenBlame => return self.open_blame(),
-            AppIntent::BlameLoaded { tag, result } => self.blame_loaded(tag, result),
-            AppIntent::BlameNext => self.with_blame(|view, rows| view.move_by(1, rows)),
-            AppIntent::BlamePrev => self.with_blame(|view, rows| view.move_by(-1, rows)),
-            AppIntent::BlamePageDown => self.with_blame(|view, rows| view.page(true, rows)),
-            AppIntent::BlamePageUp => self.with_blame(|view, rows| view.page(false, rows)),
-            AppIntent::OpenBlameCommit => return self.open_blame_commit(),
-            AppIntent::CommitLoaded { tag, result } => self.commit_loaded(tag, result),
-            AppIntent::CloseBlameCommit => self.close_blame_commit(),
-            AppIntent::ScrollCommit(by) => self.scroll_commit(by),
-            AppIntent::CloseBlame => return self.close_blame(),
-            AppIntent::ConflictLoaded { tag, path, result } => {
-                self.conflict_loaded(tag, path, result)
-            }
-            AppIntent::ConflictNext => self.with_conflict(|view, rows| view.move_by(1, rows)),
-            AppIntent::ConflictPrev => self.with_conflict(|view, rows| view.move_by(-1, rows)),
-            AppIntent::PickConflict(choice) => return self.pick_conflict(choice),
-            AppIntent::ResolvedWritten { tag, path, result } => {
-                return self.resolved_written(tag, path, result);
-            }
-            AppIntent::StageResolved => return self.stage_resolved(),
-            AppIntent::OpenMergeTool => return self.open_merge_tool(),
-            AppIntent::CycleRenderer => return self.cycle_renderer(),
-            AppIntent::RenderersFound(renderers) => self.renderers_found(renderers),
-            AppIntent::DiffRendered { tag, result } => self.diff_rendered(tag, result),
+            AppIntent::CommandLog(i) => return command_log::update(self, i),
+            AppIntent::Commits(i) => return commits::update(self, i),
+            AppIntent::Branches(i) => return branches::update(self, i),
+            AppIntent::Commit(i) => return commit::update(self, i),
+            AppIntent::Blame(i) => return blame::update(self, i),
+            AppIntent::Conflicts(i) => return conflicts::update(self, i),
+            AppIntent::CustomCommands(i) => return custom_commands::update(self, i),
+            AppIntent::Sync(i) => return sync::update(self, i),
+            AppIntent::Operation(i) => return operation::update(self, i),
+            AppIntent::Repos(i) => return repos::update(self, i),
+            AppIntent::Files(i) => return files::update(self, i),
+            AppIntent::Diff(i) => return diff::update(self, i),
             AppIntent::ConfigLoaded {
                 repo,
                 keymap,
                 errors,
             } => self.config_loaded(repo, keymap, errors),
             AppIntent::Start => return self.start(),
-            AppIntent::OpenRecent => return self.open_recent(),
-            AppIntent::RecentLoaded { seq, list } => self.recent_loaded(seq, list),
-            AppIntent::RecentNext => self.move_recent_cursor(1),
-            AppIntent::RecentPrev => self.move_recent_cursor(-1),
-            AppIntent::RecentSelect => return self.recent_select(),
             AppIntent::OpenRepo(path) => return self.open_repo(path),
-            AppIntent::InitRepo => return self.init_repo(),
-            AppIntent::RepoInitialised { tag, result } => {
-                return self.repo_initialised(tag, result);
-            }
-            AppIntent::BranchesLoaded { tag, result } => return self.branches_loaded(tag, result),
             AppIntent::ForgeRepoNone { tag } => {
                 if tag.generation == self.generation {
                     self.forge.repo_none(tag);
@@ -883,69 +700,7 @@ impl AppState {
                 repo,
                 result,
             } => self.pr_detail_loaded(tag, number, repo, result),
-            AppIntent::BranchLogLoaded {
-                tag,
-                refname,
-                result,
-            } => self.branch_log_loaded(tag, refname, result),
-            AppIntent::RemotesLoaded { tag, result } => return self.remotes_loaded(tag, result),
-            AppIntent::SwitchBranchesTab => return self.switch_branches_tab(BranchesTab::next),
-            AppIntent::PrevBranchesTab => return self.switch_branches_tab(BranchesTab::prev),
-            AppIntent::TagsLoaded { tag, result } => return self.tags_loaded(tag, result),
-            AppIntent::TagNext => return self.move_tag(1),
-            AppIntent::TagPrev => return self.move_tag(-1),
-            AppIntent::NewTag => self.ask_tag_name(false),
-            AppIntent::NewAnnotatedTag => self.ask_tag_name(true),
-            AppIntent::TagNamed(text) => return self.tag_named(text),
-            AppIntent::TagMessaged(text) => return self.tag_messaged(&text),
-            AppIntent::DeleteTag if self.branches.tags.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Tags)
-            }
-            AppIntent::DeleteTag => self.ask_delete_tag(),
-            AppIntent::ConfirmDeleteTag => return self.confirm_delete_tag(),
-            AppIntent::PushTag => return self.push_tag(),
-            AppIntent::RemoteNext => return self.move_remote(1),
-            AppIntent::RemotePrev => return self.move_remote(-1),
-            AppIntent::TrackRemoteBranch => self.ask_track_name(),
-            AppIntent::TrackRemoteBranchNamed(text) => return self.track_named(&text),
-            AppIntent::AddRemote => self.ask_remote_name(),
-            AppIntent::AddRemoteNamed(text) => self.remote_named(&text),
-            AppIntent::AddRemoteUrl(text) => return self.remote_url(&text),
-            AppIntent::RenameRemote => self.ask_remote_rename(),
-            AppIntent::RenameRemoteTo(text) => return self.rename_remote_to(&text),
-            AppIntent::RemoveRemote if self.branches.remotes.list.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Remotes)
-            }
-            AppIntent::RemoveRemote => self.ask_remove_remote(),
-            AppIntent::ConfirmRemoveRemote => return self.confirm_remove_remote(),
             AppIntent::ConfirmDeleteRange => return self.confirm_delete_range(),
-            AppIntent::SetUpstream => self.ask_upstream(),
-            AppIntent::SetUpstreamTo(text) => return self.set_upstream_to(&text),
-            AppIntent::UnsetUpstream => return self.unset_upstream(),
-            AppIntent::BranchNext => return self.move_branch(1),
-            AppIntent::BranchPrev => return self.move_branch(-1),
-            AppIntent::CheckoutBranch => return self.checkout_branch(),
-            AppIntent::NewBranch => self.ask_branch_name(PromptKind::NewBranch),
-            AppIntent::RenameBranch => self.ask_branch_name(PromptKind::RenameBranch),
-            AppIntent::DeleteBranch if self.branches.list.range_anchor.is_some() => {
-                self.ask_delete_range(RangeKind::Branches)
-            }
-            AppIntent::DeleteBranch => self.ask_delete_branch(),
-            AppIntent::CreateBranchNamed(text) => return self.create_branch_named(&text),
-            AppIntent::RenameBranchTo(text) => return self.rename_branch_to(&text),
-            AppIntent::ConfirmDeleteBranch { force } => return self.confirm_delete_branch(force),
-            AppIntent::Fetch => return self.start_remote(RemoteOp::Fetch),
-            AppIntent::Pull => return self.start_remote(RemoteOp::Pull),
-            AppIntent::Push => {
-                return self.start_remote(RemoteOp::Push {
-                    force_with_lease: false,
-                });
-            }
-            AppIntent::ForcePush => {
-                return self.start_remote(RemoteOp::Push {
-                    force_with_lease: true,
-                });
-            }
             AppIntent::CredentialAsked {
                 tag,
                 prompt,
@@ -958,40 +713,17 @@ impl AppState {
                 }
             }
             AppIntent::CredentialAnswered(answer) => return self.credential_answered(answer),
-            AppIntent::RemoteNotice { tag, text } => self.remote_notice(tag, text),
-            AppIntent::RemoteFinished { tag, op, result } => {
-                return self.remote_finished(tag, op, result);
-            }
-            AppIntent::SpinnerTick => self.spinner_tick(),
-            AppIntent::Merge(strategy) => {
-                return self.branch_op(|branch| GitOp::Merge { branch, strategy });
-            }
-            AppIntent::RebaseOnto => return self.branch_op(|onto| GitOp::Rebase { onto }),
             AppIntent::ContinueOperation => {
                 return self.resume(bisect::continue_disabled, GitOp::Continue);
             }
             AppIntent::SkipOperation if bisect::bisect_only(self) => {
-                return self.update(AppIntent::BisectHead(BisectMark::Skip));
+                return self.update(AppIntent::Commits(CommitsIntent::Bisect(
+                    BisectIntent::MarkHead(BisectMark::Skip),
+                )));
             }
             AppIntent::SkipOperation => return self.resume(keymap::skip_disabled, GitOp::Skip),
             AppIntent::AbortOperation if bisect::bisect_only(self) => self.ask_bisect_reset(),
             AppIntent::AbortOperation => self.ask_abort(),
-            AppIntent::ConfirmAbort(operation) => {
-                return self.start_op(Ok(Some(GitOp::Abort(operation))));
-            }
-            AppIntent::CheckoutCommit => return self.ask_checkout_commit(),
-            AppIntent::RevertCommit => return self.revert_commit(),
-            AppIntent::CopyCommit if self.commits.range_anchor.is_some() => self.copy_range(),
-            AppIntent::CopyCommit => self.copy_commit(),
-            AppIntent::ClearCopied => {
-                self.copied.clear();
-                self.notice = Some("Cleared copied commits".into());
-            }
-            AppIntent::PasteCommits => return self.paste_commits(),
-            AppIntent::CopyCommitText(what) => return self.copy_commit_text(what),
-            AppIntent::CommitMessageLoaded { tag, oid, result } => {
-                return self.commit_message_loaded(tag, oid, result);
-            }
             AppIntent::CopyFailed(why) => {
                 self.notice_text = None;
                 self.push_error(ErrorPopup::new(
@@ -1000,70 +732,6 @@ impl AppState {
                     "Close this; nothing was copied.",
                 ));
             }
-            AppIntent::OpenIgnore => self.open_ignore(),
-            AppIntent::IgnorePatternAnswered(text) => return self.ignore_answered(text),
-            AppIntent::IgnoreWritten { tag, result } => return self.ignore_written(tag, result),
-            AppIntent::ResetTo(mode) => return self.reset_to(mode),
-            AppIntent::ConfirmResetHard => {
-                return self.answer_question(KeyScope::ResetHard, Answer::YOnly);
-            }
-            AppIntent::LeftBehindChecked {
-                tag,
-                op,
-                head,
-                result,
-            } => return self.left_behind_checked(tag, op, head, result),
-            AppIntent::ConfirmLeaveCommits => return self.confirm_leave_commits(),
-            AppIntent::RewriteCommit(
-                edit @ (rebase_plan::Edit::Squash
-                | rebase_plan::Edit::Fixup
-                | rebase_plan::Edit::Drop),
-            ) if self.commits.range_anchor.is_some() => return self.rewrite_range(edit),
-            AppIntent::RewriteCommit(edit) => return self.rewrite(Rewrite::Edit(edit)),
-            AppIntent::ConfirmDropRange(ids) => return self.confirm_drop_range(ids),
-            AppIntent::MoveCommit(direction) => return self.rewrite(Rewrite::Move(direction)),
-            AppIntent::CreateFixup => return self.create_fixup(),
-            AppIntent::Autosquash => self.ask_autosquash(),
-            AppIntent::ConfirmAutosquash => return self.autosquash(),
-            AppIntent::FindFixupBase => return self.find_fixup_base(),
-            AppIntent::FixupBaseFound { tag, result } => self.fixup_base_found(tag, result),
-            AppIntent::PatchToggleFile => self.patch_toggle_file(),
-            AppIntent::OpenPatchMenu => {
-                if self.context == Context::Workspace {
-                    self.popups.push(Popup::Menu {
-                        id: menu::MenuId::CustomPatch,
-                        cursor: 0,
-                    });
-                }
-            }
-            AppIntent::ChoosePatchAction(choice) => self.choose_patch_action(choice),
-            AppIntent::PatchCommitMessage(message) => self.patch_commit_message(message),
-            AppIntent::ConfirmPatchAction(action) => return self.run_patch_action(action),
-            AppIntent::ResetPatch => {
-                if self.custom_patch.take().is_none() {
-                    self.notice = Some(NO_PATCH.into());
-                }
-            }
-            AppIntent::InsertBreak => return self.rewrite(Rewrite::Break),
-            AppIntent::BranchTipsLoaded { tag, result } => self.branch_tips_loaded(tag, result),
-            AppIntent::RebaseTodoLoaded { tag, result } => self.rebase_todo_loaded(tag, result),
-            AppIntent::RebaseTodoWritten { tag, result } => {
-                return self.rebase_todo_written(tag, result);
-            }
-            AppIntent::BisectSelected(mark) => return self.bisect_selected(mark),
-            AppIntent::BisectHead(mark) => return self.bisect_head(mark),
-            AppIntent::ConfirmBisectReset => return self.bisect_reset(),
-            AppIntent::SwitchCommitsTab => return self.switch_commits_tab(),
-            AppIntent::ReflogNext => {
-                self.commits.reflog.list.move_by(1);
-            }
-            AppIntent::ReflogPrev => {
-                self.commits.reflog.list.move_by(-1);
-            }
-            AppIntent::ReflogLoaded { tag, result } => return self.reflog_loaded(tag, result),
-            AppIntent::Undo => return self.travel(reflog::Direction::Undo),
-            AppIntent::Redo => return self.travel(reflog::Direction::Redo),
-            AppIntent::ConfirmTravel => return self.confirm_travel(),
             AppIntent::OpenFilter => self.open_filter(),
             AppIntent::OpenSearch if self.review_files_shown() => {
                 self.input = Some(search_input(InputTarget::PreviewSearch, &self.diff.search));
@@ -1091,11 +759,6 @@ impl AppState {
             AppIntent::PaneEscape => return self.pane_escape(),
             AppIntent::SearchNext => return self.step_search(false),
             AppIntent::SearchPrev => return self.step_search(true),
-            AppIntent::OpenLogFilter(field) => self.open_log_filter(field),
-            AppIntent::LogOfFile => return self.log_of_file(),
-            AppIntent::ToggleDiffMark => self.toggle_diff_mark(),
-            AppIntent::OpenDiff => return self.open_branch_diff(),
-            AppIntent::DiffResolved { tag, result } => return self.diff_resolved(tag, result),
         }
         vec![]
     }
@@ -1218,15 +881,6 @@ impl AppState {
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
-            // It reaches GitHub, so only `y` answers it.
-            Some(Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
-                return KeyScope::CreatePullRequest;
-            }
-            Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
-            Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
-            Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
-            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
-            Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Question(q)) => return q.scope,
@@ -1346,26 +1000,27 @@ impl AppState {
         self.update(item.intent.clone())
     }
 
+    /// A popup was closed without an answer: each feature forgets the
+    /// draft it kept for that popup. Each one matches only its own
+    /// popups, so core names none of them.
+    fn popup_closed(&mut self, closed: &Popup) {
+        self.custom_commands_popup_closed(closed);
+        self.branches_popup_closed(closed);
+        self.remotes_popup_closed(closed);
+        self.tags_popup_closed(closed);
+        self.stash_popup_closed(closed);
+        self.worktrees_popup_closed(closed);
+        self.files_popup_closed(closed);
+        self.review_popup_closed(closed);
+        self.pull_requests_popup_closed(closed);
+    }
+
     /// Close the question on top and run its answer, if it has one.
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
         if let Some(Popup::Question(q)) = self.popups.last() {
             return self.answer_confirm_question(q.scope, yes);
         }
         match self.popups.pop() {
-            // Only `ConfirmCreatePullRequest` creates; yes here keeps the
-            // question, no closes it and drops the draft.
-            Some(popup @ Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
-                if yes {
-                    self.popups.push(popup);
-                } else {
-                    self.pr_draft = None;
-                }
-                vec![]
-            }
-            Some(Popup::Confirm(kind)) => {
-                let answer = if yes { Some(kind.yes()) } else { kind.no() };
-                answer.map_or_else(Vec::new, |intent| self.update(intent))
-            }
             Some(Popup::Credential(prompt)) if prompt.confirm => {
                 // Ssh reads an exit of 0 with "yes" as allowed.
                 vec![Effect::AnswerCredential(yes.then(|| Secret::new("yes")))]
@@ -1379,13 +1034,19 @@ impl AppState {
     }
 
     /// Answer the question on top, asked in `scope`. No closes any
-    /// question. Yes answers only a discard and the detached checkout:
-    /// every other question answers only to its own intent (such as
-    /// `ConfirmDeleteBranch` or `ConfirmResetHard`), so yes here keeps it
-    /// open.
+    /// question, and its feature forgets the draft it kept for it. Yes
+    /// answers a discard, the `y`-or-Enter questions (quit, force push,
+    /// stage resolved and the detached checkout) and the `y`-only
+    /// questions whose binding sends `ConfirmYes` (abort, bisect reset,
+    /// autosquash, custom patch and drop range). Every other question
+    /// answers only to its own intent (such as
+    /// `BranchesIntent::ConfirmDelete` or `ConfirmCreatePullRequest`), so
+    /// yes here keeps it open.
     fn answer_confirm_question(&mut self, scope: KeyScope, yes: bool) -> Vec<Effect> {
         if !yes {
-            self.popups.pop();
+            if let Some(closed) = self.popups.pop() {
+                self.popup_closed(&closed);
+            }
             return vec![];
         }
         match scope {
@@ -1403,6 +1064,10 @@ impl AppState {
                 }
             }
             KeyScope::Confirm => self.answer_question(scope, Answer::YOrEnter),
+            KeyScope::AbortConfirm
+            | KeyScope::AutosquashConfirm
+            | KeyScope::PatchConfirm
+            | KeyScope::DropRangeConfirm => self.answer_question(scope, Answer::YOnly),
             _ => vec![],
         }
     }
@@ -1540,29 +1205,6 @@ impl AppState {
             .map_or_else(|| kind.title().to_string(), |t| sanitize(t.as_bytes()))
     }
 
-    /// A yes/no question's text.
-    pub fn confirm_question(&self, kind: &ConfirmKind) -> Cow<'static, str> {
-        match kind {
-            ConfirmKind::Abort(Operation::Bisect) => {
-                Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
-            }
-            ConfirmKind::CreatePullRequest => match pull_requests::question(self) {
-                Some(question) => Cow::Owned(question),
-                None => Cow::Borrowed(kind.question()),
-            },
-            ConfirmKind::CustomPatch(action) => match self.patch_question(action) {
-                Some(question) => Cow::Owned(question),
-                None => Cow::Borrowed(kind.question()),
-            },
-            // Only the count: subjects and the filter are not drawn here.
-            ConfirmKind::DropRange(ids) => Cow::Owned(format!(
-                "Drop {} commits and their changes from the history? (y/n)",
-                ids.len()
-            )),
-            _ => Cow::Borrowed(kind.question()),
-        }
-    }
-
     /// Show an error, unless the same one is already on top: a repeated
     /// failure should not need dismissing twice.
     pub(crate) fn push_error(&mut self, error: ErrorPopup) {
@@ -1614,7 +1256,7 @@ impl AppState {
     /// Take new diff options, with the context clamped to its limits, and
     /// reload the selected file's diff with them. `select` keeps the scroll
     /// and the hunk cursor, since the file is the same one.
-    fn set_diff_options(&mut self, options: DiffOptions) -> Vec<Effect> {
+    pub(crate) fn set_diff_options(&mut self, options: DiffOptions) -> Vec<Effect> {
         let options = DiffOptions {
             context: options.context.clamp(MIN_CONTEXT, MAX_CONTEXT),
             ..options
@@ -1727,7 +1369,7 @@ impl AppState {
         vec![Effect::LoadPatch { tag, request }]
     }
 
-    fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
+    pub(crate) fn toggle_hunk_stage(&mut self) -> Vec<Effect> {
         if let Some(view) = self.hunk_view()
             && view.commit.is_some()
         {
@@ -1741,7 +1383,7 @@ impl AppState {
         }
     }
 
-    fn toggle_lines_stage(&mut self) -> Vec<Effect> {
+    pub(crate) fn toggle_lines_stage(&mut self) -> Vec<Effect> {
         if let Some(view) = self.hunk_view()
             && view.commit.is_some()
         {
@@ -2135,7 +1777,7 @@ impl AppState {
     /// Copy the selected commit's hash, short hash or subject now, or
     /// read its full message first. Pure, so it works while an operation
     /// runs.
-    fn copy_commit_text(&mut self, what: CopyWhat) -> Vec<Effect> {
+    pub(crate) fn copy_commit_text(&mut self, what: CopyWhat) -> Vec<Effect> {
         let Some((id, short)) = self.commit_for_action(keymap::no_commit_selected) else {
             return vec![];
         };
@@ -2178,7 +1820,7 @@ impl AppState {
     }
 
     /// Copy the message read for the last request; an older one is dropped.
-    fn commit_message_loaded(
+    pub(crate) fn commit_message_loaded(
         &mut self,
         tag: Tag,
         oid: CommitId,
@@ -2230,14 +1872,26 @@ mod confirm_guard;
 pub(crate) use crate::op_slot::failure_next;
 pub(crate) use crate::op_slot::failure_title;
 
-use crate::features::commits::custom_patch::NO_PATCH;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
+    use crate::features::branches::tags::TagsIntent;
+    use crate::features::commit::CommitIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::custom_patch::CustomPatchIntent;
+    use crate::features::commits::rewrite::RewriteIntent;
+    use crate::features::conflicts::ConflictsIntent;
+    use crate::features::diff::DiffIntent;
+    use crate::features::files::FilesIntent;
+    use crate::features::operation::OperationIntent;
+    use crate::features::operation::abort_question;
+    use crate::features::sync::SyncIntent;
     use crate::git::diff::DiffSide;
+    use crate::git::rebase_plan;
     use crate::git::status::{EntryKind, RepoStatus};
     use crate::git::submodule::SubmoduleState;
     use crate::intent::Scroll;
@@ -2499,8 +2153,8 @@ mod tests {
     fn a_refresh_keeps_the_selected_path_and_its_scroll() {
         let (mut state, effects) = with_files(three_files(), 10);
         state.update(chunk(diff_tag(&effects), 50, true));
-        state.update(AppIntent::SelectNext);
-        let tag = diff_tag(&state.update(AppIntent::SelectNext));
+        state.update(AppIntent::Files(FilesIntent::Next));
+        let tag = diff_tag(&state.update(AppIntent::Files(FilesIntent::Next)));
         state.update(chunk(tag, 50, true));
         state.update(AppIntent::ScrollDiff(Scroll::LineDown));
         assert_eq!(state.selected, Some(2));
@@ -2519,8 +2173,8 @@ mod tests {
     #[test]
     fn a_refresh_that_drops_the_selected_file_clamps_and_resets_scroll() {
         let (mut state, _) = with_files(three_files(), 10);
-        state.update(AppIntent::SelectNext);
-        let tag = diff_tag(&state.update(AppIntent::SelectNext));
+        state.update(AppIntent::Files(FilesIntent::Next));
+        let tag = diff_tag(&state.update(AppIntent::Files(FilesIntent::Next)));
         state.update(chunk(tag, 50, true));
         state.update(AppIntent::ScrollDiff(Scroll::LineDown));
 
@@ -2642,7 +2296,7 @@ mod tests {
     fn slow_before_any_chunk_shows_loading() {
         let (mut state, effects) = with_files(three_files(), 13);
         let tag = diff_tag(&effects);
-        state.update(AppIntent::DiffSlow { tag });
+        state.update(AppIntent::Diff(DiffIntent::Slow { tag }));
         assert!(state.diff.show_loading);
 
         state.update(chunk(tag, 1, true));
@@ -2654,7 +2308,7 @@ mod tests {
         let (mut state, effects) = with_files(three_files(), 13);
         let tag = diff_tag(&effects);
         state.update(chunk(tag, 1, false));
-        state.update(AppIntent::DiffSlow { tag });
+        state.update(AppIntent::Diff(DiffIntent::Slow { tag }));
         assert!(!state.diff.show_loading);
     }
 
@@ -2728,7 +2382,7 @@ mod tests {
     fn a_finished_op_refreshes_status_and_keeps_the_selected_path() {
         let (mut state, _) = with_files(three_files(), 24);
         select_path(&mut state, "b.rs");
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         let busy = state.busy_count();
 
         let effects = state.update(finished(tag, op, Ok(())));
@@ -2768,7 +2422,7 @@ mod tests {
     #[test]
     fn a_failed_op_records_the_error_and_still_refreshes() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
 
         let effects = state.update(finished(tag, op, Err("fatal: index.lock".into())));
 
@@ -2791,7 +2445,7 @@ mod tests {
     #[test]
     fn a_successful_op_clears_an_earlier_error() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         state.set_op_error("left over".into());
         state.update(finished(tag, op, Ok(())));
         assert_eq!(state.op_error(), None);
@@ -2800,7 +2454,7 @@ mod tests {
     #[test]
     fn a_stale_generation_op_lowers_busy_and_does_nothing_else() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         let busy = state.busy_count();
         state.generation += 1;
 
@@ -2930,7 +2584,7 @@ mod tests {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.key_focus(), KeyScope::Confirm);
         assert!(!state.should_quit);
 
@@ -2943,7 +2597,7 @@ mod tests {
     fn n_or_esc_declines_the_confirm_without_quitting() {
         for key in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = AppState::new(Context::Workspace);
-            state.update(AppIntent::Ask(ConfirmKind::Quit));
+            state.update(AppIntent::AskQuit);
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, []);
             assert!(!state.should_quit);
@@ -2951,7 +2605,7 @@ mod tests {
     }
 
     fn failed_stage(state: &mut AppState, message: &str) -> Vec<Effect> {
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         state.update(finished(tag, op, Err(message.into())))
     }
 
@@ -2968,7 +2622,7 @@ mod tests {
     #[test]
     fn a_stale_failed_op_pushes_no_error() {
         let (mut state, _) = with_files(three_files(), 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStage));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStage)));
         state.generation += 1;
         state.update(finished(tag, op, Err("boom".into())));
         assert_eq!(state.popups, []);
@@ -2977,7 +2631,7 @@ mod tests {
     #[test]
     fn a_failed_unstage_all_names_what_failed() {
         let (mut state, _) = with_files(vec![changed("b.rs", 'M', '.')], 24);
-        let (tag, op) = op_of(&state.update(AppIntent::ToggleStageAll));
+        let (tag, op) = op_of(&state.update(AppIntent::Files(FilesIntent::ToggleStageAll)));
         state.update(finished(tag, op, Err("no".into())));
         assert!(
             matches!(state.popups.as_slice(), [Popup::Error(e)] if e.title == "Could not unstage everything"),
@@ -3250,10 +2904,10 @@ mod tests {
 
         // The patch failed to load: nothing to discard from.
         let (tag, _) = patch_load(&press(&mut state, KeyCode::Char('t')));
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Err("fatal: bad".into()),
-        });
+        }));
         state.popups.clear();
         assert_eq!(state.update(AppIntent::Discard), vec![]);
         assert_eq!(state.notice, Some(NO_CHANGES.into()));
@@ -3287,13 +2941,13 @@ mod tests {
     #[test]
     fn more_and_less_context_reload_the_selected_diff_with_the_new_size() {
         let (mut state, _) = with_files(three_files(), 24);
-        let effects = state.update(AppIntent::MoreContext);
+        let effects = state.update(AppIntent::Diff(DiffIntent::MoreContext));
         assert_eq!(state.diff_options.context, 4);
         assert_eq!(effects.len(), 2, "{effects:?}");
         assert_eq!(diff_request(&effects).options.context, 4);
 
-        let effects = state.update(AppIntent::LessContext);
-        let effects2 = state.update(AppIntent::LessContext);
+        let effects = state.update(AppIntent::Diff(DiffIntent::LessContext));
+        let effects2 = state.update(AppIntent::Diff(DiffIntent::LessContext));
         assert_eq!(state.diff_options.context, 2);
         assert_eq!(diff_request(&effects).options.context, 3);
         assert_eq!(diff_request(&effects2).options.context, 2);
@@ -3302,7 +2956,7 @@ mod tests {
     #[test]
     fn a_context_change_in_diff_focus_reloads_the_patch_with_the_same_options() {
         let mut state = focused(three_files(), TWO_HUNKS);
-        let effects = state.update(AppIntent::MoreContext);
+        let effects = state.update(AppIntent::Diff(DiffIntent::MoreContext));
         let (_, patch) = patch_load(&effects);
         assert_eq!(diff_request(&effects).options, state.diff_options);
         assert_eq!(patch.options, state.diff_options);
@@ -3319,13 +2973,19 @@ mod tests {
             assert_eq!(press_char(&mut state, c), vec![], "{c}");
             assert_eq!(state.notice, Some("Already at the most context".into()));
         }
-        assert_eq!(state.update(AppIntent::MoreContext), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::MoreContext)),
+            vec![]
+        );
         assert_eq!(state.diff_options.context, MAX_CONTEXT);
 
         state.diff_options.context = MIN_CONTEXT;
         assert_eq!(press_char(&mut state, '-'), vec![]);
         assert_eq!(state.notice, Some("Already at the least context".into()));
-        assert_eq!(state.update(AppIntent::LessContext), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::LessContext)),
+            vec![]
+        );
         assert_eq!(state.diff_options.context, MIN_CONTEXT);
     }
 
@@ -3359,10 +3019,22 @@ mod tests {
     #[test]
     fn without_a_selected_file_the_options_change_but_nothing_loads() {
         let (mut state, _) = with_files(vec![], 24);
-        assert_eq!(state.update(AppIntent::MoreContext), vec![]);
-        assert_eq!(state.update(AppIntent::ToggleWhitespace), vec![]);
-        assert_eq!(state.update(AppIntent::LessContext), vec![]);
-        assert_eq!(state.update(AppIntent::LessContext), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::MoreContext)),
+            vec![]
+        );
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace)),
+            vec![]
+        );
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::LessContext)),
+            vec![]
+        );
+        assert_eq!(
+            state.update(AppIntent::Diff(DiffIntent::LessContext)),
+            vec![]
+        );
         assert_eq!(
             state.diff_options,
             DiffOptions {
@@ -3375,12 +3047,12 @@ mod tests {
     #[test]
     fn toggling_whitespace_flips_it_and_reloads() {
         let mut state = focused(three_files(), TWO_HUNKS);
-        let effects = state.update(AppIntent::ToggleWhitespace);
+        let effects = state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         assert!(state.diff_options.ignore_whitespace);
         assert!(diff_request(&effects).options.ignore_whitespace);
         assert!(patch_load(&effects).1.options.ignore_whitespace);
 
-        let effects = state.update(AppIntent::ToggleWhitespace);
+        let effects = state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         assert!(!state.diff_options.ignore_whitespace);
         assert!(!patch_load(&effects).1.options.ignore_whitespace);
     }
@@ -3389,12 +3061,12 @@ mod tests {
     fn hidden_whitespace_refuses_every_key_that_applies_a_patch() {
         const REASON: &str = "Whitespace is hidden; press w to stage";
         let mut state = focused(three_files(), TWO_HUNKS);
-        let effects = state.update(AppIntent::ToggleWhitespace);
+        let effects = state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         let (tag, _) = patch_load(&effects);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         for c in [' ', 'v', 'd', 'e'] {
             assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
             assert_eq!(state.notice, Some(REASON.into()), "{c:?}");
@@ -3403,19 +3075,19 @@ mod tests {
         }
 
         // Line mode, entered before whitespace was hidden.
-        state.update(AppIntent::ToggleWhitespace);
+        state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         let (tag, _) = patch_load(&state.update(AppIntent::FocusDiff));
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         press_char(&mut state, 'v');
         assert_eq!(state.panel_focus(), KeyScope::Lines);
-        let (tag, _) = patch_load(&state.update(AppIntent::ToggleWhitespace));
-        state.update(AppIntent::PatchLoaded {
+        let (tag, _) = patch_load(&state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace)));
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(TWO_HUNKS)),
-        });
+        }));
         for c in [' ', 'd'] {
             assert_eq!(press_char(&mut state, c), vec![], "{c:?}");
             assert_eq!(state.notice, Some(REASON.into()), "{c:?}");
@@ -3424,10 +3096,10 @@ mod tests {
 
         // The intents themselves refuse too, whatever sent them.
         for intent in [
-            AppIntent::ToggleHunkStage,
-            AppIntent::ToggleLinesStage,
+            AppIntent::Diff(DiffIntent::ToggleHunkStage),
+            AppIntent::Diff(DiffIntent::ToggleLinesStage),
             AppIntent::Discard,
-            AppIntent::EditHunk,
+            AppIntent::Diff(DiffIntent::EditHunk),
         ] {
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
         }
@@ -3437,7 +3109,7 @@ mod tests {
     #[test]
     fn hidden_whitespace_leaves_file_level_stage_and_discard_alone() {
         let (mut state, _) = with_files(three_files(), 24);
-        state.update(AppIntent::ToggleWhitespace);
+        state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         let effects = press_char(&mut state, ' ');
         assert!(
             matches!(effects.as_slice(), [Effect::RunOp { .. }]),
@@ -3461,7 +3133,7 @@ mod tests {
         }
         assert_eq!(state.diff.scroll, 7);
 
-        let effects = state.update(AppIntent::MoreContext);
+        let effects = state.update(AppIntent::Diff(DiffIntent::MoreContext));
         assert_eq!(state.diff.scroll, 7);
         let tag = diff_tag(&effects);
         state.update(chunk(tag, 8, true));
@@ -3476,37 +3148,37 @@ mod tests {
     #[test]
     fn a_context_change_keeps_the_selected_hunk() {
         let mut state = focused(three_files(), THREE_HUNKS);
-        state.update(AppIntent::NextHunk);
-        state.update(AppIntent::NextHunk);
+        state.update(AppIntent::Diff(DiffIntent::NextHunk));
+        state.update(AppIntent::Diff(DiffIntent::NextHunk));
         assert_eq!(view(&state).hunk, 2);
 
-        let effects = state.update(AppIntent::MoreContext);
+        let effects = state.update(AppIntent::Diff(DiffIntent::MoreContext));
         assert_eq!(view(&state).hunk, 2);
         let (tag, _) = patch_load(&effects);
-        state.update(AppIntent::PatchLoaded {
+        state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
             tag,
             result: Ok(patch_of(THREE_HUNKS)),
-        });
+        }));
         assert_eq!(view(&state).hunk, 2);
     }
 
     #[test]
     fn changed_options_last_for_the_session() {
         let (mut state, _) = with_files(three_files(), 24);
-        state.update(AppIntent::MoreContext);
-        state.update(AppIntent::ToggleWhitespace);
+        state.update(AppIntent::Diff(DiffIntent::MoreContext));
+        state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         let changed = state.diff_options;
         assert_ne!(changed, DiffOptions::default());
 
         assert_eq!(
-            diff_request(&state.update(AppIntent::SelectNext)).options,
+            diff_request(&state.update(AppIntent::Files(FilesIntent::Next))).options,
             changed
         );
         let (_, request) = patch_load(&state.update(AppIntent::FocusDiff));
         assert_eq!(request.options, changed);
         state.update(AppIntent::FocusLeft);
         assert_eq!(
-            diff_request(&state.update(AppIntent::SelectPrev)).options,
+            diff_request(&state.update(AppIntent::Files(FilesIntent::Prev))).options,
             changed
         );
 
@@ -3824,7 +3496,7 @@ mod tests {
         state.files.clear();
         state.selected = None;
         assert_eq!(
-            state.update(AppIntent::CloseCommitFiles),
+            state.update(AppIntent::Commits(CommitsIntent::CloseFiles)),
             vec![Effect::CancelDiff]
         );
         assert_eq!(state.diff, DiffPane::default());
@@ -3857,7 +3529,7 @@ mod tests {
     fn new_diff_options_reload_the_open_commits_file() {
         let mut state = on_commit_five();
         opened(&mut state, two_commit_files());
-        let request = diff_request(&state.update(AppIntent::ToggleWhitespace));
+        let request = diff_request(&state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace)));
         assert!(request.options.ignore_whitespace);
         assert_eq!(request.commit, Some(range_of("c5", "c6")));
         assert_eq!(request.path, "src/lib.rs".into());
@@ -4178,18 +3850,22 @@ mod tests {
             other => panic!("expected SetRepo, LoadStatus and LoadBranches, got {other:?}"),
         };
         state.update(loaded(tag, &[]));
-        state.update(AppIntent::BranchesLoaded {
+        state.update(AppIntent::Branches(BranchesIntent::Loaded {
             tag: list,
             result: Ok(vec![]),
-        });
-        state.update(AppIntent::RemotesLoaded {
-            tag: remotes,
-            result: Ok(vec![]),
-        });
-        state.update(AppIntent::TagsLoaded {
-            tag: tags,
-            result: Ok(vec![]),
-        });
+        }));
+        state.update(AppIntent::Branches(BranchesIntent::Remotes(
+            RemotesIntent::Loaded {
+                tag: remotes,
+                result: Ok(vec![]),
+            },
+        )));
+        state.update(AppIntent::Branches(BranchesIntent::Tags(
+            TagsIntent::Loaded {
+                tag: tags,
+                result: Ok(vec![]),
+            },
+        )));
         assert_eq!(state.busy_count(), 0);
 
         let refs = snapshot_tag(&watch(&mut state, WatchEvent::PollRefs));
@@ -4435,9 +4111,11 @@ mod tests {
     #[test]
     fn a_bisect_alone_stops_a_merge_until_it_is_reset() {
         let mut state = in_progress(&[Operation::Bisect]);
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         assert_eq!(
-            state.update(AppIntent::Merge(MergeStrategy::FastForwardOnly)),
+            state.update(AppIntent::Operation(OperationIntent::Merge(
+                MergeStrategy::FastForwardOnly
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()));
@@ -4446,7 +4124,7 @@ mod tests {
     #[test]
     fn enter_still_answers_the_other_questions() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(AppIntent::Ask(ConfirmKind::Quit));
+        state.update(AppIntent::AskQuit);
         assert_eq!(state.key_focus(), KeyScope::Confirm);
         press(&mut state, KeyCode::Enter);
         assert!(state.should_quit);
@@ -4456,8 +4134,10 @@ mod tests {
     #[test]
     fn a_finished_squash_says_the_changes_wait_to_be_committed() {
         let mut state = in_progress(&[]);
-        state.update(AppIntent::BranchNext);
-        let (tag, op) = op_of(&state.update(AppIntent::Merge(MergeStrategy::Squash)));
+        state.update(AppIntent::Branches(BranchesIntent::Next));
+        let (tag, op) = op_of(&state.update(AppIntent::Operation(OperationIntent::Merge(
+            MergeStrategy::Squash,
+        ))));
         let effects = state.update(finished(tag, op, Ok(())));
         assert_eq!(
             state.notice,
@@ -4531,22 +4211,26 @@ mod tests {
         let mut questions = vec![
             (
                 "checkout on a branch".to_string(),
-                on_main(AppIntent::CheckoutCommit),
+                on_main(AppIntent::Commits(CommitsIntent::Checkout)),
                 checkout.clone(),
             ),
             (
                 "checkout from a detached HEAD".to_string(),
-                checked(AppIntent::CheckoutCommit, Ok(vec![])).0,
+                checked(AppIntent::Commits(CommitsIntent::Checkout), Ok(vec![])).0,
                 checkout,
             ),
             (
                 "hard reset on a branch".to_string(),
-                on_main(AppIntent::ResetTo(ResetMode::Hard)),
+                on_main(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard))),
                 hard.clone(),
             ),
             (
                 "hard reset from a detached HEAD".to_string(),
-                checked(AppIntent::ResetTo(ResetMode::Hard), Ok(vec![])).0,
+                checked(
+                    AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
+                    Ok(vec![]),
+                )
+                .0,
                 hard,
             ),
         ];
@@ -4564,9 +4248,9 @@ mod tests {
     /// Answer the open question with `y`, as the key does.
     fn answer_yes(state: &mut AppState) -> Vec<Effect> {
         match state.popups.last() {
-            Some(Popup::Question(q)) if q.scope == KeyScope::LeaveCommits => {
-                state.update(AppIntent::ConfirmLeaveCommits)
-            }
+            Some(Popup::Question(q)) if q.scope == KeyScope::LeaveCommits => state.update(
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits)),
+            ),
             _ => press_char(state, 'y'),
         }
     }
@@ -4641,10 +4325,10 @@ mod tests {
         let mut state = on_commit();
         state.commits.rows[1].oid = "--upload-pack=x".into();
         for intent in [
-            AppIntent::CheckoutCommit,
-            AppIntent::RevertCommit,
-            AppIntent::ResetTo(ResetMode::Soft),
-            AppIntent::ResetTo(ResetMode::Hard),
+            AppIntent::Commits(CommitsIntent::Checkout),
+            AppIntent::Commits(CommitsIntent::Revert),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
@@ -4717,7 +4401,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Revert))]
+            [Popup::Question(abort_question(Operation::Revert).unwrap())]
         );
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Abort(Operation::Revert));
@@ -4725,6 +4409,7 @@ mod tests {
 
     #[test]
     fn a_credential_answer_never_reaches_the_command_log() {
+        use crate::features::command_log::CommandLogIntent;
         use crate::git::command_line::display_line;
         use crate::git::recording::{CommandEvent, CommandOutcome};
         use crate::git::remote::{AskpassEnv, remote_command};
@@ -4736,17 +4421,21 @@ mod tests {
             git_askpass: true,
         };
         let line = display_line(&remote_command(&PUSH, Some(&askpass)));
-        state.update(AppIntent::CommandLogged(CommandEvent::Started {
-            id: 0,
-            line,
-            attached: false,
-        }));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Started {
+                id: 0,
+                line,
+                attached: false,
+            },
+        )));
         state.update(AppIntent::CredentialAnswered(Some(Secret::new("hunter2"))));
-        state.update(AppIntent::CommandLogged(CommandEvent::Finished {
-            id: 0,
-            outcome: CommandOutcome::Ok,
-            elapsed: std::time::Duration::from_millis(5),
-        }));
+        state.update(AppIntent::CommandLog(CommandLogIntent::Logged(
+            CommandEvent::Finished {
+                id: 0,
+                outcome: CommandOutcome::Ok,
+                elapsed: std::time::Duration::from_millis(5),
+            },
+        )));
 
         let entries = state.command_log.entries();
         assert_eq!(entries.len(), 1);
@@ -4864,12 +4553,13 @@ mod tests {
     fn a_while_only_bisecting_asks_then_y_resets_and_only_y_answers() {
         let mut state = testing_c1(&[Operation::Bisect]);
         assert_eq!(press_char(&mut state, 'a'), vec![]);
-        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        let question = [Popup::Question(state.bisect_reset_question())];
         assert_eq!(state.popups, question);
         assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
         assert!(
             state
-                .confirm_question(&ConfirmKind::Abort(Operation::Bisect))
+                .bisect_reset_question()
+                .text
                 .contains("HEAD goes back to main;")
         );
 
@@ -4896,7 +4586,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Rebase))]
+            [Popup::Question(abort_question(Operation::Rebase).unwrap())]
         );
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         let (_, op) = op_of(&press_char(&mut state, 'y'));
@@ -4932,8 +4622,18 @@ mod tests {
         let mut cases: Vec<HeadMove> = vec![
             ("commit key", to_commit, vec![], key('c')),
             ("amend key", to_commit, vec![], key('A')),
-            ("open commit", to_commit, vec![], AppIntent::OpenCommit),
-            ("open amend", to_commit, vec![], AppIntent::OpenAmend),
+            (
+                "open commit",
+                to_commit,
+                vec![],
+                AppIntent::Commit(CommitIntent::Open),
+            ),
+            (
+                "open amend",
+                to_commit,
+                vec![],
+                AppIntent::Commit(CommitIntent::OpenAmend),
+            ),
             (
                 "commit item",
                 to_commit,
@@ -4950,72 +4650,106 @@ mod tests {
                 "checkout commit",
                 on_commit,
                 vec![],
-                AppIntent::CheckoutCommit,
+                AppIntent::Commits(CommitsIntent::Checkout),
             ),
-            ("revert", on_commit, vec![], AppIntent::RevertCommit),
+            (
+                "revert",
+                on_commit,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Revert),
+            ),
             ("reset menu", on_commit, vec![], key('X')),
-            ("paste", one_copied, vec![], AppIntent::PasteCommits),
+            (
+                "paste",
+                one_copied,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Copy(CopyIntent::Paste)),
+            ),
             (
                 "move up",
                 on_linear_log,
                 vec![],
-                AppIntent::MoveCommit(Direction::Up),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Up))),
             ),
             (
                 "move down",
                 on_linear_log,
                 vec![],
-                AppIntent::MoveCommit(Direction::Down),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Down))),
             ),
-            ("autosquash", with_a_fixup, vec![], AppIntent::Autosquash),
-            ("create fixup", with_a_fixup, vec![], AppIntent::CreateFixup),
+            (
+                "autosquash",
+                with_a_fixup,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash)),
+            ),
+            (
+                "create fixup",
+                with_a_fixup,
+                vec![],
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup)),
+            ),
             (
                 "checkout branch",
                 with_branches,
-                vec![AppIntent::BranchNext],
-                AppIntent::CheckoutBranch,
+                vec![AppIntent::Branches(BranchesIntent::Next)],
+                AppIntent::Branches(BranchesIntent::Checkout),
             ),
-            ("new branch", with_branches, vec![], AppIntent::NewBranch),
+            (
+                "new branch",
+                with_branches,
+                vec![],
+                AppIntent::Branches(BranchesIntent::New),
+            ),
             (
                 "new branch named",
                 with_branches,
-                vec![AppIntent::NewBranch],
-                AppIntent::CreateBranchNamed("x".into()),
+                vec![AppIntent::Branches(BranchesIntent::New)],
+                AppIntent::Branches(BranchesIntent::CreateNamed("x".into())),
             ),
             (
                 "track",
                 on_remote_topic,
                 vec![],
-                AppIntent::TrackRemoteBranch,
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track)),
             ),
             (
                 "track named",
                 on_remote_topic,
-                vec![AppIntent::TrackRemoteBranch],
-                AppIntent::TrackRemoteBranchNamed("x".into()),
+                vec![AppIntent::Branches(BranchesIntent::Remotes(
+                    RemotesIntent::Track,
+                ))],
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(
+                    "x".into(),
+                ))),
             ),
             (
                 "merge key",
                 with_branches,
-                vec![AppIntent::BranchNext],
+                vec![AppIntent::Branches(BranchesIntent::Next)],
                 key('m'),
             ),
             (
                 "rebase onto",
                 with_branches,
-                vec![AppIntent::BranchNext],
-                AppIntent::RebaseOnto,
+                vec![AppIntent::Branches(BranchesIntent::Next)],
+                AppIntent::Operation(OperationIntent::RebaseOnto),
             ),
         ];
         for mode in [ResetMode::Soft, ResetMode::Mixed, ResetMode::Hard] {
-            cases.push(("reset to", on_commit, vec![], AppIntent::ResetTo(mode)));
+            cases.push((
+                "reset to",
+                on_commit,
+                vec![],
+                AppIntent::Commits(CommitsIntent::ResetTo(mode)),
+            ));
         }
         for edit in [Edit::Squash, Edit::Fixup, Edit::Drop, Edit::Reword] {
             cases.push((
                 "rewrite",
                 on_linear_log,
                 vec![],
-                AppIntent::RewriteCommit(edit),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(edit))),
             ));
         }
         for edit in [Edit::Squash, Edit::Fixup, Edit::Drop] {
@@ -5023,7 +4757,7 @@ mod tests {
                 "range rewrite",
                 on_linear_log,
                 range(),
-                AppIntent::RewriteCommit(edit),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(edit))),
             ));
         }
         for strategy in [
@@ -5034,8 +4768,8 @@ mod tests {
             cases.push((
                 "merge",
                 with_branches,
-                vec![AppIntent::BranchNext],
-                AppIntent::Merge(strategy),
+                vec![AppIntent::Branches(BranchesIntent::Next)],
+                AppIntent::Operation(OperationIntent::Merge(strategy)),
             ));
         }
         cases
@@ -5089,7 +4823,7 @@ mod tests {
         let before = state.commit.clone();
         assert!(matches!(before, CommitFlow::Editing(_)));
         start_bisecting(&mut state);
-        let effects = state.update(AppIntent::SubmitCommit);
+        let effects = state.update(AppIntent::Commit(CommitIntent::Submit));
         assert!(
             !effects
                 .iter()
@@ -5105,14 +4839,22 @@ mod tests {
     #[test]
     fn marks_and_reset_still_run_during_a_bisect() {
         let mut state = testing_c1(&[Operation::Bisect]);
-        let (_, op) = op_of(&state.update(AppIntent::BisectHead(BisectMark::Good)));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::MarkHead(BisectMark::Good),
+        ))));
         assert_eq!(op, bisect_mark(BisectMark::Good, "c1", false));
         state.free_op();
-        let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Bad)));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::MarkSelected(BisectMark::Bad),
+        ))));
         assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", false));
         state.free_op();
-        state.update(AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)));
-        let (_, op) = op_of(&state.update(AppIntent::ConfirmBisectReset));
+        state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::AskReset,
+        )));
+        let (_, op) = op_of(&state.update(AppIntent::Commits(CommitsIntent::Bisect(
+            BisectIntent::ConfirmReset,
+        ))));
         assert_eq!(op, GitOp::BisectReset);
         assert_eq!(state.notice, None);
     }
@@ -5133,12 +4875,15 @@ mod tests {
         }
         let mut state = ready_to_bisect();
         state.commits.selected = 1;
-        state.update(AppIntent::CheckoutCommit);
+        state.update(AppIntent::Commits(CommitsIntent::Checkout));
         assert_eq!(state.notice, None);
         assert_ne!(state.popups, []);
         let mut state = ready_to_bisect();
         state.commits.selected = 1;
-        assert_ne!(state.update(AppIntent::ResetTo(ResetMode::Soft)), vec![]);
+        assert_ne!(
+            state.update(AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft))),
+            vec![]
+        );
         assert_eq!(state.notice, None);
     }
 
@@ -5149,9 +4894,11 @@ mod tests {
             SidePanel::Commits,
         )));
         for action in [
-            AppIntent::RevertCommit,
-            AppIntent::ResetTo(ResetMode::Soft),
-            AppIntent::RewriteCommit(rebase_plan::Edit::Drop),
+            AppIntent::Commits(CommitsIntent::Revert),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(
+                rebase_plan::Edit::Drop,
+            ))),
         ] {
             state.notice = None;
             assert_eq!(state.update(action.clone()), vec![], "{action:?}");
@@ -5358,7 +5105,12 @@ mod tests {
             crate::features::commits::custom_patch::keys::patch_file_disabled(&state).as_deref(),
             Some(crate::keymap::FILTER_HIDES_ROW)
         );
-        assert_eq!(state.update(AppIntent::PatchToggleFile), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::ToggleFile
+            ))),
+            vec![]
+        );
         assert_eq!(state.custom_patch, None);
         assert_eq!(state.notice, Some(crate::keymap::FILTER_HIDES_ROW.into()));
         state.notice = None;
@@ -5387,7 +5139,7 @@ mod tests {
         for key in ['j', 'k', 'l'] {
             effects.extend(press_char(&mut state, key));
         }
-        effects.extend(state.update(AppIntent::ToggleWhitespace));
+        effects.extend(state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace)));
         let refresh = press_char(&mut state, 'r');
         assert!(!leaks(&effects), "{effects:?}");
         assert!(!leaks(&refresh), "{refresh:?}");
@@ -5395,7 +5147,7 @@ mod tests {
         // The list git was asked for is the same as without a filter.
         assert_eq!(open_files(&state).range, open_files(&twin).range);
         let mut twin = twin;
-        twin.update(AppIntent::ToggleWhitespace);
+        twin.update(AppIntent::Diff(DiffIntent::ToggleWhitespace));
         assert_eq!(refresh, press_char(&mut twin, 'r'));
     }
 
@@ -5447,7 +5199,9 @@ mod tests {
             (CopyWhat::Subject, "commit 1", "subject"),
         ];
         for (what, text, label) in cases {
-            let effects = state.update(AppIntent::CopyCommitText(what));
+            let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::CopyText(what),
+            )));
             assert_eq!(effects, [Effect::Clipboard(text.into())], "{what:?}");
             assert_eq!(
                 state.notice_text,
@@ -5457,7 +5211,9 @@ mod tests {
         }
         // The notice keeps the first 40 characters; the copy has them all.
         state.commits.rows[1].subject = "s".repeat(41);
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Subject));
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Subject),
+        )));
         assert_eq!(effects, [Effect::Clipboard("s".repeat(41))]);
         assert_eq!(
             state.notice_text,
@@ -5470,7 +5226,9 @@ mod tests {
         let mut state = copy_ready();
         state.commits.rows[1].short_oid = "-x".into();
         assert_eq!(
-            state.update(AppIntent::CopyCommitText(CopyWhat::ShortHash)),
+            state.update(AppIntent::Commits(CommitsIntent::Copy(
+                CopyIntent::CopyText(CopyWhat::ShortHash)
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some("Not a commit id git can use".into()));
@@ -5480,14 +5238,23 @@ mod tests {
     fn with_no_commit_selected_nothing_is_copied() {
         let mut state = AppState::new(Context::Workspace);
         for what in [CopyWhat::Hash, CopyWhat::Message] {
-            assert_eq!(state.update(AppIntent::CopyCommitText(what)), vec![]);
+            assert_eq!(
+                state.update(AppIntent::Commits(CommitsIntent::Copy(
+                    CopyIntent::CopyText(what)
+                ))),
+                vec![]
+            );
             assert_eq!(state.notice, Some("No commit selected".into()));
         }
         for item in menu::items(MenuId::Copy) {
             assert_eq!((item.disabled)(&state), Some("No commit selected".into()));
             // A forge URL needs a remote on a forge host as well.
             let ready = (item.disabled)(&copy_ready());
-            if item.intent == AppIntent::CopyCommitText(CopyWhat::ForgeUrl) {
+            if item.intent
+                == AppIntent::Commits(CommitsIntent::Copy(CopyIntent::CopyText(
+                    CopyWhat::ForgeUrl,
+                )))
+            {
                 assert!(
                     ready.is_some_and(|r| r.contains("forge host")),
                     "{}",
@@ -5503,31 +5270,39 @@ mod tests {
     fn the_full_message_is_read_first_and_only_the_latest_read_is_copied() {
         let mut state = copy_ready();
         let busy = state.busy_count();
-        let first = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let first = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag: old, oid }] = first.as_slice() else {
             panic!("expected a message load, got {first:?}");
         };
         assert_eq!(oid, &cid(COPIED_OID));
         assert!(old.user);
         assert_eq!(state.busy_count(), busy + 1);
-        let second = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let second = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag: new, .. }] = second.as_slice() else {
             panic!("expected a message load, got {second:?}");
         };
         assert_eq!(state.busy_count(), busy + 2);
 
-        let stale = state.update(AppIntent::CommitMessageLoaded {
-            tag: *old,
-            oid: cid(COPIED_OID),
-            result: Ok("old".into()),
-        });
+        let stale = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::MessageLoaded {
+                tag: *old,
+                oid: cid(COPIED_OID),
+                result: Ok("old".into()),
+            },
+        )));
         assert_eq!(stale, vec![]);
         assert_eq!(state.busy_count(), busy + 1);
-        let effects = state.update(AppIntent::CommitMessageLoaded {
-            tag: *new,
-            oid: cid(COPIED_OID),
-            result: Ok("subj\n\nbody".into()),
-        });
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::MessageLoaded {
+                tag: *new,
+                oid: cid(COPIED_OID),
+                result: Ok("subj\n\nbody".into()),
+            },
+        )));
         assert_eq!(effects, [Effect::Clipboard("subj\n\nbody".into())]);
         assert_eq!(
             state.notice_text.as_deref(),
@@ -5542,20 +5317,24 @@ mod tests {
     #[test]
     fn a_failed_read_or_copy_shows_an_error() {
         let mut state = copy_ready();
-        let effects = state.update(AppIntent::CopyCommitText(CopyWhat::Message));
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Message),
+        )));
         let [Effect::LoadCommitMessage { tag, oid }] = effects.as_slice() else {
             panic!("expected a message load, got {effects:?}");
         };
-        let failed = AppIntent::CommitMessageLoaded {
+        let failed = AppIntent::Commits(CommitsIntent::Copy(CopyIntent::MessageLoaded {
             tag: *tag,
             oid: oid.clone(),
             result: Err("bad object".into()),
-        };
+        }));
         assert_eq!(state.update(failed), vec![]);
         assert!(matches!(state.popups.last(), Some(Popup::Error(e)) if e.message == "bad object"));
 
         let mut state = copy_ready();
-        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Hash),
+        )));
         state.update(AppIntent::CopyFailed(clipboard::TOO_LONG.into()));
         assert_eq!(state.notice_text, None);
         assert!(
@@ -5564,7 +5343,9 @@ mod tests {
 
         // A clipboard program's failure arrives after "Copied …" is shown.
         let mut state = copy_ready();
-        state.update(AppIntent::CopyCommitText(CopyWhat::Hash));
+        state.update(AppIntent::Commits(CommitsIntent::Copy(
+            CopyIntent::CopyText(CopyWhat::Hash),
+        )));
         assert!(state.notice_text.is_some());
         let late = "false failed: exit status: 1. Check clipboard.command in the global config.";
         state.update(AppIntent::CopyFailed(late.into()));
@@ -5719,5 +5500,340 @@ mod tests {
         let state = AppState::new(Context::Workspace).with_git_version(version(38));
         assert!(state.git_has(crate::git::version::UPDATE_REFS));
         assert!(!AppState::new(Context::Workspace).git_has(crate::git::version::BREAK));
+    }
+
+    // --- Closing a popup: each feature forgets its own draft ---
+
+    /// A workspace holding one draft of every feature that keeps one,
+    /// over the Worktrees popup, whose list keeps the new worktree's
+    /// branch.
+    fn with_every_draft() -> AppState {
+        use crate::features::branches::remotes::RemotePending;
+        use crate::features::branches::tags::PendingTag;
+        use crate::features::custom_commands::{CustomCommand, OutputMode, PendingCommand, Target};
+        use crate::features::files::IgnoreDraft;
+        use crate::features::pull_requests::PrDraft;
+        use crate::features::stash::{StashDraft, StashMode, StashRef};
+        use crate::features::worktrees::WorktreeList;
+        use crate::forge::ForgeRepo;
+        let mut state = AppState::new(Context::Workspace);
+        state.pending_command = Some(PendingCommand {
+            command: CustomCommand {
+                scope: KeyScope::Files,
+                keys: vec![],
+                description: "Copy".into(),
+                argv: vec![],
+                prompts: vec!["To".into()],
+                output: OutputMode::None,
+            },
+            target: Target {
+                path: "a.rs".into(),
+                line: None,
+                commit: None,
+            },
+            answers: vec![],
+        });
+        state.branches.pending = Some("topic".into());
+        state.branches.remotes.pending = Some(RemotePending::Rename("origin".into()));
+        state.branches.pending_tag = Some(PendingTag {
+            target: cid("c1"),
+            annotated: true,
+            name: None,
+        });
+        state.stash_draft = Some(StashDraft {
+            mode: StashMode::All,
+            paths: vec![],
+            restore: vec![],
+            unstage: vec![],
+            from_range: false,
+        });
+        state.stash.pending = Some(StashRef {
+            index: 0,
+            oid: cid("c1"),
+        });
+        let mut worktrees = WorktreeList::loading(0);
+        worktrees.pending_branch = Some("topic".into());
+        state.popups = vec![Popup::Worktrees(worktrees)];
+        state.ignore_draft = Some(IgnoreDraft {
+            shown: "*.log".into(),
+            bytes: b"*.log".to_vec(),
+        });
+        state.review.check_urls = vec!["https://ci.example/1".into()];
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        state.pr_draft = Some(PrDraft {
+            branch: "topic".into(),
+            head_remote: "origin".into(),
+            head_repo: repo.clone(),
+            head: "topic".into(),
+            targets: vec![],
+            target: Some(("origin".into(), repo)),
+            bases: vec!["main".into()],
+            base: Some("main".into()),
+            title: "Add login".into(),
+        });
+        state
+    }
+
+    /// Which drafts `state` still holds, by name.
+    fn drafts_kept(state: &AppState) -> Vec<&'static str> {
+        let worktree_branch = state
+            .popups
+            .iter()
+            .any(|popup| matches!(popup, Popup::Worktrees(list) if list.pending_branch.is_some()));
+        [
+            ("command", state.pending_command.is_some()),
+            ("branch", state.branches.pending.is_some()),
+            ("remote", state.branches.remotes.pending.is_some()),
+            ("tag", state.branches.pending_tag.is_some()),
+            ("stash message", state.stash_draft.is_some()),
+            ("stash rename", state.stash.pending.is_some()),
+            ("worktree", worktree_branch),
+            ("ignore", state.ignore_draft.is_some()),
+            ("check urls", !state.review.check_urls.is_empty()),
+            ("pull request", state.pr_draft.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, kept)| kept.then_some(name))
+        .collect()
+    }
+
+    fn prompt(kind: PromptKind) -> Popup {
+        Popup::Prompt {
+            kind,
+            input: LineInput::default(),
+        }
+    }
+
+    fn pick(purpose: crate::pick_list::PickPurpose) -> Popup {
+        Popup::PickList(crate::pick_list::PickList::new(
+            purpose,
+            vec!["a".into()],
+            0,
+        ))
+    }
+
+    #[test]
+    fn closing_a_popup_forgets_only_the_draft_its_feature_kept_for_it() {
+        use crate::pick_list::PickPurpose;
+        let every = drafts_kept(&with_every_draft());
+        assert_eq!(every.len(), 10, "{every:?}");
+        let cases = [
+            (prompt(PromptKind::Command), Some("command")),
+            (prompt(PromptKind::NewBranch), Some("branch")),
+            (prompt(PromptKind::RenameBranch), Some("branch")),
+            (prompt(PromptKind::SetUpstream), Some("branch")),
+            (prompt(PromptKind::TrackBranch), Some("remote")),
+            (prompt(PromptKind::RemoteName), Some("remote")),
+            (prompt(PromptKind::RemoteUrl), Some("remote")),
+            (prompt(PromptKind::RenameRemote), Some("remote")),
+            (prompt(PromptKind::TagName), Some("tag")),
+            (prompt(PromptKind::TagMessage), Some("tag")),
+            (prompt(PromptKind::StashMessage), Some("stash message")),
+            (prompt(PromptKind::RenameStash), Some("stash rename")),
+            (prompt(PromptKind::WorktreePath), Some("worktree")),
+            (prompt(PromptKind::IgnorePattern), Some("ignore")),
+            (pick(PickPurpose::CheckDetails), Some("check urls")),
+            (pick(PickPurpose::TargetRemote), Some("pull request")),
+            (pick(PickPurpose::BaseBranch), Some("pull request")),
+            (pick(PickPurpose::MergeMethod), Some("pull request")),
+            (prompt(PromptKind::PullRequestTitle), Some("pull request")),
+            (
+                Popup::Question(crate::features::pull_requests::create_question(
+                    &with_every_draft(),
+                )),
+                Some("pull request"),
+            ),
+            // Popups no draft belongs to.
+            (prompt(PromptKind::GoToFile), None),
+            (Popup::Question(quit_question()), None),
+            (
+                Popup::Menu {
+                    id: MenuId::Actions,
+                    cursor: 0,
+                },
+                None,
+            ),
+        ];
+        for (popup, forgotten) in cases {
+            let mut state = with_every_draft();
+            let under = state.popups.clone();
+            state.popups.push(popup.clone());
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{popup:?}");
+            assert_eq!(state.popups.len(), under.len(), "{popup:?}");
+            let expected: Vec<_> = every
+                .iter()
+                .copied()
+                .filter(|name| Some(*name) != forgotten)
+                .collect();
+            assert_eq!(drafts_kept(&state), expected, "{popup:?}");
+        }
+    }
+
+    #[test]
+    fn closing_the_last_popup_leaves_none_and_returns_no_effects() {
+        let mut state = with_every_draft();
+        state.popups = vec![prompt(PromptKind::NewBranch)];
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending, None);
+        // Nothing to close: nothing changes.
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn no_on_the_create_question_closes_it_and_forgets_the_draft_yes_keeps_both() {
+        let mut state = with_every_draft();
+        state.popups = vec![Popup::Question(
+            crate::features::pull_requests::create_question(&state),
+        )];
+        let asked = state.popups.clone();
+        assert_eq!(state.update(AppIntent::ConfirmYes), vec![]);
+        assert_eq!(state.popups, asked);
+        assert!(state.pr_draft.is_some());
+        assert_eq!(state.update(AppIntent::ConfirmNo), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.pr_draft, None);
+        // Another feature's drafts stay.
+        assert!(state.branches.pending.is_some());
+    }
+
+    #[test]
+    fn no_binding_in_the_create_question_sends_pop_popup() {
+        // Its `n` and Esc forget the draft through `ConfirmNo`; nothing
+        // in its scope closes it any other way.
+        for binding in crate::keymap::registry() {
+            if binding.scope == KeyScope::CreatePullRequest {
+                assert_ne!(binding.intent, AppIntent::PopPopup, "{}", binding.id);
+            }
+        }
+    }
+
+    /// Every question whose yes is an intent, with that intent and
+    /// whether Enter answers it too.
+    fn moved_questions(state: &AppState) -> Vec<(ConfirmQuestion, AppIntent, bool)> {
+        use crate::features::commits::custom_patch::PatchAction;
+        use crate::features::commits::rewrite::{autosquash_question, drop_range_question};
+        use crate::features::conflicts::stage_resolved_question;
+        use crate::features::pull_requests::create_question;
+        use crate::features::sync::force_push_question;
+        let ids = vec![cid("c0"), cid("c1")];
+        vec![
+            (quit_question(), AppIntent::Quit, true),
+            (
+                force_push_question(),
+                AppIntent::Sync(SyncIntent::ForcePush),
+                true,
+            ),
+            (
+                stage_resolved_question(),
+                AppIntent::Conflicts(ConflictsIntent::StageResolved),
+                true,
+            ),
+            (
+                abort_question(Operation::Merge).unwrap(),
+                AppIntent::Operation(OperationIntent::ConfirmAbort(Operation::Merge)),
+                false,
+            ),
+            (
+                state.bisect_reset_question(),
+                AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::ConfirmReset)),
+                false,
+            ),
+            (
+                autosquash_question(),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmAutosquash)),
+                false,
+            ),
+            (
+                drop_range_question(ids.clone()),
+                AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmDropRange(ids))),
+                false,
+            ),
+            (
+                state.patch_action_question(PatchAction::Remove),
+                AppIntent::Commits(CommitsIntent::CustomPatch(CustomPatchIntent::Confirm(
+                    PatchAction::Remove,
+                ))),
+                false,
+            ),
+            (
+                create_question(state),
+                AppIntent::ConfirmCreatePullRequest,
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn each_moved_question_answers_with_its_keys_and_sends_its_intent() {
+        let base = status_focused(&[Operation::Merge]);
+        for (question, intent, enter) in moved_questions(&base) {
+            let name = question.title.clone();
+            assert_eq!(question.answer == Answer::YOrEnter, enter, "{name}");
+            assert_eq!(
+                question.then,
+                Then::Intent(Box::new(intent.clone())),
+                "{name}"
+            );
+            let yes_keys = if enter {
+                vec![KeyCode::Char('y'), KeyCode::Enter]
+            } else {
+                vec![KeyCode::Char('y')]
+            };
+            for key in yes_keys {
+                // What the intent alone does, from the same state.
+                let mut expected = base.clone();
+                let want = expected.update(intent.clone());
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                assert_eq!(state.key_focus(), question.scope, "{name}");
+                assert_eq!(press(&mut state, key), want, "{name} {key:?}");
+                assert_eq!(state.popups, expected.popups, "{name} {key:?}");
+                assert_eq!(state.should_quit, expected.should_quit, "{name} {key:?}");
+                assert_eq!(state.notice, expected.notice, "{name} {key:?}");
+                assert_eq!(state.held_seq(), expected.held_seq(), "{name} {key:?}");
+            }
+            if !enter {
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                let asked = state.popups.clone();
+                assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{name}");
+                assert_eq!(state.popups, asked, "{name}");
+                assert_eq!(state.held_seq(), None, "{name}");
+            }
+            for no in [KeyCode::Char('n'), KeyCode::Esc] {
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                assert_eq!(press(&mut state, no), vec![], "{name} {no:?}");
+                assert_eq!(state.popups, [], "{name} {no:?}");
+                assert_eq!(state.held_seq(), None, "{name} {no:?}");
+                assert!(!state.should_quit, "{name} {no:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_menu_asks_to_quit_and_to_reset_the_bisect() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(state.update(AppIntent::AskQuit), vec![]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
+
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Bisect(
+                BisectIntent::AskReset
+            ))),
+            vec![]
+        );
+        assert_eq!(
+            state.popups,
+            [Popup::Question(state.bisect_reset_question())]
+        );
+        assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
     }
 }

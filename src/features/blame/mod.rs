@@ -6,7 +6,11 @@
 //! `Effect::LoadCommit` (`effects.rs`). `src/git/blame.rs` stays in `src/git`
 //! as shared plumbing.
 //!
-//! Its `pub(crate)` API: the type [`BlameView`]; the handlers `open_blame`,
+//! Its intents are nested (ADR-0002): core wraps [`BlameIntent`] in
+//! `AppIntent::Blame`, and its one `update` arm calls [`update`] here.
+//!
+//! Its `pub(crate)` API: the type [`BlameView`]; the intent enum
+//! [`BlameIntent`] and the free function [`update`]; the handlers `open_blame`,
 //! `blame_loaded`, `with_blame`, `open_blame_commit`, `commit_loaded`,
 //! `close_blame_commit`, `scroll_commit` and `close_blame` on `AppState`; the
 //! chunks `keys::{BLAME_FILES, BLAME_KEYS, BLAME_COMMIT}`;
@@ -28,14 +32,18 @@
 //! `pane_step_disabled` and their tests); `blame_open`, `BLAME_OPEN` and
 //! `diff_hidden`, which guard the diff keys; the `KeyScope::Blame` and
 //! `KeyScope::BlameCommit` variants; the `Focus::Blame` variant and its
-//! `panel_focus` branch; the `AppIntent` and `Effect` variants; and the
+//! `panel_focus` branch; the `Effect` variants; and the
 //! `Focus::Blame` dispatch in `view.rs::render`.
 
 pub(crate) mod effects;
+mod intent;
 pub(crate) mod keys;
 mod state;
 mod update;
 pub(crate) mod view;
+
+pub(crate) use intent::BlameIntent;
+pub(crate) use update::update;
 
 pub(crate) use state::BlameView;
 #[cfg(test)]

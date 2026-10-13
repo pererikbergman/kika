@@ -3,16 +3,41 @@
 //! drops only the commits it asked about.
 
 use super::{range_log_plan, range_rewrite_disabled};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::commit_files::CommitId;
 use crate::git::rebase_plan::{Edit, RebasePlan, TodoAction};
-use crate::keymap::{self, Reason};
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope, Reason};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, Popup};
+use crate::popup::Popup;
 
 /// Why a confirmed drop did not run: the range is not the one asked about.
 pub(crate) const SELECTION_CHANGED: &str = "The selection changed; nothing was dropped";
+
+/// "Drop these commits?", carrying the full ids of the log range when
+/// asked, newest first. It throws away several commits' changes, so only
+/// `y` answers, and the answer drops only if the range still holds them.
+/// Only the count is shown: subjects and the filter are not drawn here.
+pub(crate) fn drop_range_question(ids: Vec<CommitId>) -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::DropRangeConfirm,
+        title: "Drop commits".into(),
+        text: format!(
+            "Drop {} commits and their changes from the history? (y/n)",
+            ids.len()
+        ),
+        answer: Answer::YOnly,
+        then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::ConfirmDropRange(ids),
+        )))),
+        range: false,
+        head: None,
+    }
+}
 
 impl AppState {
     /// Rewrite every commit of the log range with `edit`. A fold runs at
@@ -31,8 +56,7 @@ impl AppState {
         };
         let ids = dropped(&plan);
         if edit == Edit::Drop && ids.len() > 1 {
-            self.popups
-                .push(Popup::Confirm(ConfirmKind::DropRange(ids)));
+            self.popups.push(Popup::Question(drop_range_question(ids)));
             return vec![];
         }
         self.commits.range_anchor = None;
@@ -226,16 +250,16 @@ mod tests {
     #[test]
     fn d_over_three_commits_asks_and_only_y_drops_them() {
         let mut state = asked_to_drop_three();
-        let kind = ConfirmKind::DropRange(vec![id(0), id(1), id(2)]);
-        assert_eq!(state.popups, [Popup::Confirm(kind.clone())]);
+        let question = drop_range_question(vec![id(0), id(1), id(2)]);
+        assert_eq!(state.popups, [Popup::Question(question.clone())]);
         assert_eq!(state.held_seq(), None);
         assert_eq!(state.key_focus(), KeyScope::DropRangeConfirm);
-        assert_eq!(kind.title(), "Drop commits");
-        assert!(state.confirm_question(&kind).contains("Drop 3 commits"));
+        assert_eq!(question.title, "Drop commits");
+        assert!(question.text.contains("Drop 3 commits"));
 
         // Enter is too easy to press by habit: it answers nothing.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(kind.clone())]);
+        assert_eq!(state.popups, [Popup::Question(question.clone())]);
         assert_eq!(keys(&mut state, "n"), vec![]);
         assert_eq!((state.popups.len(), state.held_seq()), (0, None));
         assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
@@ -282,7 +306,9 @@ mod tests {
         let mut state = on_log(0);
         keys(&mut state, "Vjj");
         assert_eq!(
-            state.update(AppIntent::ConfirmDropRange(vec![id(0), id(1)])),
+            state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::ConfirmDropRange(vec![id(0), id(1)])
+            ))),
             vec![]
         );
         assert_eq!(state.notice, Some(SELECTION_CHANGED.into()));
@@ -340,11 +366,11 @@ mod tests {
     fn reword_moves_and_the_other_rewrites_still_refuse_a_range() {
         use crate::git::rebase_plan::Direction;
         let intents = [
-            AppIntent::RewriteCommit(Edit::Reword),
-            AppIntent::RewriteCommit(Edit::Stop),
-            AppIntent::RewriteCommit(Edit::Pick),
-            AppIntent::MoveCommit(Direction::Up),
-            AppIntent::MoveCommit(Direction::Down),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Reword))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Stop))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(Edit::Pick))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Up))),
+            AppIntent::Commits(CommitsIntent::Rewrite(RewriteIntent::Move(Direction::Down))),
         ];
         for intent in intents {
             let mut state = on_log(1);

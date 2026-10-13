@@ -4,6 +4,8 @@
 //! position there is behaviour.
 
 use crate::bisect;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::bisect::BisectIntent;
 use crate::git::bisect::BisectMark;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, Reason, list_guard};
@@ -37,7 +39,9 @@ pub(crate) static BISECT_STATUS: &[Binding] = &[
         id: "status.bisect_good",
         keys: &[KeyPattern::exact(KeyCode::Char('g'), NONE)],
         scope: KeyScope::Status,
-        intent: AppIntent::BisectHead(BisectMark::Good),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+            BisectMark::Good,
+        ))),
         description: "Mark the commit the bisect is testing good",
         label: "good",
         bar: true,
@@ -47,7 +51,9 @@ pub(crate) static BISECT_STATUS: &[Binding] = &[
         id: "status.bisect_bad",
         keys: &[KeyPattern::exact(KeyCode::Char('b'), NONE)],
         scope: KeyScope::Status,
-        intent: AppIntent::BisectHead(BisectMark::Bad),
+        intent: AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+            BisectMark::Bad,
+        ))),
         description: "Mark the commit the bisect is testing bad",
         label: "bad",
         bar: true,
@@ -156,8 +162,12 @@ mod tests {
         for state in &states {
             for item in items {
                 let expected = match item.intent {
-                    AppIntent::BisectSelected(mark) => mark_disabled(state, Target::Selected, mark),
-                    AppIntent::Ask(_) => reset_disabled(state),
+                    AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::MarkSelected(mark))) => {
+                        mark_disabled(state, Target::Selected, mark)
+                    }
+                    AppIntent::Commits(CommitsIntent::Bisect(BisectIntent::AskReset)) => {
+                        reset_disabled(state)
+                    }
                     ref other => panic!("unexpected item {other:?}"),
                 };
                 assert_eq!((item.disabled)(state), expected, "{}", item.label);

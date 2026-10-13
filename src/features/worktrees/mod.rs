@@ -9,8 +9,8 @@
 //! - the types [`Worktree`] and [`WorktreeList`], and the guard
 //!   [`worktrees_disabled`];
 //! - the queries `worktree_list()` and `worktree_list_mut()` on `AppState`;
-//! - the handlers in `update.rs`, including `forget_worktree_branch`, which
-//!   `PopPopup` calls when the path prompt closes;
+//! - the handlers in `update.rs`, including `worktrees_popup_closed`,
+//!   which calls `forget_worktree_branch` when the path prompt closes;
 //! - the chunks `keys::{WORKTREES_WORKSPACE, WORKTREES_KEYS,
 //!   WORKTREES_REMOVE_CONFIRM}`;
 //! - `view::render_worktrees`;

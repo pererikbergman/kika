@@ -32,7 +32,7 @@ Core files:
 |---|---|---|
 | `src/main.rs`, `src/app.rs` | Loop | draw → wait for intent on the `mpsc` channel → update. |
 | `src/cli.rs` | CLI | `clap` commands map to a starting `Context`. |
-| `src/intent.rs` | Intent | `AppIntent`, one flat enum with variants grouped by feature. Raw terminal or task events map to intents here. |
+| `src/intent.rs` | Intent | `AppIntent`: core variants plus one variant per feature wrapping that feature's intent enum; flat feature variants are left over until #393 (see ADR-0002). Raw terminal or task events map to intents here. |
 | `src/model.rs` | Model | `AppState` (composes feature state) + `update(intent)`, one `match` whose arms call feature handlers. Pure: no I/O, no rendering. |
 | `src/effect.rs` | Effects | `Effect`, one flat enum, and the `Runtime::run` dispatch that calls each feature's `effects.rs`. |
 | `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |
@@ -51,6 +51,7 @@ Feature-folder files (each only when the feature has something to put there):
 |---|---|
 | `mod.rs` | Module docs, and the feature's `pub(crate)` API: its state types and its `AppState` query methods |
 | `state.rs` (or a named file such as `list.rs`) | The feature's state types, which `AppState` holds as fields |
+| `intent.rs` | The feature's intent enum, which core wraps in one `AppIntent` variant (ADR-0002) |
 | `update.rs` | `impl AppState` handlers that `update()` calls. Pure. |
 | `keys.rs` | The feature's binding chunks and the guard predicates they use |
 | `view.rs` | Its render functions. They read `&AppState` only. |

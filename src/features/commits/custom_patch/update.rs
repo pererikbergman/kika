@@ -4,22 +4,53 @@
 
 use std::collections::BTreeSet;
 
+use super::CustomPatchIntent;
 use super::keys;
 use super::state::{CustomPatch, FilePick, PatchAction, PatchChoice};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
+use crate::features::commits::CommitsIntent;
 use crate::git::commit_files::CommitId;
 use crate::git::patch::{FileKind, LineId, PatchError};
 use crate::git::safe_text::terminal_safe;
 use crate::hunk_view::HunkView;
-use crate::keymap;
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope};
 use crate::layout::SidePanel;
+use crate::menu;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind};
 use crate::view::elide_right;
 
+/// The custom patch's half of `update`, which `commits::update` passes
+/// `CommitsIntent::CustomPatch` to. A free function, so its name cannot
+/// clash with handlers.
+pub(crate) fn update(state: &mut AppState, intent: CustomPatchIntent) -> Vec<Effect> {
+    match intent {
+        CustomPatchIntent::ToggleFile => state.patch_toggle_file(),
+        CustomPatchIntent::OpenMenu => {
+            if state.context == Context::Workspace {
+                state.popups.push(Popup::Menu {
+                    id: menu::MenuId::CustomPatch,
+                    cursor: 0,
+                });
+            }
+        }
+        CustomPatchIntent::Choose(choice) => state.choose_patch_action(choice),
+        CustomPatchIntent::CommitMessage(message) => state.patch_commit_message(message),
+        CustomPatchIntent::Confirm(action) => return state.run_patch_action(action),
+        CustomPatchIntent::Reset => {
+            if state.custom_patch.take().is_none() {
+                state.notice = Some(NO_PATCH.into());
+            }
+        }
+    }
+    Vec::new()
+}
+
 /// Why resetting does nothing.
-pub(crate) const NO_PATCH: &str = "No custom patch";
+const NO_PATCH: &str = "No custom patch";
 
 /// How much of a new commit's message the question shows.
 const MESSAGE_SHOWN: usize = 30;
@@ -149,9 +180,10 @@ impl AppState {
         }
         match keys::patch_action(self, choice) {
             Ok(PatchAction::NewCommit(_)) => self.ask_patch_message(),
-            Ok(action) => self
-                .popups
-                .push(Popup::Confirm(ConfirmKind::CustomPatch(action))),
+            Ok(action) => {
+                let question = self.patch_action_question(action);
+                self.popups.push(Popup::Question(question));
+            }
             Err(reason) => self.notice = Some(reason),
         }
     }
@@ -178,8 +210,8 @@ impl AppState {
             return;
         }
         let action = PatchAction::NewCommit(message);
-        self.popups
-            .push(Popup::Confirm(ConfirmKind::CustomPatch(action)));
+        let question = self.patch_action_question(action);
+        self.popups.push(Popup::Question(question));
     }
 
     /// Run `action`, as the question asked. The plan is made again from
@@ -233,8 +265,29 @@ impl AppState {
         self.close_commit_files()
     }
 
+    /// "Rewrite the history with the custom patch?", carrying `action`
+    /// with its target or message fixed when asked. It rewrites commits
+    /// the user may not be looking at, so only `y` answers.
+    pub(crate) fn patch_action_question(&self, action: PatchAction) -> ConfirmQuestion {
+        let text = self.patch_question(&action).unwrap_or_else(|| {
+            // The fallback when the patch cannot be named.
+            "Rewrite the history with the custom patch? (y/n)".into()
+        });
+        ConfirmQuestion {
+            scope: KeyScope::PatchConfirm,
+            title: "Custom patch".into(),
+            text,
+            answer: Answer::YOnly,
+            then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::Confirm(action),
+            )))),
+            range: false,
+            head: None,
+        }
+    }
+
     /// The question for `action`: what moves from where to where.
-    pub(crate) fn patch_question(&self, action: &PatchAction) -> Option<String> {
+    fn patch_question(&self, action: &PatchAction) -> Option<String> {
         let patch = self.custom_patch.as_ref()?;
         let n = patch.files.len();
         let what = format!(
@@ -330,10 +383,10 @@ mod tests {
             path: path.into(),
             orig_path: None,
         };
-        state.update(AppIntent::CommitFilesLoaded {
+        state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
             tag,
             result: Ok(vec![file("a.rs"), file("b.rs")]),
-        });
+        }));
     }
 
     /// Row 2's `a.rs` in the Diff pane, its patch `TWO_HUNKS`.
@@ -342,10 +395,7 @@ mod tests {
         open_files(&mut state, 2);
         let (tag, request) = patch_load(&press(&mut state, KeyCode::Char('l')));
         assert_eq!(request.commit.as_ref().map(|r| r.oid.clone()), Some(id(2)));
-        state.update(AppIntent::PatchLoaded {
-            tag,
-            result: Ok(patch_of(TWO_HUNKS)),
-        });
+        state.update(patch_loaded(tag, patch_of(TWO_HUNKS)));
         state
     }
 
@@ -409,9 +459,9 @@ mod tests {
         );
         // Sent as intents, they do nothing either.
         for intent in [
-            AppIntent::ToggleDiffSide,
+            toggle_diff_side_intent(),
             AppIntent::Discard,
-            AppIntent::EditHunk,
+            edit_hunk_intent(),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
@@ -514,10 +564,12 @@ mod tests {
             (PatchChoice::MoveToSelected, PatchAction::MoveTo(id(3)), 3),
         ] {
             let mut state = with_patch(row);
-            state.update(AppIntent::ChoosePatchAction(choice));
+            state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::Choose(choice),
+            )));
             assert_eq!(
                 state.popups,
-                [Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))]
+                [Popup::Question(state.patch_action_question(action.clone()))]
             );
             assert_eq!(state.key_focus(), KeyScope::PatchConfirm);
             // Enter answers nothing.
@@ -563,12 +615,16 @@ mod tests {
             PatchChoice::NewCommit,
         ] {
             let mut idle = with_patch(0);
-            idle.update(AppIntent::ChoosePatchAction(choice));
+            idle.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::Choose(choice),
+            )));
             assert_eq!(idle.popups.len(), 1, "{choice:?} asks without a bisect");
 
             let mut state = with_patch(0);
             start_bisecting(&mut state);
-            let effects = state.update(AppIntent::ChoosePatchAction(choice));
+            let effects = state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::Choose(choice),
+            )));
             assert_eq!(effects, vec![], "{choice:?}");
             assert_eq!(state.notice, Some(bisect::RESET_FIRST.into()), "{choice:?}");
             assert_eq!(state.popups, [], "{choice:?}");
@@ -579,7 +635,9 @@ mod tests {
     #[test]
     fn no_closes_the_question_and_keeps_the_patch() {
         let mut state = with_patch(0);
-        state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
+        state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+            CustomPatchIntent::Choose(PatchChoice::Remove),
+        )));
         assert_eq!(press(&mut state, KeyCode::Char('n')), vec![]);
         assert!(state.popups.is_empty());
         assert!(state.custom_patch.is_some());
@@ -588,7 +646,9 @@ mod tests {
     #[test]
     fn a_new_commit_asks_for_its_message_first_and_refuses_an_empty_one() {
         let mut state = with_patch(0);
-        state.update(AppIntent::ChoosePatchAction(PatchChoice::NewCommit));
+        state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+            CustomPatchIntent::Choose(PatchChoice::NewCommit),
+        )));
         assert!(matches!(
             state.popups.as_slice(),
             [Popup::Prompt {
@@ -616,14 +676,14 @@ mod tests {
         press(&mut state, KeyCode::Enter);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::CustomPatch(
+            [Popup::Question(state.patch_action_question(
                 PatchAction::NewCommit("Split".into())
             ))]
         );
-        let Popup::Confirm(kind) = state.popups[0].clone() else {
+        let Popup::Question(q) = state.popups[0].clone() else {
             panic!("{:?}", state.popups);
         };
-        let question = state.confirm_question(&kind);
+        let question = q.text;
         assert!(question.contains("\"Split\""), "{question}");
         let op = the_op(&press(&mut state, KeyCode::Char('y')));
         assert!(matches!(
@@ -635,7 +695,9 @@ mod tests {
     #[test]
     fn a_successful_rewrite_drops_the_patch_and_a_failed_one_keeps_it() {
         let mut state = with_patch(0);
-        state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
+        state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+            CustomPatchIntent::Choose(PatchChoice::Remove),
+        )));
         let effects = press(&mut state, KeyCode::Char('y'));
         let (tag, op) = match effects.as_slice() {
             [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),
@@ -650,7 +712,9 @@ mod tests {
         assert!(matches!(state.popups.last(), Some(Popup::Error(_))));
 
         state.popups.clear();
-        let effects = state.update(AppIntent::ChoosePatchAction(PatchChoice::Remove));
+        let effects = state.update(AppIntent::Commits(CommitsIntent::CustomPatch(
+            CustomPatchIntent::Choose(PatchChoice::Remove),
+        )));
         assert_eq!(effects, vec![]);
         let (tag, op) = match press(&mut state, KeyCode::Char('y')).as_slice() {
             [Effect::HandOff(HandOff::Attached { tag, op })] => (*tag, op.clone()),

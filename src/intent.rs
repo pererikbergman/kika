@@ -3,49 +3,36 @@ use std::path::PathBuf;
 
 use crossterm::event::{Event, KeyEventKind};
 
-use crate::clipboard::CopyWhat;
 use crate::config::ConfigError;
 use crate::effect::Tag;
-use crate::features::commits::custom_patch::{PatchAction, PatchChoice};
-use crate::features::commits::git::Tip;
-use crate::features::commits::reflog::Reflog;
-use crate::features::commits::rewrite::FixupBase;
-use crate::features::commits::rewrite::TodoFile;
-use crate::features::conflicts::Choice;
-use crate::features::custom_commands::{CommandFailure, OutputMode};
-use crate::features::diff::renderers::ExternalRenderer;
-use crate::features::diff::renderers::StyledRow;
-use crate::features::files::IgnoreAdded;
+use crate::features::blame::BlameIntent;
+use crate::features::branches::BranchesIntent;
+use crate::features::command_log::CommandLogIntent;
+use crate::features::commit::CommitIntent;
+use crate::features::commits::CommitsIntent;
+use crate::features::conflicts::ConflictsIntent;
+use crate::features::custom_commands::CustomCommandsIntent;
+use crate::features::diff::DiffIntent;
+use crate::features::files::FilesIntent;
+use crate::features::operation::OperationIntent;
+use crate::features::repos::ReposIntent;
 use crate::features::review::{CommitsHere, PrFileRow};
 use crate::features::stash::{StashEntry, StashFile};
+use crate::features::sync::SyncIntent;
 use crate::features::worktrees::Worktree;
 use crate::forge::review::{PrDetail, Queues, ReviewError};
 use crate::forge::{CreateError, ForgeRepo, ForgeStatus, PrBadge};
 use crate::git::askpass::Secret;
-use crate::git::bisect::BisectMark;
-use crate::git::blame::BlameLine;
-use crate::git::branches::{Branch, BranchName, LogRow};
-use crate::git::commit_files::{CommitFile, CommitId, CommitRange};
-use crate::git::diff::{DiffChunk, DiffLine};
-use crate::git::log::{LogPage, Markers};
-use crate::git::patch::FilePatch;
-use crate::git::path::RepoPath;
-use crate::git::rebase_plan::{Direction, Edit};
-use crate::git::recording::CommandEvent;
+use crate::git::branches::BranchName;
+use crate::git::commit_files::CommitRange;
 use crate::git::refs::RefsSnapshot;
-use crate::git::remote::{RemoteFailure, RemoteOp};
-use crate::git::remotes::Remote;
-use crate::git::repo_state::Operation;
 use crate::git::status::RepoStatus;
 use crate::git::submodule::Submodule;
-use crate::git::tags::TagRef;
 use crate::keymap::{KeyPress, Keymap};
 use crate::layout::Panel;
-use crate::list_filter::LogFilterField;
 use crate::menu::MenuId;
-use crate::op::{GitOp, MergeStrategy, ResetMode};
-use crate::popup::{ConfirmKind, PromptKind};
-use crate::prompts::PromptFacts;
+use crate::op::GitOp;
+use crate::popup::PromptKind;
 use crate::watch::WatchEvent;
 
 /// Everything that can change the model: user input and async task results.
@@ -91,8 +78,8 @@ pub enum AppIntent {
     MenuPrev,
     /// Run the item under the top menu's cursor.
     MenuSelect,
-    /// Ask a yes/no question; the answer comes back as the kind's intent.
-    Ask(ConfirmKind),
+    /// Ask "Quit Kika?" (the menu's Quit item).
+    AskQuit,
     ConfirmYes,
     ConfirmNo,
     /// Ask for a line of text; the text comes back as the kind's intent.
@@ -184,143 +171,35 @@ pub enum AppIntent {
     /// The text could not be sent to the clipboard, and why.
     CopyFailed(String),
 
-    // --- files ---
-    /// Move the file selection down or up.
-    SelectNext,
-    SelectPrev,
-    /// Stage the selected file, or unstage it when it is fully staged.
-    ToggleStage,
-    /// Stage everything, or unstage everything when nothing is left to stage.
-    ToggleStageAll,
+    // --- core: shared by features ---
+    /// Go on with the merge, rebase, cherry-pick or revert in progress.
+    ContinueOperation,
+    /// Drop the commit the rebase, cherry-pick or revert stopped on and go on.
+    SkipOperation,
+    /// Ask before aborting the operation in progress.
+    AbortOperation,
+    /// Switch the whole workspace to the repository at this top level.
+    OpenRepo(PathBuf),
     /// Ask to throw away the unstaged work under the cursor: the selected
     /// file, hunk or lines, by focus. The answer is `ConfirmYes`/`ConfirmNo`.
     Discard,
-    /// Select the first file whose path contains this text, ignoring case.
-    GoToFile(String),
-    /// Ask which pattern to add to `.gitignore` for the selected
-    /// untracked file, offering the one that matches exactly it.
-    OpenIgnore,
-    /// The pattern the `.gitignore` prompt was accepted with.
-    IgnorePatternAnswered(String),
-    /// The pattern was added to `.gitignore`, or was there already, or
-    /// why not. The text is the pattern as shown.
-    IgnoreWritten {
-        tag: Tag,
-        result: Result<IgnoreAdded, String>,
-    },
-
-    // --- diff ---
     ScrollDiff(Scroll),
-    /// A chunk of the diff stream for `tag`. A stream reports more than once.
-    DiffLoaded {
-        tag: Tag,
-        result: Result<DiffChunk, String>,
-    },
-    /// The diff for `tag` has taken long enough to show "Loading…".
-    DiffSlow {
-        tag: Tag,
-    },
-    /// Move the hunk cursor down or up.
-    NextHunk,
-    PrevHunk,
-    /// Stage the selected hunk, or unstage it in the staged view.
-    ToggleHunkStage,
-    /// Start or stop picking changed lines inside the selected hunk.
-    EnterLineMode,
-    ExitLineMode,
-    /// Move the line cursor down or up; with `extend`, grow the range.
-    NextLine {
-        extend: bool,
-    },
-    PrevLine {
-        extend: bool,
-    },
-    /// Stage the selected lines, or unstage them in the staged view.
-    ToggleLinesStage,
-    /// Switch the focused Diff pane between unstaged and staged changes.
-    ToggleDiffSide,
-    /// Show one more unchanged line around each change in the diff.
-    MoreContext,
-    /// Show one fewer unchanged line around each change in the diff.
-    LessContext,
-    /// Hide or show changes that only touch whitespace.
-    ToggleWhitespace,
-    /// A whole-file patch load finished; `tag` says which one.
-    PatchLoaded {
-        tag: Tag,
-        result: Result<FilePatch, String>,
-    },
     /// Open the selected file in the user's editor, at the selected line
     /// when there is one.
     OpenInEditor,
-    /// Edit the selected hunk in the user's editor, then stage the result.
-    EditHunk,
-    /// The editor opened by `OpenInEditor` has closed.
-    EditorClosed {
-        result: Result<(), String>,
-    },
-    /// The hunk edit finished: the patch to stage, `None` if the user
-    /// cancelled.
-    HunkEdited {
-        result: Result<Option<Vec<u8>>, String>,
-    },
 
-    // --- diff/renderers ---
-    /// Show the diff through the next configured renderer, or the
-    /// built-in view after the last.
-    CycleRenderer,
-    /// The renderers configured for this session, found at boot.
-    RenderersFound(Vec<ExternalRenderer>),
-    /// A renderer's rows for the shown diff; `tag` says which render.
-    DiffRendered {
-        tag: Tag,
-        result: Result<Vec<StyledRow>, String>,
-    },
+    // --- files ---
+    /// Everything the Files panel does; its own `update` handles it.
+    Files(FilesIntent),
+
+    // --- diff ---
+    /// Everything the Diff pane does, with its child the renderers. Its
+    /// own `update` handles it.
+    Diff(DiffIntent),
 
     // --- commit ---
-    /// Open the commit popup from the Files panel.
-    OpenCommit,
-    /// Nothing was staged: yes, stage everything and commit.
-    ConfirmStageAll,
-    /// Close the commit popup; the index is left as it is. A typed
-    /// message is only thrown away after `DiscardCommit`.
-    CancelCommit,
-    /// Yes, throw the typed message away.
-    DiscardCommit,
-    /// Back to the message instead of discarding it.
-    ResumeCommit,
-    /// Commit with the typed message.
-    SubmitCommit,
-    /// Ctrl+C in the commit popup: cancel while typing (asking before a
-    /// typed message is lost), quit while git runs.
-    InterruptCommit,
-    /// Move the cursor between the subject and the body.
-    ToggleCommitField,
-    /// Close the commit error and go back to the kept message.
-    DismissCommitError,
-    /// Open the commit popup to amend the last commit, its message filled in.
-    OpenAmend,
-    /// `HEAD`'s message was read for amending; `tag` says which load.
-    HeadMessageLoaded {
-        tag: Tag,
-        result: Result<String, String>,
-    },
-    /// Turn skipping the commit hooks on or off for this commit.
-    ToggleNoVerify,
-    /// Write the message in the user's editor, then commit with it.
-    EditCommitExternally,
-    /// The editor opened by `EditCommitExternally` has closed: the message
-    /// to commit, `None` if the user emptied it.
-    CommitMessageEdited {
-        result: Result<Option<String>, String>,
-    },
-    /// The config and hooks a commit depends on were read; `facts` is
-    /// `None` when they could not be. Decides where the commit runs.
-    CommitProbed {
-        tag: Tag,
-        op: GitOp,
-        facts: Option<PromptFacts>,
-    },
+    /// Everything the commit popup does; its own `update` handles it.
+    Commit(CommitIntent),
 
     // --- stash ---
     /// The stash list was read; `tag` says which load.
@@ -418,146 +297,36 @@ pub enum AppIntent {
     },
 
     // --- repos ---
-    /// Show the recent repositories, to switch to one.
-    OpenRecent,
-    /// The recent list as now recorded on disk, answering request `seq`.
-    RecentLoaded {
-        seq: u64,
-        list: Vec<PathBuf>,
-    },
-    /// Move the recent list's cursor down or up.
-    RecentNext,
-    RecentPrev,
-    /// Open the row under the recent list's cursor.
-    RecentSelect,
-    /// Switch the whole workspace to the repository at this top level.
-    OpenRepo(PathBuf),
-    /// Make the launch directory a repository.
-    InitRepo,
-    /// `git init` finished: the new top level, or why it failed.
-    RepoInitialised {
-        tag: Tag,
-        result: Result<PathBuf, String>,
-    },
+    /// Everything the recent list and `git init` do; its own `update`
+    /// handles it. Opening a repository is the shared `OpenRepo`.
+    Repos(ReposIntent),
 
     // --- command_log ---
-    /// A git command started or ended; the runner reports every one.
-    CommandLogged(CommandEvent),
-    /// Show the git commands Kika ran this session.
-    OpenCommandLog,
-    /// Move the Command log cursor a row or a page down or up.
-    CommandLogNext,
-    CommandLogPrev,
-    CommandLogPageDown,
-    CommandLogPageUp,
+    /// Everything the Command log does; its own `update` handles it.
+    CommandLog(CommandLogIntent),
 
     // --- custom_commands ---
-    /// The answer to a custom command's current prompt.
-    CommandPromptAnswered(String),
-    /// A custom command finished. `Ok` holds the captured output, empty
-    /// unless `output` is `Popup`; `Err` says how it failed. Text is
-    /// terminal-safe.
-    CommandFinished {
-        title: String,
-        output: OutputMode,
-        result: Result<String, CommandFailure>,
-    },
-    /// Stop the captured command that is running, if one is.
-    CancelCommand,
+    /// Everything a custom command does once started; its own `update`
+    /// handles it.
+    CustomCommands(CustomCommandsIntent),
 
     // --- blame ---
-    /// Blame the selected file: who last changed each line, and when.
-    OpenBlame,
-    /// A blame load finished; `tag` says which one.
-    BlameLoaded {
-        tag: Tag,
-        result: Result<Vec<BlameLine>, String>,
-    },
-    /// Move the blame cursor a line or a page down or up.
-    BlameNext,
-    BlamePrev,
-    BlamePageDown,
-    BlamePageUp,
-    /// Show the commit that last changed the line under the blame cursor.
-    OpenBlameCommit,
-    /// A commit load finished; `tag` says which one.
-    CommitLoaded {
-        tag: Tag,
-        result: Result<Vec<DiffLine>, String>,
-    },
-    /// Back from the commit to the blame, at the same line.
-    CloseBlameCommit,
-    ScrollCommit(Scroll),
-    /// Back from the blame to the Files panel.
-    CloseBlame,
+    /// Everything the blame does; its own `update` handles it.
+    Blame(BlameIntent),
 
     // --- conflicts ---
-    /// The conflicted file the view opened on was read: its bytes and its
-    /// marker size, or why not. `tag` says which load.
-    ConflictLoaded {
-        tag: Tag,
-        path: RepoPath,
-        result: Result<(Vec<u8>, usize), String>,
-    },
-    /// Move the conflict view's cursor to the next or previous block.
-    ConflictNext,
-    ConflictPrev,
-    /// Keep this side of the selected block, and write the file.
-    PickConflict(Choice),
-    /// A resolved file was written: what is now on disk, or why not.
-    ResolvedWritten {
-        tag: Tag,
-        path: RepoPath,
-        result: Result<Vec<u8>, String>,
-    },
-    /// Stage the file the conflict view resolved, as the question asked.
-    StageResolved,
-    /// Resolve the selected conflicted file in the user's merge tool.
-    OpenMergeTool,
+    /// Everything the conflict view does; its own `update` handles it.
+    Conflicts(ConflictsIntent),
 
     // --- sync ---
-    /// A background fetch finished.
-    FetchFinished {
-        tag: Tag,
-        result: Result<(), String>,
-    },
-    /// Fetch every remote, pull into the current branch, or push it. Each
-    /// reaches the network, so only a key the user pressed sends one.
-    Fetch,
-    Pull,
-    Push,
-    /// Push again with `--force-with-lease`, after a plain push was rejected.
-    ForcePush,
-    /// Ssh, for the remote operation `tag`, says something that needs no
-    /// answer, such as asking to touch a security key. Terminal-safe.
-    // Only the unix bridge passes these on.
-    #[cfg_attr(not(unix), allow(dead_code))]
-    RemoteNotice {
-        tag: Tag,
-        text: String,
-    },
-    /// A fetch, pull or push finished.
-    RemoteFinished {
-        tag: Tag,
-        op: RemoteOp,
-        result: Result<(), RemoteFailure>,
-    },
-    /// Time to draw the next frame of the remote operation's spinner.
-    SpinnerTick,
+    /// Everything fetch, pull and push do; its own `update` handles it.
+    Sync(SyncIntent),
 
     // --- operation ---
-    /// Merge the selected branch into the current one this way.
-    Merge(MergeStrategy),
-    /// Rebase the current branch onto the selected one.
-    RebaseOnto,
-    /// Go on with the merge, rebase, cherry-pick or revert in progress.
-    ContinueOperation,
-    /// Drop the commit the rebase, cherry-pick or revert stopped on and go on.
-    SkipOperation,
-    /// Ask before aborting the operation in progress.
-    AbortOperation,
-    /// Abort this operation, as the question asked.
-    ConfirmAbort(Operation),
+    /// Merging or rebasing onto the selected branch, and aborting as
+    /// asked; its own `update` handles it. Continue, skip and abort are
+    /// the shared core intents.
+    Operation(OperationIntent),
 
     // --- pull_requests ---
     /// The remote is on none of the forge hosts: no badges.
@@ -674,270 +443,14 @@ pub enum AppIntent {
     },
 
     // --- branches ---
-    /// The branch list was read; `tag` says which load.
-    BranchesLoaded {
-        tag: Tag,
-        result: Result<Vec<Branch>, String>,
-    },
-    /// The log of the full ref `refname` was read; `tag` says which load.
-    BranchLogLoaded {
-        tag: Tag,
-        refname: Vec<u8>,
-        result: Result<Vec<LogRow>, String>,
-    },
-    /// Show the Branches panel's next tab: local branches, remotes, tags.
-    SwitchBranchesTab,
-    /// Show the Branches panel's previous tab.
-    PrevBranchesTab,
-    /// Move the branch selection down or up.
-    BranchNext,
-    BranchPrev,
-    /// Switch to the selected branch.
-    CheckoutBranch,
-    /// Ask for a name, to make a branch at the selected one.
-    NewBranch,
-    /// Ask for a new name for the selected branch, the old one filled in.
-    RenameBranch,
-    /// Ask before deleting the selected branch.
-    DeleteBranch,
-    /// The new branch's name, typed into the `NewBranch` prompt.
-    CreateBranchNamed(String),
-    /// The new name, typed into the `RenameBranch` prompt.
-    RenameBranchTo(String),
-    /// Delete the branch the open question names: plainly, or with
-    /// `force` when its commits are not merged.
-    ConfirmDeleteBranch {
-        force: bool,
-    },
-    /// Ask which remote branch the selected local branch should track.
-    SetUpstream,
-    /// The upstream, as `remote/branch`, typed into the `SetUpstream` prompt.
-    SetUpstreamTo(String),
-    /// Stop the selected local branch tracking its upstream.
-    UnsetUpstream,
-
-    // --- branches/remotes ---
-    /// The remotes and their branches were read; `tag` says which load.
-    RemotesLoaded {
-        tag: Tag,
-        result: Result<Vec<Remote>, String>,
-    },
-    /// Move the Remotes tab's selection down or up, over remote and
-    /// branch rows alike.
-    RemoteNext,
-    RemotePrev,
-    /// Ask for a local name, to check out the selected remote branch as a
-    /// new branch tracking it.
-    TrackRemoteBranch,
-    /// The local name, typed into the `TrackBranch` prompt.
-    TrackRemoteBranchNamed(String),
-    /// Ask for a new remote's name, then its URL.
-    AddRemote,
-    /// The new remote's name, typed into the `RemoteName` prompt.
-    AddRemoteNamed(String),
-    /// The new remote's URL, typed into the `RemoteUrl` prompt.
-    AddRemoteUrl(String),
-    /// Ask for a new name for the selected remote, the old one filled in.
-    RenameRemote,
-    /// The new name, typed into the `RenameRemote` prompt.
-    RenameRemoteTo(String),
-    /// Ask before removing the selected remote.
-    RemoveRemote,
-    /// Remove the remote the open question names.
-    ConfirmRemoveRemote,
-
-    // --- branches/tags ---
-    /// The tags were read; `tag` says which load.
-    TagsLoaded {
-        tag: Tag,
-        result: Result<Vec<TagRef>, String>,
-    },
-    /// Move the Tags tab's selection down or up.
-    TagNext,
-    TagPrev,
-    /// Ask for a name, to tag the selected commit with a lightweight tag.
-    NewTag,
-    /// Ask for a name and then a message, to tag the selected commit with
-    /// an annotated tag.
-    NewAnnotatedTag,
-    /// The tag's name, typed into the `TagName` prompt.
-    TagNamed(String),
-    /// The annotated tag's message, typed into the `TagMessage` prompt.
-    TagMessaged(String),
-    /// Ask before deleting the selected tag.
-    DeleteTag,
-    /// Delete the tag the open question names.
-    ConfirmDeleteTag,
-    /// Push the selected tag to the current branch's remote, or the only
-    /// one.
-    PushTag,
+    /// Everything the branches subtree does: the panel and its Remotes
+    /// and Tags tabs. Its own `update` handles it.
+    Branches(BranchesIntent),
 
     // --- commits ---
-    /// A page of the log finished; `tag` says which load, `skip` which
-    /// page. `Ok` also carries the unix time it was read at.
-    CommitsLoaded {
-        tag: Tag,
-        skip: usize,
-        result: Result<(LogPage, i64), String>,
-    },
-    /// The push and merge markers finished; `tag` says which load.
-    MarkersLoaded {
-        tag: Tag,
-        result: Result<Markers, String>,
-    },
-    /// The branch tips were read; `tag` says which load.
-    BranchTipsLoaded {
-        tag: Tag,
-        result: Result<Vec<Tip>, String>,
-    },
-    /// Move the commit cursor down or up.
-    CommitNext,
-    CommitPrev,
-    /// Show the selected commit's files in place of the log.
-    OpenCommitFiles,
-    /// Back from a commit's files to the log, at the same commit.
-    CloseCommitFiles,
-    /// Move the cursor in a commit's files down or up.
-    CommitFileNext,
-    CommitFilePrev,
-    /// A commit's files were read; `tag` says which load.
-    CommitFilesLoaded {
-        tag: Tag,
-        result: Result<Vec<CommitFile>, String>,
-    },
-    /// Show the Commits panel's other tab: the log or the reflog.
-    SwitchCommitsTab,
-    /// Type the path or the author git narrows the log to.
-    OpenLogFilter(LogFilterField),
-    /// Show the selected file's history in the Commits panel.
-    LogOfFile,
-    /// Ask before checking out the selected commit as a detached `HEAD`.
-    CheckoutCommit,
-    /// Make a commit that undoes the selected one.
-    RevertCommit,
-    /// Reset the current branch to the selected commit. A hard reset asks
-    /// first.
-    ResetTo(ResetMode),
-    /// Reset hard, as the question asked.
-    ConfirmResetHard,
-
-    // --- commits/reflog ---
-    /// Move the Reflog tab's selection down or up.
-    ReflogNext,
-    ReflogPrev,
-    /// `HEAD`'s reflog was read; `tag` says which load.
-    ReflogLoaded {
-        tag: Tag,
-        result: Result<Reflog, String>,
-    },
-    /// Reverse the last action, or reapply the last one undone. Each reads
-    /// the reflog afresh, then asks before anything moves.
-    Undo,
-    Redo,
-    /// Run the undo or redo the open question describes.
-    ConfirmTravel,
-
-    // --- commits/rewrite ---
-    /// Rewrite the selected commit with git's interactive rebase, or
-    /// change the selected todo row's action while a rebase is stopped.
-    RewriteCommit(Edit),
-    /// Move the selected commit or todo row up (newer) or down (older).
-    MoveCommit(Direction),
-    /// Stop the rebase after the selected commit, or toggle the stop
-    /// after the selected todo row.
-    InsertBreak,
-    /// Commit the staged change as a `fixup!` of the selected commit.
-    CreateFixup,
-    /// Ask, then fold every `fixup!` commit into the commit it fixes.
-    Autosquash,
-    /// Autosquash, as the question asked.
-    ConfirmAutosquash,
-    /// Drop a log range, as the question asked: the full ids it held then,
-    /// newest first, so a range that changed since is not dropped.
-    ConfirmDropRange(Vec<CommitId>),
-    /// Find which commit last touched the staged lines.
-    FindFixupBase,
-    /// The commits the staged lines come from, or why they are not known.
-    FixupBaseFound {
-        tag: Tag,
-        result: Result<FixupBase, String>,
-    },
-    /// The read of the commits a detached `HEAD` would leave behind: which
-    /// op was planned, from which `HEAD`, and what was found or why not.
-    LeftBehindChecked {
-        tag: Tag,
-        op: GitOp,
-        head: CommitId,
-        result: Result<Vec<CommitId>, String>,
-    },
-    /// Leave the commits behind, as the question asked.
-    ConfirmLeaveCommits,
-    /// The stopped rebase's todo list was read; `None` when there is none
-    /// to edit, as in a rebase that is not interactive.
-    RebaseTodoLoaded {
-        tag: Tag,
-        result: Result<Option<TodoFile>, String>,
-    },
-    /// An edited todo list was written, or why not.
-    RebaseTodoWritten {
-        tag: Tag,
-        result: Result<(), String>,
-    },
-
-    // --- commits/copy ---
-    /// Add the selected commit to the copied set, or take it out.
-    CopyCommit,
-    /// Empty the copied set.
-    ClearCopied,
-    /// Cherry-pick the copied commits onto the current branch.
-    PasteCommits,
-    /// Put the selected commit's hash, subject or message on the system
-    /// clipboard.
-    CopyCommitText(CopyWhat),
-    /// A commit's full message was read to copy it; `tag` says which read.
-    CommitMessageLoaded {
-        tag: Tag,
-        oid: CommitId,
-        result: Result<String, String>,
-    },
-
-    // --- commits/custom_patch ---
-    /// Pick the selected commit file whole into the custom patch, or drop
-    /// it.
-    PatchToggleFile,
-    /// Show what can be done with the custom patch.
-    OpenPatchMenu,
-    /// A rewrite chosen from the patch menu: ask its message first, or
-    /// ask whether to go ahead.
-    ChoosePatchAction(PatchChoice),
-    /// The new commit's message for "New commit after source", as typed.
-    PatchCommitMessage(String),
-    /// Run the rewrite, as the question asked.
-    ConfirmPatchAction(PatchAction),
-    /// Drop the custom patch. Only Kika's selection goes; the repository
-    /// does not change.
-    ResetPatch,
-
-    // --- commits/bisect ---
-    /// Mark the selected commit in the Commits panel; with no bisect in
-    /// progress, the mark starts one.
-    BisectSelected(BisectMark),
-    /// Mark the commit git checked out to test.
-    BisectHead(BisectMark),
-    /// End the bisect, as the question asked.
-    ConfirmBisectReset,
-
-    // --- commits/compare ---
-    /// Mark the selected commit or local branch to diff against, or clear
-    /// the mark when it is already there.
-    ToggleDiffMark,
-    /// Compare the diff mark with the selected local branch.
-    OpenDiff,
-    /// Both ends of a comparison were read as commits; `tag` says which.
-    DiffResolved {
-        tag: Tag,
-        result: Result<CommitRange, String>,
-    },
+    /// Everything the commits subtree does: the panel and its
+    /// sub-features. Its own `update` handles it.
+    Commits(CommitsIntent),
 }
 
 /// How far to scroll the diff pane.
@@ -947,6 +460,78 @@ pub enum Scroll {
     LineUp,
     PageDown,
     PageUp,
+}
+
+impl From<CommandLogIntent> for AppIntent {
+    fn from(intent: CommandLogIntent) -> Self {
+        Self::CommandLog(intent)
+    }
+}
+
+impl From<BranchesIntent> for AppIntent {
+    fn from(intent: BranchesIntent) -> Self {
+        Self::Branches(intent)
+    }
+}
+
+impl From<CommitsIntent> for AppIntent {
+    fn from(intent: CommitsIntent) -> Self {
+        Self::Commits(intent)
+    }
+}
+
+impl From<FilesIntent> for AppIntent {
+    fn from(intent: FilesIntent) -> Self {
+        Self::Files(intent)
+    }
+}
+
+impl From<DiffIntent> for AppIntent {
+    fn from(intent: DiffIntent) -> Self {
+        Self::Diff(intent)
+    }
+}
+
+impl From<CommitIntent> for AppIntent {
+    fn from(intent: CommitIntent) -> Self {
+        Self::Commit(intent)
+    }
+}
+
+impl From<BlameIntent> for AppIntent {
+    fn from(intent: BlameIntent) -> Self {
+        Self::Blame(intent)
+    }
+}
+
+impl From<ConflictsIntent> for AppIntent {
+    fn from(intent: ConflictsIntent) -> Self {
+        Self::Conflicts(intent)
+    }
+}
+
+impl From<CustomCommandsIntent> for AppIntent {
+    fn from(intent: CustomCommandsIntent) -> Self {
+        Self::CustomCommands(intent)
+    }
+}
+
+impl From<SyncIntent> for AppIntent {
+    fn from(intent: SyncIntent) -> Self {
+        Self::Sync(intent)
+    }
+}
+
+impl From<OperationIntent> for AppIntent {
+    fn from(intent: OperationIntent) -> Self {
+        Self::Operation(intent)
+    }
+}
+
+impl From<ReposIntent> for AppIntent {
+    fn from(intent: ReposIntent) -> Self {
+        Self::Repos(intent)
+    }
 }
 
 impl AppIntent {

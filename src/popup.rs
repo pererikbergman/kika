@@ -8,8 +8,14 @@ use std::fmt;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
+use crate::features::branches::BranchesIntent;
+use crate::features::branches::remotes::RemotesIntent;
+use crate::features::branches::tags::TagsIntent;
 use crate::features::command_log::CommandLogView;
-use crate::features::commits::custom_patch::PatchAction;
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::custom_patch::CustomPatchIntent;
+use crate::features::custom_commands::CustomCommandsIntent;
+use crate::features::files::FilesIntent;
 use crate::features::repos::RecentList;
 use crate::features::submodules::SubmoduleList;
 use crate::features::worktrees::WorktreeList;
@@ -17,7 +23,6 @@ use crate::forge::merge::MergeMethod;
 use crate::forge::{ForgeHost, ForgeRepo};
 use crate::git::askpass::Secret;
 use crate::git::commit_files::CommitId;
-use crate::git::repo_state::Operation;
 use crate::git::safe_text::terminal_safe;
 use crate::intent::AppIntent;
 use crate::keymap::{KeyPress, KeyScope};
@@ -32,7 +37,6 @@ pub enum Popup {
         id: MenuId,
         cursor: usize,
     },
-    Confirm(ConfirmKind),
     Prompt {
         kind: PromptKind,
         input: LineInput,
@@ -492,128 +496,6 @@ impl DeleteRangeConfirm {
     }
 }
 
-/// A yes/no question. Its answer is an intent, so the asker needs no callback.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfirmKind {
-    Quit,
-    /// A plain push was rejected because the remote moved on.
-    ForcePush,
-    /// Abort this operation in progress. It names the operation found when
-    /// asked, so the answer aborts what the question said.
-    Abort(Operation),
-    /// Every block of the conflict view's file is picked: stage it?
-    StageResolved,
-    /// Fold every `fixup!` commit into its target. It rewrites commits
-    /// the user may not be looking at, so only `y` answers.
-    Autosquash,
-    /// Open the pull request `AppState::pr_draft` describes. It reaches
-    /// GitHub, so only `y` answers it: never Enter.
-    CreatePullRequest,
-    /// Rewrite history with the custom patch. It carries the action, its
-    /// target or message fixed when asked, and rewrites commits the user
-    /// may not be looking at, so only `y` answers.
-    CustomPatch(PatchAction),
-    /// Drop these commits, the full ids of a log range when asked, newest
-    /// first. It throws away several commits' changes, so only `y`
-    /// answers, and the answer drops only if the range still holds them.
-    DropRange(Vec<CommitId>),
-}
-
-impl ConfirmKind {
-    pub fn title(&self) -> &'static str {
-        match self {
-            ConfirmKind::Quit => "Quit",
-            ConfirmKind::ForcePush => "Push rejected",
-            ConfirmKind::Abort(Operation::Merge) => "Abort merge",
-            ConfirmKind::Abort(Operation::Rebase) => "Abort rebase",
-            ConfirmKind::Abort(Operation::CherryPick) => "Abort cherry-pick",
-            ConfirmKind::Abort(Operation::Revert) => "Abort revert",
-            ConfirmKind::Abort(Operation::Bisect) => "Reset bisect",
-            ConfirmKind::StageResolved => "Stage resolved file",
-            ConfirmKind::Autosquash => "Autosquash",
-            ConfirmKind::CreatePullRequest => "Create pull request",
-            ConfirmKind::CustomPatch(_) => "Custom patch",
-            ConfirmKind::DropRange(_) => "Drop commits",
-        }
-    }
-
-    pub fn question(&self) -> &'static str {
-        match self {
-            ConfirmKind::Quit => "Quit Kika? (y/n)",
-            ConfirmKind::ForcePush => {
-                "The remote has commits this branch does not. Push with \
-                 --force-with-lease, replacing them only if nobody pushed since \
-                 your last fetch? (y/n)"
-            }
-            ConfirmKind::Abort(Operation::Merge) => {
-                "Abort the merge and return to where it started? \
-                 Resolved conflicts are lost. (y/n)"
-            }
-            ConfirmKind::Abort(Operation::Rebase) => {
-                "Abort the rebase and return to where it started? \
-                 Resolved conflicts are lost. (y/n)"
-            }
-            ConfirmKind::Abort(Operation::CherryPick) => {
-                "Abort the cherry-pick and return to where it started? \
-                 Resolved conflicts are lost. (y/n)"
-            }
-            ConfirmKind::Abort(Operation::Revert) => {
-                "Abort the revert and return to where it started? \
-                 Resolved conflicts are lost. (y/n)"
-            }
-            // `AppState::confirm_question` names where the bisect started;
-            // this is the fallback when it cannot.
-            ConfirmKind::Abort(Operation::Bisect) => {
-                "Reset the bisect? Its marks are dropped and HEAD goes back to where \
-                 the bisect started; files change to match. Git refuses if a local \
-                 change would be overwritten. (y/n)"
-            }
-            ConfirmKind::StageResolved => {
-                "Every conflict in this file is resolved. Stage it? (y/n)"
-            }
-            ConfirmKind::Autosquash => "Fold every fixup! commit into the commit it fixes? (y/n)",
-            // `AppState::confirm_question` names the repository, branches
-            // and title; this is the fallback when it cannot.
-            ConfirmKind::CreatePullRequest => {
-                "Create the pull request on GitHub?\nPress y to create, n or Esc to cancel"
-            }
-            // `AppState::confirm_question` names the commits; this is the
-            // fallback when it cannot.
-            ConfirmKind::CustomPatch(_) => "Rewrite the history with the custom patch? (y/n)",
-            // `AppState::confirm_question` counts the commits; this is the
-            // fallback when it cannot.
-            ConfirmKind::DropRange(_) => "Drop the selected commits and their changes? (y/n)",
-        }
-    }
-
-    pub fn yes(&self) -> AppIntent {
-        match self {
-            ConfirmKind::Quit => AppIntent::Quit,
-            ConfirmKind::ForcePush => AppIntent::ForcePush,
-            ConfirmKind::Abort(Operation::Bisect) => AppIntent::ConfirmBisectReset,
-            ConfirmKind::Abort(op) => AppIntent::ConfirmAbort(*op),
-            ConfirmKind::StageResolved => AppIntent::StageResolved,
-            ConfirmKind::Autosquash => AppIntent::ConfirmAutosquash,
-            ConfirmKind::CreatePullRequest => AppIntent::ConfirmCreatePullRequest,
-            ConfirmKind::CustomPatch(action) => AppIntent::ConfirmPatchAction(action.clone()),
-            ConfirmKind::DropRange(ids) => AppIntent::ConfirmDropRange(ids.clone()),
-        }
-    }
-
-    pub fn no(&self) -> Option<AppIntent> {
-        match self {
-            ConfirmKind::Quit
-            | ConfirmKind::ForcePush
-            | ConfirmKind::Abort(_)
-            | ConfirmKind::StageResolved
-            | ConfirmKind::Autosquash
-            | ConfirmKind::CreatePullRequest
-            | ConfirmKind::CustomPatch(_)
-            | ConfirmKind::DropRange(_) => None,
-        }
-    }
-}
-
 /// A one-line text question. The typed text comes back as an intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
@@ -679,23 +561,39 @@ impl PromptKind {
 
     pub fn submit(self, text: String) -> AppIntent {
         match self {
-            PromptKind::GoToFile => AppIntent::GoToFile(text),
-            PromptKind::Command => AppIntent::CommandPromptAnswered(text),
-            PromptKind::NewBranch => AppIntent::CreateBranchNamed(text),
-            PromptKind::RenameBranch => AppIntent::RenameBranchTo(text),
+            PromptKind::GoToFile => AppIntent::Files(FilesIntent::GoToFile(text)),
+            PromptKind::Command => {
+                AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered(text))
+            }
+            PromptKind::NewBranch => AppIntent::Branches(BranchesIntent::CreateNamed(text)),
+            PromptKind::RenameBranch => AppIntent::Branches(BranchesIntent::RenameTo(text)),
             PromptKind::StashMessage => AppIntent::StashMessageAnswered(text),
             PromptKind::RenameStash => AppIntent::RenameStashTo(text),
-            PromptKind::TrackBranch => AppIntent::TrackRemoteBranchNamed(text),
-            PromptKind::RemoteName => AppIntent::AddRemoteNamed(text),
-            PromptKind::RemoteUrl => AppIntent::AddRemoteUrl(text),
-            PromptKind::RenameRemote => AppIntent::RenameRemoteTo(text),
-            PromptKind::SetUpstream => AppIntent::SetUpstreamTo(text),
+            PromptKind::TrackBranch => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(text)))
+            }
+            PromptKind::RemoteName => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddNamed(text)))
+            }
+            PromptKind::RemoteUrl => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddUrl(text)))
+            }
+            PromptKind::RenameRemote => {
+                AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::RenameTo(text)))
+            }
+            PromptKind::SetUpstream => AppIntent::Branches(BranchesIntent::SetUpstreamTo(text)),
             PromptKind::WorktreePath => AppIntent::AddWorktreeAt(text),
-            PromptKind::TagName => AppIntent::TagNamed(text),
-            PromptKind::TagMessage => AppIntent::TagMessaged(text),
-            PromptKind::IgnorePattern => AppIntent::IgnorePatternAnswered(text),
+            PromptKind::TagName => {
+                AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Named(text)))
+            }
+            PromptKind::TagMessage => {
+                AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(text)))
+            }
+            PromptKind::IgnorePattern => AppIntent::Files(FilesIntent::IgnorePatternAnswered(text)),
             PromptKind::PullRequestTitle => AppIntent::PullRequestTitled(text),
-            PromptKind::PatchCommitMessage => AppIntent::PatchCommitMessage(text),
+            PromptKind::PatchCommitMessage => AppIntent::Commits(CommitsIntent::CustomPatch(
+                CustomPatchIntent::CommitMessage(text),
+            )),
         }
     }
 }
@@ -783,6 +681,9 @@ impl ErrorPopup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::files::FilesIntent;
+    use crate::features::operation::OperationIntent;
+    use crate::features::sync::SyncIntent;
 
     fn press(input: &mut LineInput, code: KeyCode) {
         input.edit(KeyPress::new(code, KeyModifiers::NONE));
@@ -798,24 +699,38 @@ mod tests {
 
     #[test]
     fn the_abort_question_names_the_operation_and_yes_aborts_that_one() {
-        let ask = ConfirmKind::Abort(Operation::CherryPick);
-        assert_eq!(ask.title(), "Abort cherry-pick");
+        use crate::features::operation::abort_question;
+        use crate::git::repo_state::Operation;
+        let yes = |op| {
+            Then::Intent(Box::new(AppIntent::Operation(
+                OperationIntent::ConfirmAbort(op),
+            )))
+        };
+        let ask = abort_question(Operation::CherryPick).unwrap();
+        assert_eq!(ask.title, "Abort cherry-pick");
         assert_eq!(
-            ask.question(),
+            ask.text,
             "Abort the cherry-pick and return to where it started? \
              Resolved conflicts are lost. (y/n)"
         );
-        assert_eq!(ask.yes(), AppIntent::ConfirmAbort(Operation::CherryPick));
-        assert_eq!(ask.no(), None);
-        assert_eq!(ConfirmKind::Abort(Operation::Merge).title(), "Abort merge");
+        assert_eq!(ask.then, yes(Operation::CherryPick));
         assert_eq!(
-            ConfirmKind::Abort(Operation::Rebase).title(),
+            (ask.scope, ask.answer),
+            (KeyScope::AbortConfirm, Answer::YOnly)
+        );
+        assert_eq!(
+            abort_question(Operation::Merge).unwrap().title,
+            "Abort merge"
+        );
+        assert_eq!(
+            abort_question(Operation::Rebase).unwrap().title,
             "Abort rebase"
         );
-        let revert = ConfirmKind::Abort(Operation::Revert);
-        assert_eq!(revert.title(), "Abort revert");
-        assert!(revert.question().starts_with("Abort the revert "));
-        assert_eq!(revert.yes(), AppIntent::ConfirmAbort(Operation::Revert));
+        let revert = abort_question(Operation::Revert).unwrap();
+        assert_eq!(revert.title, "Abort revert");
+        assert!(revert.text.starts_with("Abort the revert "));
+        assert_eq!(revert.then, yes(Operation::Revert));
+        assert_eq!(abort_question(Operation::Bisect), None);
     }
 
     #[test]
@@ -1070,11 +985,11 @@ mod tests {
     fn branch_prompts_answer_with_their_intents() {
         assert_eq!(
             PromptKind::NewBranch.submit("n".into()),
-            AppIntent::CreateBranchNamed("n".into())
+            AppIntent::Branches(BranchesIntent::CreateNamed("n".into()))
         );
         assert_eq!(
             PromptKind::RenameBranch.submit("r".into()),
-            AppIntent::RenameBranchTo("r".into())
+            AppIntent::Branches(BranchesIntent::RenameTo("r".into()))
         );
     }
 
@@ -1083,33 +998,36 @@ mod tests {
         let t = || "t".to_string();
         assert_eq!(
             PromptKind::TrackBranch.submit(t()),
-            AppIntent::TrackRemoteBranchNamed(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::TrackNamed(t())))
         );
         assert_eq!(
             PromptKind::RemoteName.submit(t()),
-            AppIntent::AddRemoteNamed(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddNamed(t())))
         );
         assert_eq!(
             PromptKind::RemoteUrl.submit(t()),
-            AppIntent::AddRemoteUrl(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::AddUrl(t())))
         );
         assert_eq!(
             PromptKind::RenameRemote.submit(t()),
-            AppIntent::RenameRemoteTo(t())
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::RenameTo(t())))
         );
         assert_eq!(
             PromptKind::SetUpstream.submit(t()),
-            AppIntent::SetUpstreamTo(t())
+            AppIntent::Branches(BranchesIntent::SetUpstreamTo(t()))
         );
     }
 
     #[test]
     fn tag_prompts_answer_with_their_intents_and_delete_asks_plainly() {
         let t = || "t".to_string();
-        assert_eq!(PromptKind::TagName.submit(t()), AppIntent::TagNamed(t()));
+        assert_eq!(
+            PromptKind::TagName.submit(t()),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Named(t())))
+        );
         assert_eq!(
             PromptKind::TagMessage.submit(t()),
-            AppIntent::TagMessaged(t())
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Messaged(t())))
         );
         let ask = crate::features::branches::tags::delete_tag_question(
             "v1".into(),
@@ -1370,25 +1288,37 @@ mod tests {
 
     #[test]
     fn a_rejected_push_asks_before_forcing_with_a_lease() {
-        assert_eq!(ConfirmKind::ForcePush.yes(), AppIntent::ForcePush);
-        assert_eq!(ConfirmKind::ForcePush.no(), None);
-        assert!(ConfirmKind::ForcePush.question().starts_with(
+        let ask = crate::features::sync::force_push_question();
+        assert_eq!(
+            ask.then,
+            Then::Intent(Box::new(AppIntent::Sync(SyncIntent::ForcePush)))
+        );
+        assert_eq!(
+            (ask.scope, ask.answer),
+            (KeyScope::Confirm, Answer::YOrEnter)
+        );
+        assert_eq!(ask.title, "Push rejected");
+        assert!(ask.text.starts_with(
             "The remote has commits this branch does not. Push with --force-with-lease"
         ));
     }
 
     #[test]
     fn confirm_and_prompt_answer_with_intents() {
-        assert_eq!(ConfirmKind::Quit.yes(), AppIntent::Quit);
-        assert_eq!(ConfirmKind::Quit.no(), None);
-        assert_eq!(ConfirmKind::Quit.question(), "Quit Kika? (y/n)");
+        let quit = crate::confirm_question::quit_question();
+        assert_eq!(quit.then, Then::Intent(Box::new(AppIntent::Quit)));
+        assert_eq!(
+            (quit.scope, quit.answer),
+            (KeyScope::Confirm, Answer::YOrEnter)
+        );
+        assert_eq!(quit.text, "Quit Kika? (y/n)");
         assert_eq!(
             PromptKind::GoToFile.submit("b".into()),
-            AppIntent::GoToFile("b".into())
+            AppIntent::Files(FilesIntent::GoToFile("b".into()))
         );
         assert_eq!(
             PromptKind::Command.submit("c".into()),
-            AppIntent::CommandPromptAnswered("c".into())
+            AppIntent::CustomCommands(CustomCommandsIntent::PromptAnswered("c".into()))
         );
     }
 }

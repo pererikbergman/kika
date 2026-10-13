@@ -3,12 +3,22 @@
 //! use stays with that feature.
 
 use crate::effect::{Effect, Tag};
+use crate::features::blame::BlameIntent;
+use crate::features::branches::BranchesIntent;
 use crate::features::branches::BranchesTab;
+use crate::features::branches::remotes::RemotesIntent;
 use crate::features::branches::remotes::{RemoteLine, lines};
-use crate::features::commit::CommitEditor;
+use crate::features::branches::tags::TagsIntent;
+use crate::features::commit::{CommitEditor, CommitIntent};
 use crate::features::commits::CommitFilesList;
+use crate::features::commits::CommitsIntent;
 use crate::features::commits::reflog::Reflog;
+use crate::features::commits::reflog::ReflogIntent;
+use crate::features::commits::rewrite::RewriteIntent;
+use crate::features::diff::DiffIntent;
+use crate::features::files::FilesIntent;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
+use crate::features::sync::SyncIntent;
 use crate::filtered_list::{FilteredList, Row};
 use crate::forge::ForgeHost;
 use crate::git::FileEntry;
@@ -114,18 +124,22 @@ pub(crate) fn refresh_tag(state: &mut AppState) -> Tag {
             Effect::LoadStashes { .. },
         ] => {
             let (tag, list, remotes, tags) = (*tag, *list, *remotes, *tags);
-            state.update(AppIntent::BranchesLoaded {
+            state.update(AppIntent::Branches(BranchesIntent::Loaded {
                 tag: list,
                 result: Ok(vec![]),
-            });
-            state.update(AppIntent::RemotesLoaded {
-                tag: remotes,
-                result: Ok(vec![]),
-            });
-            state.update(AppIntent::TagsLoaded {
-                tag: tags,
-                result: Ok(vec![]),
-            });
+            }));
+            state.update(AppIntent::Branches(BranchesIntent::Remotes(
+                RemotesIntent::Loaded {
+                    tag: remotes,
+                    result: Ok(vec![]),
+                },
+            )));
+            state.update(AppIntent::Branches(BranchesIntent::Tags(
+                TagsIntent::Loaded {
+                    tag: tags,
+                    result: Ok(vec![]),
+                },
+            )));
             tag
         }
         other => {
@@ -196,13 +210,13 @@ pub(crate) fn line(text: &str) -> DiffLine {
 
 /// A `DiffLoaded` chunk of `n` lines for `tag`, each naming its seq.
 pub(crate) fn chunk(tag: Tag, n: usize, done: bool) -> AppIntent {
-    AppIntent::DiffLoaded {
+    diff_chunk(
         tag,
-        result: Ok(DiffChunk {
+        DiffChunk {
             lines: (0..n).map(|i| line(&format!("{}:{i}", tag.seq))).collect(),
             done,
-        }),
-    }
+        },
+    )
 }
 
 pub(crate) fn press(state: &mut AppState, code: KeyCode) -> Vec<Effect> {
@@ -243,7 +257,7 @@ pub(crate) fn commit_op() -> GitOp {
 
 pub(crate) fn select_path(state: &mut AppState, path: &str) {
     while state.files[state.selected.unwrap()].path != path.into() {
-        state.update(AppIntent::SelectNext);
+        state.update(AppIntent::Files(FilesIntent::Next));
     }
 }
 
@@ -324,10 +338,10 @@ pub(crate) fn view(state: &AppState) -> &HunkView {
 pub(crate) fn focused(files: Vec<FileEntry>, bytes: &[u8]) -> AppState {
     let (mut state, _) = with_files(files, 24);
     let (tag, _) = patch_load(&press(&mut state, KeyCode::Enter));
-    state.update(AppIntent::PatchLoaded {
+    state.update(AppIntent::Diff(DiffIntent::PatchLoaded {
         tag,
         result: Ok(patch_of(bytes)),
-    });
+    }));
     state
 }
 
@@ -380,10 +394,10 @@ pub(crate) fn blamed(n: usize, height: u16) -> AppState {
     let lines = (1..=n)
         .map(|i| blame_line(if i == n { &zero } else { OID }, i))
         .collect();
-    state.update(AppIntent::BlameLoaded {
+    state.update(AppIntent::Blame(BlameIntent::Loaded {
         tag,
         result: Ok(lines),
-    });
+    }));
     state
 }
 
@@ -414,7 +428,7 @@ pub(crate) fn submodules_tag(effects: &[Effect]) -> Tag {
 pub(crate) fn with_submodules(subs: Vec<Submodule>) -> AppState {
     let (state, _) = with_files(three_files(), 24);
     let mut state = state.with_location(Some(TOP.into()), TOP.into());
-    state.update(AppIntent::SelectNext);
+    state.update(AppIntent::Files(FilesIntent::Next));
     let tag = submodules_tag(&press_char(&mut state, 'S'));
     state.update(AppIntent::SubmodulesLoaded {
         tag,
@@ -467,11 +481,11 @@ pub(crate) fn commits_load(effects: &[Effect]) -> (Tag, Option<String>, usize) {
 }
 
 pub(crate) fn commits_loaded(tag: Tag, skip: usize, page: LogPage) -> AppIntent {
-    AppIntent::CommitsLoaded {
+    AppIntent::Commits(CommitsIntent::PageLoaded {
         tag,
         skip,
         result: Ok((page, 1_000)),
-    }
+    })
 }
 
 /// The markers load in `effects`: its tag.
@@ -549,11 +563,11 @@ pub(crate) fn loads(effects: &[Effect]) -> Vec<(Tag, Option<String>, usize, LogQ
 /// Answer a page load; a short page that is not the last asks for
 /// the next one at once.
 pub(crate) fn answer(state: &mut AppState, tag: Tag, skip: usize, page: LogPage) -> Vec<Effect> {
-    state.update(AppIntent::CommitsLoaded {
+    state.update(AppIntent::Commits(CommitsIntent::PageLoaded {
         tag,
         skip,
         result: Ok((page, 1_000)),
-    })
+    }))
 }
 
 /// Started in a repository, the Commits panel focused on `n` commits.
@@ -602,10 +616,10 @@ pub(crate) fn two_commit_files() -> Vec<CommitFile> {
 /// Open `c5` and answer with `files`; returns the effects of the answer.
 pub(crate) fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect> {
     let (tag, _) = files_load(&press(state, KeyCode::Enter));
-    state.update(AppIntent::CommitFilesLoaded {
+    state.update(AppIntent::Commits(CommitsIntent::FilesLoaded {
         tag,
         result: Ok(files),
-    })
+    }))
 }
 
 /// A file, a rename and another file.
@@ -702,11 +716,17 @@ pub(crate) fn log_load(effects: &[Effect]) -> Option<(Tag, Vec<u8>)> {
     })
 }
 
+/// Move the Branches panel's selection down one row. Core builds the
+/// branches intent, so tests in other features need not name it.
+pub(crate) fn next_branch(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Branches(BranchesIntent::Next))
+}
+
 pub(crate) fn branches_loaded(tag: Tag, branches: Vec<Branch>) -> AppIntent {
-    AppIntent::BranchesLoaded {
+    AppIntent::Branches(BranchesIntent::Loaded {
         tag,
         result: Ok(branches),
-    }
+    })
 }
 
 /// A workspace with `three_branches` loaded and the Branches panel
@@ -720,11 +740,11 @@ pub(crate) fn with_branches() -> AppState {
     let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
     let effects = state.update(branches_loaded(tag, three_branches()));
     let (tag, refname) = log_load(&effects).expect("the selection's log loads");
-    state.update(AppIntent::BranchLogLoaded {
+    state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
         tag,
         refname,
         result: Ok(vec![]),
-    });
+    }));
     state.update(AppIntent::FocusPanel(layout::Panel::Side(
         SidePanel::Branches,
     )));
@@ -769,10 +789,12 @@ pub(crate) fn remotes_tag(effects: &[Effect]) -> Tag {
 /// Reload both lists, answering with `remotes`.
 pub(crate) fn reload_remotes(state: &mut AppState, remotes: Vec<Remote>) -> Vec<Effect> {
     let tag = remotes_tag(&state.update(AppIntent::RefreshStatus));
-    state.update(AppIntent::RemotesLoaded {
-        tag,
-        result: Ok(remotes),
-    })
+    state.update(AppIntent::Branches(BranchesIntent::Remotes(
+        RemotesIntent::Loaded {
+            tag,
+            result: Ok(remotes),
+        },
+    )))
 }
 
 /// `fork` (no branches), `origin` with `main` and `topic`, and `stray`,
@@ -891,17 +913,20 @@ pub(crate) fn reset_op(mode: ResetMode) -> GitOp {
 /// Each move a detached `HEAD` checks first, as its intent and op.
 pub(crate) fn moves() -> [(AppIntent, GitOp); 4] {
     [
-        (AppIntent::CheckoutCommit, GitOp::CheckoutCommit(cid("c1"))),
         (
-            AppIntent::ResetTo(ResetMode::Soft),
+            AppIntent::Commits(CommitsIntent::Checkout),
+            GitOp::CheckoutCommit(cid("c1")),
+        ),
+        (
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Soft)),
             reset_op(ResetMode::Soft),
         ),
         (
-            AppIntent::ResetTo(ResetMode::Mixed),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Mixed)),
             reset_op(ResetMode::Mixed),
         ),
         (
-            AppIntent::ResetTo(ResetMode::Hard),
+            AppIntent::Commits(CommitsIntent::ResetTo(ResetMode::Hard)),
             reset_op(ResetMode::Hard),
         ),
     ]
@@ -914,12 +939,14 @@ pub(crate) fn checked(
 ) -> (AppState, Vec<Effect>) {
     let mut state = detached_on_commit();
     let (tag, op) = check_of(&state.update(intent));
-    let effects = state.update(AppIntent::LeftBehindChecked {
-        tag,
-        op,
-        head: cid("c0"),
-        result,
-    });
+    let effects = state.update(AppIntent::Commits(CommitsIntent::Rewrite(
+        RewriteIntent::LeftBehindChecked {
+            tag,
+            op,
+            head: cid("c0"),
+            result,
+        },
+    )));
     (state, effects)
 }
 
@@ -988,7 +1015,92 @@ pub(crate) fn remote_finished(
     op: RemoteOp,
     result: Result<(), RemoteFailure>,
 ) -> AppIntent {
-    AppIntent::RemoteFinished { tag, op, result }
+    AppIntent::Sync(SyncIntent::RemoteFinished { tag, op, result })
+}
+
+/// The intent that starts `op` by hand: fetch, pull, push, or push again
+/// with the lease. Core builds the sync intent, so tests in other features
+/// need not name it.
+pub(crate) fn remote_intent(op: &RemoteOp) -> AppIntent {
+    AppIntent::Sync(match op {
+        RemoteOp::Fetch => SyncIntent::Fetch,
+        RemoteOp::Pull => SyncIntent::Pull,
+        RemoteOp::Push {
+            force_with_lease: false,
+        } => SyncIntent::Push,
+        RemoteOp::Push {
+            force_with_lease: true,
+        } => SyncIntent::ForcePush,
+        other => panic!("no key starts {other:?}"),
+    })
+}
+
+/// Draw the next frame of the remote operation's spinner, as the tick
+/// does. Core builds the sync intent, so tests in other features need not
+/// name it.
+pub(crate) fn spinner_tick(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Sync(SyncIntent::SpinnerTick))
+}
+
+/// Open the commit popup, as `c` in the Files panel does. Core builds the
+/// commit intent, so tests in other features need not name it.
+pub(crate) fn open_commit(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Commit(CommitIntent::Open))
+}
+
+/// Move the blame cursor down one line. Core builds the blame intent, so
+/// tests in other features need not name it.
+pub(crate) fn next_blame_line(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Blame(BlameIntent::Next))
+}
+
+/// Move the Files panel's selection down one row. Core builds the files
+/// intent, so tests in other features need not name it.
+pub(crate) fn select_next(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Files(FilesIntent::Next))
+}
+
+/// Stage or unstage the selected file, as Space in the Files panel does.
+/// Core builds the files intent, so tests in other features need not name
+/// it.
+pub(crate) fn toggle_stage(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Files(FilesIntent::ToggleStage))
+}
+
+/// Hide or show whitespace-only changes, as `w` does. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn toggle_whitespace(state: &mut AppState) -> Vec<Effect> {
+    state.update(AppIntent::Diff(DiffIntent::ToggleWhitespace))
+}
+
+/// A chunk of the diff stream for `tag`. Core builds the diff intent, so
+/// tests in other features need not name it.
+pub(crate) fn diff_chunk(tag: Tag, chunk: DiffChunk) -> AppIntent {
+    AppIntent::Diff(DiffIntent::Loaded {
+        tag,
+        result: Ok(chunk),
+    })
+}
+
+/// A finished whole-file patch load for `tag`. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn patch_loaded(tag: Tag, patch: FilePatch) -> AppIntent {
+    AppIntent::Diff(DiffIntent::PatchLoaded {
+        tag,
+        result: Ok(patch),
+    })
+}
+
+/// The intent that switches the Diff pane's side. Core builds the diff
+/// intent, so tests in other features need not name it.
+pub(crate) fn toggle_diff_side_intent() -> AppIntent {
+    AppIntent::Diff(DiffIntent::ToggleSide)
+}
+
+/// The intent that edits the selected hunk. Core builds the diff intent,
+/// so tests in other features need not name it.
+pub(crate) fn edit_hunk_intent() -> AppIntent {
+    AppIntent::Diff(DiffIntent::EditHunk)
 }
 
 pub(crate) const PUSH: RemoteOp = RemoteOp::Push {
@@ -1177,11 +1289,15 @@ pub(crate) fn commit_reflog(head: char) -> Reflog {
 /// `state` after an undo whose fresh reflog read answered with
 /// `reflog`.
 pub(crate) fn undo_with(state: &mut AppState, reflog: Reflog) -> Vec<Effect> {
-    let tag = reflog_tag(&state.update(AppIntent::Undo));
-    state.update(AppIntent::ReflogLoaded {
-        tag,
-        result: Ok(reflog),
-    })
+    let tag = reflog_tag(&state.update(AppIntent::Commits(CommitsIntent::Reflog(
+        ReflogIntent::Undo,
+    ))));
+    state.update(AppIntent::Commits(CommitsIntent::Reflog(
+        ReflogIntent::Loaded {
+            tag,
+            result: Ok(reflog),
+        },
+    )))
 }
 
 pub(crate) fn stash_entry(index: usize, oid: &str, subject: &str) -> StashEntry {
@@ -1526,10 +1642,12 @@ pub(crate) fn tags_tag(effects: &[Effect]) -> Tag {
 /// Reload the lists, answering the tags with `tags`.
 pub(crate) fn reload_tags(state: &mut AppState, tags: Vec<TagRef>) -> Vec<Effect> {
     let tag = tags_tag(&state.update(AppIntent::RefreshStatus));
-    state.update(AppIntent::TagsLoaded {
-        tag,
-        result: Ok(tags),
-    })
+    state.update(AppIntent::Branches(BranchesIntent::Tags(
+        TagsIntent::Loaded {
+            tag,
+            result: Ok(tags),
+        },
+    )))
 }
 
 /// `v2` then `v1`, newest first.

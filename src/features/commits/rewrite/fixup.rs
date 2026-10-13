@@ -4,11 +4,16 @@
 
 use super::fixup_base::{FixupBase, candidates_notice};
 use super::{autosquash_disabled, autosquash_plan, create_fixup_disabled, find_base_disabled};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
+use crate::features::commits::CommitsIntent;
+use crate::features::commits::rewrite::RewriteIntent;
 use crate::git::commit_files::CommitId;
+use crate::intent::AppIntent;
+use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, ErrorPopup, Popup};
+use crate::popup::{ErrorPopup, Popup};
 
 impl AppState {
     /// Commit the staged change as a `fixup!` of the selected commit. Git
@@ -46,7 +51,7 @@ impl AppState {
             self.notice = Some(reason);
             return;
         }
-        self.popups.push(Popup::Confirm(ConfirmKind::Autosquash));
+        self.popups.push(Popup::Question(autosquash_question()));
     }
 
     /// Fold the fixups, as the question asked. The plan is made again from
@@ -147,5 +152,21 @@ impl AppState {
         // A stable sort keeps the unloaded ones in their order.
         ids.sort_by_key(|id| place(id).unwrap_or(usize::MAX));
         ids
+    }
+}
+
+/// "Fold every fixup! commit?" It rewrites commits the user may not be
+/// looking at, so only `y` answers.
+pub(crate) fn autosquash_question() -> ConfirmQuestion {
+    ConfirmQuestion {
+        scope: KeyScope::AutosquashConfirm,
+        title: "Autosquash".into(),
+        text: "Fold every fixup! commit into the commit it fixes? (y/n)".into(),
+        answer: Answer::YOnly,
+        then: Then::Intent(Box::new(AppIntent::Commits(CommitsIntent::Rewrite(
+            RewriteIntent::ConfirmAutosquash,
+        )))),
+        range: false,
+        head: None,
     }
 }

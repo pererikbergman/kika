@@ -7,12 +7,15 @@
 //! its four ops (`git.rs`).
 //!
 //! Its `pub(crate)` API:
+//! - the intent enum `RemotesIntent`, nested in `BranchesIntent::Remotes`,
+//!   and the free function `update` that `branches::update` passes it to;
 //! - the types [`RemotesList`], [`RemoteLine`] and [`RemotePending`], and
 //!   `lines`, which flattens a load's remotes into the tab's rows;
 //! - the handlers in `update.rs`: `remotes_loaded`, `move_remote`,
 //!   `ask_track_name`, `track_named`, `ask_remote_name`, `remote_named`,
 //!   `remote_url`, `ask_remote_rename`, `rename_remote_to`,
-//!   `ask_remove_remote` and `confirm_remove_remote`;
+//!   `ask_remove_remote`, `confirm_remove_remote` and
+//!   `remotes_popup_closed`;
 //! - the chunks `keys::{REMOTES_KEYS, REMOTES_REMOVE_CONFIRM}` and the
 //!   guards `keys::{add_remote_disabled, track_disabled,
 //!   change_remote_disabled, rename_remote_disabled}`;
@@ -41,12 +44,15 @@
 
 pub(crate) mod effects;
 pub(crate) mod git;
+mod intent;
 pub(crate) mod keys;
 mod list;
 mod update;
 pub(crate) mod view;
 
+pub(crate) use intent::RemotesIntent;
 pub(crate) use list::{RemoteLine, RemotePending, RemotesList, lines};
+pub(crate) use update::update;
 // Core's popup tests build the question as the feature asks it.
 #[cfg(test)]
 pub(crate) use update::remove_remote_question;

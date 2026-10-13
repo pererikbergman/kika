@@ -2480,12 +2480,28 @@ pub fn registry() -> &'static [Binding] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::branches::BranchesIntent;
+    use crate::features::branches::remotes::RemotesIntent;
+    use crate::features::branches::tags::TagsIntent;
+    use crate::features::commit::CommitIntent;
+    use crate::features::commits::CommitsIntent;
+    use crate::features::commits::bisect::BisectIntent;
+    use crate::features::commits::copy::CopyIntent;
+    use crate::features::commits::custom_patch::CustomPatchIntent;
     use crate::features::commits::custom_patch::keys::patch_file_disabled;
+    use crate::features::commits::reflog::ReflogIntent;
+    use crate::features::commits::rewrite::RewriteIntent;
     use crate::features::commits::rewrite::keys::{
         commits_drop_disabled, commits_fixup_disabled, commits_reword_disabled,
         commits_squash_disabled,
     };
+    use crate::features::conflicts::ConflictsIntent;
     use crate::features::custom_commands::{OutputMode, Panel, test_table};
+    use crate::features::diff::DiffIntent;
+    use crate::features::diff::renderers::RenderersIntent;
+    use crate::features::files::FilesIntent;
+    use crate::features::repos::ReposIntent;
+    use crate::features::sync::SyncIntent;
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::{CommitId, CommitRange};
     use crate::git::rebase_plan::{Direction, Edit};
@@ -2529,12 +2545,12 @@ mod tests {
             bind(V, KeyScope::Global, Quit),
             bind(X, KeyScope::Workspace, RefreshStatus),
             bind(Y, KeyScope::Workspace, RefreshStatus),
-            bind(X, KeyScope::Files, SelectNext),
+            bind(X, KeyScope::Files, Files(FilesIntent::Next)),
             Binding {
                 disabled: off,
-                ..bind(V, KeyScope::Files, SelectPrev)
+                ..bind(V, KeyScope::Files, Files(FilesIntent::Prev))
             },
-            bind(W, KeyScope::Review, ToggleStage),
+            bind(W, KeyScope::Review, Files(FilesIntent::ToggleStage)),
         ]
     }
 
@@ -2552,7 +2568,7 @@ mod tests {
         let files = KeyScope::Files;
         assert_eq!(
             run(&table, files, &state, plain('x')),
-            AppIntent::SelectNext
+            AppIntent::Files(FilesIntent::Next)
         );
         assert_eq!(
             run(&table, files, &state, plain('y')),
@@ -2577,7 +2593,7 @@ mod tests {
         ));
         assert_eq!(
             run(&table, KeyScope::Review, &state, plain('w')),
-            AppIntent::ToggleStage
+            AppIntent::Files(FilesIntent::ToggleStage)
         );
     }
 
@@ -2671,10 +2687,16 @@ mod tests {
         assert_eq!(KeyScope::Commits.title(), "Commits");
         let commits = |k| from(KeyScope::Commits, k);
         let none = KeyModifiers::NONE;
-        assert_eq!(commits(plain('j')), Some(CommitNext));
-        assert_eq!(commits(key(KeyCode::Down, none)), Some(CommitNext));
-        assert_eq!(commits(plain('k')), Some(CommitPrev));
-        assert_eq!(commits(key(KeyCode::Up, none)), Some(CommitPrev));
+        assert_eq!(commits(plain('j')), Some(Commits(CommitsIntent::Next)));
+        assert_eq!(
+            commits(key(KeyCode::Down, none)),
+            Some(Commits(CommitsIntent::Next))
+        );
+        assert_eq!(commits(plain('k')), Some(Commits(CommitsIntent::Prev)));
+        assert_eq!(
+            commits(key(KeyCode::Up, none)),
+            Some(Commits(CommitsIntent::Prev))
+        );
         assert_eq!(commits(plain('r')), Some(RefreshStatus));
         assert_eq!(commits(plain('q')), Some(Quit));
     }
@@ -2685,7 +2707,7 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(
             from(KeyScope::Commits, key(KeyCode::Enter, none)),
-            Some(OpenCommitFiles)
+            Some(Commits(CommitsIntent::OpenFiles))
         );
         assert_eq!(KeyScope::CommitFiles.parent(), Some(KeyScope::Workspace));
         assert_eq!(KeyScope::CommitFiles.title(), "Commit files");
@@ -2693,12 +2715,18 @@ mod tests {
         // Esc clears a search first, then goes back.
         assert_eq!(files(key(KeyCode::Esc, none)), Some(PaneEscape));
         for k in [plain('h'), key(KeyCode::Left, none)] {
-            assert_eq!(files(k), Some(CloseCommitFiles), "{k:?}");
+            assert_eq!(files(k), Some(Commits(CommitsIntent::CloseFiles)), "{k:?}");
         }
-        assert_eq!(files(plain('j')), Some(CommitFileNext));
-        assert_eq!(files(key(KeyCode::Down, none)), Some(CommitFileNext));
-        assert_eq!(files(plain('k')), Some(CommitFilePrev));
-        assert_eq!(files(key(KeyCode::Up, none)), Some(CommitFilePrev));
+        assert_eq!(files(plain('j')), Some(Commits(CommitsIntent::FileNext)));
+        assert_eq!(
+            files(key(KeyCode::Down, none)),
+            Some(Commits(CommitsIntent::FileNext))
+        );
+        assert_eq!(files(plain('k')), Some(Commits(CommitsIntent::FilePrev)));
+        assert_eq!(
+            files(key(KeyCode::Up, none)),
+            Some(Commits(CommitsIntent::FilePrev))
+        );
         assert_eq!(files(plain('q')), Some(Quit));
         assert_eq!(files(plain('J')), Some(ScrollDiff(Scroll::LineDown)));
     }
@@ -2717,10 +2745,16 @@ mod tests {
             Some(Quit)
         );
         assert_eq!(files(plain('r')), Some(RefreshStatus));
-        assert_eq!(files(plain('j')), Some(SelectNext));
-        assert_eq!(files(key(KeyCode::Down, none)), Some(SelectNext));
-        assert_eq!(files(plain('k')), Some(SelectPrev));
-        assert_eq!(files(key(KeyCode::Up, none)), Some(SelectPrev));
+        assert_eq!(files(plain('j')), Some(Files(FilesIntent::Next)));
+        assert_eq!(
+            files(key(KeyCode::Down, none)),
+            Some(Files(FilesIntent::Next))
+        );
+        assert_eq!(files(plain('k')), Some(Files(FilesIntent::Prev)));
+        assert_eq!(
+            files(key(KeyCode::Up, none)),
+            Some(Files(FilesIntent::Prev))
+        );
         for mods in [none, shift] {
             assert_eq!(
                 files(key(KeyCode::Char('J'), mods)),
@@ -2739,9 +2773,9 @@ mod tests {
             files(key(KeyCode::PageUp, none)),
             Some(ScrollDiff(Scroll::PageUp))
         );
-        assert_eq!(files(plain(' ')), Some(ToggleStage));
-        assert_eq!(files(plain('a')), Some(ToggleStageAll));
-        assert_eq!(files(plain('c')), Some(OpenCommit));
+        assert_eq!(files(plain(' ')), Some(Files(FilesIntent::ToggleStage)));
+        assert_eq!(files(plain('a')), Some(Files(FilesIntent::ToggleStageAll)));
+        assert_eq!(files(plain('c')), Some(Commit(CommitIntent::Open)));
         assert_eq!(files(key(KeyCode::Char('a'), KeyModifiers::CONTROL)), None);
         assert_eq!(files(plain('x')), None);
     }
@@ -2798,7 +2832,7 @@ mod tests {
         assert_eq!(c(&state), Err("An operation is running".into()));
         state.free_op();
         state.files.pop();
-        assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
+        assert_eq!(c(&state), Ok(AppIntent::Commit(CommitIntent::Open)));
     }
 
     #[test]
@@ -2832,9 +2866,9 @@ mod tests {
         // A clean tree with commits: nothing staged is a message-only amend.
         state.branch = Some(branch(Head::Branch("main".into())));
         assert!(state.files.is_empty());
-        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+        assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
         state.branch = Some(branch(Head::Detached("abc".into())));
-        assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
+        assert_eq!(a(&state), Ok(AppIntent::Commit(CommitIntent::OpenAmend)));
 
         state.hold_op(1);
         assert_eq!(a(&state), Err(OP_RUNNING.into()));
@@ -2856,7 +2890,7 @@ mod tests {
         let loading = |k| from(KeyScope::CommitLoading, k);
         assert_eq!(
             loading(key(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(CancelCommit)
+            Some(Commit(CommitIntent::Cancel))
         );
         assert_eq!(
             loading(key(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -2876,27 +2910,33 @@ mod tests {
         let ctrl = |c| key(KeyCode::Char(c), KeyModifiers::CONTROL);
 
         let confirm = |k| from(KeyScope::CommitConfirm, k);
-        assert_eq!(confirm(plain('y')), Some(ConfirmStageAll));
-        assert_eq!(confirm(enter), Some(ConfirmStageAll));
-        assert_eq!(confirm(plain('n')), Some(CancelCommit));
-        assert_eq!(confirm(esc), Some(CancelCommit));
+        assert_eq!(
+            confirm(plain('y')),
+            Some(Commit(CommitIntent::ConfirmStageAll))
+        );
+        assert_eq!(confirm(enter), Some(Commit(CommitIntent::ConfirmStageAll)));
+        assert_eq!(confirm(plain('n')), Some(Commit(CommitIntent::Cancel)));
+        assert_eq!(confirm(esc), Some(Commit(CommitIntent::Cancel)));
 
         let editor = |k| from(KeyScope::CommitEditor, k);
-        assert_eq!(editor(ctrl('s')), Some(SubmitCommit));
-        assert_eq!(editor(esc), Some(CancelCommit));
-        assert_eq!(editor(key(KeyCode::Tab, none)), Some(ToggleCommitField));
+        assert_eq!(editor(ctrl('s')), Some(Commit(CommitIntent::Submit)));
+        assert_eq!(editor(esc), Some(Commit(CommitIntent::Cancel)));
+        assert_eq!(
+            editor(key(KeyCode::Tab, none)),
+            Some(Commit(CommitIntent::ToggleField))
+        );
         assert_eq!(editor(enter), None, "Enter is typed into the message");
 
         let error = |k| from(KeyScope::CommitError, k);
-        assert_eq!(error(esc), Some(DismissCommitError));
-        assert_eq!(error(enter), Some(DismissCommitError));
+        assert_eq!(error(esc), Some(Commit(CommitIntent::DismissError)));
+        assert_eq!(error(enter), Some(Commit(CommitIntent::DismissError)));
 
-        assert_eq!(editor(ctrl('c')), Some(InterruptCommit));
+        assert_eq!(editor(ctrl('c')), Some(Commit(CommitIntent::Interrupt)));
 
         let discard = |k| from(KeyScope::CommitDiscard, k);
-        assert_eq!(discard(plain('y')), Some(DiscardCommit));
-        assert_eq!(discard(plain('n')), Some(ResumeCommit));
-        assert_eq!(discard(esc), Some(ResumeCommit));
+        assert_eq!(discard(plain('y')), Some(Commit(CommitIntent::Discard)));
+        assert_eq!(discard(plain('n')), Some(Commit(CommitIntent::Resume)));
+        assert_eq!(discard(esc), Some(Commit(CommitIntent::Resume)));
         assert_eq!(discard(enter), None, "Enter never throws a message away");
 
         for scope in [
@@ -3013,7 +3053,10 @@ mod tests {
                 .find(|b| b.scope == scope && b.matches(k))
                 .map(|b| b.intent.clone())
         };
-        assert_eq!(bound(KeyScope::Diff, plain('e')), Some(EditHunk));
+        assert_eq!(
+            bound(KeyScope::Diff, plain('e')),
+            Some(Diff(DiffIntent::EditHunk))
+        );
         assert_eq!(bound(KeyScope::Files, plain('e')), None);
         assert_eq!(bound(KeyScope::Lines, plain('e')), None);
         assert_eq!(
@@ -3072,15 +3115,30 @@ mod tests {
             other => panic!("{key:?}: {other:?}"),
         };
         let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(run(&state, plain('j')), Some(AppIntent::BranchNext));
+        assert_eq!(
+            run(&state, plain('j')),
+            Some(AppIntent::Branches(BranchesIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(AppIntent::BranchPrev)
+            Some(AppIntent::Branches(BranchesIntent::Prev))
         );
-        assert_eq!(run(&state, plain(' ')), Some(AppIntent::CheckoutBranch));
-        assert_eq!(run(&state, plain('n')), Some(AppIntent::NewBranch));
-        assert_eq!(run(&state, shift('R')), Some(AppIntent::RenameBranch));
-        assert_eq!(run(&state, plain('d')), Some(AppIntent::DeleteBranch));
+        assert_eq!(
+            run(&state, plain(' ')),
+            Some(AppIntent::Branches(BranchesIntent::Checkout))
+        );
+        assert_eq!(
+            run(&state, plain('n')),
+            Some(AppIntent::Branches(BranchesIntent::New))
+        );
+        assert_eq!(
+            run(&state, shift('R')),
+            Some(AppIntent::Branches(BranchesIntent::Rename))
+        );
+        assert_eq!(
+            run(&state, plain('d')),
+            Some(AppIntent::Branches(BranchesIntent::Delete))
+        );
         // `r` still reloads, and the digits still move focus.
         assert_eq!(run(&state, plain('r')), Some(AppIntent::RefreshStatus));
         assert_eq!(
@@ -3141,25 +3199,46 @@ mod tests {
             other => panic!("{key:?}: {other:?}"),
         };
         let shift = |c| key(KeyCode::Char(c), KeyModifiers::SHIFT);
-        assert_eq!(run(&state, plain('j')), AppIntent::RemoteNext);
+        assert_eq!(
+            run(&state, plain('j')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            AppIntent::RemotePrev
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Prev))
         );
-        assert_eq!(run(&state, plain('a')), AppIntent::AddRemote);
-        assert_eq!(run(&state, shift('R')), AppIntent::RenameRemote);
-        assert_eq!(run(&state, plain('d')), AppIntent::RemoveRemote);
-        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
-        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
+        assert_eq!(
+            run(&state, plain('a')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Add))
+        );
+        assert_eq!(
+            run(&state, shift('R')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Rename))
+        );
+        assert_eq!(
+            run(&state, plain('d')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Remove))
+        );
+        assert_eq!(
+            run(&state, plain('[')),
+            AppIntent::Branches(BranchesIntent::PrevTab)
+        );
+        assert_eq!(
+            run(&state, plain(']')),
+            AppIntent::Branches(BranchesIntent::SwitchTab)
+        );
         assert_eq!(run(&state, plain('r')), AppIntent::RefreshStatus);
-        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        assert_eq!(run(&state, plain('f')), AppIntent::Sync(SyncIntent::Fetch));
         // A header row is a remote, not a branch to check out.
         assert!(matches!(
             resolve_in(&state, plain(' ')),
             Resolution::Disabled(ref reason) if reason == "Select a remote branch"
         ));
         state.branches.remotes.list.move_by(1);
-        assert_eq!(run(&state, plain(' ')), AppIntent::TrackRemoteBranch);
+        assert_eq!(
+            run(&state, plain(' ')),
+            AppIntent::Branches(BranchesIntent::Remotes(RemotesIntent::Track))
+        );
         assert_eq!(KeyScope::Remotes.parent(), Some(KeyScope::Workspace));
 
         let branches = |key| match resolve(
@@ -3173,8 +3252,14 @@ mod tests {
             Resolution::Disabled(_) => None,
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(branches(plain('[')), Some(AppIntent::PrevBranchesTab));
-        assert_eq!(branches(plain(']')), Some(AppIntent::SwitchBranchesTab));
+        assert_eq!(
+            branches(plain('[')),
+            Some(AppIntent::Branches(BranchesIntent::PrevTab))
+        );
+        assert_eq!(
+            branches(plain(']')),
+            Some(AppIntent::Branches(BranchesIntent::SwitchTab))
+        );
         // No branch is selected, so both are refused.
         assert_eq!(branches(plain('u')), None);
         assert_eq!(branches(shift('U')), None);
@@ -3222,20 +3307,35 @@ mod tests {
             Resolution::Run(binding) => binding.intent.clone(),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(run(&state, plain('j')), AppIntent::TagNext);
+        assert_eq!(
+            run(&state, plain('j')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Next))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Down, KeyModifiers::NONE)),
-            AppIntent::TagNext
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Next))
         );
-        assert_eq!(run(&state, plain('k')), AppIntent::TagPrev);
+        assert_eq!(
+            run(&state, plain('k')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Prev))
+        );
         assert_eq!(
             run(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            AppIntent::TagPrev
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Prev))
         );
-        assert_eq!(run(&state, plain('d')), AppIntent::DeleteTag);
-        assert_eq!(run(&state, plain(']')), AppIntent::SwitchBranchesTab);
-        assert_eq!(run(&state, plain('[')), AppIntent::PrevBranchesTab);
-        assert_eq!(run(&state, plain('f')), AppIntent::Fetch);
+        assert_eq!(
+            run(&state, plain('d')),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Delete))
+        );
+        assert_eq!(
+            run(&state, plain(']')),
+            AppIntent::Branches(BranchesIntent::SwitchTab)
+        );
+        assert_eq!(
+            run(&state, plain('[')),
+            AppIntent::Branches(BranchesIntent::PrevTab)
+        );
+        assert_eq!(run(&state, plain('f')), AppIntent::Sync(SyncIntent::Fetch));
         assert_eq!(KeyScope::Tags.parent(), Some(KeyScope::Workspace));
 
         // `P` is the tag's push here, never the branch's.
@@ -3262,7 +3362,10 @@ mod tests {
                 merged: true,
             }]),
         );
-        assert_eq!(run(&state, shift_p), AppIntent::PushTag);
+        assert_eq!(
+            run(&state, shift_p),
+            AppIntent::Branches(BranchesIntent::Tags(TagsIntent::Push))
+        );
         assert_eq!(push_tag_remote(&state), Ok("origin".into()));
         state.remote = Some(crate::remote_run::RemoteRun::new(
             crate::git::remote::RemoteOp::Fetch,
@@ -3309,10 +3412,10 @@ mod tests {
     fn the_commits_panel_checks_out_reverts_and_resets_the_selected_commit() {
         use AppIntent::*;
         let commits = |k| from(KeyScope::Commits, k);
-        assert_eq!(commits(plain(' ')), Some(CheckoutCommit));
+        assert_eq!(commits(plain(' ')), Some(Commits(CommitsIntent::Checkout)));
         assert_eq!(
             commits(key(KeyCode::Char('R'), KeyModifiers::SHIFT)),
-            Some(RevertCommit)
+            Some(Commits(CommitsIntent::Revert))
         );
         assert_eq!(
             commits(key(KeyCode::Char('X'), KeyModifiers::SHIFT)),
@@ -3395,7 +3498,6 @@ mod tests {
 
     #[test]
     fn the_commits_panel_squashes_fixes_up_drops_and_rewords() {
-        use AppIntent::RewriteCommit;
         let ids = ['a', 'b', 'c'].map(|d| d.to_string().repeat(40));
         let mut state = AppState::new(Context::Workspace);
         state.commits.rows = (0..2)
@@ -3421,22 +3523,50 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             other => panic!("{key:?}: {other:?}"),
         };
-        assert_eq!(on(&state, plain('s')), Some(RewriteCommit(Edit::Squash)));
+        assert_eq!(
+            on(&state, plain('s')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Squash)
+            )))
+        );
         assert_eq!(
             on(&state, key(KeyCode::Char('F'), KeyModifiers::SHIFT)),
-            Some(RewriteCommit(Edit::Fixup))
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Fixup)
+            )))
         );
-        assert_eq!(on(&state, plain('d')), Some(RewriteCommit(Edit::Drop)));
-        assert_eq!(on(&state, plain('e')), Some(RewriteCommit(Edit::Reword)));
+        assert_eq!(
+            on(&state, plain('d')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Drop)
+            )))
+        );
+        assert_eq!(
+            on(&state, plain('e')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Reword)
+            )))
+        );
         assert_eq!(
             on(&state, key(KeyCode::Char('E'), KeyModifiers::SHIFT)),
-            Some(RewriteCommit(Edit::Stop))
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Edit(Edit::Stop)
+            )))
         );
-        assert_eq!(on(&state, plain('b')), Some(AppIntent::InsertBreak));
+        assert_eq!(
+            on(&state, plain('b')),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::InsertBreak
+            )))
+        );
         let alt = KeyModifiers::ALT;
         let (up, down) = (
-            Some(AppIntent::MoveCommit(Direction::Up)),
-            Some(AppIntent::MoveCommit(Direction::Down)),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Move(Direction::Up),
+            ))),
+            Some(AppIntent::Commits(CommitsIntent::Rewrite(
+                RewriteIntent::Move(Direction::Down),
+            ))),
         );
         state.commits.selected = 1;
         assert_eq!(on(&state, key(KeyCode::Char('k'), alt)), up);
@@ -3447,11 +3577,11 @@ mod tests {
         // Plain arrows still move the cursor.
         assert_eq!(
             on(&state, key(KeyCode::Down, KeyModifiers::NONE)),
-            Some(AppIntent::CommitNext)
+            Some(AppIntent::Commits(CommitsIntent::Next))
         );
         assert_eq!(
             on(&state, key(KeyCode::Up, KeyModifiers::NONE)),
-            Some(AppIntent::CommitPrev)
+            Some(AppIntent::Commits(CommitsIntent::Prev))
         );
         // Only plain arrows move the cursor now: Alt+arrow moves the
         // commit, and Shift+arrow is left unbound.
@@ -3524,7 +3654,10 @@ mod tests {
         let none = KeyModifiers::NONE;
         assert_eq!(resolve_in(key(KeyCode::Enter, none)), None);
         assert_eq!(resolve_in(plain('q')), None);
-        assert_eq!(resolve_in(plain('y')), Some(AppIntent::ConfirmResetHard));
+        assert_eq!(
+            resolve_in(plain('y')),
+            Some(AppIntent::Commits(CommitsIntent::ConfirmResetHard))
+        );
         assert_eq!(resolve_in(plain('n')), Some(AppIntent::ConfirmNo));
         assert_eq!(
             resolve_in(key(KeyCode::Esc, none)),
@@ -3790,8 +3923,20 @@ mod tests {
                 Resolution::Run(binding) => Some(binding.intent.clone()),
                 other => panic!("{scope:?} {k:?}: {other:?}"),
             };
-            assert_eq!(run(ctrl('z')), Some(AppIntent::Undo), "{scope:?}");
-            assert_eq!(run(ctrl('r')), Some(AppIntent::Redo), "{scope:?}");
+            assert_eq!(
+                run(ctrl('z')),
+                Some(AppIntent::Commits(CommitsIntent::Reflog(
+                    ReflogIntent::Undo
+                ))),
+                "{scope:?}"
+            );
+            assert_eq!(
+                run(ctrl('r')),
+                Some(AppIntent::Commits(CommitsIntent::Reflog(
+                    ReflogIntent::Redo
+                ))),
+                "{scope:?}"
+            );
         }
         // Plain `z` still zooms and plain `r` still refreshes.
         assert_eq!(
@@ -4353,7 +4498,10 @@ mod tests {
             assert_eq!(from(scope, key(KeyCode::Left, none)), Some(FocusLeft));
         }
         // List movement stays list movement.
-        assert_eq!(from(KeyScope::Files, plain('j')), Some(SelectNext));
+        assert_eq!(
+            from(KeyScope::Files, plain('j')),
+            Some(Files(FilesIntent::Next))
+        );
         assert_eq!(from(KeyScope::Workspace, plain('j')), None);
         // None of them are in the bar, which is full at 80 columns.
         for c in ['0', '1', '2', '3', '4', '5', 'l', 'z'] {
@@ -4841,41 +4989,59 @@ mod tests {
     #[test]
     fn every_binding_that_quits_starts_a_program_destroys_work_or_answers_is_locked() {
         use AppIntent::*;
+        // The feature that owns a nested intent, by its top-level variant.
+        fn nested_feature(intent: &AppIntent) -> Option<&'static str> {
+            match intent {
+                Branches(_) => Some("branches"),
+                Commits(_) => Some("commits"),
+                Commit(_) => Some("commit"),
+                Blame(_) => Some("blame"),
+                Conflicts(_) => Some("conflicts"),
+                CustomCommands(_) => Some("custom_commands"),
+                Sync(_) => Some("sync"),
+                Operation(_) => Some("operation"),
+                Repos(_) => Some("repos"),
+                Files(_) => Some("files"),
+                Diff(_) => Some("diff"),
+                _ => None,
+            }
+        }
+        let mut nested_risky = Vec::new();
         for b in registry() {
             let risky = matches!(
                 b.intent,
-                Quit | InterruptCommit
+                Quit | Commit(CommitIntent::Interrupt)
                     | OpenInEditor
-                    | EditHunk
-                    | CycleRenderer
-                    | EditCommitExternally
+                    | Diff(DiffIntent::EditHunk)
+                    | Diff(DiffIntent::Renderers(RenderersIntent::Cycle))
+                    | Commit(CommitIntent::EditExternally)
                     | InitSubmodule
                     | UpdateSubmodule
                     | Discard
-                    | DiscardCommit
+                    | Commit(CommitIntent::Discard)
                     | ConfirmYes
                     | ConfirmNo
-                    | InitRepo
-                    | RecentSelect
-                    | DeleteBranch
-                    | ConfirmDeleteBranch { .. }
-                    | Fetch
-                    | Pull
-                    | Push
-                    | ForcePush
+                    | Repos(ReposIntent::Init)
+                    | Repos(ReposIntent::Select)
+                    | Branches(BranchesIntent::Delete)
+                    | Branches(BranchesIntent::ConfirmDelete { .. })
+                    | Sync(SyncIntent::Fetch)
+                    | Sync(SyncIntent::Pull)
+                    | Sync(SyncIntent::Push)
+                    | Sync(SyncIntent::ForcePush)
                     | SubmitCredential
                     | CredentialAnswered(_)
                     | OpenMenu(MenuId::Merge)
                     | ContinueOperation
                     | SkipOperation
                     | AbortOperation
-                    | PickConflict(_)
-                    | OpenMergeTool
-                    | RevertCommit
-                    | PasteCommits
+                    | Conflicts(ConflictsIntent::Pick(_))
+                    | Conflicts(ConflictsIntent::OpenMergeTool)
+                    | Commits(CommitsIntent::Revert)
+                    | Commits(CommitsIntent::Copy(CopyIntent::Paste))
                     | OpenMenu(MenuId::Reset)
-                    | ConfirmResetHard
-                    | ConfirmLeaveCommits
+                    | Commits(CommitsIntent::ConfirmResetHard)
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::ConfirmLeaveCommits))
                     | OpenMenu(MenuId::Stash)
                     | OpenStashFiles
                     | ApplyStash
@@ -4883,32 +5049,32 @@ mod tests {
                     | DropStash
                     | RenameStash
                     | ConfirmDropStash
-                    | RemoveRemote
-                    | ConfirmRemoveRemote
+                    | Branches(BranchesIntent::Remotes(RemotesIntent::Remove))
+                    | Branches(BranchesIntent::Remotes(RemotesIntent::ConfirmRemove))
                     | ConfirmDeleteRange
-                    | DeleteTag
-                    | ConfirmDeleteTag
-                    | PushTag
-                    | RewriteCommit(_)
-                    | MoveCommit(_)
-                    | InsertBreak
-                    | CreateFixup
-                    | Autosquash
-                    | BisectHead(_)
+                    | Branches(BranchesIntent::Tags(TagsIntent::Delete))
+                    | Branches(BranchesIntent::Tags(TagsIntent::ConfirmDelete))
+                    | Branches(BranchesIntent::Tags(TagsIntent::Push))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Edit(_)))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Move(_)))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::InsertBreak))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::CreateFixup))
+                    | Commits(CommitsIntent::Rewrite(RewriteIntent::Autosquash))
+                    | Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(_)))
                     | OpenMenu(MenuId::Bisect)
                     | OpenWorktree
                     | AddWorktree
                     | RemoveWorktree
                     | ConfirmRemoveWorktree
-                    | Undo
-                    | Redo
-                    | ConfirmTravel
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::Undo))
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::Redo))
+                    | Commits(CommitsIntent::Reflog(ReflogIntent::ConfirmTravel))
                     | ListEscape
                     | OpenMenu(MenuId::PullRequest)
                     | ConfirmCreatePullRequest
                     // It asks GitHub for the badges again.
                     | RefreshPullRequests
-                    | OpenPatchMenu
+                    | Commits(CommitsIntent::CustomPatch(CustomPatchIntent::OpenMenu))
                     // Review mode reaches GitHub or starts the browser, and
                     // a pick may open a check's page.
                     | EnterReview
@@ -4926,6 +5092,85 @@ mod tests {
                     | PaneEscape
             );
             assert_eq!(risky, REPO_LOCKED.contains(&b.id), "{}", b.id);
+            if risky && let Some(feature) = nested_feature(&b.intent) {
+                nested_risky.push((feature, b.id));
+            }
+        }
+        // `use AppIntent::*` lets a stale bare name in the pattern above
+        // bind anything, so pin the nested bindings it must match, per
+        // feature and in registry order.
+        let risky_in = |feature| {
+            nested_risky
+                .iter()
+                .filter(|(f, _)| *f == feature)
+                .map(|(_, id)| *id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            risky_in("branches"),
+            [
+                "branches.delete",
+                "remotes.remove",
+                "tags.delete",
+                "tags.push",
+                "delete_branch.yes",
+                "delete_branch.force",
+                "delete_tag.yes",
+                "remove_remote.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("commits"),
+            [
+                "workspace.patch_menu",
+                "workspace.undo",
+                "workspace.redo",
+                "commits.revert",
+                "commits.squash",
+                "commits.fixup",
+                "commits.create_fixup",
+                "commits.autosquash",
+                "commits.drop",
+                "commits.reword",
+                "commits.move_up",
+                "commits.move_down",
+                "commits.edit",
+                "commits.break",
+                "commits.pick",
+                "commits.paste",
+                "status.bisect_good",
+                "status.bisect_bad",
+                "reset_hard.yes",
+                "leave_commits.yes",
+                "travel.yes",
+            ]
+        );
+        assert_eq!(
+            risky_in("commit"),
+            [
+                "commit_editor.edit_externally",
+                "commit_editor.quit",
+                "commit_discard.discard",
+            ]
+        );
+        assert_eq!(risky_in("repos"), ["recent.open", "recent.init"]);
+        assert_eq!(
+            risky_in("sync"),
+            ["workspace.fetch", "workspace.pull", "workspace.push"]
+        );
+        assert_eq!(
+            risky_in("conflicts"),
+            [
+                "files.mergetool",
+                "conflict.ours",
+                "conflict.theirs",
+                "conflict.both",
+                "conflict.mergetool",
+            ]
+        );
+        assert_eq!(risky_in("diff"), ["diff.edit_hunk", "diff.renderer"]);
+        for feature in ["blame", "custom_commands", "operation", "files"] {
+            assert!(risky_in(feature).is_empty(), "{feature}");
         }
     }
 
@@ -5211,7 +5456,7 @@ mod tests {
             head: Head::Detached("abc".into()),
             upstream: None,
             ahead_behind: None,
-            in_progress: vec![Operation::Bisect],
+            in_progress: vec![crate::git::repo_state::Operation::Bisect],
             bisect: Some(crate::git::bisect::BisectState::default()),
         });
         let status = |c| match resolve(
@@ -5224,8 +5469,18 @@ mod tests {
             Resolution::Run(binding) => Some(binding.intent.clone()),
             other => panic!("{c}: {other:?}"),
         };
-        assert_eq!(status('g'), Some(BisectHead(BisectMark::Good)));
-        assert_eq!(status('b'), Some(BisectHead(BisectMark::Bad)));
+        assert_eq!(
+            status('g'),
+            Some(Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+                BisectMark::Good
+            ))))
+        );
+        assert_eq!(
+            status('b'),
+            Some(Commits(CommitsIntent::Bisect(BisectIntent::MarkHead(
+                BisectMark::Bad
+            ))))
+        );
         assert_eq!(status('s'), Some(SkipOperation));
         assert_eq!(status('a'), Some(AbortOperation));
     }
@@ -5302,7 +5557,10 @@ mod tests {
             Err("Only untracked files can be ignored".into())
         );
         state.files = vec![file(EntryKind::Untracked, '?', '?')];
-        assert_eq!(resolve_i(&state), Ok(AppIntent::OpenIgnore));
+        assert_eq!(
+            resolve_i(&state),
+            Ok(AppIntent::Files(FilesIntent::OpenIgnore))
+        );
         for id in ["commits.copy_menu", "files.ignore"] {
             assert!(!REPO_LOCKED.contains(&id), "{id}");
         }

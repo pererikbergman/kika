@@ -4,7 +4,7 @@
 
 use super::git::Reflog;
 use super::keys::undo_disabled;
-use super::undo;
+use super::{ReflogIntent, undo};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::status::EntryKind;
@@ -12,6 +12,25 @@ use crate::keymap::KeyScope;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::Popup;
+
+/// The reflog's half of `update`, which `commits::update` passes
+/// `CommitsIntent::Reflog` to. A free function, so its name cannot clash
+/// with handlers.
+pub(crate) fn update(state: &mut AppState, intent: ReflogIntent) -> Vec<Effect> {
+    match intent {
+        ReflogIntent::Next => {
+            state.commits.reflog.list.move_by(1);
+        }
+        ReflogIntent::Prev => {
+            state.commits.reflog.list.move_by(-1);
+        }
+        ReflogIntent::Loaded { tag, result } => return state.reflog_loaded(tag, result),
+        ReflogIntent::Undo => return state.travel(undo::Direction::Undo),
+        ReflogIntent::Redo => return state.travel(undo::Direction::Redo),
+        ReflogIntent::ConfirmTravel => return state.confirm_travel(),
+    }
+    Vec::new()
+}
 
 /// The Reflog tab, undo and redo.
 impl AppState {
@@ -152,13 +171,14 @@ pub(crate) fn travel_question(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::confirm_question::quit_question;
+    use crate::features::commits::CommitsIntent;
     use crate::features::commits::CommitsTab;
     use crate::git::repo_state::Operation;
     use crate::git::status::{BranchStatus, Head};
     use crate::intent::AppIntent;
     use crate::keymap::{self, KeyScope};
     use crate::list_filter::{self, InputTarget};
-    use crate::popup::ConfirmKind;
     use crate::test_support::*;
     use crossterm::event::{KeyCode, KeyModifiers};
 
@@ -184,10 +204,12 @@ mod tests {
         assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
         assert_eq!(state.popups, []);
 
-        let effects = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        let effects = state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
 
         assert_eq!(effects, vec![]);
         assert_eq!(state.busy_count(), busy);
@@ -224,10 +246,12 @@ mod tests {
                 ..tag
             },
         ] {
-            state.update(AppIntent::ReflogLoaded {
-                tag: stale,
-                result: Ok(commit_reflog('c')),
-            });
+            state.update(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::Loaded {
+                    tag: stale,
+                    result: Ok(commit_reflog('c')),
+                },
+            )));
         }
         assert_eq!(state.busy_count(), busy - 2);
         assert!(!state.commits.reflog.list.loaded);
@@ -245,10 +269,12 @@ mod tests {
         let mut state = undoable();
         let tag = reflog_tag(&press_with(&mut state, 'r', KeyModifiers::CONTROL));
         assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Redo));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         assert_eq!(state.popups, []);
         assert_eq!(state.op_error(), Some("Nothing to redo"));
     }
@@ -275,16 +301,29 @@ mod tests {
     #[test]
     fn confirm_travel_does_nothing_without_the_question() {
         let mut state = undoable();
-        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        state.popups.push(Popup::Confirm(ConfirmKind::Quit));
-        assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::ConfirmTravel
+            ))),
+            vec![]
+        );
+        state.popups.push(Popup::Question(quit_question()));
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::ConfirmTravel
+            ))),
+            vec![]
+        );
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn undo_and_redo_wait_for_a_running_op_or_an_operation_in_progress() {
-        for intent in [AppIntent::Undo, AppIntent::Redo] {
+        for intent in [
+            AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Undo)),
+            AppIntent::Commits(CommitsIntent::Reflog(ReflogIntent::Redo)),
+        ] {
             let mut state = undoable();
             state.hold_op(7);
             assert_eq!(state.update(intent.clone()), vec![]);
@@ -335,22 +374,28 @@ mod tests {
     #[test]
     fn a_stale_or_failed_read_plans_nothing() {
         let mut state = undoable();
-        let tag = reflog_tag(&state.update(AppIntent::Undo));
+        let tag = reflog_tag(&state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Undo,
+        ))));
         let stale = Tag {
             seq: tag.seq + 100,
             ..tag
         };
-        state.update(AppIntent::ReflogLoaded {
-            tag: stale,
-            result: Ok(commit_reflog('c')),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag: stale,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         assert_eq!(state.popups, []);
         assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
 
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Err("fatal: broken".into()),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Err("fatal: broken".into()),
+            },
+        )));
         assert_eq!(state.popups, []);
         assert_eq!(state.commits.reflog.planning, None);
         assert_eq!(
@@ -365,10 +410,12 @@ mod tests {
         let tag = reflog_tag(&press_char(&mut state, ']'));
         assert_eq!(state.commits.tab, CommitsTab::Reflog);
         assert_eq!(state.key_focus(), KeyScope::Reflog);
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         press_char(&mut state, 'j');
         press(&mut state, KeyCode::Down);
         press(&mut state, KeyCode::Down);
@@ -387,10 +434,12 @@ mod tests {
     fn on_reflog_tab() -> AppState {
         let mut state = undoable();
         let tag = reflog_tag(&press_char(&mut state, ']'));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         state
     }
 
@@ -501,19 +550,23 @@ mod tests {
                 _ => None,
             })
             .expect("a refresh rereads the reflog");
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
 
         // Undo plans from every entry, though the filter hides them all.
         let undo = ctrl(&mut state, 'z');
         assert!(!leaks(&undo), "{undo:?}");
         let tag = reflog_tag(&undo);
-        let loaded = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        let loaded = state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         assert!(!leaks(&loaded), "{loaded:?}");
         match state.popups.as_slice() {
             [Popup::Question(q)] => assert_eq!(q.then, Then::Op(undo_commit_op())),
@@ -527,10 +580,12 @@ mod tests {
         let redo = ctrl(&mut state, 'r');
         assert!(!leaks(&redo), "{redo:?}");
         let tag = reflog_tag(&redo);
-        let loaded = state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        let loaded = state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         assert!(!leaks(&loaded), "{loaded:?}");
         assert!(state.commits.reflog.list.filter.starts_with("--force -D x"));
     }
@@ -545,11 +600,13 @@ mod tests {
                 .any(|e| matches!(e, Effect::LoadReflog { .. })),
             "{effects:?}"
         );
-        let tag = reflog_tag(&state.update(AppIntent::SwitchCommitsTab));
-        state.update(AppIntent::ReflogLoaded {
-            tag,
-            result: Ok(commit_reflog('c')),
-        });
+        let tag = reflog_tag(&state.update(AppIntent::Commits(CommitsIntent::SwitchTab)));
+        state.update(AppIntent::Commits(CommitsIntent::Reflog(
+            ReflogIntent::Loaded {
+                tag,
+                result: Ok(commit_reflog('c')),
+            },
+        )));
         let effects = state.update(AppIntent::RefreshStatus);
         let reloads: Vec<&Tag> = effects
             .iter()
@@ -569,9 +626,17 @@ mod tests {
             head: Head::Unborn("main".into()),
             ..on_branch("main")
         });
-        assert_eq!(state.update(AppIntent::SwitchCommitsTab), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::SwitchTab)),
+            vec![]
+        );
         assert_eq!(state.commits.reflog.reflog(), Some(Reflog::default()));
-        assert_eq!(state.update(AppIntent::Undo), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Commits(CommitsIntent::Reflog(
+                ReflogIntent::Undo
+            ))),
+            vec![]
+        );
         assert_eq!(state.notice, Some("Nothing to undo".into()));
     }
 }

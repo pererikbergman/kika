@@ -3,16 +3,51 @@
 //! the selected branch, creating, renaming and deleting one, and setting
 //! or unsetting its upstream.
 
-use super::BranchesTab;
 use super::keys;
+use super::{BranchesIntent, BranchesTab, remotes, tags};
 use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::{Effect, Tag};
 use crate::git::branches::{Branch, BranchName, LogRow};
 use crate::keymap::{self, KeyScope};
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
-use crate::popup::{LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind, RangeKind};
 use crate::refresh::{RefreshPlan, Scope};
+
+/// The branches subtree's half of `update`: core's one
+/// `AppIntent::Branches` arm lands here, and each sub-feature's intent goes
+/// on to its own `update`. A free function, so its name cannot clash with
+/// handlers.
+pub(crate) fn update(state: &mut AppState, intent: BranchesIntent) -> Vec<Effect> {
+    match intent {
+        BranchesIntent::Loaded { tag, result } => return state.branches_loaded(tag, result),
+        BranchesIntent::LogLoaded {
+            tag,
+            refname,
+            result,
+        } => state.branch_log_loaded(tag, refname, result),
+        BranchesIntent::SwitchTab => return state.switch_branches_tab(BranchesTab::next),
+        BranchesIntent::PrevTab => return state.switch_branches_tab(BranchesTab::prev),
+        BranchesIntent::SetUpstream => state.ask_upstream(),
+        BranchesIntent::SetUpstreamTo(text) => return state.set_upstream_to(&text),
+        BranchesIntent::UnsetUpstream => return state.unset_upstream(),
+        BranchesIntent::Next => return state.move_branch(1),
+        BranchesIntent::Prev => return state.move_branch(-1),
+        BranchesIntent::Checkout => return state.checkout_branch(),
+        BranchesIntent::New => state.ask_branch_name(PromptKind::NewBranch),
+        BranchesIntent::Rename => state.ask_branch_name(PromptKind::RenameBranch),
+        BranchesIntent::Delete if state.branches.list.range_anchor.is_some() => {
+            state.ask_delete_range(RangeKind::Branches)
+        }
+        BranchesIntent::Delete => state.ask_delete_branch(),
+        BranchesIntent::CreateNamed(text) => return state.create_branch_named(&text),
+        BranchesIntent::RenameTo(text) => return state.rename_branch_to(&text),
+        BranchesIntent::ConfirmDelete { force } => return state.confirm_delete_branch(force),
+        BranchesIntent::Remotes(i) => return remotes::update(state, i),
+        BranchesIntent::Tags(i) => return tags::update(state, i),
+    }
+    Vec::new()
+}
 
 /// The Branches panel: loading the list and the selected branch's log,
 /// moving the selection, checking out the selected branch, and changing
@@ -296,6 +331,20 @@ impl AppState {
             .map(GitOp::UnsetUpstream);
         self.start_op(Ok(op))
     }
+
+    /// Closing a branch name or upstream prompt forgets the branch it was
+    /// asked for.
+    pub(crate) fn branches_popup_closed(&mut self, closed: &Popup) {
+        if matches!(
+            closed,
+            Popup::Prompt {
+                kind: PromptKind::NewBranch | PromptKind::RenameBranch | PromptKind::SetUpstream,
+                ..
+            }
+        ) {
+            self.branches.pending = None;
+        }
+    }
 }
 
 /// "Delete this branch?", carrying the op chosen when it was asked.
@@ -334,6 +383,7 @@ pub(crate) fn delete_branch_question(name: String, op: GitOp) -> ConfirmQuestion
 mod tests {
     use crate::confirm_question::Answer;
     use crate::effect::Effect;
+    use crate::features::branches::BranchesIntent;
     use crate::features::branches::BranchesTab;
     use crate::git::branches::LogRow;
     use crate::intent::AppIntent;
@@ -363,7 +413,7 @@ mod tests {
     #[test]
     fn a_reload_keeps_the_selected_branch_by_name() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         assert_eq!(selected_name(&state), "topic");
 
         let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
@@ -398,10 +448,10 @@ mod tests {
         // Neither a failed load, nor a stale one, nor one from another
         // repository changes what the forge sees.
         let tag = branches_tag(&state.update(AppIntent::RefreshStatus));
-        state.update(AppIntent::BranchesLoaded {
+        state.update(AppIntent::Branches(BranchesIntent::Loaded {
             tag,
             result: Err("broken".into()),
-        });
+        }));
         let old = branches_tag(&state.update(AppIntent::RefreshStatus));
         let mut other_repo = branches_tag(&state.update(AppIntent::RefreshStatus));
         state.update(branches_loaded(old, three_branches()));
@@ -423,29 +473,32 @@ mod tests {
         state.update(branches_loaded(other_repo, vec![]));
         assert_eq!(state.branches.list.rows, three_branches());
 
-        let (first, refname) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
-        let (second, _) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
-        state.update(AppIntent::BranchLogLoaded {
+        let (first, refname) =
+            log_load(&state.update(AppIntent::Branches(BranchesIntent::Next))).unwrap();
+        let (second, _) =
+            log_load(&state.update(AppIntent::Branches(BranchesIntent::Next))).unwrap();
+        state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
             tag: first,
             refname,
             result: Ok(vec![log_row("topic's")]),
-        });
+        }));
         assert!(
             state.branches.log.rows.is_empty(),
             "the log of wip is awaited"
         );
-        state.update(AppIntent::BranchLogLoaded {
+        state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
             tag: second,
             refname: b"refs/heads/wip".to_vec(),
             result: Ok(vec![log_row("wip's")]),
-        });
+        }));
         assert_eq!(state.branches.log.rows, [log_row("wip's")]);
     }
 
     #[test]
     fn moving_the_selection_loads_the_new_branch_log() {
         let mut state = with_branches();
-        let (tag, refname) = log_load(&state.update(AppIntent::BranchNext)).unwrap();
+        let (tag, refname) =
+            log_load(&state.update(AppIntent::Branches(BranchesIntent::Next))).unwrap();
         assert_eq!(refname, b"refs/heads/topic");
         assert!(tag.user);
         assert_eq!(
@@ -453,8 +506,11 @@ mod tests {
             Some(&b"refs/heads/topic"[..])
         );
         // At the end there is nowhere to go, so nothing loads.
-        state.update(AppIntent::BranchNext);
-        assert_eq!(state.update(AppIntent::BranchNext), vec![]);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Next)),
+            vec![]
+        );
     }
 
     #[test]
@@ -463,11 +519,11 @@ mod tests {
         press_char(&mut state, 'j');
         assert_eq!(selected_name(&state), "topic");
         let (tag, refname) = log_load(&press_char(&mut state, 'j')).unwrap();
-        state.update(AppIntent::BranchLogLoaded {
+        state.update(AppIntent::Branches(BranchesIntent::LogLoaded {
             tag,
             refname,
             result: Ok(vec![log_row("1"), log_row("2")]),
-        });
+        }));
         state.update(AppIntent::Key(KeyPress::new(
             KeyCode::Char('J'),
             KeyModifiers::SHIFT,
@@ -481,7 +537,7 @@ mod tests {
     #[test]
     fn checking_out_runs_the_op_and_its_finish_reloads_status_and_branches() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         let (tag, op) = op_of(&press_char(&mut state, ' '));
         assert_eq!(op, GitOp::Checkout("topic".into()));
 
@@ -499,9 +555,15 @@ mod tests {
     #[test]
     fn checking_out_or_deleting_the_current_branch_is_refused() {
         let mut state = with_branches();
-        assert_eq!(state.update(AppIntent::CheckoutBranch), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Checkout)),
+            vec![]
+        );
         assert_eq!(state.notice, Some("Already on this branch".into()));
-        assert_eq!(state.update(AppIntent::DeleteBranch), vec![]);
+        assert_eq!(
+            state.update(AppIntent::Branches(BranchesIntent::Delete)),
+            vec![]
+        );
         assert_eq!(
             state.notice,
             Some("Cannot delete the current branch".into())
@@ -513,13 +575,13 @@ mod tests {
     #[test]
     fn branch_actions_are_refused_while_an_op_runs_or_with_nothing_selected() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         state.hold_op(99);
         for intent in [
-            AppIntent::CheckoutBranch,
-            AppIntent::NewBranch,
-            AppIntent::RenameBranch,
-            AppIntent::DeleteBranch,
+            AppIntent::Branches(BranchesIntent::Checkout),
+            AppIntent::Branches(BranchesIntent::New),
+            AppIntent::Branches(BranchesIntent::Rename),
+            AppIntent::Branches(BranchesIntent::Delete),
         ] {
             state.notice = None;
             assert_eq!(state.update(intent.clone()), vec![], "{intent:?}");
@@ -532,14 +594,14 @@ mod tests {
         assert_eq!(state.popups, []);
 
         let mut empty = AppState::new(Context::Workspace);
-        empty.update(AppIntent::CheckoutBranch);
+        empty.update(AppIntent::Branches(BranchesIntent::Checkout));
         assert_eq!(empty.notice, Some("No branch selected".into()));
     }
 
     #[test]
     fn deleting_a_merged_branch_asks_and_y_deletes_without_force() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'd');
         assert_eq!(state.key_focus(), KeyScope::DeleteBranch);
         // `D` answers only the question about an unmerged branch.
@@ -565,8 +627,8 @@ mod tests {
     #[test]
     fn deleting_an_unmerged_branch_ignores_y_and_d_forces() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'd');
         match state.popups.as_slice() {
             [Popup::Question(q)] => assert_eq!(q.answer, Answer::Force),
@@ -594,7 +656,7 @@ mod tests {
     fn n_or_esc_keeps_the_branch() {
         for key in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = with_branches();
-            state.update(AppIntent::BranchNext);
+            state.update(AppIntent::Branches(BranchesIntent::Next));
             press_char(&mut state, 'd');
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, []);
@@ -606,7 +668,7 @@ mod tests {
     #[test]
     fn the_create_prompt_uses_the_branch_selected_when_it_opened() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'n');
         assert_eq!(
             state.prompt_title(PromptKind::NewBranch),
@@ -632,8 +694,8 @@ mod tests {
     #[test]
     fn the_rename_prompt_starts_from_the_old_name_and_renames_that_branch() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press(&mut state, KeyCode::Char('R'));
         match state.popups.as_slice() {
             [Popup::Prompt { kind, input }] => {
@@ -671,7 +733,7 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.branches.pending, None);
         assert_eq!(
-            state.update(AppIntent::CreateBranchNamed("x".into())),
+            state.update(AppIntent::Branches(BranchesIntent::CreateNamed("x".into()))),
             vec![]
         );
     }
@@ -697,7 +759,7 @@ mod tests {
     #[test]
     fn set_upstream_starts_from_the_upstream_or_origin_and_needs_a_listed_branch() {
         let mut state = with_remotes();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'u');
         match state.popups.as_slice() {
             [Popup::Prompt { kind, input }] => {
@@ -756,7 +818,7 @@ mod tests {
     #[test]
     fn a_failed_delete_says_the_branch_list_was_reloaded() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'd');
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         state.update(finished(tag, op, Err("error: not fully merged".into())));
@@ -772,7 +834,7 @@ mod tests {
     #[test]
     fn a_finished_delete_reloads_only_the_list() {
         let mut state = with_branches();
-        state.update(AppIntent::BranchNext);
+        state.update(AppIntent::Branches(BranchesIntent::Next));
         press_char(&mut state, 'd');
         let (tag, op) = op_of(&press_char(&mut state, 'y'));
         let effects = state.update(finished(tag, op, Ok(())));
@@ -783,5 +845,25 @@ mod tests {
             "a delete changes no files: {effects:?}"
         );
         branches_tag(&effects);
+    }
+
+    #[test]
+    fn closing_a_branch_prompt_forgets_its_branch() {
+        use crate::popup::LineInput;
+        for kind in [
+            PromptKind::NewBranch,
+            PromptKind::RenameBranch,
+            PromptKind::SetUpstream,
+        ] {
+            let mut state = AppState::new(Context::Workspace);
+            state.branches.pending = Some("topic".into());
+            state.popups.push(Popup::Prompt {
+                kind,
+                input: LineInput::default(),
+            });
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{kind:?}");
+            assert_eq!(state.popups, [], "{kind:?}");
+            assert_eq!(state.branches.pending, None, "{kind:?}");
+        }
     }
 }
