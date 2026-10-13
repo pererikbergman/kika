@@ -38,7 +38,7 @@ Core files:
 | `src/keymap.rs` | Keys | Key engine, shared guards, the ordered `CHUNKS` list and `registry()`. Binding order is behaviour. |
 | `src/view.rs` and the shared widgets (`layout.rs`, `popup*.rs`, `menu.rs`, `pick_list.rs`, `list_filter.rs`, ...) | View | `render(&AppState, &mut Frame)` composes the frame. Reads state only. |
 | `src/op.rs`, `src/prompts.rs` | Op slot | `GitOp`, `op_command` and `run_op`; whether an op needs the terminal. Feature `git.rs` files hold the argv builders the arms call. |
-| `src/refresh.rs`, `src/watch.rs` | Refresh | The refresh plan from each `GitOp` to the data it makes stale, and the watch for outside changes. |
+| `src/refresh.rs`, `src/reload.rs`, `src/watch.rs` | Refresh | The refresh plan from each `GitOp` to the data it makes stale, the reload executor (`apply_plan`, `reload_repo`) that turns a plan into each feature's loads, and the watch for outside changes. |
 | `src/handoff.rs` | Hand-off | Blocking work that needs the real terminal (editor, attached ops, commands). The loop suspends the screen around it. |
 | `src/list_input.rs` | List input | List filters, ranges, pane search and Esc in a list, shared by every list. |
 | `src/bisect.rs`, `src/diff_pane.rs`, `src/hunk_view.rs`, `src/diff_search.rs`, `src/diff_mark.rs`, `src/range_delete.rs`, `src/remote_run.rs`, `src/model/confirm_guard.rs` | Shared state | State and guards that two or more features use. Each one's reason is in ADR-0001's Outcome. |
@@ -69,7 +69,7 @@ Dependency rules:
 1. Something two features both need goes in their nearest common parent feature, or
    in core if they have none.
 2. A feature never calls another feature's behaviour directly. It returns an `Effect`,
-   or the core refresh plan (`refresh.rs`) reloads what an operation changed.
+   or the core refresh plan (`refresh.rs`, run by `reload.rs`) reloads what an operation changed.
 3. A feature reads another feature's state only through that feature's `pub(crate)`
    query methods on `AppState`. Direct field reads kept by the move-only slices are
    listed in the feature's `mod.rs`; new code follows the rule.
@@ -77,7 +77,7 @@ Dependency rules:
    nothing (hits that point at a parent feature are allowed):
    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
 
-The known exceptions to rule 2 (seven direct calls to a sibling feature's `AppState`
+The known exceptions to rule 2 (three direct calls to a sibling feature's `AppState`
 methods) are listed in ADR-0001's Outcome section and in each caller's `mod.rs`.
 
 MVI purity:

@@ -24,8 +24,9 @@
 //!   (review), accepted cross-feature calls listed in ADR-0001's Outcome;
 //! - `REFRESH_LIMITED`, `same_repo` and `ForgeState::record_rate_limit`,
 //!   which review's merge shares, live in `src/forge`;
-//! - core calls `load_pull_requests` when a branch list loads
-//!   (`branches_loaded`), and review calls it after a merge. A fetch, pull or
+//! - branches (`branches_loaded`, when a branch list loads) and review
+//!   (after a merge) ask core (`reload.rs`) for `Scope::PullRequests`, which
+//!   calls `load_pull_requests`. A fetch, pull or
 //!   push sets `forge.want_refresh()` in sync's `remote_finished`, and the
 //!   branch reload that follows starts the load.
 

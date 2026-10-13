@@ -75,7 +75,7 @@ MVI does not change. `update(state, intent)` stays pure and returns effects. I/O
    - `with_stacked_branches` is used by `commits/rewrite` and `commits/custom_patch`, so it goes in `commits`.
    - `discard_disabled` is used by `files` and `diff`, so it goes in core.
    - `commit_file_line` is used by the `stash` and `commits` views, so it goes in `rows.rs`.
-2. **A feature never calls another feature's behaviour directly.** It returns an `Effect`, or the core refresh plan (`refresh.rs`) reloads what an operation changed.
+2. **A feature never calls another feature's behaviour directly.** It returns an `Effect`, or the core refresh plan (`refresh.rs`, run by `reload.rs`) reloads what an operation changed.
 3. **Reading another feature's state** goes through that feature's `pub(crate)` query methods on `AppState`, such as `selected_file()`, `selected_commit()` or `local_branch_selected()`. The issues below are move-only, so direct field reads that exist today are kept as they are and listed in each feature's `mod.rs`. New code follows this rule.
 4. **noupling only sees `use` items.** It misses fully qualified paths written inline (`crate::features::x::f()`) and calls to `AppState` methods. So every slice PR also runs this check, which must print nothing:
    `grep -rnE 'crate::features::' src/features/<f> | grep -v 'crate::features::<f>\b'`
@@ -223,6 +223,7 @@ Most of these have importers or callers in two or more sibling features, or in c
 | `handoff.rs` | Terminal hand-off, used by commit, diff, custom commands, the rewrite and the custom patch. |
 | `list_input.rs`, `list_filter.rs` | List filters, ranges and pane search: the bottom-bar input dispatches on focus across every list. |
 | `refresh.rs`, `watch.rs` | The refresh plan and the outside-change watch, which reload every feature's data. |
+| `reload.rs` | The reload executor: `apply_plan` and `reload_repo` turn a refresh plan into each feature's loads, so features ask for scopes instead of calling a sibling's reload. |
 | `rows.rs`, `pick_list.rs`, `popup*.rs`, `menu.rs` | Shared widgets. |
 | `clipboard.rs`, `config.rs`, `program.rs`, `worktree_file.rs`, `sequence_editor.rs` | Plumbing that the loop, `src/git` or several features use. |
 | `model/confirm_guard.rs` | `confirm_refused`, the re-check a `HEAD`-moving question runs on `y`. Only commits and its rewrite call it, so rule 1 would put it in `commits`. #323 kept it in place as planned. Moving it is a candidate for a follow-up. |
@@ -238,19 +239,15 @@ The final sweep moved one item: `query_title`, used only by the Commits panel, f
 
 ### Accepted cross-feature calls
 
-Rule 2 has seven known exceptions. Each is a direct call to an `AppState` method that a sibling feature defines. They are listed in the caller's `mod.rs`:
+Rule 2 has three known exceptions. Each is a direct call to an `AppState` method that a sibling feature defines. They are listed in the caller's `mod.rs`:
 
 | Caller | Calls | Owner |
 |---|---|---|
-| `branches/update.rs`, `branches_loaded` | `load_pull_requests` | pull_requests |
-| `review/merge.rs`, after a merge | `load_pull_requests` | pull_requests |
 | `branches/tags/update.rs`, `push_tag` | `start_remote` | sync |
 | `pull_requests/create.rs`, `pick_select` | `pick_check` | review |
 | `pull_requests/create.rs`, `pick_select` | `pick_merge_method` | review |
-| `repos/update.rs`, `open_repo` | `reload_stashes` | stash |
-| `submodules/update.rs`, `enter_submodule` and `leave_submodule` | `reload_stashes` | stash |
 
-They were kept for two reasons. Moving a callee into `model.rs` would break "hubs only shrink". Turning a call into an `Effect` round trip would change the order and timing of effects. A possible follow-up is to move the callees into a core file that is not a hub, such as a `reload.rs`.
+They were kept for two reasons. Moving a callee into `model.rs` would break "hubs only shrink". Turning a call into an `Effect` round trip would change the order and timing of effects. The four reload calls that were once listed here (`reload_stashes` from repos and submodules, `load_pull_requests` from branches and review) now go through core `reload.rs`: #378 and #379 moved them there, and the features ask for a `Scope` instead.
 
 ### Deferred
 
