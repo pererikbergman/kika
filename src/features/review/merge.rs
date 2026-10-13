@@ -15,6 +15,7 @@ use crate::keymap::Reason;
 use crate::model::{AppState, Context};
 use crate::pick_list::{PickList, PickPurpose};
 use crate::popup::{ErrorPopup, MergePrConfirm, Popup};
+use crate::refresh::{RefreshPlan, Scope};
 
 const NO_PR_SHOWN: &str = "Open a pull request first";
 const MERGING: &str = "A merge is already running";
@@ -254,7 +255,7 @@ impl AppState {
             self.forge.add_created(branch, badge, known_from);
         }
         self.forge.want_refresh();
-        self.load_pull_requests()
+        self.apply_plan(RefreshPlan::of(&[Scope::PullRequests]))
     }
 }
 

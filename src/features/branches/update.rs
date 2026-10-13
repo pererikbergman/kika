@@ -11,6 +11,7 @@ use crate::keymap;
 use crate::model::{AppState, Context};
 use crate::op::GitOp;
 use crate::popup::{DeleteBranchConfirm, LineInput, Popup, PromptKind};
+use crate::refresh::{RefreshPlan, Scope};
 
 /// The Branches panel: loading the list and the selected branch's log,
 /// moving the selection, checking out the selected branch, and changing
@@ -87,7 +88,7 @@ impl AppState {
             vec![]
         };
         if listed {
-            effects.extend(self.load_pull_requests());
+            effects.extend(self.apply_plan(RefreshPlan::of(&[Scope::PullRequests])));
         }
         effects
     }

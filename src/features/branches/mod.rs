@@ -30,9 +30,9 @@
 //! - `view::{render_panel, render_log, RowMarks}`.
 //!
 //! Kept cross-feature reads and calls:
-//! - `branches_loaded` calls `load_pull_requests` (pull_requests) on
-//!   `AppState`, an accepted cross-feature call listed in ADR-0001's
-//!   Outcome, and writes `forge`'s branch names;
+//! - `branches_loaded` writes `forge`'s branch names, and asks core
+//!   `apply_plan` (`reload.rs`) for `Scope::PullRequests` to reload the
+//!   badges instead of calling pull_requests' load;
 //! - `watch.branches_pending`, the op slot, `take_seq`, `start_op`,
 //!   `bisect_refuses` and `branch_for_action` (core), and
 //!   `crate::bisect::head_move_disabled` (core), so no checkout moves
