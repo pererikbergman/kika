@@ -23,6 +23,7 @@ pub struct FakeRunner {
     attached: Mutex<VecDeque<(Vec<String>, bool)>>,
     on_attached: Option<AttachedProbe>,
     envs: Mutex<Vec<Vec<(OsString, OsString)>>>,
+    process_envs: Mutex<Vec<Vec<(OsString, OsString)>>>,
     inputs: Mutex<Vec<Option<Vec<u8>>>>,
     interrupts: AtomicUsize,
 }
@@ -68,6 +69,12 @@ impl FakeRunner {
         self.envs.lock().unwrap().clone()
     }
 
+    /// The env every call so far would give git, profile vars included, in
+    /// order.
+    pub fn process_envs(&self) -> Vec<Vec<(OsString, OsString)>> {
+        self.process_envs.lock().unwrap().clone()
+    }
+
     /// Stdin of every call so far, in order; `None` where it was closed.
     pub fn inputs(&self) -> Vec<Option<Vec<u8>>> {
         self.inputs.lock().unwrap().clone()
@@ -81,6 +88,7 @@ impl FakeRunner {
     /// Record what every call, run or spawn, was given besides its argv.
     fn record(&self, cmd: &GitCommand) {
         self.envs.lock().unwrap().push(cmd.envs().to_vec());
+        self.process_envs.lock().unwrap().push(cmd.process_env());
         self.inputs
             .lock()
             .unwrap()
