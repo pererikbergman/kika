@@ -36,6 +36,7 @@ pub(crate) fn tips_failed(error: &str) -> String {
 fn log_filter_disabled(state: &AppState) -> Option<Reason> {
     state
         .commits
+        .list
         .range_anchor
         .is_some()
         .then_some(CLEAR_RANGE_FIRST.into())
@@ -65,7 +66,7 @@ pub(crate) fn revert_disabled(state: &AppState) -> Option<Reason> {
     commit_action_disabled(state)
         .or_else(|| in_progress_disabled(state))
         .or_else(|| {
-            let row = state.commits.rows.get(state.commits.selected);
+            let row = state.commits.list.rows.get(state.commits.list.selected);
             row.is_some_and(|r| r.parents.len() > 1)
                 .then_some("Cannot revert a merge commit".into())
         })
@@ -321,7 +322,7 @@ mod tests {
     fn a_range_keeps_the_new_commits_keys_from_running() {
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "a".repeat(40),
             short_oid: "a".into(),
             parents: vec![],
@@ -332,7 +333,7 @@ mod tests {
         }];
         assert_eq!(log_filter_disabled(&state), None);
         assert_eq!(commits_mark_disabled(&state), None);
-        state.commits.range_anchor = Some("a".repeat(40));
+        state.commits.list.range_anchor = Some("a".repeat(40));
         assert_eq!(
             log_filter_disabled(&state).as_deref(),
             Some(CLEAR_RANGE_FIRST)
@@ -358,11 +359,11 @@ mod tests {
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
             assert_eq!(disabled(&state), Some("No commits".into()));
         }
-        state.commits.rows = vec![row(&["p"])];
+        state.commits.list.rows = vec![row(&["p"])];
         for disabled in [checkout_commit_disabled, revert_disabled, reset_disabled] {
             assert_eq!(disabled(&state), None);
         }
-        state.commits.rows = vec![row(&["p", "q"])];
+        state.commits.list.rows = vec![row(&["p", "q"])];
         assert_eq!(
             revert_disabled(&state),
             Some("Cannot revert a merge commit".into())
@@ -370,7 +371,7 @@ mod tests {
         assert_eq!(reset_disabled(&state), None);
         assert_eq!(checkout_commit_disabled(&state), None);
 
-        state.commits.rows = vec![row(&["p"])];
+        state.commits.list.rows = vec![row(&["p"])];
         state.branch = Some(crate::git::status::BranchStatus {
             head: Head::Branch("main".into()),
             upstream: None,

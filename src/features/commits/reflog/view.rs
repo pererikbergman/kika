@@ -272,7 +272,7 @@ mod tests {
     fn the_title_marks_the_log_tab_when_it_is_shown() {
         let mut state = showing(b"");
         state.commits.tab = CommitsTab::Log;
-        state.commits.loaded = true;
+        state.commits.list.loaded = true;
         line_with(
             &buffer_rows(&draw(&state, 100, 20)),
             "Commits · [Log] Reflog",

@@ -340,7 +340,7 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
         && !state.watch.is_pending()
         && !state.recent_pending()
         && diff_settled
-        && state.commits.page_seq.is_none()
+        && state.commits.list.seq.is_none()
         && state.commits.markers_seq.is_none()
         && state.commits.tips_seq.is_none()
         && state.commits.todo_seq.is_none()

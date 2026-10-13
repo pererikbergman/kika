@@ -14,7 +14,7 @@ use crate::op::GitOp;
 /// with handlers.
 pub(crate) fn update(state: &mut AppState, intent: CopyIntent) -> Vec<Effect> {
     match intent {
-        CopyIntent::Toggle if state.commits.range_anchor.is_some() => state.copy_range(),
+        CopyIntent::Toggle if state.commits.list.range_anchor.is_some() => state.copy_range(),
         CopyIntent::Toggle => state.copy_commit(),
         CopyIntent::Clear => {
             state.copied.clear();
@@ -37,7 +37,7 @@ impl AppState {
         let Some((id, _)) = self.commit_for_action(keys::copy_disabled) else {
             return;
         };
-        let row = self.commits.rows.get(self.commits.selected);
+        let row = self.commits.list.rows.get(self.commits.list.selected);
         let subject = row.map(|r| r.subject.clone()).unwrap_or_default();
         let entry = CopiedCommit::new(id, subject);
         let short = entry.short.clone();
@@ -70,8 +70,8 @@ impl AppState {
         }
         let mut merges = 0;
         let mut picks = Vec::new();
-        for i in self.commits.range() {
-            let row = &self.commits.rows[i];
+        for i in self.commits.list.range() {
+            let row = &self.commits.list.rows[i];
             if row.parents.len() > 1 {
                 merges += 1;
             } else if let Some(id) = CommitId::parse(&row.oid) {
@@ -85,7 +85,7 @@ impl AppState {
                 self.copied.toggle(pick);
             }
         }
-        self.commits.range_anchor = None;
+        self.commits.list.range_anchor = None;
         let verb = if remove { "Removed" } else { "Copied" };
         let skipped = match merges {
             0 => String::new(),
@@ -142,8 +142,8 @@ mod tests {
         assert_eq!(state.copied.len(), 1);
 
         let mut merge = one_copied();
-        merge.commits.selected = 0;
-        merge.commits.rows[0].parents = vec!["c1".into(), "d0".into()];
+        merge.commits.list.selected = 0;
+        merge.commits.list.rows[0].parents = vec!["c1".into(), "d0".into()];
         assert_eq!(press_char(&mut merge, 'c'), vec![]);
         assert_eq!(
             merge.notice,
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn v_cherry_picks_the_copied_ids_on_the_terminal() {
         let mut state = one_copied();
-        state.commits.selected = 2;
-        state.commits.rows[2].oid = "2".repeat(40);
+        state.commits.list.selected = 2;
+        state.commits.list.rows[2].oid = "2".repeat(40);
         press_char(&mut state, 'c');
         let (tag, op) = attached_of(&press_char(&mut state, 'v'));
         assert_eq!(

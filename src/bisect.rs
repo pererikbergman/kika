@@ -73,7 +73,7 @@ pub(crate) fn head_commit(state: &AppState) -> Option<CommitId> {
 
 /// The selected Commits row's id, if it is one git can use.
 fn selected_commit(state: &AppState) -> Option<CommitId> {
-    let row = state.commits.rows.get(state.commits.selected)?;
+    let row = state.commits.list.rows.get(state.commits.list.selected)?;
     CommitId::parse(&row.oid)
 }
 
@@ -251,7 +251,7 @@ mod tests {
 
     fn state(head: Head, ops: &[Operation], bisect: Option<BisectState>) -> AppState {
         let mut state = AppState::new(Context::Workspace);
-        state.commits.rows = vec![row(HEX)];
+        state.commits.list.rows = vec![row(HEX)];
         state.branch = Some(BranchStatus {
             head,
             upstream: None,
@@ -297,7 +297,7 @@ mod tests {
     fn a_running_op_comes_first() {
         let mut state = testing();
         state.hold_op(1);
-        state.commits.rows.clear();
+        state.commits.list.rows.clear();
         for disabled in [
             selected_bad_disabled,
             head_good_disabled,
@@ -323,7 +323,7 @@ mod tests {
             Some(START_FROM_COMMITS.into())
         );
         let mut no_rows = on_main();
-        no_rows.commits.rows.clear();
+        no_rows.commits.list.rows.clear();
         assert_eq!(selected_bad_disabled(&no_rows), Some("No commit".into()));
     }
 

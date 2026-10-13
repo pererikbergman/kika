@@ -435,7 +435,7 @@ mod tests {
 
         let mut state = AppState::new(Context::Workspace);
         state.files = vec![file("a", 'M', '.', EntryKind::Changed)];
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc".into(),
             short_oid: "abc".into(),
             parents: vec!["p".into()],

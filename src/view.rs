@@ -333,7 +333,7 @@ pub(crate) fn bisect_lines(
         lines.push(row("Only skipped commits left".to_string()));
     }
     lines.push(row(match head {
-        Head::Detached(oid) => match state.commits.rows.iter().find(|r| &r.oid == oid) {
+        Head::Detached(oid) => match state.commits.list.rows.iter().find(|r| &r.oid == oid) {
             Some(commit) => format!("Testing: {} {}", commit.short_oid, commit.subject),
             None => format!("Testing: {}", short_hash(oid)),
         },
@@ -806,7 +806,7 @@ fn list_hints(state: &AppState, focus: KeyScope) -> (Vec<&'static str>, Vec<&'st
         }
         KeyScope::Commits => {
             let panel = &state.commits;
-            let clears = panel.range_anchor.is_some() || !panel.filter.is_empty();
+            let clears = panel.list.range_anchor.is_some() || !panel.list.filter.is_empty();
             let leading = if clears {
                 vec!["commits.escape"]
             } else {
@@ -3363,7 +3363,7 @@ mod tests {
         status.in_progress = vec![Operation::Bisect];
         status.bisect = Some(bisect);
         let mut state = on(status);
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc1234def".into(),
             short_oid: "abc1234".into(),
             parents: vec![],
@@ -3372,7 +3372,7 @@ mod tests {
             subject: "the tested one".into(),
             subject_altered: false,
         }];
-        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        let graph = state.commits.builder.push(&state.commits.list.rows[0]);
         state.commits.graph = vec![graph];
         status_focused(&state)
     }

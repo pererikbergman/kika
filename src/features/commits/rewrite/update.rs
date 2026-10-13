@@ -24,7 +24,7 @@ pub(crate) fn update(state: &mut AppState, intent: RewriteIntent) -> Vec<Effect>
         RewriteIntent::ConfirmLeaveCommits => return state.confirm_leave_commits(),
         RewriteIntent::Edit(
             edit @ (rebase_plan::Edit::Squash | rebase_plan::Edit::Fixup | rebase_plan::Edit::Drop),
-        ) if state.commits.range_anchor.is_some() => return state.rewrite_range(edit),
+        ) if state.commits.list.range_anchor.is_some() => return state.rewrite_range(edit),
         RewriteIntent::Edit(edit) => return state.rewrite(Rewrite::Edit(edit)),
         RewriteIntent::ConfirmDropRange(ids) => return state.confirm_drop_range(ids),
         RewriteIntent::Move(direction) => return state.rewrite(Rewrite::Move(direction)),
@@ -62,8 +62,8 @@ impl AppState {
             Ok(plan) => {
                 // The cursor follows the moved commit.
                 match rewrite {
-                    Rewrite::Move(rebase_plan::Direction::Up) => self.commits.selected -= 1,
-                    Rewrite::Move(rebase_plan::Direction::Down) => self.commits.selected += 1,
+                    Rewrite::Move(rebase_plan::Direction::Up) => self.commits.list.selected -= 1,
+                    Rewrite::Move(rebase_plan::Direction::Down) => self.commits.list.selected += 1,
                     _ => {}
                 }
                 self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan))
@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(plan.base, cid(&"c".repeat(40)));
         assert_eq!(plan.steps, picks(&['a', 'b']));
         assert!(!plan.update_refs);
-        assert_eq!(state.commits.selected, 0);
+        assert_eq!(state.commits.list.selected, 0);
 
         let mut state = on_linear_log();
         state.git_version = version(38);
@@ -201,7 +201,7 @@ mod tests {
         assert_eq!(plan.base, cid(&"d".repeat(40)));
         assert_eq!(plan.steps, picks(&['b', 'c', 'a']));
         assert!(plan.update_refs);
-        assert_eq!(state.commits.selected, 2);
+        assert_eq!(state.commits.list.selected, 2);
     }
 
     #[test]
@@ -259,7 +259,7 @@ mod tests {
             assert_eq!(state.notice, Some(reason.into()), "{code:?}");
         }
         // Rewriting only the head commit leaves `stack` where it is.
-        state.commits.selected = 0;
+        state.commits.list.selected = 0;
         assert!(matches!(
             press_char(&mut state, 'e').as_slice(),
             [Effect::HandOff(_)]
@@ -297,7 +297,7 @@ mod tests {
             Some("Moving bbbbbbb past branch stack would change what it holds".into())
         );
         let mut from_head = state.clone();
-        from_head.commits.selected = 0;
+        from_head.commits.list.selected = 0;
         assert_eq!(alt(&mut from_head, KeyCode::Char('j')), vec![]);
         assert_eq!(
             from_head.notice,
@@ -484,9 +484,9 @@ mod tests {
     fn j_and_k_move_through_the_todo_rows_and_on_into_the_log() {
         let mut state = stopped(TODO, 0);
         state.commits.todo_selected = None;
-        state.commits.selected = 1;
+        state.commits.list.selected = 1;
         press_char(&mut state, 'k');
-        assert_eq!(state.commits.selected, 0);
+        assert_eq!(state.commits.list.selected, 0);
         press_char(&mut state, 'k');
         assert_eq!(state.commits.todo_selected, Some(0));
         for _ in 0..5 {
@@ -497,7 +497,7 @@ mod tests {
             press_char(&mut state, 'j');
         }
         assert_eq!(state.commits.todo_selected, None);
-        assert_eq!(state.commits.selected, 0);
+        assert_eq!(state.commits.list.selected, 0);
         // Log keys do not act on a todo row.
         state.commits.todo_selected = Some(0);
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
@@ -667,7 +667,7 @@ mod tests {
         let range = Some(keymap::CLEAR_RANGE_FIRST);
         // Over a range of log rows.
         let mut state = on_linear_log();
-        state.commits.range_anchor = Some("a".repeat(40));
+        state.commits.list.range_anchor = Some("a".repeat(40));
         for key in ['E', 'b', 'u'] {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(state.notice.as_deref(), range);
         // On a todo row while a range is kept.
         let mut todo = stopped(TODO, 2);
-        todo.commits.range_anchor = Some("a".repeat(40));
+        todo.commits.list.range_anchor = Some("a".repeat(40));
         assert_eq!(press_char(&mut todo, 'e'), vec![]);
         assert_eq!(todo.notice.as_deref(), range);
         // Drop takes a range, but only one of log rows.
@@ -689,7 +689,7 @@ mod tests {
         // A range starts on log rows only.
         let mut todo = stopped(TODO, 2);
         press_char(&mut todo, 'V');
-        assert_eq!(todo.commits.range_anchor, None);
+        assert_eq!(todo.commits.list.range_anchor, None);
         assert_eq!(
             todo.notice.as_deref(),
             Some("Select a commit in the log first")
@@ -701,7 +701,7 @@ mod tests {
         let mut state = on_linear_log();
         state.git_version = version(38);
         // `commit 1` is the selected row, the only one it shows.
-        state.commits.filter = "commit 1".into();
+        state.commits.list.filter = "commit 1".into();
         assert_eq!(alt(&mut state, KeyCode::Char('k')), vec![]);
         assert_eq!(
             state.notice.as_deref(),
@@ -711,7 +711,7 @@ mod tests {
             press_char(&mut state.clone(), 'E').as_slice(),
             [Effect::HandOff(_)]
         ));
-        state.commits.filter = "commit 2".into();
+        state.commits.list.filter = "commit 2".into();
         for key in ['E', 'b'] {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
@@ -723,7 +723,7 @@ mod tests {
         }
         // The filter hides log rows only: the todo above stays editable.
         let mut todo = stopped(TODO, 2);
-        todo.commits.filter = "nothing matches".into();
+        todo.commits.list.filter = "nothing matches".into();
         todo_write(&press_char(&mut todo, 'd'));
     }
 
@@ -731,13 +731,13 @@ mod tests {
     fn with_a_filter_k_enters_the_todo_from_the_top_row_it_shows() {
         let mut state = stopped(TODO, 0);
         state.commits.todo_selected = None;
-        state.commits.filter = "commit 1".into();
-        state.commits.selected = 1;
+        state.commits.list.filter = "commit 1".into();
+        state.commits.list.selected = 1;
         press_char(&mut state, 'k');
         assert_eq!(state.commits.todo_selected, Some(0));
         press_char(&mut state, 'j');
         assert_eq!(
-            (state.commits.todo_selected, state.commits.selected),
+            (state.commits.todo_selected, state.commits.list.selected),
             (None, 1)
         );
     }
@@ -789,14 +789,14 @@ mod tests {
     #[test]
     fn no_rewrite_starts_across_a_merge() {
         let mut state = on_linear_log();
-        state.commits.rows[0].parents.push("e".repeat(40));
+        state.commits.list.rows[0].parents.push("e".repeat(40));
         no_rewrite(&state, "Cannot rewrite across a merge");
     }
 
     #[test]
     fn the_root_commit_is_not_rewritten() {
         let mut state = on_linear_log();
-        state.commits.rows[1].parents.clear();
+        state.commits.list.rows[1].parents.clear();
         no_rewrite(&state, "Cannot rewrite the first commit");
     }
 
@@ -935,7 +935,7 @@ mod tests {
         let mut state = with_a_fixup();
         press_char(&mut state, 'S');
         // A reload while asking found the fixup folded already.
-        state.commits.rows[0].subject = "A".into();
+        state.commits.list.rows[0].subject = "A".into();
         assert_eq!(press_char(&mut state, 'y'), vec![]);
         assert_eq!(state.notice, Some(rebase_plan::NO_FIXUPS.into()));
         assert_eq!(state.held_seq(), None);
@@ -944,7 +944,7 @@ mod tests {
     #[test]
     fn autosquash_says_why_not_and_asks_nothing() {
         let mut state = with_a_fixup();
-        state.commits.rows[0].subject = "A".into();
+        state.commits.list.rows[0].subject = "A".into();
         assert_eq!(
             state.update(AppIntent::Commits(CommitsIntent::Rewrite(
                 RewriteIntent::Autosquash
@@ -978,7 +978,7 @@ mod tests {
     fn one_fixup_base_moves_the_cursor_to_it() {
         use rewrite::FixupBase;
         let mut state = with_a_fixup();
-        state.commits.range_anchor = Some("b".repeat(40));
+        state.commits.list.range_anchor = Some("b".repeat(40));
         // From the Files panel a range in the log does not stop it.
         state.focus = Focus::Files;
         let before = state.busy_count();
@@ -991,15 +991,15 @@ mod tests {
         };
         assert_eq!(state.busy_count(), before + 1);
         state.update(base_found(tag, FixupBase::One(cid(&"c".repeat(40)))));
-        assert_eq!(state.commits.selected, 2);
-        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.commits.list.selected, 2);
+        assert_eq!(state.commits.list.range_anchor, None);
         assert_eq!(state.notice, Some("Fixup base: c1 C".into()));
         assert_eq!(state.busy_count(), before);
         state.focus = Focus::Commits;
 
         let tag = find_base(&mut state);
         state.update(base_found(tag, FixupBase::One(cid(&"e".repeat(40)))));
-        assert_eq!(state.commits.selected, 2);
+        assert_eq!(state.commits.list.selected, 2);
         assert_eq!(
             state.notice,
             Some(
@@ -1015,7 +1015,7 @@ mod tests {
         let tag = find_base(&mut state);
         let ids = ["e", "c", "a"].map(|d| cid(&d.repeat(40)));
         state.update(base_found(tag, FixupBase::Many(ids.to_vec())));
-        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.commits.list.selected, 1);
         assert_eq!(
             state.notice,
             Some("Staged lines come from 3 commits: a1, c1, eeeeeee".into())
@@ -1050,7 +1050,7 @@ mod tests {
         let busy = state.busy_count();
         state.notice = None;
         state.update(base_found(old, FixupBase::One(cid(&"c".repeat(40)))));
-        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.commits.list.selected, 1);
         assert_eq!(state.notice, None);
         assert_eq!(
             state.busy_count(),
@@ -1064,7 +1064,7 @@ mod tests {
             ..new
         };
         state.update(base_found(other, FixupBase::One(cid(&"c".repeat(40)))));
-        assert_eq!(state.commits.selected, 1);
+        assert_eq!(state.commits.list.selected, 1);
         assert_eq!(state.notice, None);
     }
 }

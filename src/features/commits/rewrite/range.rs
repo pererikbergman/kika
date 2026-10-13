@@ -59,7 +59,7 @@ impl AppState {
             self.popups.push(Popup::Question(drop_range_question(ids)));
             return vec![];
         }
-        self.commits.range_anchor = None;
+        self.commits.list.range_anchor = None;
         self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan))
     }
 
@@ -86,15 +86,16 @@ impl AppState {
             self.notice = Some(SELECTION_CHANGED.into());
             return vec![];
         }
-        self.commits.range_anchor = None;
+        self.commits.list.range_anchor = None;
         self.run_op_where_it_belongs(GitOp::InteractiveRebase(plan))
     }
 
     /// The commits the range covers now, newest first; empty without one.
     fn range_ids(&self) -> Vec<CommitId> {
-        let rows = &self.commits.rows;
+        let rows = &self.commits.list.rows;
         let ids = self
             .commits
+            .list
             .range()
             .into_iter()
             .map(|i| CommitId::parse(&rows[i].oid));
@@ -173,11 +174,11 @@ mod tests {
         let mut state = AppState::new(Context::Workspace);
         state.focus = Focus::Commits;
         state.expanded = SidePanel::Commits;
-        state.commits.rows = (0..5).map(row).collect();
-        state.commits.loaded = true;
+        state.commits.list.rows = (0..5).map(row).collect();
+        state.commits.list.loaded = true;
         state.commits.done = true;
         state.commits.tips = Some(vec![]);
-        state.commits.selected = at;
+        state.commits.list.selected = at;
         assert_eq!(state.key_focus(), KeyScope::Commits);
         state
     }
@@ -209,7 +210,7 @@ mod tests {
         for (key, action) in [("s", TodoAction::Squash), ("F", TodoAction::Fixup)] {
             let mut state = on_log(1);
             assert_eq!(keys(&mut state, "Vj"), vec![]);
-            assert_eq!(state.commits.range(), [1, 2]);
+            assert_eq!(state.commits.list.range(), [1, 2]);
             let plan = rebase_of(&keys(&mut state, key));
             assert_eq!(plan.base, id(4), "{key}");
             assert_eq!(
@@ -222,7 +223,7 @@ mod tests {
                 ],
                 "{key}"
             );
-            assert_eq!(state.commits.range_anchor, None, "{key}");
+            assert_eq!(state.commits.list.range_anchor, None, "{key}");
             assert!(state.op_is_running(), "{key}");
             assert_eq!(state.notice, None, "{key}");
         }
@@ -236,7 +237,7 @@ mod tests {
             keys(&mut state, "V");
             assert_eq!(rebase_of(&keys(&mut state, key)), single, "{key}");
             assert_eq!(state.popups, [], "{key}");
-            assert_eq!(state.commits.range_anchor, None, "{key}");
+            assert_eq!(state.commits.list.range_anchor, None, "{key}");
         }
     }
 
@@ -265,7 +266,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Char('d')), vec![]);
         assert_eq!(press(&mut state, KeyCode::Esc), vec![]);
         assert_eq!((state.popups.len(), state.held_seq()), (0, None));
-        assert!(state.commits.range_anchor.is_some(), "kept for another try");
+        assert!(
+            state.commits.list.range_anchor.is_some(),
+            "kept for another try"
+        );
 
         keys(&mut state, "d");
         let plan = rebase_of(&keys(&mut state, "y"));
@@ -273,21 +277,21 @@ mod tests {
         let drop = TodoAction::Drop;
         assert_eq!(plan.steps, [step(drop, 2), step(drop, 1), step(drop, 0)]);
         assert_eq!(state.popups, []);
-        assert_eq!(state.commits.range_anchor, None);
+        assert_eq!(state.commits.list.range_anchor, None);
     }
 
     #[test]
     fn a_range_that_changed_while_asking_drops_nothing() {
         // A new commit came in on top: the range now covers other rows.
         let mut moved = asked_to_drop_three();
-        moved.commits.rows.insert(0, row(9));
-        moved.commits.rows[0].parents = vec![oid(0)];
+        moved.commits.list.rows.insert(0, row(9));
+        moved.commits.list.rows[0].parents = vec![oid(0)];
         // The history was rewritten: none of the commits are there.
         let mut gone = asked_to_drop_three();
-        gone.commits.rows = (10..15).map(row).collect();
+        gone.commits.list.rows = (10..15).map(row).collect();
         // The cursor moved under the question.
         let mut shrunk = asked_to_drop_three();
-        shrunk.commits.selected = 1;
+        shrunk.commits.list.selected = 1;
         for mut state in [moved, gone, shrunk] {
             assert_eq!(keys(&mut state, "y"), vec![]);
             assert_eq!(state.notice, Some(SELECTION_CHANGED.into()));
@@ -319,20 +323,20 @@ mod tests {
     fn a_range_with_hidden_commits_inside_is_not_rewritten() {
         let mut state = on_log(0);
         // Rows 0 and 2 have a `0` in their text; row 1 does not.
-        state.commits.filter = "0".into();
-        state.commits.rows[1].short_oid = "zzzzzzz".into();
-        state.commits.rows[1].subject = "hidden".into();
-        state.commits.rows[2].short_oid = "zzzzzzz".into();
-        state.commits.rows[2].subject = "commit 0 again".into();
-        assert_eq!(state.commits.visible(), [0, 2, 3, 4]);
+        state.commits.list.filter = "0".into();
+        state.commits.list.rows[1].short_oid = "zzzzzzz".into();
+        state.commits.list.rows[1].subject = "hidden".into();
+        state.commits.list.rows[2].short_oid = "zzzzzzz".into();
+        state.commits.list.rows[2].subject = "commit 0 again".into();
+        assert_eq!(state.commits.list.visible(), [0, 2, 3, 4]);
         keys(&mut state, "Vj");
-        assert_eq!(state.commits.range(), [0, 2]);
+        assert_eq!(state.commits.list.range(), [0, 2]);
         for key in ["s", "F", "d"] {
             let mut state = state.clone();
             assert_eq!(keys(&mut state, key), vec![], "{key}");
             assert_eq!(state.notice, Some(RANGE_GAP.into()), "{key}");
             assert_eq!((state.popups.len(), state.held_seq()), (0, None), "{key}");
-            assert!(state.commits.range_anchor.is_some(), "{key}");
+            assert!(state.commits.list.range_anchor.is_some(), "{key}");
         }
     }
 
@@ -340,11 +344,11 @@ mod tests {
     fn the_filter_text_never_reaches_the_rebase() {
         let filter = "a\x1b[31m;rm";
         let mut state = on_log(1);
-        for row in &mut state.commits.rows {
+        for row in &mut state.commits.list.rows {
             row.subject = format!("x {filter} y");
         }
-        state.commits.filter = filter.into();
-        assert_eq!(state.commits.visible(), [0, 1, 2, 3, 4]);
+        state.commits.list.filter = filter.into();
+        assert_eq!(state.commits.list.visible(), [0, 1, 2, 3, 4]);
         keys(&mut state, "Vj");
         let plan = rebase_of(&keys(&mut state, "s"));
         let full_hex = |id: &CommitId| {

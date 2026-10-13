@@ -7,9 +7,10 @@ use super::git::Tip;
 use super::graph::{GraphBuilder, GraphRow};
 use super::reflog::ReflogList;
 use super::rewrite::RebaseTodo;
+use crate::effect::Tag;
+use crate::filtered_list::{FilteredList, Row};
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, LogQuery, Markers};
-use crate::list_filter;
 
 /// Commits per page.
 pub const PAGE: usize = 200;
@@ -28,12 +29,28 @@ pub enum Marker {
     Unknown,
 }
 
+/// A log row in the list: it follows its commit by full id, and a failed
+/// page 0 keeps the log shown.
+impl Row for CommitRow {
+    type Key = String;
+    const KEEP_ROWS_ON_ERROR: bool = true;
+    fn key(&self) -> String {
+        self.oid.clone()
+    }
+    /// What the row shows of it.
+    fn filter_text(&self) -> String {
+        format!("{} {} {}", self.short_oid, self.subject, self.author)
+    }
+}
+
 /// Everything the panel shows. Rows only grow by whole pages, in log
 /// order, so the graph can be extended without looking back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CommitsPanel {
-    pub rows: Vec<CommitRow>,
-    /// One per row, in step with `rows`.
+    /// The log loaded so far, with its cursor, fuzzy filter, range and
+    /// the page load in flight.
+    pub list: FilteredList<CommitRow>,
+    /// One per row, in step with `list.rows`.
     pub graph: Vec<GraphRow>,
     /// Carries the lanes across pages.
     pub builder: GraphBuilder,
@@ -44,19 +61,13 @@ pub struct CommitsPanel {
     pub tip: Option<String>,
     /// The last page is in.
     pub done: bool,
-    /// Page 0 has answered at least once.
-    pub loaded: bool,
-    pub error: Option<String>,
-    pub selected: usize,
-    /// The page load in flight; only its result is applied.
-    pub page_seq: Option<u64>,
     /// The page in flight comes after the rows shown, not in their place.
     pub more_in_flight: bool,
     pub markers: Markers,
     pub markers_seq: Option<u64>,
     /// Unix time page 0 loaded, which relative dates count from.
     pub loaded_at: i64,
-    /// A commit opened to its files, shown in place of the log. `selected`
+    /// A commit opened to its files, shown in place of the log. The cursor
     /// stays where it was, so closing it returns to the same commit.
     pub open: Option<CommitFilesList>,
     /// Where every local branch points, to tell which sit on commits a
@@ -79,12 +90,7 @@ pub struct CommitsPanel {
     pub tab: CommitsTab,
     /// `HEAD`'s reflog, read when its tab is first shown or an undo asks.
     pub reflog: ReflogList,
-    /// Narrows the loaded rows as typed; empty shows them all.
-    pub filter: String,
-    /// The full id of the commit a range selection started on, so a reload
-    /// keeps the range on the same commits.
-    pub range_anchor: Option<String>,
-    /// What git narrows the log to. Unlike `filter`, it changes which
+    /// What git narrows the log to. Unlike the list's filter, it changes which
     /// commits are loaded, not which loaded rows show.
     pub query: LogQuery,
     /// The look for the commit the staged lines come from, in flight;
@@ -136,7 +142,8 @@ impl CommitsPanel {
     /// `id` as the log shows it, or its first seven digits once its row
     /// is no longer loaded.
     pub fn short_oid(&self, id: &CommitId) -> String {
-        self.rows
+        self.list
+            .rows
             .iter()
             .find(|row| row.oid == id.as_str())
             .map_or_else(
@@ -151,77 +158,81 @@ impl CommitsPanel {
     /// The caller loads page 0.
     pub fn set_query(&mut self, query: LogQuery) {
         self.query = query;
-        self.rows.clear();
+        self.list.rows.clear();
+        self.list.selected = 0;
+        self.list.range_anchor = None;
+        self.list.loaded = false;
+        self.list.error = None;
         self.graph.clear();
         self.builder = GraphBuilder::default();
         self.lanes = 0;
         self.tip = None;
         self.done = false;
-        self.loaded = false;
-        self.error = None;
-        self.selected = 0;
-        self.range_anchor = None;
         self.open = None;
     }
 
     /// Page `skip` was asked for under `seq`.
     pub fn begin_page(&mut self, seq: u64, skip: usize) {
-        self.page_seq = Some(seq);
+        self.list.begin(seq);
         self.more_in_flight = skip > 0;
     }
 
-    /// Apply a page if it is the one in flight. Page 0 replaces the rows,
-    /// keeping the cursor on the same commit when it is still there; a
-    /// later page is appended.
-    pub fn page_loaded(&mut self, seq: u64, skip: usize, result: Result<(LogPage, i64), String>) {
-        if self.page_seq != Some(seq) {
-            return;
-        }
-        self.page_seq = None;
-        self.more_in_flight = false;
-        let (page, now) = match result {
-            Ok(loaded) => loaded,
-            Err(message) => {
-                if skip == 0 {
-                    self.error = Some(format!("Could not read the history: {message}"));
-                    self.loaded = true;
-                } else {
-                    self.error = Some(format!("Could not load more commits: {message}"));
-                    // Retrying on every key press would only repeat it;
-                    // the next reload tries again.
-                    self.done = true;
-                }
-                return;
-            }
+    /// Apply a page if it is the one in flight in this repository's
+    /// `generation`. Page 0 replaces the rows, keeping the cursor on the
+    /// same commit when it is still there; a later page is appended.
+    /// Returns whether it was applied.
+    pub fn page_loaded(
+        &mut self,
+        tag: Tag,
+        generation: u64,
+        skip: usize,
+        result: Result<(LogPage, i64), String>,
+    ) -> bool {
+        let (rows, done, now) = match result {
+            Ok((page, now)) => (Ok(page.rows), page.done, now),
+            // A failed later page ends the log: retrying on every key
+            // press would only repeat it; the next reload tries again.
+            // (`done` and `now` are not used for a failed page 0.)
+            Err(message) => (Err(message), true, 0),
         };
-        self.error = None;
-        if skip == 0 {
-            let old = self.rows.get(self.selected).map(|row| row.oid.clone());
-            self.rows.clear();
-            self.graph.clear();
-            self.builder = GraphBuilder::default();
-            self.lanes = 0;
-            self.tip = page.rows.first().map(|row| row.oid.clone());
-            self.loaded = true;
-            self.loaded_at = now;
-            self.append(page);
-            self.selected = old
-                .and_then(|oid| self.rows.iter().position(|row| row.oid == oid))
-                .unwrap_or(self.selected)
-                .min(self.rows.len().saturating_sub(1));
-        } else if skip == self.rows.len() {
-            self.append(page);
+        let failed = rows.is_err();
+        let applied = if skip == 0 {
+            let rows = rows.map_err(|m| format!("Could not read the history: {m}"));
+            let applied = self.list.loaded(tag, generation, rows);
+            if applied && !failed {
+                self.graph.clear();
+                self.builder = GraphBuilder::default();
+                self.lanes = 0;
+                self.extend_graph(0);
+                self.tip = self.list.rows.first().map(|row| row.oid.clone());
+                self.done = done;
+                self.loaded_at = now;
+            }
+            applied
+        } else {
+            let rows = rows.map_err(|m| format!("Could not load more commits: {m}"));
+            let applied = self.list.append(tag, generation, skip, rows);
+            if applied {
+                self.done = done;
+                if !failed {
+                    self.extend_graph(skip);
+                }
+            }
+            applied
+        };
+        if self.list.seq.is_none() {
+            self.more_in_flight = false;
         }
+        applied
     }
 
-    fn append(&mut self, page: LogPage) {
-        self.done = page.done;
-        for row in &page.rows {
+    /// Graph rows for the rows from `from` on, which are new.
+    fn extend_graph(&mut self, from: usize) {
+        for row in &self.list.rows[from..] {
             let graph = self.builder.push(row);
             self.lanes = self.lanes.max(graph.cells.len());
             self.graph.push(graph);
         }
-        self.rows.extend(page.rows);
     }
 
     /// Apply markers if they are the load in flight. A failure leaves every
@@ -265,85 +276,33 @@ impl CommitsPanel {
             (Some(0), 1) => {
                 self.todo_selected = None;
                 // The log's first row the filter shows.
-                self.selected = self.visible().first().copied().unwrap_or(0);
+                self.list.selected = self.list.visible().first().copied().unwrap_or(0);
             }
             (Some(i), 1) => self.todo_selected = Some(i - 1),
             (Some(i), _) => self.todo_selected = Some((i + 1).min(rows.saturating_sub(1))),
             (None, -1)
                 if rows > 0
                     && self
+                        .list
                         .visible()
                         .first()
-                        .is_none_or(|&top| top == self.selected) =>
+                        .is_none_or(|&top| top == self.list.selected) =>
             {
                 self.todo_selected = Some(0)
             }
-            (None, _) => self.move_by(delta),
-        }
-    }
-
-    pub fn move_by(&mut self, delta: isize) {
-        if let Some(next) = list_filter::step(&self.visible(), self.selected, delta) {
-            self.selected = next;
-        }
-    }
-
-    /// What the filter matches a row against: what the row shows of it.
-    fn filter_text(row: &CommitRow) -> String {
-        format!("{} {} {}", row.short_oid, row.subject, row.author)
-    }
-
-    /// The indexes of the rows the filter shows, in log order.
-    pub fn visible(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            return (0..self.rows.len()).collect();
-        }
-        let texts: Vec<String> = self.rows.iter().map(Self::filter_text).collect();
-        list_filter::visible(&self.filter, texts.iter().map(String::as_str))
-    }
-
-    /// The filter hides the cursor's row, which happens only when it hides
-    /// every row.
-    pub fn selected_hidden(&self) -> bool {
-        !self.filter.is_empty()
-            && self
-                .rows
-                .get(self.selected)
-                .is_some_and(|row| !list_filter::matches(&self.filter, &Self::filter_text(row)))
-    }
-
-    /// The rows the range covers, in log order; empty without one.
-    pub fn range(&self) -> Vec<usize> {
-        let Some(anchor) = &self.range_anchor else {
-            return Vec::new();
-        };
-        match self.rows.iter().position(|row| &row.oid == anchor) {
-            Some(at) => list_filter::range(&self.visible(), at, self.selected),
-            None => Vec::new(),
-        }
-    }
-
-    /// After the filter or the rows changed: a range whose first commit is
-    /// gone is cleared, and a hidden cursor moves to the first row shown.
-    pub fn reconcile(&mut self) {
-        if let Some(anchor) = &self.range_anchor
-            && !self.rows.iter().any(|row| &row.oid == anchor)
-        {
-            self.range_anchor = None;
-        }
-        if self.selected_hidden()
-            && let Some(&first) = self.visible().first()
-        {
-            self.selected = first;
+            (None, _) => {
+                self.list.move_by(delta);
+            }
         }
     }
 
     /// The `skip` of the next page, when the cursor is near the end of what
     /// is loaded, more exists, and no page is already on its way.
     pub fn wants_more(&self) -> Option<usize> {
-        let near_end = self.selected + PREFETCH >= self.rows.len();
-        let ready = self.loaded && !self.done && self.page_seq.is_none();
-        (ready && near_end && !self.rows.is_empty()).then_some(self.rows.len())
+        let list = &self.list;
+        let near_end = list.selected + PREFETCH >= list.rows.len();
+        let ready = list.loaded && !self.done && list.seq.is_none();
+        (ready && near_end && !list.rows.is_empty()).then_some(list.rows.len())
     }
 }
 
@@ -382,7 +341,12 @@ mod tests {
         let mut panel = CommitsPanel::default();
         panel.begin_page(1, 0);
         panel.page_loaded(
-            1,
+            Tag {
+                generation: 0,
+                seq: 1,
+                user: false,
+            },
+            0,
             0,
             Ok((
                 LogPage {
@@ -392,9 +356,9 @@ mod tests {
                 5,
             )),
         );
-        panel.selected = 1;
-        panel.range_anchor = Some("a1".into());
-        panel.filter = "s".into();
+        panel.list.selected = 1;
+        panel.list.range_anchor = Some("a1".into());
+        panel.list.filter = "s".into();
         panel.tab = CommitsTab::Reflog;
         let query = LogQuery {
             path: None,
@@ -404,12 +368,67 @@ mod tests {
         panel.set_query(query.clone());
 
         assert_eq!(panel.query, query);
-        assert!(panel.rows.is_empty() && panel.graph.is_empty());
-        assert_eq!((panel.selected, panel.lanes), (0, 0));
-        assert!(!panel.loaded && !panel.done && panel.tip.is_none());
-        assert!(panel.range_anchor.is_none() && panel.open.is_none());
-        assert_eq!(panel.filter, "s");
+        assert!(panel.list.rows.is_empty() && panel.graph.is_empty());
+        assert_eq!((panel.list.selected, panel.lanes), (0, 0));
+        assert!(!panel.list.loaded && !panel.done && panel.tip.is_none());
+        assert!(panel.list.range_anchor.is_none() && panel.open.is_none());
+        assert_eq!(panel.list.filter, "s");
         assert_eq!(panel.tab, CommitsTab::Reflog);
+    }
+
+    /// A straight line of commits `from..to`, each the child of the next.
+    fn line(from: usize, to: usize, done: bool) -> Result<(LogPage, i64), String> {
+        let rows = (from..to)
+            .map(|i| CommitRow {
+                oid: format!("c{i}"),
+                short_oid: format!("c{i}"),
+                parents: vec![format!("c{}", i + 1)],
+                author: "Ann".into(),
+                time: 0,
+                subject: format!("commit {i}"),
+                subject_altered: false,
+            })
+            .collect();
+        Ok((LogPage { rows, done }, 5))
+    }
+
+    #[test]
+    fn graph_rows_stay_in_step_across_pages_and_a_reload() {
+        let tag = |seq| Tag {
+            generation: 0,
+            seq,
+            user: false,
+        };
+        let mut panel = CommitsPanel::default();
+        panel.begin_page(1, 0);
+        assert!(panel.page_loaded(tag(1), 0, 0, line(0, 3, false)));
+        assert_eq!(panel.graph.len(), panel.list.rows.len());
+
+        panel.begin_page(2, 3);
+        assert!(panel.page_loaded(tag(2), 0, 3, line(3, 5, false)));
+        assert_eq!((panel.list.rows.len(), panel.graph.len()), (5, 5));
+
+        panel.list.move_by(4);
+        panel.begin_page(3, 0);
+        assert!(panel.page_loaded(tag(3), 0, 0, line(1, 5, false)));
+        assert_eq!((panel.list.rows.len(), panel.graph.len()), (4, 4));
+        assert_eq!(panel.tip.as_deref(), Some("c1"));
+        assert_eq!(panel.list.selected, 3, "the cursor followed c4");
+
+        let (rows, graph) = (panel.list.rows.clone(), panel.graph.clone());
+        panel.begin_page(4, 4);
+        assert!(panel.more_in_flight);
+        assert!(panel.page_loaded(tag(4), 0, 4, Err("gone".into())));
+        assert_eq!(
+            (panel.list.rows.clone(), panel.graph.clone()),
+            (rows, graph)
+        );
+        assert_eq!(panel.list.selected, 3);
+        assert!(panel.done && !panel.more_in_flight);
+        assert_eq!(
+            panel.list.error.as_deref(),
+            Some("Could not load more commits: gone")
+        );
     }
 
     #[test]

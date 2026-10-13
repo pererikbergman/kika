@@ -2018,7 +2018,7 @@ mod tests {
     #[test]
     fn the_copy_menu_draws_its_four_items_and_the_bar_says_what_was_copied() {
         let mut state = workspace(&[]);
-        state.commits.rows = vec![crate::git::log::CommitRow {
+        state.commits.list.rows = vec![crate::git::log::CommitRow {
             oid: "abc1234def".into(),
             short_oid: "abc1234".into(),
             parents: vec![],
@@ -2027,7 +2027,7 @@ mod tests {
             subject: "s".into(),
             subject_altered: false,
         }];
-        let graph = state.commits.builder.push(&state.commits.rows[0]);
+        let graph = state.commits.builder.push(&state.commits.list.rows[0]);
         state.commits.graph = vec![graph];
         state.popups = vec![Popup::Menu {
             id: MenuId::Copy,

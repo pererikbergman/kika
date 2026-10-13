@@ -20,7 +20,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// an id git can use. Not refused while an operation runs, since the
 /// prompt comes first; the answer waits for it instead.
 pub(crate) fn tag_commit_disabled(state: &AppState) -> Option<Reason> {
-    let row = state.commits.rows.get(state.commits.selected);
+    let row = state.commits.list.rows.get(state.commits.list.selected);
     let valid = row.is_some_and(|r| CommitId::parse(&r.oid).is_some());
     (!valid).then_some("No commit".into())
 }
@@ -209,9 +209,9 @@ mod tests {
                 Resolution::Disabled(ref reason) if reason == "No commit"
             ));
         }
-        state.commits.rows = vec![row("not hex")];
+        state.commits.list.rows = vec![row("not hex")];
         assert_eq!(tag_commit_disabled(&state), Some("No commit".into()));
-        state.commits.rows = vec![row(&"a".repeat(40))];
+        state.commits.list.rows = vec![row(&"a".repeat(40))];
         // An operation running does not refuse the prompt; the answer waits.
         state.hold_op(1);
         let ran = |key| match resolve_in(&state, key) {

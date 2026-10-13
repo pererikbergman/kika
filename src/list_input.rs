@@ -100,7 +100,7 @@ impl AppState {
         }
         let (target, text) = match self.panel_focus() {
             KeyScope::Files => (InputTarget::FilesFilter, &self.files_filter),
-            KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.filter),
+            KeyScope::Commits => (InputTarget::CommitsFilter, &self.commits.list.filter),
             KeyScope::Branches => (InputTarget::BranchesFilter, &self.branches.list.filter),
             KeyScope::Remotes => (
                 InputTarget::RemotesFilter,
@@ -147,13 +147,9 @@ impl AppState {
                 }
             }
             InputTarget::CommitsFilter => {
-                if text != self.commits.filter {
-                    self.commits.filter = text;
-                    if self.commits.range_anchor.take().is_some() {
-                        self.notice = Some(SELECTION_CLEARED.into());
-                    }
+                if self.commits.list.set_filter(text) {
+                    self.notice = Some(SELECTION_CLEARED.into());
                 }
-                self.commits.reconcile();
             }
             InputTarget::BranchesFilter | InputTarget::RemotesFilter | InputTarget::TagsFilter => {
                 return self.apply_branches_filter(input.target, text);
@@ -288,12 +284,12 @@ impl AppState {
                     .and_then(|i| self.files.get(i))
                     .map(|f| f.path.clone());
             }
-            KeyScope::Commits if self.commits.range_anchor.is_some() => {
-                self.commits.range_anchor = None;
+            KeyScope::Commits if self.commits.list.range_anchor.is_some() => {
+                self.commits.list.range_anchor = None;
             }
-            KeyScope::Commits if !self.commits.selected_hidden() => {
-                let row = self.commits.rows.get(self.commits.selected);
-                self.commits.range_anchor = row.map(|r| r.oid.clone());
+            KeyScope::Commits if !self.commits.list.selected_hidden() => {
+                let row = self.commits.list.rows.get(self.commits.list.selected);
+                self.commits.list.range_anchor = row.map(|r| r.oid.clone());
             }
             KeyScope::Branches => self.branches.list.toggle_range(),
             KeyScope::Remotes => self.branches.remotes.list.toggle_range(),
@@ -333,8 +329,8 @@ impl AppState {
         let (cleared, filter) = match focus {
             KeyScope::Files => (self.files_anchor.take().is_some(), &mut self.files_filter),
             KeyScope::Commits => (
-                self.commits.range_anchor.take().is_some(),
-                &mut self.commits.filter,
+                self.commits.list.range_anchor.take().is_some(),
+                &mut self.commits.list.filter,
             ),
             KeyScope::Branches => (
                 branches.list.range_anchor.take().is_some(),
@@ -545,18 +541,18 @@ mod tests {
         let mut state = with_commits(5, true);
         assert_eq!(state.key_focus(), KeyScope::Commits);
         type_text(&mut state, "/commit 3");
-        assert_eq!(state.commits.filter, "commit 3");
-        assert_eq!(state.commits.visible(), [3]);
-        assert_eq!(state.commits.selected, 3);
+        assert_eq!(state.commits.list.filter, "commit 3");
+        assert_eq!(state.commits.list.visible(), [3]);
+        assert_eq!(state.commits.list.selected, 3);
         press(&mut state, KeyCode::Enter);
         press_char(&mut state, 'k');
         assert_eq!(
-            state.commits.selected, 3,
+            state.commits.list.selected, 3,
             "nothing else is shown to move to"
         );
         press(&mut state, KeyCode::Esc);
-        assert_eq!(state.commits.filter, "");
-        assert_eq!(state.commits.visible().len(), 5);
+        assert_eq!(state.commits.list.filter, "");
+        assert_eq!(state.commits.list.visible().len(), 5);
     }
 
     #[test]
@@ -854,14 +850,14 @@ mod tests {
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.commits.open, None, "then back to the log");
         assert_eq!(state.key_focus(), KeyScope::Commits);
-        assert_eq!(state.commits.selected, 5, "on the same commit");
+        assert_eq!(state.commits.list.selected, 5, "on the same commit");
         assert!(!state.should_quit);
 
         // With neither set, one Esc goes back.
         let mut state = commit_files_open();
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.commits.open, None);
-        assert_eq!(state.commits.selected, 5);
+        assert_eq!(state.commits.list.selected, 5);
         assert!(!state.should_quit);
     }
 
