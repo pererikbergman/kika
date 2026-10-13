@@ -2,11 +2,11 @@
 //! graph, the cursor and the push/merge markers. Pure; `AppState` turns
 //! its answers into effects.
 
+use super::commit_files::CommitFilesList;
 use super::git::Tip;
 use super::graph::{GraphBuilder, GraphRow};
 use super::reflog::ReflogList;
 use super::rewrite::RebaseTodo;
-use crate::commit_files::CommitFilesList;
 use crate::git::commit_files::CommitId;
 use crate::git::log::{CommitRow, LogPage, LogQuery, Markers};
 use crate::list_filter;

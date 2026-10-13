@@ -2,7 +2,6 @@ mod app;
 mod bisect;
 mod cli;
 mod clipboard;
-mod commit_files;
 mod config;
 #[cfg(test)]
 mod config_docs;
