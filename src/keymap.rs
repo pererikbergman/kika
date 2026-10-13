@@ -16,7 +16,6 @@ use crate::features::{
 };
 use crate::git::remotes::RemoteName;
 use crate::git::repo_state::{Operation, resumable};
-use crate::git::status::EntryKind;
 use crate::intent::{AppIntent, Scroll};
 use crate::layout::{Panel, SidePanel};
 use crate::model::{AppState, Focus};
@@ -1187,19 +1186,6 @@ pub(crate) fn no_commit_selected(state: &AppState) -> Option<Reason> {
     row.is_none().then_some("No commit selected".into())
 }
 
-pub(crate) fn stage_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        return Some(OP_RUNNING.into());
-    }
-    match state.selected.and_then(|i| state.files.get(i)) {
-        None => Some("No file selected".into()),
-        Some(file) if file.kind == EntryKind::Conflicted => {
-            Some("Resolve the conflict before staging this file".into())
-        }
-        Some(_) => None,
-    }
-}
-
 /// Why the diff cannot take focus: with a commit's files open, the hunks
 /// are its selected file's, picked for the custom patch, so the filter must
 /// show that file; otherwise the selected working-tree file's.
@@ -1247,18 +1233,6 @@ pub(crate) const NOT_IN_COMMIT: &str = "Not in a commit's change";
 pub(crate) fn in_commit(state: &AppState) -> Option<Reason> {
     matches!(&state.focus, Focus::Diff(view) if view.commit.is_some())
         .then_some(NOT_IN_COMMIT.into())
-}
-
-pub(crate) fn stage_all_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
-        Some(OP_RUNNING.into())
-    } else if state.files.is_empty() {
-        Some("No changes to stage".into())
-    } else if state.files.iter().any(|f| f.kind == EntryKind::Conflicted) {
-        Some(crate::op::CONFLICTS_REFUSAL.into())
-    } else {
-        None
-    }
 }
 
 /// Why `d` cannot ask right now. What it would discard, and why that is
@@ -1472,35 +1446,6 @@ pub(crate) fn list_guard(state: &AppState, range_ok: bool) -> Option<Reason> {
     } else {
         None
     }
-}
-
-/// Space stages a range too, so long as one of its files can be staged.
-pub(crate) fn files_stage_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, true).or_else(|| {
-        // As the action: the range counts only where it shows.
-        if state.files_anchor.is_none() || state.focus != Focus::Files {
-            return stage_disabled(state);
-        }
-        let range = state.files_range();
-        if state.op_seq.is_some() {
-            Some(OP_RUNNING.into())
-        } else if range
-            .iter()
-            .all(|&i| state.files[i].kind == EntryKind::Conflicted)
-        {
-            Some("Resolve the conflicts before staging these files".into())
-        } else {
-            None
-        }
-    })
-}
-
-fn files_discard_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, true).or_else(|| discard_disabled(state))
-}
-
-fn files_open_disabled(state: &AppState) -> Option<Reason> {
-    list_guard(state, false).or_else(|| open_disabled(state))
 }
 
 /// Why a rewrite cannot run on a log narrowed to a path or an author.
@@ -1762,55 +1707,6 @@ static CORE_FOCUS: &[Binding] = &[
     },
 ];
 
-// Chunk 20: files
-static FILES_STAGE: &[Binding] = &[
-    Binding {
-        id: "files.stage",
-        keys: &[KeyPattern::exact(KeyCode::Char(' '), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::ToggleStage,
-        description: "Stage the selected file, or unstage it if fully staged",
-        label: "stage",
-        bar: true,
-        disabled: files_stage_disabled,
-    },
-    Binding {
-        id: "files.stage_all",
-        keys: &[KeyPattern::exact(KeyCode::Char('a'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::ToggleStageAll,
-        description: "Stage everything, or unstage everything if all is staged",
-        label: "all",
-        bar: true,
-        disabled: stage_all_disabled,
-    },
-];
-
-// Chunk 22: files
-static FILES_DISCARD_OPEN: &[Binding] = &[
-    Binding {
-        id: "files.discard",
-        keys: &[KeyPattern::exact(KeyCode::Char('d'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::Discard,
-        description: "Discard the selected file's unstaged changes, or delete it if untracked",
-        label: "discard",
-        bar: true,
-        disabled: files_discard_disabled,
-    },
-    Binding {
-        id: "files.open",
-        keys: &[KeyPattern::exact(KeyCode::Char('o'), NONE)],
-        scope: KeyScope::Files,
-        intent: AppIntent::OpenInEditor,
-        description: "Open the selected file in your editor",
-        label: "open in editor",
-        // Out of the bar, which is full at 80 columns; the help menu lists it.
-        bar: false,
-        disabled: files_open_disabled,
-    },
-];
-
 // Chunk 41: core
 static CORE_POPUPS: &[Binding] = &[
     Binding {
@@ -2006,45 +1902,6 @@ static CORE_ERROR: &[Binding] = &[
         id: "error.quit",
         keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
         scope: KeyScope::Error,
-        intent: AppIntent::Quit,
-        description: "Quit Kika",
-        label: "quit",
-        bar: true,
-        disabled: never,
-    },
-];
-
-// Chunk 44: files
-static FILES_DISCARD_CONFIRM: &[Binding] = &[
-    // Only `y` throws work away. Enter is left unbound on purpose: it
-    // answers yes elsewhere, and a discard cannot be undone.
-    Binding {
-        id: "discard_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
-        scope: KeyScope::DiscardConfirm,
-        intent: AppIntent::ConfirmYes,
-        description: "Yes, throw it away",
-        label: "discard",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "discard_confirm.no",
-        keys: &[
-            KeyPattern::exact(KeyCode::Char('n'), NONE),
-            KeyPattern::any(KeyCode::Esc),
-        ],
-        scope: KeyScope::DiscardConfirm,
-        intent: AppIntent::ConfirmNo,
-        description: "No, keep it",
-        label: "keep",
-        bar: true,
-        disabled: never,
-    },
-    Binding {
-        id: "discard_confirm.quit",
-        keys: &[KeyPattern::exact(KeyCode::Char('c'), KeyModifiers::CONTROL)],
-        scope: KeyScope::DiscardConfirm,
         intent: AppIntent::Quit,
         description: "Quit Kika",
         label: "quit",
@@ -2545,9 +2402,9 @@ static CHUNKS: &[&[Binding]] = &[
     commits::custom_patch::keys::CUSTOM_PATCH_COMMIT_FILES,
     commits::keys::COMMITS_FILES_BACK,
     stash::keys::STASH_KEYS,
-    FILES_STAGE,
+    files::keys::FILES_STAGE,
     commit::keys::COMMIT_FROM_FILES,
-    FILES_DISCARD_OPEN,
+    files::keys::FILES_DISCARD_OPEN,
     submodules::keys::SUBMODULES_FILES,
     worktrees::keys::WORKTREES_WORKSPACE,
     command_log::keys::COMMAND_LOG_WORKSPACE,
@@ -2569,7 +2426,7 @@ static CHUNKS: &[&[Binding]] = &[
     CORE_POPUPS,
     sync::keys::SYNC_CREDENTIAL,
     CORE_ERROR,
-    FILES_DISCARD_CONFIRM,
+    files::keys::FILES_DISCARD_CONFIRM,
     branches::keys::BRANCHES_KEYS,
     branches::keys::BRANCHES_CHANGE,
     operation::keys::OPERATION_BRANCHES,
@@ -2633,7 +2490,7 @@ mod tests {
     use crate::git::bisect::BisectMark;
     use crate::git::commit_files::{CommitId, CommitRange};
     use crate::git::rebase_plan::{Direction, Edit};
-    use crate::git::status::Head;
+    use crate::git::status::{EntryKind, Head};
     use crate::git::version;
     use crate::menu::MenuId;
     use crate::model::Context;
