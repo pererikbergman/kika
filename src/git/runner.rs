@@ -77,19 +77,16 @@ impl GitCommand {
     }
 
     /// Run with the [`EnvProfile::Standard`] vars.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn standard_env(self) -> Self {
         self.with_profile(EnvProfile::Standard)
     }
 
     /// Run with the [`EnvProfile::Write`] vars.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write_env(self) -> Self {
         self.with_profile(EnvProfile::Write)
     }
 
     /// Run in the user's own env, see [`EnvProfile::UserEnv`].
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn user_env(self) -> Self {
         self.with_profile(EnvProfile::UserEnv)
     }
@@ -217,7 +214,6 @@ pub trait GitRunner: Send + Sync {
     /// Run `cmd` and fail unless git succeeded. The error's message is
     /// already safe to draw, with URL credentials removed. Callers move
     /// here from the free [`run_checked`] in #372/#373.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn run_checked(&self, cmd: &GitCommand) -> Result<GitOutput, GitError> {
         let output = self.run(cmd).map_err(|e| GitError::io(&e))?;
         if output.success {
@@ -576,6 +572,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// Run `cmd`, with git's message, made safe to draw, as the error.
+/// Its last callers moved to [`GitRunner::run_checked`] in #372; it goes
+/// in #374.
+#[allow(dead_code)]
 pub(crate) fn run_checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
     let output = runner.run(cmd).map_err(|e| e.to_string())?;
     if output.success {

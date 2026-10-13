@@ -5,9 +5,10 @@
 
 use super::push::with_literal_paths;
 use crate::git::commit_files::{CommitFile, CommitId, CommitRange, commit_files};
-use crate::git::diff::{sanitize, terminal_safe};
+use crate::git::diff::sanitize;
+use crate::git::error::GitError;
 use crate::git::path::RepoPath;
-use crate::git::runner::{GitCommand, GitRunner, run_checked};
+use crate::git::runner::{GitCommand, GitOutput, GitRunner};
 use crate::git::version::{GitVersion, parse_version, version_command};
 use crate::op::{GitOp, op_command};
 
@@ -62,29 +63,23 @@ pub struct StashFile {
 
 /// `git stash list`, one NUL-terminated record per entry: the id, the
 /// parents and the subject, split by 0x1f. A read-only query: no lock, and
-/// git's text in English.
+/// git's text in English. It names no paths, so literal pathspecs change
+/// nothing.
 pub fn list_command() -> GitCommand {
     GitCommand::new("stash")
         .arg("list")
         .arg("-z")
         .arg("--format=%H%x1f%P%x1f%gs")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C")
+        .standard_env()
 }
 
 /// The stash list, newest first. No stashes is an empty list.
 pub fn list_stashes(runner: &dyn GitRunner) -> Result<Vec<StashEntry>, String> {
-    let output = runner
-        .run(&list_command())
-        .map_err(|e| terminal_safe(e.to_string().as_bytes()))?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git stash list failed".into()
-        } else {
-            message
-        });
-    }
+    let output = runner.run_checked(&list_command()).map_err(|e| match e {
+        // The subcommand alone would read `git stash failed`.
+        GitError::Failed { message, .. } if message.is_empty() => "git stash list failed".into(),
+        e => e.to_string(),
+    })?;
     parse_list(&output.stdout)
 }
 
@@ -193,11 +188,12 @@ pub(crate) fn push_command(
     paths: &[RepoPath],
 ) -> GitCommand {
     // Paths only with `-u` or no flag: `--staged` takes the whole
-    // index, and no key builds it with paths. Only a push that names
-    // files reads pathspecs literally: without paths, `-u` cleans the
-    // untracked files through a `:/` pathspec of git's own, which a
-    // literal reading turns into a name that matches nothing, and they
-    // would stay in the worktree as well as in the stash.
+    // index, and no key builds it with paths. A `-u` push without paths
+    // must not read pathspecs literally: it cleans the untracked files
+    // through a `:/` pathspec of git's own, which a literal reading turns
+    // into a name that matches nothing, and they would stay in the
+    // worktree as well as in the stash. The other pathless pushes use no
+    // pathspec, so for them literal pathspecs change nothing.
     // A rename's old path is in `restore`, not here; a staged deletion
     // is here and in `unstage`: see `GitOp::StashPush`.
     let cmd = GitCommand::new("stash").arg("push");
@@ -214,8 +210,12 @@ pub(crate) fn push_command(
         mode != StashMode::Staged || paths.is_empty(),
         "--staged takes no paths"
     );
-    if paths.is_empty() || mode == StashMode::Staged {
+    if paths.is_empty() && mode == StashMode::IncludeUntracked {
+        // Not `write_env`: its literal pathspecs would break the `:/`.
         return cmd.env("LC_ALL", "C");
+    }
+    if paths.is_empty() || mode == StashMode::Staged {
+        return cmd.write_env();
     }
     with_literal_paths(cmd, paths)
 }
@@ -228,15 +228,16 @@ pub(crate) fn store_command(stash: &StashRef, message: &str) -> GitCommand {
         .arg("-m")
         .arg(message)
         .arg(stash.oid.as_str())
-        .env("LC_ALL", "C")
+        .write_env()
 }
 
-/// `git stash <verb> stash@{N}`.
+/// `git stash <verb> stash@{N}`. No paths, so literal pathspecs change
+/// nothing.
 pub(crate) fn stash_command(verb: &str, stash: &StashRef) -> GitCommand {
     GitCommand::new("stash")
         .arg(verb)
         .arg(stash.arg())
-        .env("LC_ALL", "C")
+        .write_env()
 }
 
 /// Whether `stash@{N}` still names the commit `stash` was chosen as.
@@ -245,8 +246,7 @@ fn stash_is(runner: &dyn GitRunner, stash: &StashRef) -> Result<bool, String> {
         .arg("-q")
         .arg("--verify")
         .arg(stash.arg())
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C");
+        .standard_env();
     let output = runner.run(&cmd).map_err(|e| e.to_string())?;
     // `-q` makes a missing entry a quiet failure, not an error.
     let found = String::from_utf8_lossy(&output.stdout);
@@ -274,6 +274,11 @@ pub(crate) fn staged_stash_supported(runner: &dyn GitRunner) -> Result<(), Strin
         )),
         _ => Ok(()),
     }
+}
+
+/// Run `cmd`; git's message made safe to draw if it fails.
+pub(super) fn checked(runner: &dyn GitRunner, cmd: &GitCommand) -> Result<GitOutput, String> {
+    runner.run_checked(cmd).map_err(|e| e.to_string())
 }
 
 /// Store the entry again under `message`, then drop its old place, which
@@ -307,7 +312,7 @@ pub(crate) fn rename_stash(
     }
     // `run_op` has checked that `stash@{index}` is still this commit.
     if stash.index == 0 {
-        run_checked(runner, &drop(0))?;
+        checked(runner, &drop(0))?;
         let lost = |why: String| {
             format!(
                 "{why}\nThe stash was dropped but not stored again; \
@@ -315,13 +320,13 @@ pub(crate) fn rename_stash(
                 stash.oid.as_str()
             )
         };
-        run_checked(runner, &store).map_err(lost)?;
+        checked(runner, &store).map_err(lost)?;
         return verify_stash(runner, &at(0)).map_err(lost);
     }
-    run_checked(runner, &store)?;
+    checked(runner, &store)?;
     verify_stash(runner, &at(0))?;
     verify_stash(runner, &at(stash.index + 1))?;
-    run_checked(runner, &drop(stash.index + 1)).map(|_| ())
+    checked(runner, &drop(stash.index + 1)).map(|_| ())
 }
 
 #[cfg(test)]
@@ -332,7 +337,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::features::stash::push::{StashSet, stash_file_for};
     use crate::git::fake::{FakeRunner, fail, ok};
-    use crate::git::runner::GitOutput;
+    use crate::git::runner::EnvProfile;
     use crate::git::status::EntryKind;
     use crate::op::{op_steps, refusal, run_op};
     use crate::test_support::{argv, file_entry as entry};
@@ -348,10 +353,11 @@ pub(crate) mod tests {
         let result = list_stashes(&fake);
         fake.assert_done();
         let env: Vec<(OsString, OsString)> = vec![
-            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
             ("LC_ALL".into(), "C".into()),
+            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+            ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
         ];
-        assert_eq!(fake.envs(), [env]);
+        assert_eq!(fake.process_envs(), [env]);
         result
     }
 
@@ -548,12 +554,24 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn literal_env(cmd: &GitCommand) -> Vec<(&str, &str)> {
-        cmd.envs()
+    /// Everything `cmd` adds to git's env, profile vars included.
+    pub(crate) fn literal_env(cmd: &GitCommand) -> Vec<(String, String)> {
+        cmd.process_env()
             .iter()
-            .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
+            .map(|(k, v)| (k.to_str().unwrap().into(), v.to_str().unwrap().into()))
             .collect()
     }
+
+    /// `pairs` as [`literal_env`] returns them.
+    pub(crate) fn env_of(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The env of an op that takes the index lock and names no path.
+    pub(crate) const WRITE: [(&str, &str); 2] = [("LC_ALL", "C"), ("GIT_LITERAL_PATHSPECS", "1")];
 
     #[test]
     fn each_stash_push_mode_with_and_without_a_message() {
@@ -585,7 +603,22 @@ pub(crate) mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(literal_env(&cmd), [("LC_ALL", "C")], "{op:?}");
+            // A pathless `-u` push cleans through a `:/` pathspec of git's
+            // own, which literal pathspecs would turn into a plain name.
+            let untracked = matches!(
+                op,
+                GitOp::StashPush {
+                    mode: StashMode::IncludeUntracked,
+                    ..
+                }
+            );
+            let (profile, want) = if untracked {
+                (EnvProfile::PerCommand, env_of(&[("LC_ALL", "C")]))
+            } else {
+                (EnvProfile::Write, env_of(&WRITE))
+            };
+            assert_eq!(cmd.env_profile(), profile, "{op:?}");
+            assert_eq!(literal_env(&cmd), want, "{op:?}");
         }
     }
 
@@ -599,7 +632,8 @@ pub(crate) mod tests {
         for (op, expected) in cases {
             let cmd = op_command(&op);
             assert_eq!(argv(&cmd), expected, "{op:?}");
-            assert_eq!(literal_env(&cmd), [("LC_ALL", "C")], "{op:?}");
+            assert_eq!(cmd.env_profile(), EnvProfile::Write, "{op:?}");
+            assert_eq!(literal_env(&cmd), env_of(&WRITE), "{op:?}");
         }
     }
 
@@ -654,6 +688,40 @@ pub(crate) mod tests {
             expect_verify(runner, 3, STASH_OID).expect(&["stash", "drop", "stash@{3}"], ok(b""));
         assert_eq!(run_op(&runner, &op), Ok(()));
         runner.assert_done();
+    }
+
+    #[test]
+    fn a_rename_s_checks_are_reads_and_its_store_and_drop_take_the_lock() {
+        let op = GitOp::StashRename {
+            stash: at(2),
+            message: "m".into(),
+        };
+        let runner = expect_verify(FakeRunner::new(), 2, STASH_OID);
+        let runner = expect_verify(runner, 0, "0ther")
+            .expect(&["stash", "store", "-m", "m", STASH_OID], ok(b""));
+        let runner = expect_verify(runner, 0, STASH_OID);
+        let runner =
+            expect_verify(runner, 3, STASH_OID).expect(&["stash", "drop", "stash@{3}"], ok(b""));
+        assert_eq!(run_op(&runner, &op), Ok(()));
+        runner.assert_done();
+        let read: Vec<(OsString, OsString)> = vec![
+            ("LC_ALL".into(), "C".into()),
+            ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+            ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+        ];
+        let write: Vec<(OsString, OsString)> =
+            WRITE.iter().map(|(k, v)| (k.into(), v.into())).collect();
+        assert_eq!(
+            runner.process_envs(),
+            [
+                read.clone(),
+                read.clone(),
+                write.clone(),
+                read.clone(),
+                read,
+                write
+            ]
+        );
     }
 
     #[test]

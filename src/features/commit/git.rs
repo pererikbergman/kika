@@ -22,9 +22,9 @@ pub enum MessageSource<'a> {
 
 /// `git commit` taking its message from `source`. Shared by the detached
 /// run and the one on the terminal, whose stdin is the user's, so the two
-/// differ only there.
+/// differ only there. Its hooks and editor see the user's own env.
 pub fn commit_command(amend: bool, no_verify: bool, source: MessageSource) -> GitCommand {
-    let cmd = GitCommand::new("commit");
+    let cmd = GitCommand::new("commit").user_env();
     let cmd = if amend { cmd.arg("--amend") } else { cmd };
     let cmd = if no_verify {
         cmd.arg("--no-verify")
@@ -248,6 +248,36 @@ mod tests {
         assert_eq!(made, format!("fixup! {subject}\n").into_bytes());
         assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"4\n");
         assert_eq!(git(dir, &["diff", "--cached"]), b"");
+    }
+
+    #[test]
+    fn every_message_source_runs_in_the_user_s_env() {
+        use super::{MessageSource, commit_command};
+        use crate::git::runner::EnvProfile;
+        use std::path::Path;
+
+        let target = CommitId::parse(&"a".repeat(40)).unwrap();
+        for source in [
+            MessageSource::File(Path::new("-")),
+            MessageSource::Keep,
+            MessageSource::Fixup(&target),
+        ] {
+            for (amend, no_verify) in [(false, false), (true, true)] {
+                let cmd = commit_command(amend, no_verify, source);
+                assert_eq!(cmd.env_profile(), EnvProfile::UserEnv, "{source:?}");
+                assert_eq!(cmd.process_env(), [], "{source:?}");
+            }
+        }
+        let runner = FakeRunner::new().expect(&["commit", "--amend", "--no-edit"], ok(b""));
+        let keep = GitOp::Commit {
+            message: None,
+            stage_all: false,
+            amend: true,
+            no_verify: false,
+            fixup: None,
+        };
+        assert_eq!(run_op(&runner, &keep), Ok(()));
+        assert_eq!(runner.process_envs(), [vec![]]);
     }
 
     #[test]

@@ -5,7 +5,6 @@
 
 use crate::git::GitRunner;
 use crate::git::commit_files::CommitId;
-use crate::git::diff::terminal_safe;
 use crate::git::runner::GitCommand;
 
 /// `picks` in the order `stdout`, a `rev-list --topo-order --reverse`
@@ -52,17 +51,8 @@ pub fn ordered(runner: &dyn GitRunner, picks: &[CommitId]) -> Result<Vec<CommitI
         .arg("--not")
         .arg("HEAD")
         .arg("--")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("LC_ALL", "C");
-    let output = runner.run(&cmd).map_err(|e| e.to_string())?;
-    if !output.success {
-        let message = terminal_safe(&output.stderr);
-        return Err(if message.is_empty() {
-            "git rev-list failed".into()
-        } else {
-            message
-        });
-    }
+        .standard_env();
+    let output = runner.run_checked(&cmd).map_err(|e| e.to_string())?;
     pick_order(&output.stdout, picks)
 }
 
@@ -158,12 +148,20 @@ mod tests {
             Ok(vec![id('a'), id('b')])
         );
         runner.assert_done();
-        let envs = runner.envs();
+        // `--` with no paths after it, so literal pathspecs change nothing.
+        let envs = runner.process_envs();
         let env: Vec<_> = envs[0]
             .iter()
             .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
             .collect();
-        assert_eq!(env, [("GIT_OPTIONAL_LOCKS", "0"), ("LC_ALL", "C")]);
+        assert_eq!(
+            env,
+            [
+                ("LC_ALL", "C"),
+                ("GIT_OPTIONAL_LOCKS", "0"),
+                ("GIT_LITERAL_PATHSPECS", "1")
+            ]
+        );
 
         // A short id never reaches git, and nor does an empty set.
         let none = FakeRunner::new();
