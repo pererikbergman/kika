@@ -601,6 +601,26 @@ pub(crate) fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect
     })
 }
 
+/// A file, a rename and another file.
+pub(crate) fn three_commit_files() -> Vec<CommitFile> {
+    vec![
+        commit_file('M', "src/lib.rs", None),
+        commit_file('R', "src/new.rs", Some("legacy/old.rs")),
+        commit_file('A', "docs/guide.md", None),
+    ]
+}
+
+/// `c5` open with `three_commit_files`, the first one's diff streaming.
+pub(crate) fn commit_files_open() -> AppState {
+    let mut state = on_commit_five();
+    opened(&mut state, three_commit_files());
+    state
+}
+
+pub(crate) fn open_files(state: &AppState) -> &CommitFilesList {
+    state.commits.open.as_ref().expect("a commit is open")
+}
+
 /// A commit's file list for `range` under `seq`, answered with `files`
 /// when set, for tests outside `commits` that put one in `state.commits`.
 pub(crate) fn commit_files_list(
