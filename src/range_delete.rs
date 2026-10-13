@@ -65,7 +65,7 @@ impl AppState {
             RangeKind::Branches => self.branches.clear_range(BranchesTab::Local),
             RangeKind::Tags => self.branches.clear_range(BranchesTab::Tags),
             RangeKind::Remotes => self.branches.clear_range(BranchesTab::Remotes),
-            RangeKind::Stashes => self.stash.range_anchor = None,
+            RangeKind::Stashes => self.stash.list.range_anchor = None,
         }
         self.start_op(Ok(Some(confirm.op)))
     }

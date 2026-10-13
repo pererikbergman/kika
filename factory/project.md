@@ -40,7 +40,7 @@ Core files:
 | `src/op.rs`, `src/prompts.rs` | Op slot | `GitOp`, `op_command` and `run_op`; whether an op needs the terminal. Feature `git.rs` files hold the argv builders the arms call. |
 | `src/refresh.rs`, `src/watch.rs` | Refresh | The refresh plan from each `GitOp` to the data it makes stale, and the watch for outside changes. |
 | `src/handoff.rs` | Hand-off | Blocking work that needs the real terminal (editor, attached ops, commands). The loop suspends the screen around it. |
-| `src/list_input.rs` | List input | List filters, ranges, pane search and Esc in a list, shared by every list. |
+| `src/list_input.rs`, `src/filtered_list.rs` | List input | List filters, ranges, pane search and Esc in a list, shared by every list. `FilteredList` owns one list's rows, cursor, filter, range and load in flight. |
 | `src/bisect.rs`, `src/diff_pane.rs`, `src/hunk_view.rs`, `src/diff_search.rs`, `src/diff_mark.rs`, `src/range_delete.rs`, `src/remote_run.rs`, `src/model/confirm_guard.rs` | Shared state | State and guards that two or more features use. Each one's reason is in ADR-0001's Outcome. |
 | `src/config.rs`, `src/config_docs.rs`, `src/clipboard.rs`, `src/program.rs`, `src/sequence_editor.rs`, `src/worktree_file.rs` | Plumbing | Config loading and its doc test, the clipboard, program lookup, Kika as git's sequence editor, and worktree file I/O. |
 | `src/test_support.rs` | Tests | Shared `#[cfg(test)]` builders that tests in more than one area use. A helper only one feature's tests use stays with that feature. |

@@ -1373,7 +1373,7 @@ pub(crate) fn from(focus: KeyScope, key: KeyPress) -> Option<AppIntent> {
     // Every binding is enabled on a workspace with a stageable file
     // selected, a commit in the log and a stash in the list.
     let mut state = AppState::new(Context::Workspace);
-    state.stash.entries = vec![crate::features::stash::StashEntry {
+    state.stash.list.rows = vec![crate::features::stash::StashEntry {
         index: 0,
         oid: crate::git::commit_files::CommitId::parse("a0").unwrap(),
         base: crate::git::commit_files::CommitId::parse("b0").unwrap(),
