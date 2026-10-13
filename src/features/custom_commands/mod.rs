@@ -27,9 +27,9 @@
 //! loading `[[commands]]` from the global file only, in `config.rs`;
 //! `HandOff::RunCommand` in `handoff.rs`; the `AppState` fields
 //! `pending_command` and `command_running`; and the command branches in
-//! shared core code (`Resolution::Command`, the `PromptKind::Command`
-//! cleanup in `PopPopup`, `prompt_title`, `switch_repo`, the help height and
-//! the running-command bar hint).
+//! shared core code (`Resolution::Command`, `prompt_title`, `switch_repo`,
+//! the help height and the running-command bar hint). Closing the command's
+//! prompt is its own `custom_commands_popup_closed`.
 
 mod captured;
 mod command;

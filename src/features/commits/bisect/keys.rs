@@ -157,7 +157,7 @@ mod tests {
             for item in items {
                 let expected = match item.intent {
                     AppIntent::BisectSelected(mark) => mark_disabled(state, Target::Selected, mark),
-                    AppIntent::Ask(_) => reset_disabled(state),
+                    AppIntent::AskBisectReset => reset_disabled(state),
                     ref other => panic!("unexpected item {other:?}"),
                 };
                 assert_eq!((item.disabled)(state), expected, "{}", item.label);

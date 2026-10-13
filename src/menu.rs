@@ -16,12 +16,11 @@ use crate::features::stash::keys::{
     stash_all_disabled, stash_file_disabled, stash_staged_disabled, stash_untracked_disabled,
 };
 use crate::git::bisect::BisectMark;
-use crate::git::repo_state::Operation;
 use crate::intent::AppIntent;
 use crate::keymap::{Reason, never, no_commit_selected};
 use crate::model::AppState;
 use crate::op::{MergeStrategy, ResetMode};
-use crate::popup::{ConfirmKind, PromptKind};
+use crate::popup::PromptKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuId {
@@ -120,7 +119,7 @@ static ACTIONS: &[MenuItem] = &[
     },
     MenuItem {
         label: "Quit…",
-        intent: AppIntent::Ask(ConfirmKind::Quit),
+        intent: AppIntent::AskQuit,
         disabled: never,
     },
 ];
@@ -273,7 +272,7 @@ static BISECT: &[MenuItem] = &[
     },
     MenuItem {
         label: "Reset bisect…",
-        intent: AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)),
+        intent: AppIntent::AskBisectReset,
         disabled: bisect::reset_disabled,
     },
 ];

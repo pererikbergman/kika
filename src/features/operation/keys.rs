@@ -5,6 +5,7 @@
 //! behaviour.
 
 use crate::bisect;
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{
     Binding, KeyPattern, KeyScope, NONE, Reason, branch_action_disabled, never, resumable_operation,
@@ -82,7 +83,7 @@ pub(crate) static OPERATION_ABORT_CONFIRM: &[Binding] = &[
     // conflicts.
     Binding {
         id: "abort_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::AbortConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, abort the operation",

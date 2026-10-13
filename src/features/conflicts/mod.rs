@@ -9,8 +9,8 @@
 //! Its `pub(crate)` API:
 //! - the types [`Choice`] and [`ConflictView`];
 //! - the handlers in `update.rs`: `open_conflict`, `conflict_loaded`,
-//!   `with_conflict`, `pick_conflict`, `resolved_written`, `stage_resolved`
-//!   and `open_merge_tool`;
+//!   `with_conflict`, `pick_conflict`, `resolved_written` (which asks
+//!   `stage_resolved_question`), `stage_resolved` and `open_merge_tool`;
 //! - the chunks `keys::{CONFLICTS_FILES, CONFLICTS_KEYS}`;
 //! - `view::render`;
 //! - `effects::{load, write}`.
@@ -37,3 +37,6 @@ mod update;
 pub(crate) mod view;
 
 pub(crate) use state::{Choice, ConflictView};
+
+#[cfg(test)]
+pub(crate) use update::stage_resolved_question;

@@ -1,12 +1,11 @@
 use crate::bisect;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::clipboard::{self, CopyWhat};
 use crate::config::ConfigError;
-use crate::confirm_question::{Answer, ConfirmQuestion, Then};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then, quit_question};
 use crate::diff_mark::DiffMark;
 use crate::diff_pane::{DiffPane, DiffStart, focused_hunks, focused_hunks_mut};
 use crate::effect::{Effect, Tag};
@@ -58,8 +57,7 @@ use crate::list_input::{RANGE_FILES_CHANGED, search_input};
 use crate::menu;
 use crate::op::GitOp;
 use crate::op_slot::OpSlot;
-use crate::pick_list::{PickList, PickPurpose};
-use crate::popup::{ConfirmKind, DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
+use crate::popup::{DiscardWhat, ErrorPopup, LineInput, Popup, PromptKind, RangeKind};
 use crate::prompts::runs_attached;
 use crate::refresh::Selection;
 use crate::remote_run::RemoteRun;
@@ -608,7 +606,8 @@ impl AppState {
             AppIntent::MenuNext => self.move_menu_cursor(1),
             AppIntent::MenuPrev => self.move_menu_cursor(-1),
             AppIntent::MenuSelect => return self.menu_select(),
-            AppIntent::Ask(kind) => self.popups.push(Popup::Confirm(kind)),
+            AppIntent::AskQuit => self.popups.push(Popup::Question(quit_question())),
+            AppIntent::AskBisectReset => self.ask_bisect_reset(),
             AppIntent::ConfirmYes => return self.answer(true),
             AppIntent::ConfirmNo => return self.answer(false),
             AppIntent::OpenPrompt(kind) => {
@@ -631,56 +630,8 @@ impl AppState {
                 // Closing the welcome shows what git says about the launch
                 // directory, as Kika did before there was a welcome.
                 Some(Popup::Recent(_)) if self.repo.is_none() => return self.refresh_status(),
-                // Cancelling a command's prompt cancels the command.
-                Some(Popup::Prompt {
-                    kind: PromptKind::Command,
-                    ..
-                }) => self.pending_command = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::NewBranch | PromptKind::RenameBranch | PromptKind::SetUpstream,
-                    ..
-                }) => self.branches.pending = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::StashMessage,
-                    ..
-                }) => self.stash_draft = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::RenameStash,
-                    ..
-                }) => self.stash.pending = None,
-                Some(Popup::Prompt {
-                    kind:
-                        PromptKind::TrackBranch
-                        | PromptKind::RemoteName
-                        | PromptKind::RemoteUrl
-                        | PromptKind::RenameRemote,
-                    ..
-                }) => self.branches.remotes.pending = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::WorktreePath,
-                    ..
-                }) => self.forget_worktree_branch(),
-                Some(Popup::Prompt {
-                    kind: PromptKind::TagName | PromptKind::TagMessage,
-                    ..
-                }) => self.branches.pending_tag = None,
-                Some(Popup::Prompt {
-                    kind: PromptKind::IgnorePattern,
-                    ..
-                }) => self.ignore_draft = None,
-                // Closing a step of a pull request stops it.
-                Some(Popup::PickList(PickList {
-                    purpose: PickPurpose::CheckDetails,
-                    ..
-                })) => self.review.check_urls.clear(),
-                Some(
-                    Popup::PickList(_)
-                    | Popup::Prompt {
-                        kind: PromptKind::PullRequestTitle,
-                        ..
-                    },
-                ) => self.pr_draft = None,
-                _ => {}
+                Some(closed) => self.popup_closed(&closed),
+                None => {}
             },
             AppIntent::CommandPromptAnswered(text) => return self.command_answered(text),
             AppIntent::CommandFinished {
@@ -1214,15 +1165,6 @@ impl AppState {
         match self.popups.last() {
             None => {}
             Some(Popup::Menu { .. }) => return KeyScope::Menu,
-            // It reaches GitHub, so only `y` answers it.
-            Some(Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
-                return KeyScope::CreatePullRequest;
-            }
-            Some(Popup::Confirm(ConfirmKind::Abort(_))) => return KeyScope::AbortConfirm,
-            Some(Popup::Confirm(ConfirmKind::Autosquash)) => return KeyScope::AutosquashConfirm,
-            Some(Popup::Confirm(ConfirmKind::CustomPatch(_))) => return KeyScope::PatchConfirm,
-            Some(Popup::Confirm(ConfirmKind::DropRange(_))) => return KeyScope::DropRangeConfirm,
-            Some(Popup::Confirm(_)) => return KeyScope::Confirm,
             Some(Popup::Prompt { .. }) => return KeyScope::Prompt,
             Some(Popup::Error(_)) => return KeyScope::Error,
             Some(Popup::Question(q)) => return q.scope,
@@ -1342,26 +1284,27 @@ impl AppState {
         self.update(item.intent.clone())
     }
 
+    /// A popup was closed without an answer: each feature forgets the
+    /// draft it kept for that popup. Each one matches only its own
+    /// popups, so core names none of them.
+    fn popup_closed(&mut self, closed: &Popup) {
+        self.custom_commands_popup_closed(closed);
+        self.branches_popup_closed(closed);
+        self.remotes_popup_closed(closed);
+        self.tags_popup_closed(closed);
+        self.stash_popup_closed(closed);
+        self.worktrees_popup_closed(closed);
+        self.files_popup_closed(closed);
+        self.review_popup_closed(closed);
+        self.pull_requests_popup_closed(closed);
+    }
+
     /// Close the question on top and run its answer, if it has one.
     fn answer(&mut self, yes: bool) -> Vec<Effect> {
         if let Some(Popup::Question(q)) = self.popups.last() {
             return self.answer_confirm_question(q.scope, yes);
         }
         match self.popups.pop() {
-            // Only `ConfirmCreatePullRequest` creates; yes here keeps the
-            // question, no closes it and drops the draft.
-            Some(popup @ Popup::Confirm(ConfirmKind::CreatePullRequest)) => {
-                if yes {
-                    self.popups.push(popup);
-                } else {
-                    self.pr_draft = None;
-                }
-                vec![]
-            }
-            Some(Popup::Confirm(kind)) => {
-                let answer = if yes { Some(kind.yes()) } else { kind.no() };
-                answer.map_or_else(Vec::new, |intent| self.update(intent))
-            }
             Some(Popup::Credential(prompt)) if prompt.confirm => {
                 // Ssh reads an exit of 0 with "yes" as allowed.
                 vec![Effect::AnswerCredential(yes.then(|| Secret::new("yes")))]
@@ -1375,13 +1318,18 @@ impl AppState {
     }
 
     /// Answer the question on top, asked in `scope`. No closes any
-    /// question. Yes answers only a discard and the detached checkout:
-    /// every other question answers only to its own intent (such as
-    /// `ConfirmDeleteBranch` or `ConfirmResetHard`), so yes here keeps it
-    /// open.
+    /// question, and its feature forgets the draft it kept for it. Yes
+    /// answers a discard, the `y`-or-Enter questions (quit, force push,
+    /// stage resolved and the detached checkout) and the `y`-only
+    /// questions whose binding sends `ConfirmYes` (abort, bisect reset,
+    /// autosquash, custom patch and drop range). Every other question
+    /// answers only to its own intent (such as `ConfirmDeleteBranch` or
+    /// `ConfirmCreatePullRequest`), so yes here keeps it open.
     fn answer_confirm_question(&mut self, scope: KeyScope, yes: bool) -> Vec<Effect> {
         if !yes {
-            self.popups.pop();
+            if let Some(closed) = self.popups.pop() {
+                self.popup_closed(&closed);
+            }
             return vec![];
         }
         match scope {
@@ -1399,6 +1347,10 @@ impl AppState {
                 }
             }
             KeyScope::Confirm => self.answer_question(scope, Answer::YOrEnter),
+            KeyScope::AbortConfirm
+            | KeyScope::AutosquashConfirm
+            | KeyScope::PatchConfirm
+            | KeyScope::DropRangeConfirm => self.answer_question(scope, Answer::YOnly),
             _ => vec![],
         }
     }
@@ -1534,29 +1486,6 @@ impl AppState {
         pending
             .and_then(|p| p.command.prompts.get(p.answers.len()))
             .map_or_else(|| kind.title().to_string(), |t| sanitize(t.as_bytes()))
-    }
-
-    /// A yes/no question's text.
-    pub fn confirm_question(&self, kind: &ConfirmKind) -> Cow<'static, str> {
-        match kind {
-            ConfirmKind::Abort(Operation::Bisect) => {
-                Cow::Owned(bisect::reset_question(bisect::bisect_state(self)))
-            }
-            ConfirmKind::CreatePullRequest => match pull_requests::question(self) {
-                Some(question) => Cow::Owned(question),
-                None => Cow::Borrowed(kind.question()),
-            },
-            ConfirmKind::CustomPatch(action) => match self.patch_question(action) {
-                Some(question) => Cow::Owned(question),
-                None => Cow::Borrowed(kind.question()),
-            },
-            // Only the count: subjects and the filter are not drawn here.
-            ConfirmKind::DropRange(ids) => Cow::Owned(format!(
-                "Drop {} commits and their changes from the history? (y/n)",
-                ids.len()
-            )),
-            _ => Cow::Borrowed(kind.question()),
-        }
     }
 
     /// Show an error, unless the same one is already on top: a repeated
@@ -2234,6 +2163,7 @@ mod tests {
     use super::*;
     use crate::confirm_question::{ConfirmQuestion, Then};
     use crate::diff_pane::DIFF_PREFETCH;
+    use crate::features::operation::abort_question;
     use crate::git::diff::DiffSide;
     use crate::git::status::{EntryKind, RepoStatus};
     use crate::git::submodule::SubmoduleState;
@@ -2927,7 +2857,7 @@ mod tests {
             state.update(AppIntent::MenuNext);
         }
         state.update(AppIntent::MenuSelect);
-        assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
         assert_eq!(state.key_focus(), KeyScope::Confirm);
         assert!(!state.should_quit);
 
@@ -2940,7 +2870,7 @@ mod tests {
     fn n_or_esc_declines_the_confirm_without_quitting() {
         for key in [KeyCode::Char('n'), KeyCode::Esc] {
             let mut state = AppState::new(Context::Workspace);
-            state.update(AppIntent::Ask(ConfirmKind::Quit));
+            state.update(AppIntent::AskQuit);
             assert_eq!(press(&mut state, key), vec![]);
             assert_eq!(state.popups, []);
             assert!(!state.should_quit);
@@ -4443,7 +4373,7 @@ mod tests {
     #[test]
     fn enter_still_answers_the_other_questions() {
         let mut state = AppState::new(Context::Workspace);
-        state.update(AppIntent::Ask(ConfirmKind::Quit));
+        state.update(AppIntent::AskQuit);
         assert_eq!(state.key_focus(), KeyScope::Confirm);
         press(&mut state, KeyCode::Enter);
         assert!(state.should_quit);
@@ -4714,7 +4644,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Revert))]
+            [Popup::Question(abort_question(Operation::Revert).unwrap())]
         );
         let (_, op) = op_of(&press_char(&mut state, 'y'));
         assert_eq!(op, GitOp::Abort(Operation::Revert));
@@ -4861,12 +4791,13 @@ mod tests {
     fn a_while_only_bisecting_asks_then_y_resets_and_only_y_answers() {
         let mut state = testing_c1(&[Operation::Bisect]);
         assert_eq!(press_char(&mut state, 'a'), vec![]);
-        let question = [Popup::Confirm(ConfirmKind::Abort(Operation::Bisect))];
+        let question = [Popup::Question(state.bisect_reset_question())];
         assert_eq!(state.popups, question);
         assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
         assert!(
             state
-                .confirm_question(&ConfirmKind::Abort(Operation::Bisect))
+                .bisect_reset_question()
+                .text
                 .contains("HEAD goes back to main;")
         );
 
@@ -4893,7 +4824,7 @@ mod tests {
         press_char(&mut state, 'a');
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::Abort(Operation::Rebase))]
+            [Popup::Question(abort_question(Operation::Rebase).unwrap())]
         );
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         let (_, op) = op_of(&press_char(&mut state, 'y'));
@@ -5108,7 +5039,7 @@ mod tests {
         let (_, op) = op_of(&state.update(AppIntent::BisectSelected(BisectMark::Bad)));
         assert_eq!(op, bisect_mark(BisectMark::Bad, "c0", false));
         state.free_op();
-        state.update(AppIntent::Ask(ConfirmKind::Abort(Operation::Bisect)));
+        state.update(AppIntent::AskBisectReset);
         let (_, op) = op_of(&state.update(AppIntent::ConfirmBisectReset));
         assert_eq!(op, GitOp::BisectReset);
         assert_eq!(state.notice, None);
@@ -5712,5 +5643,321 @@ mod tests {
         let state = AppState::new(Context::Workspace).with_git_version(version(38));
         assert!(state.git_has(crate::git::version::UPDATE_REFS));
         assert!(!AppState::new(Context::Workspace).git_has(crate::git::version::BREAK));
+    }
+
+    // --- Closing a popup: each feature forgets its own draft ---
+
+    /// A workspace holding one draft of every feature that keeps one,
+    /// over the Worktrees popup, whose list keeps the new worktree's
+    /// branch.
+    fn with_every_draft() -> AppState {
+        use crate::features::branches::remotes::RemotePending;
+        use crate::features::branches::tags::PendingTag;
+        use crate::features::custom_commands::{CustomCommand, OutputMode, PendingCommand, Target};
+        use crate::features::files::IgnoreDraft;
+        use crate::features::pull_requests::PrDraft;
+        use crate::features::stash::{StashDraft, StashMode, StashRef};
+        use crate::features::worktrees::WorktreeList;
+        use crate::forge::ForgeRepo;
+        let mut state = AppState::new(Context::Workspace);
+        state.pending_command = Some(PendingCommand {
+            command: CustomCommand {
+                scope: KeyScope::Files,
+                keys: vec![],
+                description: "Copy".into(),
+                argv: vec![],
+                prompts: vec!["To".into()],
+                output: OutputMode::None,
+            },
+            target: Target {
+                path: "a.rs".into(),
+                line: None,
+                commit: None,
+            },
+            answers: vec![],
+        });
+        state.branches.pending = Some("topic".into());
+        state.branches.remotes.pending = Some(RemotePending::Rename("origin".into()));
+        state.branches.pending_tag = Some(PendingTag {
+            target: cid("c1"),
+            annotated: true,
+            name: None,
+        });
+        state.stash_draft = Some(StashDraft {
+            mode: StashMode::All,
+            paths: vec![],
+            restore: vec![],
+            unstage: vec![],
+            from_range: false,
+        });
+        state.stash.pending = Some(StashRef {
+            index: 0,
+            oid: cid("c1"),
+        });
+        let mut worktrees = WorktreeList::loading(0);
+        worktrees.pending_branch = Some("topic".into());
+        state.popups = vec![Popup::Worktrees(worktrees)];
+        state.ignore_draft = Some(IgnoreDraft {
+            shown: "*.log".into(),
+            bytes: b"*.log".to_vec(),
+        });
+        state.review.check_urls = vec!["https://ci.example/1".into()];
+        let repo = ForgeRepo {
+            host: "github.com".into(),
+            owner: "acme".into(),
+            name: "widgets".into(),
+        };
+        state.pr_draft = Some(PrDraft {
+            branch: "topic".into(),
+            head_remote: "origin".into(),
+            head_repo: repo.clone(),
+            head: "topic".into(),
+            targets: vec![],
+            target: Some(("origin".into(), repo)),
+            bases: vec!["main".into()],
+            base: Some("main".into()),
+            title: "Add login".into(),
+        });
+        state
+    }
+
+    /// Which drafts `state` still holds, by name.
+    fn drafts_kept(state: &AppState) -> Vec<&'static str> {
+        let worktree_branch = state
+            .popups
+            .iter()
+            .any(|popup| matches!(popup, Popup::Worktrees(list) if list.pending_branch.is_some()));
+        [
+            ("command", state.pending_command.is_some()),
+            ("branch", state.branches.pending.is_some()),
+            ("remote", state.branches.remotes.pending.is_some()),
+            ("tag", state.branches.pending_tag.is_some()),
+            ("stash message", state.stash_draft.is_some()),
+            ("stash rename", state.stash.pending.is_some()),
+            ("worktree", worktree_branch),
+            ("ignore", state.ignore_draft.is_some()),
+            ("check urls", !state.review.check_urls.is_empty()),
+            ("pull request", state.pr_draft.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, kept)| kept.then_some(name))
+        .collect()
+    }
+
+    fn prompt(kind: PromptKind) -> Popup {
+        Popup::Prompt {
+            kind,
+            input: LineInput::default(),
+        }
+    }
+
+    fn pick(purpose: crate::pick_list::PickPurpose) -> Popup {
+        Popup::PickList(crate::pick_list::PickList::new(
+            purpose,
+            vec!["a".into()],
+            0,
+        ))
+    }
+
+    #[test]
+    fn closing_a_popup_forgets_only_the_draft_its_feature_kept_for_it() {
+        use crate::pick_list::PickPurpose;
+        let every = drafts_kept(&with_every_draft());
+        assert_eq!(every.len(), 10, "{every:?}");
+        let cases = [
+            (prompt(PromptKind::Command), Some("command")),
+            (prompt(PromptKind::NewBranch), Some("branch")),
+            (prompt(PromptKind::RenameBranch), Some("branch")),
+            (prompt(PromptKind::SetUpstream), Some("branch")),
+            (prompt(PromptKind::TrackBranch), Some("remote")),
+            (prompt(PromptKind::RemoteName), Some("remote")),
+            (prompt(PromptKind::RemoteUrl), Some("remote")),
+            (prompt(PromptKind::RenameRemote), Some("remote")),
+            (prompt(PromptKind::TagName), Some("tag")),
+            (prompt(PromptKind::TagMessage), Some("tag")),
+            (prompt(PromptKind::StashMessage), Some("stash message")),
+            (prompt(PromptKind::RenameStash), Some("stash rename")),
+            (prompt(PromptKind::WorktreePath), Some("worktree")),
+            (prompt(PromptKind::IgnorePattern), Some("ignore")),
+            (pick(PickPurpose::CheckDetails), Some("check urls")),
+            (pick(PickPurpose::TargetRemote), Some("pull request")),
+            (pick(PickPurpose::BaseBranch), Some("pull request")),
+            (pick(PickPurpose::MergeMethod), Some("pull request")),
+            (prompt(PromptKind::PullRequestTitle), Some("pull request")),
+            (
+                Popup::Question(crate::features::pull_requests::create_question(
+                    &with_every_draft(),
+                )),
+                Some("pull request"),
+            ),
+            // Popups no draft belongs to.
+            (prompt(PromptKind::GoToFile), None),
+            (Popup::Question(quit_question()), None),
+            (
+                Popup::Menu {
+                    id: MenuId::Actions,
+                    cursor: 0,
+                },
+                None,
+            ),
+        ];
+        for (popup, forgotten) in cases {
+            let mut state = with_every_draft();
+            let under = state.popups.clone();
+            state.popups.push(popup.clone());
+            assert_eq!(state.update(AppIntent::PopPopup), vec![], "{popup:?}");
+            assert_eq!(state.popups.len(), under.len(), "{popup:?}");
+            let expected: Vec<_> = every
+                .iter()
+                .copied()
+                .filter(|name| Some(*name) != forgotten)
+                .collect();
+            assert_eq!(drafts_kept(&state), expected, "{popup:?}");
+        }
+    }
+
+    #[test]
+    fn closing_the_last_popup_leaves_none_and_returns_no_effects() {
+        let mut state = with_every_draft();
+        state.popups = vec![prompt(PromptKind::NewBranch)];
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.branches.pending, None);
+        // Nothing to close: nothing changes.
+        assert_eq!(state.update(AppIntent::PopPopup), vec![]);
+        assert_eq!(state.popups, []);
+    }
+
+    #[test]
+    fn no_on_the_create_question_closes_it_and_forgets_the_draft_yes_keeps_both() {
+        let mut state = with_every_draft();
+        state.popups = vec![Popup::Question(
+            crate::features::pull_requests::create_question(&state),
+        )];
+        let asked = state.popups.clone();
+        assert_eq!(state.update(AppIntent::ConfirmYes), vec![]);
+        assert_eq!(state.popups, asked);
+        assert!(state.pr_draft.is_some());
+        assert_eq!(state.update(AppIntent::ConfirmNo), vec![]);
+        assert_eq!(state.popups, []);
+        assert_eq!(state.pr_draft, None);
+        // Another feature's drafts stay.
+        assert!(state.branches.pending.is_some());
+    }
+
+    #[test]
+    fn no_binding_in_the_create_question_sends_pop_popup() {
+        // Its `n` and Esc forget the draft through `ConfirmNo`; nothing
+        // in its scope closes it any other way.
+        for binding in crate::keymap::registry() {
+            if binding.scope == KeyScope::CreatePullRequest {
+                assert_ne!(binding.intent, AppIntent::PopPopup, "{}", binding.id);
+            }
+        }
+    }
+
+    /// Every question whose yes is an intent, with that intent and
+    /// whether Enter answers it too.
+    fn moved_questions(state: &AppState) -> Vec<(ConfirmQuestion, AppIntent, bool)> {
+        use crate::features::commits::custom_patch::PatchAction;
+        use crate::features::commits::rewrite::{autosquash_question, drop_range_question};
+        use crate::features::conflicts::stage_resolved_question;
+        use crate::features::pull_requests::create_question;
+        use crate::features::sync::force_push_question;
+        let ids = vec![cid("c0"), cid("c1")];
+        vec![
+            (quit_question(), AppIntent::Quit, true),
+            (force_push_question(), AppIntent::ForcePush, true),
+            (stage_resolved_question(), AppIntent::StageResolved, true),
+            (
+                abort_question(Operation::Merge).unwrap(),
+                AppIntent::ConfirmAbort(Operation::Merge),
+                false,
+            ),
+            (
+                state.bisect_reset_question(),
+                AppIntent::ConfirmBisectReset,
+                false,
+            ),
+            (autosquash_question(), AppIntent::ConfirmAutosquash, false),
+            (
+                drop_range_question(ids.clone()),
+                AppIntent::ConfirmDropRange(ids),
+                false,
+            ),
+            (
+                state.patch_action_question(PatchAction::Remove),
+                AppIntent::ConfirmPatchAction(PatchAction::Remove),
+                false,
+            ),
+            (
+                create_question(state),
+                AppIntent::ConfirmCreatePullRequest,
+                false,
+            ),
+        ]
+    }
+
+    #[test]
+    fn each_moved_question_answers_with_its_keys_and_sends_its_intent() {
+        let base = status_focused(&[Operation::Merge]);
+        for (question, intent, enter) in moved_questions(&base) {
+            let name = question.title.clone();
+            assert_eq!(question.answer == Answer::YOrEnter, enter, "{name}");
+            assert_eq!(
+                question.then,
+                Then::Intent(Box::new(intent.clone())),
+                "{name}"
+            );
+            let yes_keys = if enter {
+                vec![KeyCode::Char('y'), KeyCode::Enter]
+            } else {
+                vec![KeyCode::Char('y')]
+            };
+            for key in yes_keys {
+                // What the intent alone does, from the same state.
+                let mut expected = base.clone();
+                let want = expected.update(intent.clone());
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                assert_eq!(state.key_focus(), question.scope, "{name}");
+                assert_eq!(press(&mut state, key), want, "{name} {key:?}");
+                assert_eq!(state.popups, expected.popups, "{name} {key:?}");
+                assert_eq!(state.should_quit, expected.should_quit, "{name} {key:?}");
+                assert_eq!(state.notice, expected.notice, "{name} {key:?}");
+                assert_eq!(state.held_seq(), expected.held_seq(), "{name} {key:?}");
+            }
+            if !enter {
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                let asked = state.popups.clone();
+                assert_eq!(press(&mut state, KeyCode::Enter), vec![], "{name}");
+                assert_eq!(state.popups, asked, "{name}");
+                assert_eq!(state.held_seq(), None, "{name}");
+            }
+            for no in [KeyCode::Char('n'), KeyCode::Esc] {
+                let mut state = base.clone();
+                state.popups = vec![Popup::Question(question.clone())];
+                assert_eq!(press(&mut state, no), vec![], "{name} {no:?}");
+                assert_eq!(state.popups, [], "{name} {no:?}");
+                assert_eq!(state.held_seq(), None, "{name} {no:?}");
+                assert!(!state.should_quit, "{name} {no:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_menu_asks_to_quit_and_to_reset_the_bisect() {
+        let mut state = AppState::new(Context::Workspace);
+        assert_eq!(state.update(AppIntent::AskQuit), vec![]);
+        assert_eq!(state.popups, [Popup::Question(quit_question())]);
+
+        let mut state = testing_c1(&[Operation::Bisect]);
+        assert_eq!(state.update(AppIntent::AskBisectReset), vec![]);
+        assert_eq!(
+            state.popups,
+            [Popup::Question(state.bisect_reset_question())]
+        );
+        assert_eq!(state.key_focus(), KeyScope::AbortConfirm);
     }
 }

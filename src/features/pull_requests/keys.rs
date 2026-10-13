@@ -3,6 +3,7 @@
 //! `keymap.rs` places both chunks, so their position there is behaviour.
 
 use super::create::refresh_disabled;
+use crate::confirm_question::Answer;
 use crate::intent::AppIntent;
 use crate::keymap::{Binding, KeyPattern, KeyScope, NONE, never, no_branch_selected};
 use crate::menu::MenuId;
@@ -96,7 +97,7 @@ pub(crate) static PULL_REQUESTS_PICK_CREATE: &[Binding] = &[
     // Creating a pull request reaches GitHub, so Enter is left unbound.
     Binding {
         id: "create_pull_request.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::CreatePullRequest,
         intent: AppIntent::ConfirmCreatePullRequest,
         description: "Yes, create the pull request on GitHub",

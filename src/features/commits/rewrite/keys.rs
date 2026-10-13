@@ -270,7 +270,7 @@ pub(crate) static REWRITE_AUTOSQUASH_CONFIRM: &[Binding] = &[
     // may not be looking at.
     Binding {
         id: "autosquash_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::AutosquashConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, fold every fixup! commit into its target",
@@ -309,7 +309,7 @@ pub(crate) static REWRITE_DROP_RANGE_CONFIRM: &[Binding] = &[
     // changes of several commits at once, so only a deliberate y answers.
     Binding {
         id: "drop_range_confirm.yes",
-        keys: &[KeyPattern::exact(KeyCode::Char('y'), NONE)],
+        keys: Answer::YOnly.keys(),
         scope: KeyScope::DropRangeConfirm,
         intent: AppIntent::ConfirmYes,
         description: "Yes, drop the selected commits and their changes",

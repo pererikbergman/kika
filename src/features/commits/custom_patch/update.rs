@@ -6,16 +6,18 @@ use std::collections::BTreeSet;
 
 use super::keys;
 use super::state::{CustomPatch, FilePick, PatchAction, PatchChoice};
+use crate::confirm_question::{Answer, ConfirmQuestion, Then};
 use crate::effect::Effect;
 use crate::git::commit_files::CommitId;
 use crate::git::patch::{FileKind, LineId, PatchError};
 use crate::git::safe_text::terminal_safe;
 use crate::hunk_view::HunkView;
-use crate::keymap;
+use crate::intent::AppIntent;
+use crate::keymap::{self, KeyScope};
 use crate::layout::SidePanel;
 use crate::model::{AppState, Context, Focus};
 use crate::op::GitOp;
-use crate::popup::{ConfirmKind, LineInput, Popup, PromptKind};
+use crate::popup::{LineInput, Popup, PromptKind};
 use crate::view::elide_right;
 
 /// Why resetting does nothing.
@@ -149,9 +151,10 @@ impl AppState {
         }
         match keys::patch_action(self, choice) {
             Ok(PatchAction::NewCommit(_)) => self.ask_patch_message(),
-            Ok(action) => self
-                .popups
-                .push(Popup::Confirm(ConfirmKind::CustomPatch(action))),
+            Ok(action) => {
+                let question = self.patch_action_question(action);
+                self.popups.push(Popup::Question(question));
+            }
             Err(reason) => self.notice = Some(reason),
         }
     }
@@ -178,8 +181,8 @@ impl AppState {
             return;
         }
         let action = PatchAction::NewCommit(message);
-        self.popups
-            .push(Popup::Confirm(ConfirmKind::CustomPatch(action)));
+        let question = self.patch_action_question(action);
+        self.popups.push(Popup::Question(question));
     }
 
     /// Run `action`, as the question asked. The plan is made again from
@@ -233,8 +236,27 @@ impl AppState {
         self.close_commit_files()
     }
 
+    /// "Rewrite the history with the custom patch?", carrying `action`
+    /// with its target or message fixed when asked. It rewrites commits
+    /// the user may not be looking at, so only `y` answers.
+    pub(crate) fn patch_action_question(&self, action: PatchAction) -> ConfirmQuestion {
+        let text = self.patch_question(&action).unwrap_or_else(|| {
+            // The fallback when the patch cannot be named.
+            "Rewrite the history with the custom patch? (y/n)".into()
+        });
+        ConfirmQuestion {
+            scope: KeyScope::PatchConfirm,
+            title: "Custom patch".into(),
+            text,
+            answer: Answer::YOnly,
+            then: Then::Intent(Box::new(AppIntent::ConfirmPatchAction(action))),
+            range: false,
+            head: None,
+        }
+    }
+
     /// The question for `action`: what moves from where to where.
-    pub(crate) fn patch_question(&self, action: &PatchAction) -> Option<String> {
+    fn patch_question(&self, action: &PatchAction) -> Option<String> {
         let patch = self.custom_patch.as_ref()?;
         let n = patch.files.len();
         let what = format!(
@@ -517,7 +539,7 @@ mod tests {
             state.update(AppIntent::ChoosePatchAction(choice));
             assert_eq!(
                 state.popups,
-                [Popup::Confirm(ConfirmKind::CustomPatch(action.clone()))]
+                [Popup::Question(state.patch_action_question(action.clone()))]
             );
             assert_eq!(state.key_focus(), KeyScope::PatchConfirm);
             // Enter answers nothing.
@@ -616,14 +638,14 @@ mod tests {
         press(&mut state, KeyCode::Enter);
         assert_eq!(
             state.popups,
-            [Popup::Confirm(ConfirmKind::CustomPatch(
+            [Popup::Question(state.patch_action_question(
                 PatchAction::NewCommit("Split".into())
             ))]
         );
-        let Popup::Confirm(kind) = state.popups[0].clone() else {
+        let Popup::Question(q) = state.popups[0].clone() else {
             panic!("{:?}", state.popups);
         };
-        let question = state.confirm_question(&kind);
+        let question = q.text;
         assert!(question.contains("\"Split\""), "{question}");
         let op = the_op(&press(&mut state, KeyCode::Char('y')));
         assert!(matches!(

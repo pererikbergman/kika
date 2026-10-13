@@ -25,7 +25,7 @@
 //!   commit's diff;
 //! - `commit_source_disabled`, `list_guard` and `in_progress_disabled`,
 //!   which other keys use too;
-//! - the patch menu (`menu.rs`), `ConfirmKind`/`PromptKind`, the
+//! - the patch menu (`menu.rs`), `PromptKind`, the
 //!   `AppIntent` variants, `GitOp::CustomPatch` with its
 //!   `op_command`/`refusal` arms, and the `handoff.rs` run arm, all
 //!   shared dispatch.
