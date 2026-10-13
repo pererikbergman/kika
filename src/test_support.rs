@@ -660,7 +660,7 @@ pub(crate) fn background_status_tag(effects: &[Effect]) -> Tag {
 pub(crate) fn idle_with_files() -> AppState {
     let (state, _) = with_files(three_files(), 24);
     let state = state.with_location(Some("/r/a".into()), "/r/a".into());
-    assert_eq!(state.busy, 0);
+    assert_eq!(state.busy_count(), 0);
     state
 }
 
@@ -961,7 +961,7 @@ pub(crate) fn with_merge() -> AppState {
 pub(crate) fn remote_ready() -> AppState {
     let mut state = with_branches().with_location(Some("/r".into()), "/r".into());
     state.branch = Some(on_branch("main"));
-    state.busy = 0;
+    state.set_busy(0);
     state.status_seq = None;
     state
 }

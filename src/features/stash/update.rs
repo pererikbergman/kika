@@ -53,12 +53,7 @@ impl AppState {
         };
         let seq = self.take_seq();
         self.stash.open = Some(StashFilesList::begin(entry.stash_ref(), seq));
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadStashFiles { tag, entry }]
     }
 
@@ -69,9 +64,7 @@ impl AppState {
         result: Result<Vec<StashFile>, String>,
     ) -> Vec<Effect> {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -221,7 +214,7 @@ impl AppState {
             self.notice = Some("A stash message cannot be empty".into());
             return vec![];
         }
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -302,7 +295,7 @@ impl AppState {
         else {
             return vec![];
         };
-        if self.op_seq.is_some() {
+        if self.op_is_running() {
             self.notice = Some(keymap::OP_RUNNING.into());
             return vec![];
         }
@@ -378,7 +371,7 @@ mod tests {
             [Effect::LoadStashes { tag }] => *tag,
             other => panic!("{other:?}"),
         };
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.update(AppIntent::StashesLoaded {
             tag: first,
             result: Ok(three_stashes()),
@@ -398,7 +391,7 @@ mod tests {
         });
         assert_eq!(state.stash.entries, three_stashes());
         assert!(state.stash.loaded);
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
     }
 
     #[test]
@@ -435,19 +428,19 @@ mod tests {
     #[test]
     fn enter_opens_the_stash_as_a_user_load_then_shows_its_first_files_diff() {
         let mut state = on_stash_one();
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let (tag, entry) = stash_files_load(&press(&mut state, KeyCode::Enter));
 
         assert_eq!(entry, three_stashes()[1]);
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.key_focus(), KeyScope::StashFiles);
         let effects = state.update(AppIntent::StashFilesLoaded {
             tag,
             result: Ok(tracked_and_untracked()),
         });
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         let request = diff_request(&effects);
         assert_eq!(request.commit, Some(range_of("a1", "ba5e")));
         assert_eq!(request.path, "src/lib.rs".into());
@@ -472,7 +465,7 @@ mod tests {
     fn a_stale_stash_file_list_is_dropped_and_an_empty_or_failed_one_empties_the_diff() {
         let mut state = on_stash_one();
         let (tag, _) = stash_files_load(&press(&mut state, KeyCode::Enter));
-        let busy = state.busy;
+        let busy = state.busy_count();
         let stale = Tag {
             seq: tag.seq + 1,
             ..tag
@@ -482,7 +475,7 @@ mod tests {
             result: Ok(tracked_and_untracked()),
         });
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         assert!(!state.stash.open.as_ref().unwrap().loaded);
 
         for result in [Ok(vec![]), Err("bad object".to_string())] {
@@ -580,7 +573,7 @@ mod tests {
         // Enter is not an answer.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups, [asked]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         // A reload under the question moves the list, not the answer.
         let mut moved = three_stashes();
         moved.insert(0, stash_entry(0, "f0", "new"));
@@ -683,7 +676,7 @@ mod tests {
         // Enter is not an answer.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups.len(), 1);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         // A reload under the question moves the list, not the answer.
         let mut moved = three_stashes();
         moved.insert(0, stash_entry(0, "f0", "new"));
@@ -702,7 +695,7 @@ mod tests {
             press_char(&mut state, 'd');
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
 
@@ -722,12 +715,16 @@ mod tests {
                 Some(keymap::CLEAR_RANGE_FIRST),
                 "{code:?}"
             );
-            assert_eq!((state.op_seq, state.popups.len()), (None, 0), "{code:?}");
+            assert_eq!(
+                (state.held_seq(), state.popups.len()),
+                (None, 0),
+                "{code:?}"
+            );
             assert_eq!(state.stash.open, None, "{code:?}");
         }
         // Asked of the model directly, the guard still holds.
         state.update(AppIntent::ApplyStash);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         state.update(AppIntent::OpenStashFiles);
         assert_eq!(state.stash.open, None);
 
@@ -790,11 +787,11 @@ mod tests {
             press_char(&mut state, 'd');
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
         let mut state = on_stash_one();
         assert_eq!(state.update(AppIntent::ConfirmDropStash), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -835,7 +832,7 @@ mod tests {
         state.popups.clear();
         assert_eq!(state.update(AppIntent::RenameStashTo("   ".into())), vec![]);
         assert_eq!(state.notice, Some("A stash message cannot be empty".into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         press(&mut state, KeyCode::Char('R'));
         assert!(state.stash.pending.is_some());
@@ -994,7 +991,7 @@ mod tests {
         press_char(&mut state, 'V');
         press_char(&mut state, 'j');
         assert_eq!(keys::stash_file_disabled(&state), None);
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(
             keys::stash_file_disabled(&state),
             Some(keymap::OP_RUNNING.into())

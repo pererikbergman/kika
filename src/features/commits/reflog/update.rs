@@ -36,15 +36,8 @@ impl AppState {
         }
         let seq = self.take_seq();
         self.commits.reflog.seq = Some(seq);
-        if user {
-            self.busy += 1;
-        }
         vec![Effect::LoadReflog {
-            tag: Tag {
-                generation: self.generation,
-                seq,
-                user,
-            },
+            tag: self.effect_tag(seq, user),
         }]
     }
 
@@ -56,9 +49,7 @@ impl AppState {
         tag: Tag,
         result: Result<Reflog, String>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return vec![];
         }
@@ -70,7 +61,10 @@ impl AppState {
             return vec![];
         };
         if failed {
-            self.op_error = self.commits.reflog.error.clone();
+            match self.commits.reflog.error.clone() {
+                Some(message) => self.set_op_error(message),
+                None => self.clear_op_error(),
+            }
             return vec![];
         }
         self.plan_travel(direction);
@@ -94,7 +88,7 @@ impl AppState {
             });
             return vec![];
         }
-        self.op_error = None;
+        self.clear_op_error();
         self.commits.reflog.planning = Some(direction);
         self.load_reflog(true)
     }
@@ -131,7 +125,7 @@ impl AppState {
                     expect: plan.expect,
                 },
             })),
-            Err(message) => self.op_error = Some(message),
+            Err(message) => self.set_op_error(message),
         }
     }
 
@@ -174,11 +168,11 @@ mod tests {
     #[test]
     fn undo_reads_the_reflog_afresh_then_asks_with_the_plan_and_emits_nothing_else() {
         let mut state = undoable();
-        let busy = state.busy;
+        let busy = state.busy_count();
         let effects = press_with(&mut state, 'z', KeyModifiers::CONTROL);
         let tag = reflog_tag(&effects);
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(state.commits.reflog.planning, Some(undo::Direction::Undo));
         assert_eq!(state.popups, []);
 
@@ -188,7 +182,7 @@ mod tests {
         });
 
         assert_eq!(effects, vec![]);
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         assert_eq!(state.commits.reflog.planning, None);
         assert_eq!(
             state.popups,
@@ -204,7 +198,7 @@ mod tests {
             })]
         );
         assert_eq!(state.key_focus(), KeyScope::Travel);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -217,7 +211,7 @@ mod tests {
             result: Ok(commit_reflog('c')),
         });
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_error.as_deref(), Some("Nothing to redo"));
+        assert_eq!(state.op_error(), Some("Nothing to redo"));
     }
 
     #[test]
@@ -235,7 +229,7 @@ mod tests {
             undo_with(&mut state, commit_reflog('c'));
             assert_eq!(press(&mut state, code), vec![], "{code:?}");
             assert_eq!(state.popups, [], "{code:?}");
-            assert_eq!(state.op_seq, None, "{code:?}");
+            assert_eq!(state.held_seq(), None, "{code:?}");
         }
     }
 
@@ -246,14 +240,14 @@ mod tests {
         state.popups.push(Popup::Confirm(ConfirmKind::Quit));
         assert_eq!(state.update(AppIntent::ConfirmTravel), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Quit)]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
     fn undo_and_redo_wait_for_a_running_op_or_an_operation_in_progress() {
         for intent in [AppIntent::Undo, AppIntent::Redo] {
             let mut state = undoable();
-            state.op_seq = Some(7);
+            state.hold_op(7);
             assert_eq!(state.update(intent.clone()), vec![]);
             assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()));
             assert_eq!(state.commits.reflog.planning, None);
@@ -283,17 +277,14 @@ mod tests {
         assert_eq!(effects, vec![]);
         assert_eq!(state.popups, []);
         assert_eq!(
-            state.op_error.as_deref(),
+            state.op_error(),
             Some("HEAD has moved since commit; nothing is undone")
         );
 
         let mut state = undoable();
         state.files = vec![changed("a.rs", '.', 'M')];
         undo_with(&mut state, commit_reflog('c'));
-        assert_eq!(
-            state.op_error.as_deref(),
-            Some("Commit or stash your changes first")
-        );
+        assert_eq!(state.op_error(), Some("Commit or stash your changes first"));
 
         // Untracked files are left to `reset --keep`.
         let mut state = undoable();
@@ -324,7 +315,7 @@ mod tests {
         assert_eq!(state.popups, []);
         assert_eq!(state.commits.reflog.planning, None);
         assert_eq!(
-            state.op_error.as_deref(),
+            state.op_error(),
             Some("Could not read the reflog: fatal: broken")
         );
     }
@@ -493,7 +484,7 @@ mod tests {
         assert!(!leaks(&ran), "{ran:?}");
         assert_eq!(op_of(&ran).1, undo_commit_op());
 
-        state.op_seq = None;
+        state.free_op();
         let redo = ctrl(&mut state, 'r');
         assert!(!leaks(&redo), "{redo:?}");
         let tag = reflog_tag(&redo);

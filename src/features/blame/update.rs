@@ -30,21 +30,14 @@ impl AppState {
             return vec![];
         };
         let seq = self.take_seq();
-        self.busy += 1;
         self.focus = Focus::Blame(BlameView::new(path.clone(), seq));
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadBlame { tag, path }]
     }
 
     pub(crate) fn blame_loaded(&mut self, tag: Tag, result: Result<Vec<BlameLine>, String>) {
         // Every user effect reports back once, stale or not.
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let Focus::Blame(view) = &mut self.focus else {
             return;
         };
@@ -82,19 +75,12 @@ impl AppState {
         if let Focus::Blame(view) = &mut self.focus {
             view.commit = Some(CommitView::new(oid.clone(), seq));
         }
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::LoadCommit { tag, oid }]
     }
 
     pub(crate) fn commit_loaded(&mut self, tag: Tag, result: Result<Vec<DiffLine>, String>) {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         if tag.generation != self.generation {
             return;
         }
@@ -153,7 +139,7 @@ mod tests {
         assert_eq!(view.path, RepoPath::from("a.rs"));
         assert!(!view.loaded);
         assert_eq!(state.panel_focus(), KeyScope::Blame);
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
     }
 
     #[test]
@@ -186,7 +172,7 @@ mod tests {
             result: Ok(vec![blame_line(OID, 1)]),
         });
         assert!(!blame(&state).loaded);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
 
         let old_generation = Tag {
             generation: tag.generation + 1,
@@ -216,7 +202,7 @@ mod tests {
             result: Ok(vec![blame_line(OID, 1)]),
         });
         assert_eq!(state.focus, Focus::Files);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
     }
 
     #[test]
@@ -280,7 +266,7 @@ mod tests {
             other => panic!("expected one LoadCommit, got {other:?}"),
         };
         assert_eq!(state.panel_focus(), KeyScope::BlameCommit);
-        assert_eq!(state.busy, 1);
+        assert_eq!(state.busy_count(), 1);
         // The blame's keys are not the commit's: Enter does nothing more.
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
 
@@ -289,7 +275,7 @@ mod tests {
             tag,
             result: Ok(lines.clone()),
         });
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         let commit = blame(&state).commit.as_ref().expect("commit open");
         assert!(commit.loaded);
         assert_eq!(commit.lines, lines);
@@ -330,7 +316,7 @@ mod tests {
             result: Ok(vec![line("x")]),
         });
         assert!(!blame(&state).commit.as_ref().unwrap().loaded);
-        assert_eq!(state.busy, 0);
+        assert_eq!(state.busy_count(), 0);
         // Closed before it landed: the result has nowhere to go.
         press(&mut state, KeyCode::Esc);
         state.update(AppIntent::CommitLoaded {

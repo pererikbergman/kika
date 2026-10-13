@@ -39,8 +39,8 @@
 //! `todo_write_seq`, `rows`, `selected`, `query`, `filter`, `tips`,
 //! `range_anchor`, `range()`, `fixup_base_seq`, `pending` and
 //! `short_oid` (the parent `commits` panel); `files` (the Files
-//! panel, core); `op_seq`, `branch` (and its `head`), `popups`,
-//! `left_behind_check`, `busy`, `generation` and `notice` (core).
+//! panel, core); the op slot, `branch` (and its `head`), `popups`,
+//! `left_behind_check`, `generation` and `notice` (core).
 //!
 //! What stays elsewhere, and why:
 //! - `CommitsPanel.todo`/`set_todo`, `fixup_base_seq`, `range_anchor` and
@@ -260,7 +260,7 @@ pub(crate) fn todo_edit(
 }
 
 fn todo_disabled(state: &AppState, rewrite: Rewrite) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         return Some(OP_RUNNING.into());
     }
     // The list shown is what was written only once it is read back.

@@ -118,7 +118,7 @@ impl AppState {
             OutputMode::Terminal => vec![Effect::HandOff(HandOff::RunCommand { title, argv })],
             output => {
                 self.command_running = true;
-                self.busy += 1;
+                self.raise_busy();
                 vec![Effect::RunCommand {
                     title,
                     argv,
@@ -139,7 +139,7 @@ impl AppState {
     ) -> Vec<Effect> {
         if output != OutputMode::Terminal && self.command_running {
             self.command_running = false;
-            self.busy = self.busy.saturating_sub(1);
+            self.lower_busy();
         }
         match result {
             Err(CommandFailure::Launch(message)) => self.push_error(ErrorPopup::new(
@@ -236,7 +236,7 @@ mod tests {
                 OutputMode::None,
             )],
         );
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let effects = ctrl_t(&mut state);
 
@@ -249,7 +249,7 @@ mod tests {
             }]
         );
         assert!(state.command_running);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
     }
 
     #[cfg(unix)]
@@ -432,12 +432,12 @@ mod tests {
             &[files_command(&["sleep", "9"], &[], OutputMode::None)],
         );
         assert_eq!(ctrl_t(&mut state).len(), 1);
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         assert_eq!(ctrl_t(&mut state), []);
 
         assert_eq!(state.notice, Some("A command is running".into()));
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         assert!(state.popups.is_empty());
     }
 
@@ -465,7 +465,7 @@ mod tests {
             &[files_command(&["sh", "x"], &[], OutputMode::Popup)],
         );
         ctrl_t(&mut state);
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let effects = state.update(command_finished(
             OutputMode::Popup,
@@ -475,7 +475,7 @@ mod tests {
         assert!(is_status_load(&effects), "{effects:?}");
         assert!(!state.command_running);
         // One down for the command, one up for the reload.
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         match state.popups.as_slice() {
             [Popup::Error(popup)] => {
                 assert_eq!(popup.title, "Show it");
@@ -561,7 +561,7 @@ mod tests {
             &[files_command(&["sleep", "9"], &[], OutputMode::Popup)],
         );
         ctrl_t(&mut state);
-        let busy = state.busy;
+        let busy = state.busy_count();
 
         let effects = state.update(command_finished(
             OutputMode::Popup,
@@ -571,7 +571,7 @@ mod tests {
         assert!(is_status_load(&effects), "{effects:?}");
         assert!(!state.command_running);
         // One down for the command, one up for the reload.
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         assert!(state.popups.is_empty(), "{:?}", state.popups);
         assert_eq!(state.notice, Some("Command cancelled".into()));
     }

@@ -1643,7 +1643,7 @@ mod tests {
         let (x, y) = find(&buffer, "r refresh");
         assert_ne!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
 
-        state.op_seq = Some(1);
+        state.hold_op(1);
         let buffer = draw_buffer(&state, 80, 8);
         let (x, y) = find(&buffer, "space stage");
         assert_eq!(buffer[(x, y)].style().fg, Some(Color::DarkGray));
@@ -1655,8 +1655,8 @@ mod tests {
     fn a_notice_replaces_the_hints_in_yellow_after_loading() {
         let mut state = loaded(vec![file("a.rs")]);
         state.notice = Some("An operation is running".into());
-        state.op_error = Some("older failure".into());
-        state.busy = 1;
+        state.set_op_error("older failure".into());
+        state.set_busy(1);
         let buffer = draw_buffer(&state, 80, 8);
         let rows = draw(&state, 80, 8);
         assert!(
@@ -1825,7 +1825,7 @@ mod tests {
     #[test]
     fn workspace_shows_loading_before_status_arrives() {
         let mut state = AppState::new(Context::Workspace);
-        state.busy = 1;
+        state.set_busy(1);
         let rows = thin(draw(&state, 40, 13));
         assert!(rows[1].contains(" Files "), "{rows:#?}");
         assert!(rows[2].starts_with("│Loading…"), "{rows:#?}");
@@ -1857,7 +1857,7 @@ mod tests {
     #[test]
     fn busy_indicator_survives_a_narrow_status_bar() {
         let mut state = loaded(vec![]);
-        state.busy = 1;
+        state.set_busy(1);
         let rows = draw(&state, 12, 4);
         assert!(rows[3].contains("loading…"), "{rows:#?}");
     }
@@ -1879,7 +1879,7 @@ mod tests {
     #[test]
     fn an_op_error_replaces_the_hints_with_its_first_line_in_red() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.op_error = Some("fatal: Unable to create index.lock\nhint: another git".into());
+        state.set_op_error("fatal: Unable to create index.lock\nhint: another git".into());
         let buffer = draw_buffer(&state, 80, 8);
         let rows = draw(&state, 80, 8);
         assert!(
@@ -1895,8 +1895,8 @@ mod tests {
     #[test]
     fn an_op_error_keeps_the_busy_indicator_in_front() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.op_error = Some("boom".into());
-        state.busy = 1;
+        state.set_op_error("boom".into());
+        state.set_busy(1);
         let rows = draw(&state, 80, 8);
         assert!(rows[7].starts_with(" loading…  error: boom"), "{rows:#?}");
     }
@@ -1904,9 +1904,9 @@ mod tests {
     #[test]
     fn tiny_terminals_do_not_panic_with_an_op_error() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.op_error = Some("fatal: a long error line\nsecond".into());
+        state.set_op_error("fatal: a long error line\nsecond".into());
         for busy in [0, 1] {
-            state.busy = busy;
+            state.set_busy(busy);
             for (w, h) in [(0, 0), (1, 1), (10, 2), (2, 10), (3, 3), (5, 4)] {
                 draw(&state, w, h);
             }
@@ -2726,7 +2726,7 @@ mod tests {
         assert!(!contains(&rows, "cancel command"), "{rows:#?}");
 
         state.command_running = true;
-        state.busy = 1;
+        state.set_busy(1);
         let rows = draw(&state, 100, 20);
         assert!(
             rows[19].starts_with(" loading…  ctrl-x cancel command"),
@@ -3033,11 +3033,11 @@ mod tests {
     #[test]
     fn a_bar_error_wider_than_the_bar_ends_in_a_marker() {
         let mut state = loaded(vec![file("a.rs")]);
-        state.op_error = Some(format!("fatal: {}", "e".repeat(200)));
+        state.set_op_error(format!("fatal: {}", "e".repeat(200)));
         let rows = draw(&state, 80, 8);
         assert_eq!(width_of(&rows[7]), 80, "{rows:#?}");
         assert!(rows[7].ends_with("ee…"), "{rows:#?}");
-        state.busy = 1;
+        state.set_busy(1);
         let rows = draw(&state, 80, 8);
         assert!(
             rows[7].starts_with(" loading…  error: fatal: e"),
@@ -3864,7 +3864,7 @@ mod tests {
         let mut quiet = loaded(vec![]);
         quiet.notice_text = Some(notice.clone());
         let mut busy = quiet.clone();
-        busy.busy = 1;
+        busy.set_busy(1);
         let mut running = quiet.clone();
         running.command_running = true;
         // The cancel hint takes 22 columns, so 50 leaves too little room

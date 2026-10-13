@@ -46,7 +46,7 @@ pub struct Harness {
     runner: Arc<CliRunner>,
     terminal: Terminal<TestBackend>,
     /// Boot's renderer discovery has reported. It is not a user effect,
-    /// so `busy` does not cover it.
+    /// so the busy count does not cover it.
     renderers_found: bool,
     /// What git runs as the sequence editor of Kika's interactive rebase.
     /// The test binary is not Kika, so a script runs it as Kika's hidden
@@ -305,8 +305,8 @@ impl Harness {
         panic!(
             "app not idle after {HANG_TIMEOUT:?}: busy {}, op_seq {:?}, diff seq {:?} \
              pending {} done {} requested {} lines {}\n{screen}",
-            state.busy,
-            state.op_seq,
+            state.busy_count(),
+            state.held_seq(),
             diff.seq,
             diff.pending,
             diff.done,
@@ -320,7 +320,7 @@ impl Harness {
 /// operation in flight, no background or recent-list load pending, the
 /// diff settled, no commits page, markers, reflog or stash list on
 /// their way, and no forge refresh running.
-/// Diff streams and background loads stay out of `busy`, so they are read
+/// Diff streams and background loads stay out of the busy count, so they are read
 /// directly.
 pub(crate) fn is_idle(state: &AppState) -> bool {
     let diff = &state.diff;
@@ -328,8 +328,8 @@ pub(crate) fn is_idle(state: &AppState) -> bool {
     // demands more, so nothing arrives on its own.
     let diff_settled =
         diff.seq.is_none() || (!diff.pending && (diff.done || diff.lines.len() >= diff.requested));
-    state.busy == 0
-        && state.op_seq.is_none()
+    !state.is_busy()
+        && !state.op_is_running()
         && !state.watch.is_pending()
         && !state.recent_pending()
         && diff_settled
@@ -389,11 +389,11 @@ mod tests {
     #[test]
     fn a_status_load_or_op_in_flight_is_not_idle() {
         let mut state = AppState::new(Context::Workspace);
-        state.busy = 1;
+        state.set_busy(1);
         assert!(!is_idle(&state));
 
         let mut state = AppState::new(Context::Workspace);
-        state.op_seq = Some(3);
+        state.hold_op(3);
         assert!(!is_idle(&state));
     }
 

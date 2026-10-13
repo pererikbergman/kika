@@ -17,7 +17,7 @@
 //! - the handlers read `commits.rows`, `commits.selected`,
 //!   `commits.range()` and `commits.range_anchor`, and call
 //!   `commit_for_action` (commits);
-//! - `paste_disabled` reads `branch`, `files` and `op_seq`.
+//! - `paste_disabled` reads `branch`, `files` and the op slot.
 //!
 //! What stays in core, and why:
 //! - the clipboard plumbing (`clipboard.rs`, `Effect::Clipboard`,

@@ -479,9 +479,7 @@ impl AppState {
         tag: crate::effect::Tag,
         result: Result<(u64, String), CreateError>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let Some(creating) = self.pr_create.take_if(|c| c.seq == tag.seq) else {
             return vec![];
         };
@@ -994,10 +992,10 @@ mod tests {
                 .ends_with("\nacme-org/widgets: acme:topic → main\nAdd login")
         );
 
-        let busy = state.busy;
+        let busy = state.busy_count();
         let (tag, target, head, base, title) = created(&press_char(&mut state, 'y'));
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert_eq!(target, repo("acme-org", "widgets"));
         assert_eq!(
             (head.as_str(), base.as_str(), title.as_str()),
@@ -1154,7 +1152,7 @@ mod tests {
     #[test]
     fn a_refused_create_shows_githubs_words_and_a_rate_limit_is_kept() {
         let mut state = one_remote();
-        let busy = state.busy;
+        let busy = state.busy_count();
         let tag = start_create(&mut state);
         state.update(AppIntent::PullRequestCreated {
             tag,
@@ -1162,7 +1160,7 @@ mod tests {
                 "Validation Failed: A pull request already exists for acme:topic.".into(),
             )),
         });
-        assert_eq!(state.busy, busy);
+        assert_eq!(state.busy_count(), busy);
         match state.popups.as_slice() {
             [Popup::Error(error)] => {
                 assert_eq!(error.title, "Could not create the pull request");

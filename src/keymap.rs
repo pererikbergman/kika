@@ -2782,9 +2782,9 @@ mod tests {
             Resolution::Unbound | Resolution::Command(_) => panic!("c is unbound"),
         };
         let mut state = AppState::new(Context::Workspace);
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(c(&state), Err("An operation is running".into()));
-        state.op_seq = None;
+        state.free_op();
         assert_eq!(c(&state), Err("Nothing to commit".into()));
         let file = |kind| crate::git::FileEntry {
             path: "a.rs".into(),
@@ -2795,9 +2795,9 @@ mod tests {
         };
         state.files = vec![file(EntryKind::Changed), file(EntryKind::Conflicted)];
         assert_eq!(c(&state), Err("Resolve conflicts before committing".into()));
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(c(&state), Err("An operation is running".into()));
-        state.op_seq = None;
+        state.free_op();
         state.files.pop();
         assert_eq!(c(&state), Ok(AppIntent::OpenCommit));
     }
@@ -2837,9 +2837,9 @@ mod tests {
         state.branch = Some(branch(Head::Detached("abc".into())));
         assert_eq!(a(&state), Ok(AppIntent::OpenAmend));
 
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(a(&state), Err(OP_RUNNING.into()));
-        state.op_seq = None;
+        state.free_op();
         state.files = vec![crate::git::FileEntry {
             path: "a.rs".into(),
             orig_path: None,
@@ -3042,7 +3042,7 @@ mod tests {
         };
         let mut state = AppState::new(Context::Workspace);
         assert_eq!(d(&state), Some("No file selected".into()));
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(d(&state), Some("An operation is running".into()));
     }
 
@@ -4223,7 +4223,7 @@ mod tests {
             }
             assert_eq!(reason(&state, delete), None, "{delete} works on a range");
             assert_eq!(reason(&state, "remotes.add"), None);
-            state.op_seq = Some(1);
+            state.hold_op(1);
             assert_eq!(reason(&state, delete).as_deref(), Some(OP_RUNNING));
         }
     }

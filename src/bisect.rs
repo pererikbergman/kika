@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn a_running_op_comes_first() {
         let mut state = testing();
-        state.op_seq = Some(1);
+        state.hold_op(1);
         state.commits.rows.clear();
         for disabled in [
             selected_bad_disabled,

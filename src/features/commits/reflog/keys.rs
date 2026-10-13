@@ -13,7 +13,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 /// repository to act on, and no operation half done, a bisect included,
 /// whose own state a moved `HEAD` would confuse.
 pub(crate) fn undo_disabled(state: &AppState) -> Option<Reason> {
-    if state.op_seq.is_some() {
+    if state.op_is_running() {
         Some(OP_RUNNING.into())
     } else if state.repo.is_none() {
         Some("Not in a repository".into())
@@ -271,7 +271,7 @@ mod tests {
             undo_disabled(&state),
             Some("Finish or abort the operation in progress".into())
         );
-        state.op_seq = Some(1);
+        state.hold_op(1);
         assert_eq!(undo_disabled(&state), Some(OP_RUNNING.into()));
     }
 

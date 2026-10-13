@@ -64,12 +64,7 @@ impl AppState {
         self.commits.todo_selected = Some(cursor);
         let seq = self.take_seq();
         self.commits.todo_write_seq = Some(seq);
-        self.busy += 1;
-        let tag = Tag {
-            generation: self.generation,
-            seq,
-            user: true,
-        };
+        let tag = self.user_tag(seq);
         vec![Effect::WriteRebaseTodo {
             tag,
             path,
@@ -86,7 +81,7 @@ impl AppState {
         tag: Tag,
         result: Result<(), String>,
     ) -> Vec<Effect> {
-        self.busy = self.busy.saturating_sub(1);
+        self.user_done(tag);
         if tag.generation != self.generation || self.commits.todo_write_seq != Some(tag.seq) {
             return vec![];
         }
@@ -94,7 +89,7 @@ impl AppState {
         match result {
             Ok(()) => {}
             Err(message) if message == CHANGED_ON_DISK => self.notice = Some(TODO_CHANGED.into()),
-            Err(message) => self.op_error = Some(message),
+            Err(message) => self.set_op_error(message),
         }
         self.reload_rebase_todo()
     }
@@ -222,7 +217,7 @@ mod tests {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
             assert_eq!(state.notice, Some(reason.into()), "{key}");
-            assert_eq!(state.op_seq, None, "{key}");
+            assert_eq!(state.held_seq(), None, "{key}");
         }
         for code in [KeyCode::Char('k'), KeyCode::Char('j')] {
             let mut state = state.clone();
@@ -384,7 +379,7 @@ mod tests {
             assert_eq!(expected, TODO, "{name}");
             assert_eq!(content, written, "{name}");
             assert!(state.commits.todo_write_seq.is_some(), "{name}");
-            assert_eq!(state.op_seq, None, "{name}");
+            assert_eq!(state.held_seq(), None, "{name}");
         }
         // Pick undoes another action.
         let mut state = stopped(b"drop 1111 one\n", 0);
@@ -594,21 +589,21 @@ mod tests {
             ),
         ] {
             let mut state = stopped(TODO, 2);
-            let busy = state.busy;
+            let busy = state.busy_count();
             let tag = match press_char(&mut state, 'd').as_slice() {
                 [Effect::WriteRebaseTodo { tag, .. }] => *tag,
                 other => panic!("{other:?}"),
             };
-            assert_eq!(state.busy, busy + 1);
+            assert_eq!(state.busy_count(), busy + 1);
             let effects = state.update(AppIntent::RebaseTodoWritten { tag, result });
             assert!(
                 matches!(effects.as_slice(), [Effect::LoadRebaseTodo { .. }]),
                 "{effects:?}"
             );
-            assert_eq!(state.busy, busy);
+            assert_eq!(state.busy_count(), busy);
             assert_eq!(state.commits.todo_write_seq, None);
             assert_eq!(state.notice.as_deref(), notice);
-            assert_eq!(state.op_error, error);
+            assert_eq!(state.op_error(), error.as_deref());
         }
     }
 
@@ -734,7 +729,7 @@ mod tests {
             let mut state = on_linear_log();
             let (tag, op) = attached_of(&press_char(&mut state, key));
             assert_eq!(op, GitOp::InteractiveRebase(plan), "{key}");
-            assert_eq!(state.op_seq, Some(tag.seq), "{key}");
+            assert_eq!(state.held_seq(), Some(tag.seq), "{key}");
             assert_eq!(state.notice, None, "{key}");
         }
     }
@@ -746,7 +741,7 @@ mod tests {
             let mut state = state.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
             assert_eq!(state.notice, Some(notice.into()), "{key}");
-            assert_eq!(state.op_seq, None, "{key}");
+            assert_eq!(state.held_seq(), None, "{key}");
             assert_eq!(state.popups, [], "{key}");
         }
     }
@@ -768,12 +763,12 @@ mod tests {
     #[test]
     fn no_rewrite_starts_while_an_op_runs_or_an_operation_is_in_progress() {
         let mut running = on_linear_log();
-        running.op_seq = Some(9);
+        running.hold_op(9);
         for key in ['s', 'F', 'd', 'e'] {
             let mut state = running.clone();
             assert_eq!(press_char(&mut state, key), vec![], "{key}");
             assert_eq!(state.notice, Some(keymap::OP_RUNNING.into()), "{key}");
-            assert_eq!(state.op_seq, Some(9), "{key}");
+            assert_eq!(state.held_seq(), Some(9), "{key}");
         }
 
         let mut rebasing = on_linear_log();
@@ -791,7 +786,7 @@ mod tests {
             state.update(AppIntent::RewriteCommit(rebase_plan::Edit::Drop)),
             vec![]
         );
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     // Create fixup, autosquash and the fixup base (`fixup.rs`).
@@ -814,7 +809,7 @@ mod tests {
                 fixup: Some(cid(&"b".repeat(40))),
             }
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         assert_eq!(state.commit, CommitFlow::Closed);
 
         // Its failure shows as any op's, not in the commit popup.
@@ -830,7 +825,7 @@ mod tests {
             }
             other => panic!("expected the error, got {other:?}"),
         }
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert!(!state.commit_on_terminal);
     }
 
@@ -840,7 +835,7 @@ mod tests {
         state.files.clear();
         assert_eq!(state.update(AppIntent::CreateFixup), vec![]);
         assert_eq!(state.notice, Some(rewrite::STAGE_THE_FIX.into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -864,10 +859,10 @@ mod tests {
         assert_eq!(press(&mut state, KeyCode::Enter), vec![]);
         assert_eq!(state.popups, [Popup::Confirm(ConfirmKind::Autosquash)]);
         assert_eq!(press_char(&mut state, 'q'), vec![]);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
         assert_eq!(press_char(&mut state, 'n'), vec![]);
         assert_eq!(state.popups, []);
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
 
         ask(&mut state);
         let (tag, op) = attached_of(&press_char(&mut state, 'y'));
@@ -883,7 +878,7 @@ mod tests {
                 update_refs: false,
             })
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         assert_eq!(state.popups, []);
     }
 
@@ -895,7 +890,7 @@ mod tests {
         state.commits.rows[0].subject = "A".into();
         assert_eq!(press_char(&mut state, 'y'), vec![]);
         assert_eq!(state.notice, Some(rebase_plan::NO_FIXUPS.into()));
-        assert_eq!(state.op_seq, None);
+        assert_eq!(state.held_seq(), None);
     }
 
     #[test]
@@ -933,18 +928,18 @@ mod tests {
         state.commits.range_anchor = Some("b".repeat(40));
         // From the Files panel a range in the log does not stop it.
         state.focus = Focus::Files;
-        let before = state.busy;
+        let before = state.busy_count();
         let tag = state.update(AppIntent::FindFixupBase);
         let tag = match tag.as_slice() {
             [Effect::FindFixupBase { tag }] => *tag,
             other => panic!("{other:?}"),
         };
-        assert_eq!(state.busy, before + 1);
+        assert_eq!(state.busy_count(), before + 1);
         state.update(base_found(tag, FixupBase::One(cid(&"c".repeat(40)))));
         assert_eq!(state.commits.selected, 2);
         assert_eq!(state.commits.range_anchor, None);
         assert_eq!(state.notice, Some("Fixup base: c1 C".into()));
-        assert_eq!(state.busy, before);
+        assert_eq!(state.busy_count(), before);
         state.focus = Focus::Commits;
 
         let tag = find_base(&mut state);
@@ -995,12 +990,16 @@ mod tests {
         let mut state = with_a_fixup();
         let old = find_base(&mut state);
         let new = find_base(&mut state);
-        let busy = state.busy;
+        let busy = state.busy_count();
         state.notice = None;
         state.update(base_found(old, FixupBase::One(cid(&"c".repeat(40)))));
         assert_eq!(state.commits.selected, 1);
         assert_eq!(state.notice, None);
-        assert_eq!(state.busy, busy - 1, "the newer look is still on its way");
+        assert_eq!(
+            state.busy_count(),
+            busy - 1,
+            "the newer look is still on its way"
+        );
         assert_eq!(state.commits.fixup_base_seq, Some(new.seq));
 
         let other = Tag {

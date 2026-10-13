@@ -54,7 +54,7 @@ pub(crate) fn write(
     background::run(
         tx,
         move || worktree_file::replace(&workdir, &target, &expected, &content).map(|()| content),
-        // A panic still reports back, or `op_seq` would block every later op.
+        // A panic still reports back, or the op slot would block every later op.
         background::crashed("Writing the file"),
         move |result| AppIntent::ResolvedWritten { tag, path, result },
     );

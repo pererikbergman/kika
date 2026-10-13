@@ -388,7 +388,7 @@ mod tests {
             state.forge.status,
             ForgeView::Problem(ForgeStatus::RateLimited)
         );
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
         assert!(state.popups.is_empty());
 
         // A user fetch hands the limit to the task, which decides by the clock.
@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(effects, []);
         assert_eq!(state.forge.badges[&BranchName::from("main")], badge(3));
         assert_eq!(state.forge.status, ForgeView::Problem(ForgeStatus::Offline));
-        assert_eq!(state.op_error, None);
+        assert_eq!(state.op_error(), None);
         assert!(state.popups.is_empty());
         let rows = crate::test_support::draw_branches(&state, 80, 12);
         assert!(
@@ -507,7 +507,7 @@ mod tests {
             staged.iter().any(|e| matches!(e, Effect::RunOp { .. })),
             "{staged:?}"
         );
-        state.op_seq = None;
+        state.free_op();
         state.update(AppIntent::OpenCommit);
         assert_ne!(state.commit, CommitFlow::Closed);
     }

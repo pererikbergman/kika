@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn copying_works_while_an_op_runs_but_never_copies_a_merge() {
         let mut state = copy_ready();
-        state.op_seq = Some(4);
+        state.hold_op(4);
         press_char(&mut state, 'c');
         assert_eq!(state.copied.len(), 1);
 
@@ -149,7 +149,7 @@ mod tests {
             op,
             GitOp::CherryPick(vec![cid(COPIED_OID), cid(&"2".repeat(40))])
         );
-        assert_eq!(state.op_seq, Some(tag.seq));
+        assert_eq!(state.held_seq(), Some(tag.seq));
         // The set stays, to paste on another branch too.
         assert_eq!(state.copied.len(), 2);
     }
@@ -181,7 +181,7 @@ mod tests {
                 |s| s.files = vec![changed("a.rs", '.', 'M')],
                 changes,
             ),
-            ("op running", |s| s.op_seq = Some(9), keymap::OP_RUNNING),
+            ("op running", |s| s.hold_op(9), keymap::OP_RUNNING),
         ];
         for (case, setup, reason) in cases {
             let mut state = one_copied();

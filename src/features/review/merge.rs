@@ -185,9 +185,7 @@ impl AppState {
         number: u64,
         result: Result<(), CreateError>,
     ) -> Vec<Effect> {
-        if tag.user {
-            self.busy = self.busy.saturating_sub(1);
-        }
+        self.user_done(tag);
         let Some(merging) = self
             .pr_merge
             .take_if(|m| m.seq == tag.seq && m.number == number)
@@ -364,12 +362,12 @@ mod tests {
                 Some(Popup::MergePullRequest(_))
             ));
         }
-        let busy = state.busy;
+        let busy = state.busy_count();
         let (tag, number, method, head) = confirmed(&mut state);
         assert_eq!((number, method), (12, MergeMethod::Squash));
         assert_eq!(head, "1".repeat(40));
         assert!(tag.user);
-        assert_eq!(state.busy, busy + 1);
+        assert_eq!(state.busy_count(), busy + 1);
         assert!(state.popups.is_empty());
         // A second `y` has no question to answer.
         assert!(state.update(AppIntent::ConfirmMergePr).is_empty());
@@ -469,11 +467,11 @@ mod tests {
             let mut state = on_detail(squash_only);
             shift_m(&mut state);
             change(&mut state);
-            let busy = state.busy;
+            let busy = state.busy_count();
             assert!(press(&mut state, KeyCode::Char('y')).is_empty());
             assert!(state.popups.is_empty());
             assert!(state.pr_merge.is_none());
-            assert_eq!(state.busy, busy);
+            assert_eq!(state.busy_count(), busy);
         }
         // A limit that has passed no longer stops it.
         let mut state = on_detail(squash_only);
@@ -580,13 +578,13 @@ mod tests {
         assert!(state.review.rows().iter().any(|pr| pr.number == 12));
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let effects = state.update(AppIntent::PullRequestMerged {
             tag,
             number,
             result: Ok(()),
         });
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Merged);
         let queues = state.review.queues.as_ref().unwrap();
         for kind in QueueKind::ALL {
@@ -712,7 +710,7 @@ mod tests {
         with_badge(&mut state);
         shift_m(&mut state);
         let (tag, number, ..) = confirmed(&mut state);
-        let busy = state.busy;
+        let busy = state.busy_count();
         let stale = Tag {
             seq: tag.seq + 100,
             ..tag
@@ -724,7 +722,7 @@ mod tests {
         });
         assert!(effects.is_empty());
         // Its busy count is still let go.
-        assert_eq!(state.busy, busy - 1);
+        assert_eq!(state.busy_count(), busy - 1);
         assert_eq!(state.review.detail.as_ref().unwrap().state, PrState::Open);
         assert_eq!(badge(&state).state, PrState::Open);
         assert!(state.pr_merge.is_some());

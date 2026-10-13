@@ -24,7 +24,7 @@
 //!   (bisect, in core), so no tracking checkout moves `HEAD` mid-bisect;
 //! - `branches.*` and `load_branch_log` (the parent, `features/branches`):
 //!   the tab, its remotes and the selected branch's log;
-//! - `start_op` and `op_seq` (core), git one operation at a time.
+//! - `start_op` and the op slot (core), git one operation at a time.
 //!
 //! What stays in core: the tag push and selection guards `push_tag_disabled`,
 //! `push_tag_remote` and `tag_selected_disabled` and `op_running` in
