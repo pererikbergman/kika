@@ -5,6 +5,7 @@
 use crate::effect::{Effect, Tag};
 use crate::features::branches::BranchesTab;
 use crate::features::commit::CommitEditor;
+use crate::features::commits::CommitFilesList;
 use crate::features::commits::reflog::Reflog;
 use crate::features::stash::{StashEntry, StashFile, StashRef};
 use crate::forge::ForgeHost;
@@ -597,6 +598,21 @@ pub(crate) fn opened(state: &mut AppState, files: Vec<CommitFile>) -> Vec<Effect
         tag,
         result: Ok(files),
     })
+}
+
+/// A commit's file list for `range` under `seq`, answered with `files`
+/// when set, for tests outside `commits` that put one in `state.commits`.
+pub(crate) fn commit_files_list(
+    range: CommitRange,
+    short_oid: &str,
+    seq: u64,
+    files: Option<Vec<CommitFile>>,
+) -> CommitFilesList {
+    let mut open = CommitFilesList::begin(range, short_oid.into(), seq);
+    if let Some(files) = files {
+        open.loaded(seq, Ok(files));
+    }
+    open
 }
 
 pub(crate) fn watch(state: &mut AppState, event: WatchEvent) -> Vec<Effect> {

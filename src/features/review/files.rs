@@ -880,9 +880,9 @@ mod tests {
 
     #[test]
     fn back_in_the_workspace_an_open_commit_file_streams_again() {
+        use crate::test_support::commit_files_list;
         let (mut state, _) = ready();
-        let mut open = crate::commit_files::CommitFilesList::begin(range(), "1111111".into(), 1);
-        open.loaded(1, Ok(vec![rows()[0].file.clone()]));
+        let open = commit_files_list(range(), "1111111", 1, Some(vec![rows()[0].file.clone()]));
         state.commits.open = Some(open);
         press(&mut state, KeyCode::Esc);
         press(&mut state, KeyCode::Esc);

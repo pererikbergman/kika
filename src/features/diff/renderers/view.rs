@@ -205,8 +205,8 @@ mod tests {
 
     #[test]
     fn an_open_commits_file_shows_its_streamed_diff_not_a_stale_render() {
-        use crate::commit_files::CommitFilesList;
         use crate::git::commit_files::{CommitId, CommitRange};
+        use crate::test_support::commit_files_list;
 
         // A commit's file of the same name as the rendered worktree file.
         let mut state = with_diff(vec![diff_line(LineKind::Added, "+in the commit")]);
@@ -217,7 +217,7 @@ mod tests {
             oid: CommitId::parse("abc").unwrap(),
             parent: None,
         };
-        state.commits.open = Some(CommitFilesList::begin(range, "abc".into(), 1));
+        state.commits.open = Some(commit_files_list(range, "abc", 1, None));
 
         let rows = draw(&state, 100, 20);
 

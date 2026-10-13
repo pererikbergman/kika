@@ -7,6 +7,7 @@ use crate::features::branches::{self, remotes, tags};
 use crate::features::commit::git::{MessageSource, commit_command};
 use crate::features::commits::bisect::git::run_bisect_start;
 use crate::features::commits::custom_patch::{CustomPatch, PatchAction};
+use crate::features::commits::git::detached_checkout;
 use crate::features::commits::reflog::{self, Direction, Expected, Step};
 use crate::features::commits::rewrite;
 use crate::features::stash::{self, StashMode, StashRef};
@@ -608,16 +609,6 @@ pub(crate) fn checkout_command(name: &BranchName) -> GitCommand {
     cmd.arg(name.as_os_string()).arg("--")
 }
 
-/// Check out `oid` with no branch. The id is hex digits only, so it cannot
-/// be read as an option; `--` keeps it from being read as a path.
-pub(crate) fn detached_checkout(oid: &CommitId) -> GitCommand {
-    GitCommand::new("checkout")
-        .arg("-q")
-        .arg("--detach")
-        .arg(oid.as_str())
-        .arg("--")
-}
-
 /// The single ops a many-step op runs, in order; any other op is its own
 /// one step.
 pub fn op_steps(op: &GitOp) -> Vec<GitOp> {
@@ -819,7 +810,7 @@ mod tests {
     use super::*;
     use crate::git::fake::{FakeRunner, fail, ok};
     use crate::git::runner::GitOutput;
-    use crate::test_support::{argv, dirty_repo, file_entry as entry, rev_parse, two_commit_repo};
+    use crate::test_support::{argv, dirty_repo, file_entry as entry};
     use std::ffi::OsString;
 
     fn stage(paths: &[&str]) -> Option<GitOp> {
@@ -989,137 +980,6 @@ mod tests {
                 .into())
         );
         runner.assert_done();
-    }
-
-    fn oid(text: &str) -> CommitId {
-        CommitId::parse(text).unwrap()
-    }
-
-    #[test]
-    fn checkout_and_reset_name_the_commit_before_the_path_separator() {
-        let cases: [(GitOp, &[&str]); 4] = [
-            (
-                GitOp::CheckoutCommit(oid("abc123")),
-                &["checkout", "-q", "--detach", "abc123", "--"],
-            ),
-            (
-                GitOp::Reset {
-                    to: oid("abc123"),
-                    mode: ResetMode::Soft,
-                },
-                &["reset", "-q", "--soft", "abc123", "--"],
-            ),
-            (
-                GitOp::Reset {
-                    to: oid("abc123"),
-                    mode: ResetMode::Mixed,
-                },
-                &["reset", "-q", "--mixed", "abc123", "--"],
-            ),
-            (
-                GitOp::Reset {
-                    to: oid("abc123"),
-                    mode: ResetMode::Hard,
-                },
-                &["reset", "-q", "--hard", "abc123", "--"],
-            ),
-        ];
-        for (op, expected) in cases {
-            let cmd = op_command(&op);
-            assert_eq!(argv(&cmd), expected, "{op:?}");
-            let envs: Vec<_> = cmd
-                .envs()
-                .iter()
-                .map(|(k, v)| (k.to_str().unwrap(), v.to_str().unwrap()))
-                .collect();
-            assert_eq!(
-                envs,
-                [("GIT_LITERAL_PATHSPECS", "1"), ("LC_ALL", "C")],
-                "{op:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn revert_is_plain_git_revert_and_sets_no_env() {
-        let cmd = op_command(&GitOp::Revert(oid("abc123")));
-        assert_eq!(argv(&cmd), ["revert", "abc123"]);
-        assert!(cmd.envs().is_empty(), "{:?}", cmd.envs());
-        assert_eq!(cmd.input(), None);
-    }
-
-    #[test]
-    fn checkout_commit_leaves_head_detached_at_it_in_real_git() {
-        use crate::git::fake::{git, try_git};
-
-        let (tmp, first) = two_commit_repo();
-        let dir = tmp.path();
-        let runner = crate::git::CliRunner::isolated(dir);
-        run_op(&runner, &GitOp::CheckoutCommit(first.clone())).unwrap();
-        assert_eq!(rev_parse(dir, "HEAD"), first);
-        assert!(
-            !try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
-            "HEAD is on a branch"
-        );
-        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
-        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
-    }
-
-    #[test]
-    fn revert_makes_a_commit_on_head_that_undoes_the_change_in_real_git() {
-        use crate::git::fake::git;
-
-        let (tmp, _) = two_commit_repo();
-        let dir = tmp.path();
-        let second = rev_parse(dir, "HEAD");
-        let runner = crate::git::CliRunner::isolated(dir).with_env("GIT_EDITOR", "true");
-        run_op(&runner, &GitOp::Revert(second.clone())).unwrap();
-        assert_eq!(rev_parse(dir, "HEAD^"), second);
-        assert_eq!(git(dir, &["show", "HEAD:a.txt"]), b"one\n");
-        assert_eq!(git(dir, &["rev-list", "--count", "HEAD"]), b"3\n");
-        assert_eq!(git(dir, &["status", "--porcelain"]), b"");
-    }
-
-    #[test]
-    fn each_reset_mode_keeps_what_it_says_in_real_git() {
-        use crate::git::fake::git;
-
-        let cases = [
-            (ResetMode::Soft, "M  a.txt\n"),
-            (ResetMode::Mixed, " M a.txt\n"),
-            (ResetMode::Hard, ""),
-        ];
-        for (mode, status) in cases {
-            let (tmp, first) = two_commit_repo();
-            let dir = tmp.path();
-            let runner = crate::git::CliRunner::isolated(dir);
-            run_op(
-                &runner,
-                &GitOp::Reset {
-                    to: first.clone(),
-                    mode,
-                },
-            )
-            .unwrap();
-            assert_eq!(rev_parse(dir, "HEAD"), first, "{mode:?}");
-            // The branch moved with it; HEAD is still on it.
-            assert!(
-                crate::git::fake::try_git(dir, &["symbolic-ref", "-q", "HEAD"]),
-                "{mode:?}"
-            );
-            assert_eq!(
-                String::from_utf8(git(dir, &["status", "--porcelain"])).unwrap(),
-                status,
-                "{mode:?}"
-            );
-            let worktree = std::fs::read_to_string(dir.join("a.txt")).unwrap();
-            let expected = if mode == ResetMode::Hard {
-                "one\n"
-            } else {
-                "two\n"
-            };
-            assert_eq!(worktree, expected, "{mode:?}");
-        }
     }
 
     #[cfg(unix)]
